@@ -19,7 +19,7 @@ dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash-latest")
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 chat_history = {}
 
