@@ -191,7 +191,7 @@ async def handle_text(message: types.Message):
         chat_history[user_id].append(f"APEX: {reply}")
         await message.answer(reply)
     except Exception as e:
-        await message.answer("⚡️ Мозг временно недоступен.")
+        await message.answer(f"Ошибка: {str(e)}")
 
 async def auto_scan():
     signals = scan_market()
