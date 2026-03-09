@@ -1,23 +1,26 @@
-import asyncio
+pythonimport asyncio
 import logging
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import os
 import requests
 import pandas as pd
 import sqlite3
+import google.generativeai as genai
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
 logging.basicConfig(level=logging.INFO)
 
-# ===== SMC ENGINE =====
+genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash")
+
+chat_history = {}
 
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 
@@ -44,23 +47,14 @@ def detect_bos_choch(df, highs, lows):
         return signals
     last_close = df["close"].iloc[-1]
     if last_close > highs[-1][1] and highs[-1][1] > highs[-2][1]:
-        signals.append({"type": "BOS", "direction": "BULLISH", "level": highs[-1][1]})
+        signals.append({"type": "BOS", "direction": "BULLISH"})
     if last_close < lows[-1][1] and lows[-1][1] < lows[-2][1]:
-        signals.append({"type": "BOS", "direction": "BEARISH", "level": lows[-1][1]})
+        signals.append({"type": "BOS", "direction": "BEARISH"})
     if last_close > highs[-1][1] and highs[-1][1] < highs[-2][1]:
-        signals.append({"type": "CHoCH", "direction": "BULLISH", "level": highs[-1][1]})
+        signals.append({"type": "CHoCH", "direction": "BULLISH"})
     if last_close < lows[-1][1] and lows[-1][1] > lows[-2][1]:
-        signals.append({"type": "CHoCH", "direction": "BEARISH", "level": lows[-1][1]})
+        signals.append({"type": "CHoCH", "direction": "BEARISH"})
     return signals
-
-def find_ob(df, direction):
-    obs = []
-    for i in range(1, len(df) - 1):
-        if direction == "BULLISH" and df["close"][i] < df["open"][i] and df["close"][i+1] > df["open"][i+1]:
-            obs.append(i)
-        if direction == "BEARISH" and df["close"][i] > df["open"][i] and df["close"][i+1] < df["open"][i+1]:
-            obs.append(i)
-    return obs
 
 def find_fvg(df):
     fvgs = []
@@ -75,21 +69,16 @@ def analyze(symbol, interval="60"):
     df = get_klines(symbol, interval)
     highs, lows = find_swings(df)
     signals = detect_bos_choch(df, highs, lows)
-    obs = find_ob(df, signals[0]["direction"]) if signals else []
     fvgs = find_fvg(df)
     score = 0
     if signals:
         score += 2
         if signals[0]["type"] == "CHoCH":
             score += 1
-    if obs:
-        score += 1
     if fvgs:
         score += 1
     return {"symbol": symbol, "interval": interval, "price": df["close"].iloc[-1],
             "signals": signals, "score": score}
-
-# ===== DATABASE =====
 
 def init_db():
     conn = sqlite3.connect("signals.db")
@@ -107,8 +96,6 @@ def save_signal(symbol, direction, signal_type, entry, tp, sl):
                  (symbol, direction, signal_type, entry, tp, sl))
     conn.commit()
     conn.close()
-
-# ===== SCANNER =====
 
 SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
            "TONUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","ARBUSDT"]
@@ -134,56 +121,70 @@ def scan_market():
                        f"💰 Вход: {price}\n"
                        f"🎯 TP: {tp}\n"
                        f"🛡 SL: {sl}\n"
-                       f"⚡️ Сила сигнала: {r['score']}/5")
+                       f"⚡️ Сила: {r['score']}/5")
                 results.append(msg)
             except Exception as e:
                 print(f"Error {symbol}: {e}")
     return results
 
-# ===== HANDLERS =====
+SYSTEM_PROMPT = """Ты APEX — дерзкий AI трейдер и ассистент. 
+Специализируешься на SMC (Smart Money Concepts): BOS, CHoCH, Order Blocks, FVG, ликвидность.
+Отвечаешь коротко, по делу, без воды. Можешь материться если пользователь так общается.
+Знаешь всё о крипте, фьючерсах, Bybit, TON, NFT.
+Если спрашивают про сигналы — говори использовать /scan."""
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "⚡️ <b>APEX SMC BOT</b>\n\n"
-        "Торговые сигналы по методу Smart Money\n\n"
-        "/scan — сканировать рынок сейчас\n"
-        "/help — помощь",
+        "⚡️ <b>APEX SMC BOT</b>\n\nГотов. Спрашивай что угодно или используй:\n/scan — сигналы\n/help — справка",
         parse_mode="HTML"
     )
 
 @dp.message(Command("scan"))
 async def cmd_scan(message: types.Message):
-    await message.answer("🔍 Сканирую рынок...")
+    await message.answer("🔍 Сканирую...")
     signals = scan_market()
     if signals:
         for s in signals:
             await message.answer(s, parse_mode="HTML")
     else:
-        await message.answer("😴 Сигналов нет. Рынок спокойный.")
+        await message.answer("😴 Чисто. Сигналов нет.")
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 <b>Как читать сигналы:</b>\n\n"
-        "BOS — слом структуры (продолжение тренда)\n"
-        "CHoCH — смена характера (разворот)\n\n"
-        "🟢 BULLISH = лонг\n"
-        "🔴 BEARISH = шорт\n\n"
-        "⚡️ Сила 3+ = хороший сигнал\n"
-        "⚡️ Сила 5 = сильнейший сигнал",
+        "📖 BOS — продолжение тренда\nCHoCH — разворот\n🟢 BULLISH = лонг\n🔴 BEARISH = шорт",
         parse_mode="HTML"
     )
 
-# ===== AUTO SCAN =====
+@dp.message()
+async def handle_text(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text
+
+    if user_id not in chat_history:
+        chat_history[user_id] = []
+
+    chat_history[user_id].append(f"Пользователь: {text}")
+    if len(chat_history[user_id]) > 20:
+        chat_history[user_id] = chat_history[user_id][-20:]
+
+    history_text = "\n".join(chat_history[user_id][-10:])
+    prompt = f"{SYSTEM_PROMPT}\n\nИстория:\n{history_text}\n\nОтветь на последнее сообщение:"
+
+    try:
+        response = model.generate_content(prompt)
+        reply = response.text
+        chat_history[user_id].append(f"APEX: {reply}")
+        await message.answer(reply)
+    except Exception as e:
+        await message.answer("⚡️ Мозг временно недоступен. Попробуй позже.")
 
 async def auto_scan():
     signals = scan_market()
     if signals:
         for s in signals:
             await bot.send_message(ADMIN_ID, s, parse_mode="HTML")
-
-# ===== MAIN =====
 
 async def main():
     init_db()
