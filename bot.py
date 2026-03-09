@@ -1,9 +1,11 @@
-pythonimport asyncio
+import asyncio
 import logging
 import os
 import requests
 import pandas as pd
 import sqlite3
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import google.generativeai as genai
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -21,6 +23,18 @@ genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 chat_history = {}
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def run_server():
+    server = HTTPServer(("0.0.0.0", 10000), HealthHandler)
+    server.serve_forever()
 
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 
@@ -128,9 +142,8 @@ def scan_market():
     return results
 
 SYSTEM_PROMPT = """Ты APEX — дерзкий AI трейдер и ассистент. 
-Специализируешься на SMC (Smart Money Concepts): BOS, CHoCH, Order Blocks, FVG, ликвидность.
-Отвечаешь коротко, по делу, без воды. Можешь материться если пользователь так общается.
-Знаешь всё о крипте, фьючерсах, Bybit, TON, NFT.
+Специализируешься на SMC: BOS, CHoCH, Order Blocks, FVG.
+Отвечаешь коротко, по делу. Знаешь всё о крипте и фьючерсах.
 Если спрашивают про сигналы — говори использовать /scan."""
 
 @dp.message(Command("start"))
@@ -153,32 +166,27 @@ async def cmd_scan(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 BOS — продолжение тренда\nCHoCH — разворот\n🟢 BULLISH = лонг\n🔴 BEARISH = шорт",
-        parse_mode="HTML"
+        "📖 BOS — продолжение тренда\nCHoCH — разворот\n🟢 BULLISH = лонг\n🔴 BEARISH = шорт"
     )
 
 @dp.message()
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
     text = message.text
-
     if user_id not in chat_history:
         chat_history[user_id] = []
-
     chat_history[user_id].append(f"Пользователь: {text}")
     if len(chat_history[user_id]) > 20:
         chat_history[user_id] = chat_history[user_id][-20:]
-
     history_text = "\n".join(chat_history[user_id][-10:])
-    prompt = f"{SYSTEM_PROMPT}\n\nИстория:\n{history_text}\n\nОтветь на последнее сообщение:"
-
+    prompt = f"{SYSTEM_PROMPT}\n\nИстория:\n{history_text}\n\nОтветь:"
     try:
         response = model.generate_content(prompt)
         reply = response.text
         chat_history[user_id].append(f"APEX: {reply}")
         await message.answer(reply)
     except Exception as e:
-        await message.answer("⚡️ Мозг временно недоступен. Попробуй позже.")
+        await message.answer("⚡️ Мозг временно недоступен.")
 
 async def auto_scan():
     signals = scan_market()
@@ -188,6 +196,7 @@ async def auto_scan():
 
 async def main():
     init_db()
+    threading.Thread(target=run_server, daemon=True).start()
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_scan, "interval", minutes=30)
     scheduler.start()
