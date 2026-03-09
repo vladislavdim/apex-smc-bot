@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import requests
-import pandas as pd
 import sqlite3
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -38,28 +37,38 @@ def run_server():
 
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 
-def get_klines(symbol, interval="60", limit=200):
+def get_klines(symbol, interval="60", limit=100):
     params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
     r = requests.get(BYBIT_URL, params=params, timeout=10)
     data = r.json()["result"]["list"]
-    df = pd.DataFrame(data, columns=["time","open","high","low","close","volume","turnover"])
-    df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
-    return df.iloc[::-1].reset_index(drop=True)
+    candles = []
+    for row in reversed(data):
+        candles.append({
+            "time": int(row[0]),
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5])
+        })
+    return candles
 
-def find_swings(df, lookback=5):
+def find_swings(candles, lookback=5):
     highs, lows = [], []
-    for i in range(lookback, len(df) - lookback):
-        if df["high"][i] == df["high"][i-lookback:i+lookback+1].max():
-            highs.append((i, df["high"][i]))
-        if df["low"][i] == df["low"][i-lookback:i+lookback+1].min():
-            lows.append((i, df["low"][i]))
+    for i in range(lookback, len(candles) - lookback):
+        window_h = [c["high"] for c in candles[i-lookback:i+lookback+1]]
+        window_l = [c["low"] for c in candles[i-lookback:i+lookback+1]]
+        if candles[i]["high"] == max(window_h):
+            highs.append((i, candles[i]["high"]))
+        if candles[i]["low"] == min(window_l):
+            lows.append((i, candles[i]["low"]))
     return highs, lows
 
-def detect_bos_choch(df, highs, lows):
+def detect_signals(candles, highs, lows):
     signals = []
     if len(highs) < 2 or len(lows) < 2:
         return signals
-    last_close = df["close"].iloc[-1]
+    last_close = candles[-1]["close"]
     if last_close > highs[-1][1] and highs[-1][1] > highs[-2][1]:
         signals.append({"type": "BOS", "direction": "BULLISH"})
     if last_close < lows[-1][1] and lows[-1][1] < lows[-2][1]:
@@ -70,20 +79,20 @@ def detect_bos_choch(df, highs, lows):
         signals.append({"type": "CHoCH", "direction": "BEARISH"})
     return signals
 
-def find_fvg(df):
+def find_fvg(candles):
     fvgs = []
-    for i in range(1, len(df) - 1):
-        if df["low"][i+1] > df["high"][i-1]:
+    for i in range(1, len(candles) - 1):
+        if candles[i+1]["low"] > candles[i-1]["high"]:
             fvgs.append("BULL")
-        if df["high"][i+1] < df["low"][i-1]:
+        if candles[i+1]["high"] < candles[i-1]["low"]:
             fvgs.append("BEAR")
     return fvgs
 
 def analyze(symbol, interval="60"):
-    df = get_klines(symbol, interval)
-    highs, lows = find_swings(df)
-    signals = detect_bos_choch(df, highs, lows)
-    fvgs = find_fvg(df)
+    candles = get_klines(symbol, interval)
+    highs, lows = find_swings(candles)
+    signals = detect_signals(candles, highs, lows)
+    fvgs = find_fvg(candles)
     score = 0
     if signals:
         score += 2
@@ -91,8 +100,7 @@ def analyze(symbol, interval="60"):
             score += 1
     if fvgs:
         score += 1
-    return {"symbol": symbol, "interval": interval, "price": df["close"].iloc[-1],
-            "signals": signals, "score": score}
+    return {"symbol": symbol, "price": candles[-1]["close"], "signals": signals, "score": score}
 
 def init_db():
     conn = sqlite3.connect("signals.db")
@@ -106,7 +114,7 @@ def init_db():
 
 def save_signal(symbol, direction, signal_type, entry, tp, sl):
     conn = sqlite3.connect("signals.db")
-    conn.execute("INSERT INTO signals (symbol,direction,signal_type,entry,tp,sl) VALUES (?,?,?,?,?,?)",
+    conn.execute("INSERT INTO signals VALUES (NULL,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
                  (symbol, direction, signal_type, entry, tp, sl))
     conn.commit()
     conn.close()
@@ -135,23 +143,22 @@ def scan_market():
                        f"💰 Вход: {price}\n"
                        f"🎯 TP: {tp}\n"
                        f"🛡 SL: {sl}\n"
-                       f"⚡️ Сила: {r['score']}/5")
+                       f"⚡️ Сила: {r['score']}/4")
                 results.append(msg)
             except Exception as e:
                 print(f"Error {symbol}: {e}")
     return results
 
-SYSTEM_PROMPT = """Ты APEX — дерзкий AI трейдер и ассистент. 
+SYSTEM_PROMPT = """Ты APEX — дерзкий AI трейдер.
 Специализируешься на SMC: BOS, CHoCH, Order Blocks, FVG.
-Отвечаешь коротко, по делу. Знаешь всё о крипте и фьючерсах.
-Если спрашивают про сигналы — говори использовать /scan."""
+Отвечаешь коротко и по делу. Знаешь всё о крипте и фьючерсах.
+Для сигналов говори использовать /scan."""
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "⚡️ <b>APEX SMC BOT</b>\n\nГотов. Спрашивай что угодно или используй:\n/scan — сигналы\n/help — справка",
-        parse_mode="HTML"
-    )
+        "⚡️ <b>APEX SMC BOT</b>\n\nГотов. Спрашивай или используй:\n/scan — сигналы\n/help — справка",
+        parse_mode="HTML")
 
 @dp.message(Command("scan"))
 async def cmd_scan(message: types.Message):
@@ -161,13 +168,11 @@ async def cmd_scan(message: types.Message):
         for s in signals:
             await message.answer(s, parse_mode="HTML")
     else:
-        await message.answer("😴 Чисто. Сигналов нет.")
+        await message.answer("😴 Сигналов нет.")
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    await message.answer(
-        "📖 BOS — продолжение тренда\nCHoCH — разворот\n🟢 BULLISH = лонг\n🔴 BEARISH = шорт"
-    )
+    await message.answer("📖 BOS — продолжение тренда\nCHoCH — разворот\n🟢 LONG\n🔴 SHORT")
 
 @dp.message()
 async def handle_text(message: types.Message):
