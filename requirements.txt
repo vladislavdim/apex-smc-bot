@@ -1,4 +1,5 @@
-python-telegram-bot==21.6
+aiogram==3.4.1
 requests==2.31.0
+pandas==2.1.4
 numpy==1.26.4
-duckduckgo-search==6.2.13
+apscheduler==3.10.4
