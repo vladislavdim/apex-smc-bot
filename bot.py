@@ -7,21 +7,20 @@ import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash-002")from aiogram import Bot, Dispatcher, types
+from groq import Groq
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_KEY = os.environ.get("GROQ_API_KEY")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash-002")
+groq_client = Groq(api_key=GROQ_KEY)
 
 chat_history = {}
 
@@ -120,6 +119,16 @@ def get_signal_stats():
     except:
         return 0, 0
 
+# ===== AI =====
+
+def ask_groq(prompt, max_tokens=800):
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens
+    )
+    return response.choices[0].message.content
+
 # ===== CRYPTO DATA =====
 
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
@@ -151,9 +160,8 @@ def get_market_overview():
         )
         tickers = r.json()["result"]["list"]
         tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-        top = tickers[:10]
         overview = []
-        for t in top:
+        for t in tickers[:10]:
             if t["symbol"].endswith("USDT"):
                 change = float(t.get("price24hPcnt", 0)) * 100
                 overview.append(f"{t['symbol']}: ${float(t['lastPrice']):.4f} ({change:+.2f}%)")
@@ -269,7 +277,7 @@ def ask_ai(user_id, user_message):
 ТЕКУЩИЙ РЫНОК:
 {market}
 
-ЧТО Я УЖЕ ЗНАЮ (из исследований):
+ЧТО Я УЖЕ ЗНАЮ:
 {knowledge if knowledge else "Накапливается..."}
 
 ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
@@ -288,21 +296,20 @@ def ask_ai(user_id, user_message):
 APEX:"""
 
     try:
-        response = model.generate_content(prompt)
-        return response.text
+        return ask_groq(prompt)
     except Exception as e:
-        logging.error(f"Gemini error: {e}")
+        logging.error(f"AI error: {e}")
         return None
 
 def update_profile_sync(user_id, message, response):
     profile = get_user_profile(user_id)
     try:
-        prompt = f"""Проанализируй диалог и обнови профиль трейдера одним абзацем (макс 150 слов).
+        prompt = f"""Обнови профиль трейдера одним абзацем (макс 150 слов).
 Текущий профиль: {profile if profile else "Пустой"}
-Сообщение: {message}
+Сообщение пользователя: {message}
 Если упомянуты монеты, суммы, стратегии, опыт — добавь. Иначе верни текущий профиль."""
-        result = model.generate_content(prompt)
-        save_user_profile(user_id, result.text.strip())
+        result = ask_groq(prompt, max_tokens=200)
+        save_user_profile(user_id, result.strip())
     except:
         pass
 
@@ -316,8 +323,8 @@ async def auto_research():
             prompt = f"""Ты крипто аналитик. Тема: "{topic}"
 Данные рынка: {market}
 Напиши 3-4 предложения с конкретными выводами для трейдера."""
-            response = model.generate_content(prompt)
-            save_knowledge(topic, response.text.strip(), "auto")
+            result = ask_groq(prompt, max_tokens=300)
+            save_knowledge(topic, result.strip(), "auto")
             await asyncio.sleep(5)
         except Exception as e:
             logging.error(f"Research error: {e}")
@@ -364,10 +371,10 @@ async def cmd_market(message: types.Message):
     await message.answer("📊 Собираю данные...")
     market = get_market_overview()
     try:
-        commentary = model.generate_content(
-            f"Дай краткий комментарий (3 предложения) по рынку:\n{market}\nЧто интересного?"
+        comment = ask_groq(
+            f"Дай краткий комментарий (3 предложения) по рынку:\n{market}\nЧто интересного?",
+            max_tokens=200
         )
-        comment = commentary.text
     except:
         comment = "Анализ недоступен."
     await message.answer(f"📊 <b>Рынок</b>\n\n{market}\n\n💬 {comment}", parse_mode="HTML")
@@ -390,7 +397,7 @@ async def cmd_help(message: types.Message):
         "📊 SMC сигналы каждые 30 мин — /scan\n"
         "💹 Обзор рынка — /market\n"
         "💬 Отвечает на вопросы про крипту\n"
-        "🔍 Каждые 2 часа сам изучает рынок\n"
+        "🔍 Каждые 2 часа изучает рынок сам\n"
         "🧠 Помнит твои интересы и портфель\n\n"
         "Просто пиши 👇",
         parse_mode="HTML"
@@ -410,7 +417,6 @@ async def handle_text(message: types.Message):
         chat_history[user_id] = chat_history[user_id][-30:]
 
     thinking = await message.answer("⚡️")
-
     reply = ask_ai(user_id, text)
 
     try:
