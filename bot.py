@@ -19,7 +19,7 @@ dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
 chat_history = {}
 
@@ -187,7 +187,7 @@ async def handle_text(message: types.Message):
     prompt = f"{SYSTEM_PROMPT}\n\nИстория:\n{history_text}\n\nОтветь:"
     try:
         response = model.generate_content(prompt)
-        reply = response.text
+        reply = response.text if hasattr(response, 'text') else str(response.candidates[0].content.parts[0].text)
         chat_history[user_id].append(f"APEX: {reply}")
         await message.answer(reply)
     except Exception as e:
