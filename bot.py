@@ -1,302 +1,196 @@
-"""
-APEX SMC Bot — Telegram бот с сигналами по Smart Money Concepts
-Биржа: Bybit Futures | Полностью бесплатный стек
-"""
-
-import os
 import asyncio
 import logging
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import os
+import requests
+import pandas as pd
+import sqlite3
 
-from core.smc_engine import BybitData
-from core.learning import LearningEngine
-from signals.generator import SignalGenerator
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))       # Твой Telegram ID
-CHANNEL_ID = os.getenv("CHANNEL_ID", "")         # Канал для сигналов (опц.)
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-SCAN_INTERVAL_MINUTES = 30  # Сканировать каждые 30 минут
+logging.basicConfig(level=logging.INFO)
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
-)
-log = logging.getLogger(__name__)
+# ===== SMC ENGINE =====
 
-# ─── ИНИЦИАЛИЗАЦИЯ ────────────────────────────────────────────────────────────
-bybit = BybitData()
-scanner = SignalGenerator()
-learner = LearningEngine()
+BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 
-# Хранилище подписчиков
-subscribers: set[int] = set()
-if ADMIN_ID:
-    subscribers.add(ADMIN_ID)
+def get_klines(symbol, interval="60", limit=200):
+    params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
+    r = requests.get(BYBIT_URL, params=params, timeout=10)
+    data = r.json()["result"]["list"]
+    df = pd.DataFrame(data, columns=["time","open","high","low","close","volume","turnover"])
+    df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+    return df.iloc[::-1].reset_index(drop=True)
 
+def find_swings(df, lookback=5):
+    highs, lows = [], []
+    for i in range(lookback, len(df) - lookback):
+        if df["high"][i] == df["high"][i-lookback:i+lookback+1].max():
+            highs.append((i, df["high"][i]))
+        if df["low"][i] == df["low"][i-lookback:i+lookback+1].min():
+            lows.append((i, df["low"][i]))
+    return highs, lows
 
-# ─── ФОРМАТИРОВАНИЕ СИГНАЛА ───────────────────────────────────────────────────
+def detect_bos_choch(df, highs, lows):
+    signals = []
+    if len(highs) < 2 or len(lows) < 2:
+        return signals
+    last_close = df["close"].iloc[-1]
+    if last_close > highs[-1][1] and highs[-1][1] > highs[-2][1]:
+        signals.append({"type": "BOS", "direction": "BULLISH", "level": highs[-1][1]})
+    if last_close < lows[-1][1] and lows[-1][1] < lows[-2][1]:
+        signals.append({"type": "BOS", "direction": "BEARISH", "level": lows[-1][1]})
+    if last_close > highs[-1][1] and highs[-1][1] < highs[-2][1]:
+        signals.append({"type": "CHoCH", "direction": "BULLISH", "level": highs[-1][1]})
+    if last_close < lows[-1][1] and lows[-1][1] > lows[-2][1]:
+        signals.append({"type": "CHoCH", "direction": "BEARISH", "level": lows[-1][1]})
+    return signals
 
-def format_signal(signal, signal_id: int = None) -> str:
-    emoji = "🟢" if signal.direction == "LONG" else "🔴"
-    stars = "⭐" * signal.strength
+def find_ob(df, direction):
+    obs = []
+    for i in range(1, len(df) - 1):
+        if direction == "BULLISH" and df["close"][i] < df["open"][i] and df["close"][i+1] > df["open"][i+1]:
+            obs.append(i)
+        if direction == "BEARISH" and df["close"][i] > df["open"][i] and df["close"][i+1] < df["open"][i+1]:
+            obs.append(i)
+    return obs
 
-    confluence_text = "\n".join(signal.confluence)
+def find_fvg(df):
+    fvgs = []
+    for i in range(1, len(df) - 1):
+        if df["low"][i+1] > df["high"][i-1]:
+            fvgs.append("BULL")
+        if df["high"][i+1] < df["low"][i-1]:
+            fvgs.append("BEAR")
+    return fvgs
 
-    msg = f"""
-{'━' * 30}
-{emoji} *{signal.symbol}* — {signal.direction} [{signal.timeframe}]
-{'━' * 30}
+def analyze(symbol, interval="60"):
+    df = get_klines(symbol, interval)
+    highs, lows = find_swings(df)
+    signals = detect_bos_choch(df, highs, lows)
+    obs = find_ob(df, signals[0]["direction"]) if signals else []
+    fvgs = find_fvg(df)
+    score = 0
+    if signals:
+        score += 2
+        if signals[0]["type"] == "CHoCH":
+            score += 1
+    if obs:
+        score += 1
+    if fvgs:
+        score += 1
+    return {"symbol": symbol, "interval": interval, "price": df["close"].iloc[-1],
+            "signals": signals, "score": score}
 
-📐 *Сетап:* {signal.setup}
-{stars}
+# ===== DATABASE =====
 
-💰 *Вход:* `{signal.entry:.4f}`
-🛑 *Стоп:* `{signal.sl:.4f}`
-🎯 *TP1:* `{signal.tp1:.4f}` (1:2)
-🎯 *TP2:* `{signal.tp2:.4f}` (1:3)
-🎯 *TP3:* `{signal.tp3:.4f}` (1:5)
+def init_db():
+    conn = sqlite3.connect("signals.db")
+    conn.execute("""CREATE TABLE IF NOT EXISTS signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT, direction TEXT, signal_type TEXT,
+        entry REAL, tp REAL, sl REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    conn.commit()
+    conn.close()
 
-📊 *Confluences ({len(signal.confluence)}):*
-{confluence_text}
+def save_signal(symbol, direction, signal_type, entry, tp, sl):
+    conn = sqlite3.connect("signals.db")
+    conn.execute("INSERT INTO signals (symbol,direction,signal_type,entry,tp,sl) VALUES (?,?,?,?,?,?)",
+                 (symbol, direction, signal_type, entry, tp, sl))
+    conn.commit()
+    conn.close()
 
-⏰ {signal.time.strftime('%H:%M %d.%m.%Y')}
-{'━' * 30}
-⚠️ _Не финансовый совет. DYOR._
-"""
-    return msg.strip()
+# ===== SCANNER =====
 
+SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
+           "TONUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","ARBUSDT"]
 
-def format_update(update_data: dict) -> str:
-    signal = update_data["signal"]
-    result = update_data["result"]
-    pnl = update_data["pnl_rr"]
+def scan_market():
+    results = []
+    for symbol in SYMBOLS:
+        for interval in ["60", "240"]:
+            try:
+                r = analyze(symbol, interval)
+                if not r["signals"] or r["score"] < 3:
+                    continue
+                sig = r["signals"][0]
+                price = r["price"]
+                direction = sig["direction"]
+                tp = round(price * 1.03, 4) if direction == "BULLISH" else round(price * 0.97, 4)
+                sl = round(price * 0.985, 4) if direction == "BULLISH" else round(price * 1.015, 4)
+                save_signal(symbol, direction, sig["type"], price, tp, sl)
+                tf = "1H" if interval == "60" else "4H"
+                emoji = "🟢" if direction == "BULLISH" else "🔴"
+                msg = (f"{emoji} <b>{symbol}</b> [{tf}]\n"
+                       f"📊 {sig['type']} — {direction}\n"
+                       f"💰 Вход: {price}\n"
+                       f"🎯 TP: {tp}\n"
+                       f"🛡 SL: {sl}\n"
+                       f"⚡️ Сила сигнала: {r['score']}/5")
+                results.append(msg)
+            except Exception as e:
+                print(f"Error {symbol}: {e}")
+    return results
 
-    icons = {
-        "tp1": "🎯 TP1 достигнут! +2R",
-        "tp2": "🎯🎯 TP2 достигнут! +3R",
-        "tp3": "🎯🎯🎯 TP3 достигнут! +5R",
-        "sl": "💀 Стоп сработал. -1R"
-    }
+# ===== HANDLERS =====
 
-    emoji = "✅" if result != "sl" else "❌"
-    return f"""{emoji} *{signal['symbol']}* {signal['direction']} — {icons.get(result, result)}
-PnL: *{'+' if pnl > 0 else ''}{pnl}R*"""
-
-
-# ─── КОМАНДЫ ──────────────────────────────────────────────────────────────────
-
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    subscribers.add(user_id)
-
-    keyboard = [
-        [InlineKeyboardButton("📡 Сканировать рынок", callback_data="scan"),
-         InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton("📈 Топ монеты", callback_data="top_symbols"),
-         InlineKeyboardButton("❓ Как читать сигнал", callback_data="howto")]
-    ]
-
-    await update.message.reply_text(
-        "⚡ *APEX SMC — Фьючерсные сигналы*\n\n"
-        "Анализирую рынок по *Smart Money Concepts*:\n"
-        "• Break of Structure (BOS)\n"
-        "• Change of Character (CHoCH)\n"
-        "• Order Blocks (OB)\n"
-        "• Fair Value Gaps (FVG)\n"
-        "• Liquidity Zones\n\n"
-        "Биржа: *Bybit Futures*\n"
-        "Учусь на каждом сигнале 🧠\n\n"
-        "Сканирование каждые 30 минут автоматически.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "⚡️ <b>APEX SMC BOT</b>\n\n"
+        "Торговые сигналы по методу Smart Money\n\n"
+        "/scan — сканировать рынок сейчас\n"
+        "/help — помощь",
+        parse_mode="HTML"
     )
 
+@dp.message(Command("scan"))
+async def cmd_scan(message: types.Message):
+    await message.answer("🔍 Сканирую рынок...")
+    signals = scan_market()
+    if signals:
+        for s in signals:
+            await message.answer(s, parse_mode="HTML")
+    else:
+        await message.answer("😴 Сигналов нет. Рынок спокойный.")
 
-async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔍 Сканирую рынок... (~30 сек)")
-
-    signals = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: scanner.scan_market(timeframes=["60", "240"])
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await message.answer(
+        "📖 <b>Как читать сигналы:</b>\n\n"
+        "BOS — слом структуры (продолжение тренда)\n"
+        "CHoCH — смена характера (разворот)\n\n"
+        "🟢 BULLISH = лонг\n"
+        "🔴 BEARISH = шорт\n\n"
+        "⚡️ Сила 3+ = хороший сигнал\n"
+        "⚡️ Сила 5 = сильнейший сигнал",
+        parse_mode="HTML"
     )
 
-    if not signals:
-        await msg.edit_text("😴 Чистый рынок — нет сигналов с достаточным confluence.\nПодожди следующего скана.")
-        return
+# ===== AUTO SCAN =====
 
-    await msg.edit_text(f"✅ Найдено *{len(signals)}* сигналов", parse_mode="Markdown")
+async def auto_scan():
+    signals = scan_market()
+    if signals:
+        for s in signals:
+            await bot.send_message(ADMIN_ID, s, parse_mode="HTML")
 
-    for signal in signals[:5]:  # Топ 5
-        signal_id = learner.save_signal(signal)
-        text = format_signal(signal, signal_id)
-        await update.message.reply_text(text, parse_mode="Markdown")
+# ===== MAIN =====
 
-
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    report = learner.get_performance_report()
-
-    if report["total"] == 0:
-        await update.message.reply_text(
-            "📊 Статистика пока пустая — нет закрытых сигналов.\n"
-            "Запусти /scan и подожди пока позиции закроются."
-        )
-        return
-
-    top_symbols_text = "\n".join(
-        [f"• {s[0]}: {s[1]}% ({s[2]} сделок)" for s in report["top_symbols"]]
-    ) or "нет данных"
-
-    top_factors_text = "\n".join(
-        [f"• {f[0][:40]}: {f[1]}%" for f in report["top_factors"]]
-    ) or "нет данных"
-
-    pnl_emoji = "✅" if report["avg_rr"] > 0 else "❌"
-
-    await update.message.reply_text(
-        f"📊 *Статистика APEX SMC*\n\n"
-        f"📈 Всего сигналов: *{report['total']}*\n"
-        f"✅ Выигрыши: *{report['wins']}*\n"
-        f"❌ Стопы: *{report['losses']}*\n"
-        f"🎯 Win Rate: *{report['win_rate']}%*\n"
-        f"{pnl_emoji} Средний RR: *{report['avg_rr']}R*\n\n"
-        f"🏆 *Лучшие монеты:*\n{top_symbols_text}\n\n"
-        f"🧠 *Лучшие confluences:*\n{top_factors_text}\n\n"
-        f"_Бот адаптирует стратегию на основе этих данных_",
-        parse_mode="Markdown"
-    )
-
-
-async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📡 Получаю топ монеты Bybit...")
-
-    symbols = await asyncio.get_event_loop().run_in_executor(
-        None, bybit.get_top_symbols, 10
-    )
-
-    text = "🔥 *Топ монеты по объёму (Bybit Futures):*\n\n"
-    for i, s in enumerate(symbols, 1):
-        price = bybit.get_price(s)
-        text += f"{i}. `{s}` — ${price:,.4f}\n"
-
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-async def cmd_howto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 *Как читать сигналы APEX SMC*\n\n"
-        "*Вход* — цена входа в позицию\n"
-        "*Стоп* — уровень стоп-лосса (ниже OB для лонга)\n"
-        "*TP1/2/3* — цели (RR 1:2, 1:3, 1:5)\n\n"
-        "⭐ *Сила сигнала (1-5 звёзд):*\n"
-        "⭐⭐⭐ = минимум 3 фактора совпало\n"
-        "⭐⭐⭐⭐⭐ = максимальный confluence\n\n"
-        "📐 *SMC концепции:*\n"
-        "• *BOS* — Break of Structure (продолжение тренда)\n"
-        "• *CHoCH* — Change of Character (разворот)\n"
-        "• *OB* — Order Block (зона входа крупных игроков)\n"
-        "• *FVG* — Fair Value Gap (незакрытый дисбаланс)\n"
-        "• *Liquidity* — зона ликвидности (стопы толпы)\n\n"
-        "💡 *Рекомендуемый риск:* 1-2% от депозита на сделку\n"
-        "📊 Всегда дожидайся закрытия свечи перед входом!",
-        parse_mode="Markdown"
-    )
-
-
-# ─── CALLBACK КНОПКИ ──────────────────────────────────────────────────────────
-
-async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "scan":
-        await cmd_scan(query, ctx)
-    elif query.data == "stats":
-        await cmd_stats(query, ctx)
-    elif query.data == "top_symbols":
-        await cmd_top(query, ctx)
-    elif query.data == "howto":
-        await cmd_howto(query, ctx)
-
-
-# ─── АВТО-СКАНИРОВАНИЕ ────────────────────────────────────────────────────────
-
-async def auto_scan(app: Application):
-    """Фоновое сканирование каждые 30 минут"""
-    while True:
-        await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
-
-        log.info("🔍 Авто-скан...")
-
-        try:
-            # Проверяем результаты прошлых сигналов
-            updates = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: learner.check_pending_signals(bybit)
-            )
-
-            # Отправляем апдейты подписчикам
-            for upd in updates:
-                text = format_update(upd)
-                for user_id in subscribers:
-                    try:
-                        await app.bot.send_message(user_id, text, parse_mode="Markdown")
-                    except:
-                        pass
-
-            # Адаптивный min confluence
-            min_conf = learner.get_adaptive_min_confluence()
-            log.info(f"Адаптивный min_confluence: {min_conf}")
-
-            # Предпочтительные символы (если есть история)
-            best = learner.get_best_symbols()
-            symbols = best if best else None
-
-            # Сканируем
-            signals = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: scanner.scan_market(symbols=symbols, timeframes=["60", "240"])
-            )
-
-            if signals:
-                log.info(f"Найдено {len(signals)} сигналов")
-                for signal in signals[:3]:
-                    signal_id = learner.save_signal(signal)
-                    text = format_signal(signal, signal_id)
-
-                    for user_id in subscribers:
-                        try:
-                            await app.bot.send_message(
-                                user_id, text, parse_mode="Markdown"
-                            )
-                        except Exception as e:
-                            log.error(f"Send error {user_id}: {e}")
-            else:
-                log.info("Сигналов нет — рынок в зоне ожидания")
-
-        except Exception as e:
-            log.error(f"Авто-скан ошибка: {e}")
-
-
-# ─── ЗАПУСК ───────────────────────────────────────────────────────────────────
-
-async def post_init(app: Application):
-    asyncio.create_task(auto_scan(app))
-    log.info("⚡ APEX SMC запущен. Авто-скан каждые 30 минут.")
-
-
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("scan", cmd_scan))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CommandHandler("top", cmd_top))
-    app.add_handler(CommandHandler("howto", cmd_howto))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-
-    app.run_polling(drop_pending_updates=True)
-
+async def main():
+    init_db()
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(auto_scan, "interval", minutes=30)
+    scheduler.start()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
