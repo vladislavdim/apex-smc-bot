@@ -5697,8 +5697,8 @@ def setup_error_capture():
 async def restore_db_from_github():
     """При старте скачиваем brain.db из GitHub"""
     try:
-        gh_token = os.environ.get("GH_TOKEN", "")
-        gh_repo = os.environ.get("GH_REPO", "")
+        gh_token = os.environ.get("GITHUB_TOKEN", "")
+        gh_repo = os.environ.get("GITHUB_REPO", "")
         if not gh_token or not gh_repo:
             logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
             return
@@ -5722,8 +5722,8 @@ async def restore_db_from_github():
 async def backup_db_to_github():
     """Сохраняем brain.db в GitHub"""
     try:
-        gh_token = os.environ.get("GH_TOKEN", "")
-        gh_repo = os.environ.get("GH_REPO", "")
+        gh_token = os.environ.get("GITHUB_TOKEN", "")
+        gh_repo = os.environ.get("GITHUB_REPO", "")
         if not gh_token or not gh_repo:
             return
         import base64
