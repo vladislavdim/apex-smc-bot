@@ -88,7 +88,7 @@ def init_db():
         avg_hours_to_tp REAL DEFAULT 0,
         best_timeframe TEXT,
         worst_timeframe TEXT,
-        win_rate REAL DEFAULT 0,
+        win_ratio DECIMAL(10,2)te REAL DEFAULT 0,
         last_analysis TEXT)""")
 
     # Дневник сделок пользователя
