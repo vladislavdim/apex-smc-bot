@@ -248,6 +248,7 @@ pairs_cache = []
 pairs_cache_time = 0
 price_cache = {}
 last_price_update = 0
+candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
 def get_top_pairs(limit=50):
     """Топ-N пар по объёму. Пробуем Futures, fallback на Spot."""
@@ -549,7 +550,16 @@ COINGECKO_IDS = {
 }
 
 def get_candles(symbol, interval="1h", limit=150):
-    """Свечи: CoinGecko (основной) → Binance Futures → Binance Spot"""
+    """Свечи: кэш (2 мин) → CoinGecko → Binance Futures → Binance Spot"""
+    global candle_cache
+    cache_key = f"{symbol}_{interval}"
+    cache_ttl = 120  # 2 минуты
+
+    # Проверяем кэш
+    if cache_key in candle_cache:
+        cached_candles, cached_time = candle_cache[cache_key]
+        if time.time() - cached_time < cache_ttl and len(cached_candles) >= 20:
+            return cached_candles
 
     # 1. CoinGecko OHLC — первый и основной (работает без ограничений)
     cg_id = COINGECKO_IDS.get(symbol)
@@ -569,6 +579,7 @@ def get_candles(symbol, interval="1h", limit=150):
                             "low": float(c[3]), "close": float(c[4]),
                             "volume": 0.0} for c in data[-limit:]]
                 logging.info(f"Свечи CoinGecko: {symbol} {interval} {len(candles)}шт")
+                candle_cache[cache_key] = (candles, time.time())
                 return candles
         except Exception as e:
             logging.warning(f"CoinGecko OHLC {symbol}: {e}")
@@ -583,9 +594,11 @@ def get_candles(symbol, interval="1h", limit=150):
         data = r.json()
         if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
             logging.info(f"Свечи Binance Futures: {symbol}")
-            return [{"open": float(c[1]), "high": float(c[2]),
+            candles = [{"open": float(c[1]), "high": float(c[2]),
                      "low": float(c[3]), "close": float(c[4]),
                      "volume": float(c[5])} for c in data]
+            candle_cache[cache_key] = (candles, time.time())
+            return candles
     except Exception as e:
         logging.warning(f"Futures klines {symbol}: {e}")
 
@@ -599,9 +612,11 @@ def get_candles(symbol, interval="1h", limit=150):
         data = r.json()
         if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
             logging.info(f"Свечи Binance Spot: {symbol}")
-            return [{"open": float(c[1]), "high": float(c[2]),
+            candles = [{"open": float(c[1]), "high": float(c[2]),
                      "low": float(c[3]), "close": float(c[4]),
                      "volume": float(c[5])} for c in data]
+            candle_cache[cache_key] = (candles, time.time())
+            return candles
     except Exception as e:
         logging.warning(f"Spot klines {symbol}: {e}")
 
@@ -2691,16 +2706,16 @@ def scan_diagnostics(symbol):
     try:
         lines = [f"😴 <b>{symbol} — сигнал не найден</b>\n"]
 
-        # Проверяем свечи
         candles = get_candles(symbol, "1h", 150)
         if not candles or len(candles) < 20:
-            return f"😴 <b>{symbol}</b>\n❌ Нет данных с Binance"
+            lines.append("⚠️ Данные временно недоступны (CoinGecko rate limit)")
+            lines.append("\n<i>Подожди 30 секунд и попробуй снова</i>")
+            return "\n".join(lines)
 
         price = candles[-1]["close"]
         ps = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
         lines.append(f"💰 Цена: <code>{ps}</code>\n")
 
-        # MTF проверка
         results = {}
         for tf in ["15m", "1h", "4h"]:
             d = smc_on_tf(symbol, tf)
@@ -2712,30 +2727,27 @@ def scan_diagnostics(symbol):
         bearish = [tf for tf, d in results.items() if d == "BEARISH"]
 
         if not bullish and not bearish:
-            lines.append("\n⚠️ SMC структура не определена — рынок в боковике или нет данных")
+            lines.append("\n⚠️ SMC структура не определена — рынок в боковике")
         elif len(bullish) == len(bearish):
             lines.append("\n⚠️ Таймфреймы конфликтуют — нет чёткого направления")
         else:
             direction = "BULLISH" if len(bullish) > len(bearish) else "BEARISH"
-            lines.append(f"\n✅ Направление: {direction}")
-
-            # OB и FVG
+            lines.append(f"\n{'🟢' if direction == 'BULLISH' else '🔴'} Направление: {direction}")
             ob = find_ob(candles, direction)
             fvg = find_fvg(candles, direction)
             lines.append(f"{'✅' if ob else '❌'} Order Block: {'найден' if ob else 'не найден'}")
             lines.append(f"{'✅' if fvg else '❌'} FVG: {'найден' if fvg else 'не найден'}")
-
-            # Режим рынка
             regime = get_market_regime(symbol)
             lines.append(f"🧠 Режим: {regime['mode']} (уверенность {regime['confidence']}%)")
             if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
                 lines.append("⛔️ Заблокировано: рынок в глубоком боковике")
+            lines.append(f"\n📊 Confluence набрал меньше 25 очков — сигнал слабый")
 
-        lines.append("\n<i>Попробуй через 15-30 минут или выбери другую монету</i>")
+        lines.append("\n<i>Попробуй через 15-30 мин или выбери другую монету</i>")
         return "\n".join(lines)
 
     except Exception as e:
-        return f"😴 {symbol} — ошибка диагностики: {e}"
+        return f"😴 {symbol}\n⚠️ Временная ошибка: {e}\n\n<i>Попробуй снова через минуту</i>"
 
 # ===== CALLBACK HANDLERS =====
 
