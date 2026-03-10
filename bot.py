@@ -1039,7 +1039,7 @@ def get_upcoming_events():
     high_impact = ["Federal Reserve", "Fed", "CPI", "NFP", "Non-Farm", "GDP",
                    "Interest Rate", "Inflation", "FOMC", "Powell", "SEC", "ECB"]
     try:
-        items = parse_rss("https://feeds.reuters.com/reuters/businessNews", "Reuters", limit=10)
+        items = parse_rss("https://www.reuters.com/reuters/businessNews", "Reuters", limit=10)
         now = datetime.now()
         warnings = []
         for item in items:
