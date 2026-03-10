@@ -105,6 +105,35 @@ c.execute("""CREATE TABLE IF NOT EXISTS alerts (
     triggered INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
+# ===== ОШИБКИ БОТА =====
+c.execute("""CREATE TABLE IF NOT EXISTS bot_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id INTEGER,
+    symbol TEXT,
+    direction TEXT,
+    entry REAL,
+    sl REAL,
+    result TEXT,
+    error_type TEXT,
+    error_description TEXT,
+    ai_analysis TEXT,
+    ai_lesson TEXT,
+    ai_next_time TEXT,
+    fixed INTEGER DEFAULT 0,
+    fix_description TEXT,
+    hours_in_trade REAL,
+    market_context TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    fixed_at TEXT)""")
+
+# Счётчик повторных ошибок
+c.execute("""CREATE TABLE IF NOT EXISTS error_patterns (
+    error_type TEXT PRIMARY KEY,
+    count INTEGER DEFAULT 1,
+    last_seen TEXT,
+    rule_added TEXT,
+    active INTEGER DEFAULT 1)""")
+
 conn.commit()
 conn.close()
 ```
@@ -213,32 +242,199 @@ update_user_memory(user_id, name=user_name)
 BINANCE = “https://api.binance.com”
 BINANCE_F = “https://fapi.binance.com”
 
-PAIRS = [“BTCUSDT”, “ETHUSDT”, “SOLUSDT”, “BNBUSDT”,
-“XRPUSDT”, “TONUSDT”, “DOGEUSDT”, “AVAXUSDT”,
-“LINKUSDT”, “ARBUSDT”]
+# Динамический кэш топ-50 пар
 
+pairs_cache = []
+pairs_cache_time = 0
 price_cache = {}
 last_price_update = 0
+
+def get_top_pairs(limit=50):
+“”“Топ-50 фьючерсных пар по объёму с Binance — авто-обновление каждый час”””
+global pairs_cache, pairs_cache_time
+if time.time() - pairs_cache_time < 3600 and pairs_cache:
+return pairs_cache
+try:
+r = requests.get(f”{BINANCE_F}/fapi/v1/ticker/24hr”, timeout=15)
+tickers = r.json()
+# Фильтруем только USDT пары, сортируем по объёму
+usdt = [t for t in tickers if t[“symbol”].endswith(“USDT”)]
+usdt.sort(key=lambda x: float(x.get(“quoteVolume”, 0)), reverse=True)
+pairs_cache = [t[“symbol”] for t in usdt[:limit]]
+pairs_cache_time = time.time()
+logging.info(f”Обновлено {len(pairs_cache)} пар”)
+return pairs_cache
+except Exception as e:
+logging.error(f”get_top_pairs error: {e}”)
+# Fallback список если API недоступен
+return [“BTCUSDT”,“ETHUSDT”,“SOLUSDT”,“BNBUSDT”,“XRPUSDT”,
+“TONUSDT”,“DOGEUSDT”,“AVAXUSDT”,“LINKUSDT”,“ARBUSDT”,
+“SUIUSDT”,“SEIUSDT”,“TIAUSDT”,“INJUSDT”,“APTUSDT”,
+“OPUSDT”,“LDOUSDT”,“FTMUSDT”,“NEARUSDT”,“ATOMUSDT”]
+
+# Обратная совместимость
+
+PAIRS = [“BTCUSDT”,“ETHUSDT”,“SOLUSDT”,“BNBUSDT”,“XRPUSDT”,
+“TONUSDT”,“DOGEUSDT”,“AVAXUSDT”,“LINKUSDT”,“ARBUSDT”]
 
 def get_live_prices():
 global price_cache, last_price_update
 if time.time() - last_price_update < 20 and price_cache:
 return price_cache
-market = {}
-for pair in PAIRS:
 try:
-r = requests.get(f”{BINANCE}/api/v3/ticker/24hr”, params={“symbol”: pair}, timeout=8)
-d = r.json()
-market[pair] = {
-“price”: float(d[“lastPrice”]),
-“change”: float(d[“priceChangePercent”]),
-“volume”: float(d[“quoteVolume”])
+# Берём всё одним запросом — быстрее
+r = requests.get(f”{BINANCE_F}/fapi/v1/ticker/24hr”, timeout=15)
+tickers = r.json()
+market = {}
+for t in tickers:
+if t[“symbol”].endswith(“USDT”):
+market[t[“symbol”]] = {
+“price”: float(t[“lastPrice”]),
+“change”: float(t[“priceChangePercent”]),
+“volume”: float(t.get(“quoteVolume”, 0))
 }
-except:
-pass
 price_cache = market
 last_price_update = time.time()
 return market
+except:
+return price_cache if price_cache else {}
+
+# ===== МОНИТОРИНГ НАКОПЛЕНИЙ ПЕРЕД ПАМПОМ =====
+
+def detect_accumulation(symbol):
+“””
+Wyckoff Accumulation + Volume Analysis:
+- Боковик (низкая волатильность) + сжатие цены
+- Объём ниже среднего (накопление в тишине)
+- Резкий всплеск объёма на последних свечах (кит заходит)
+- Крупные bid ордера в стакане
+Возвращает score 0-100 и детали
+“””
+try:
+candles_1h = get_candles(symbol, “1h”, 48)
+candles_15m = get_candles(symbol, “15m”, 96)
+
+```
+    if len(candles_1h) < 24 or len(candles_15m) < 48:
+        return None
+
+    score = 0
+    signals = []
+
+    # 1. БОКОВИК — цена в узком диапазоне последние 12 свечей
+    last_12 = candles_1h[-12:]
+    high_max = max(c["high"] for c in last_12)
+    low_min = min(c["low"] for c in last_12)
+    price_now = candles_1h[-1]["close"]
+    range_pct = (high_max - low_min) / low_min * 100
+
+    if range_pct < 5:
+        score += 25
+        signals.append(f"✅ Боковик {range_pct:.1f}% за 12ч (накопление)")
+    elif range_pct < 8:
+        score += 15
+        signals.append(f"⚡️ Диапазон {range_pct:.1f}% за 12ч (сжатие)")
+
+    # 2. ОБЪЁМ — среднее vs последние 3 свечи
+    all_vols = [c["volume"] for c in candles_1h[:-3]]
+    avg_vol = sum(all_vols) / len(all_vols) if all_vols else 1
+    recent_vols = [c["volume"] for c in candles_1h[-3:]]
+    avg_recent = sum(recent_vols) / len(recent_vols)
+
+    vol_ratio = avg_recent / avg_vol if avg_vol > 0 else 1
+
+    if vol_ratio < 0.6:
+        score += 20
+        signals.append(f"✅ Объём в {1/vol_ratio:.1f}x ниже среднего (тихое накопление)")
+    elif vol_ratio > 2.0:
+        score += 20
+        signals.append(f"🔥 Всплеск объёма x{vol_ratio:.1f} (кит заходит!)")
+
+    # 3. СВЕЧИ — серия маленьких тел (нерешительность = накопление)
+    small_candles = 0
+    for c in last_12:
+        body = abs(c["close"] - c["open"])
+        full_range = c["high"] - c["low"] if c["high"] != c["low"] else 0.001
+        if body / full_range < 0.3:
+            small_candles += 1
+
+    if small_candles >= 7:
+        score += 20
+        signals.append(f"✅ {small_candles}/12 свечей с маленьким телом (боковик)")
+
+    # 4. СТАКАН — давление покупателей
+    ob = get_orderbook(symbol)
+    if ob:
+        bid_ask_ratio = ob["bids"] / ob["asks"] if ob["asks"] > 0 else 1
+        if bid_ask_ratio > 1.5:
+            score += 20
+            signals.append(f"✅ Биды x{bid_ask_ratio:.1f} больше асков (кит покупает)")
+        elif bid_ask_ratio > 1.2:
+            score += 10
+            signals.append(f"⚡️ Биды немного давят (bid/ask {bid_ask_ratio:.1f})")
+
+    # 5. BOLLINGER BANDS — сжатие волатильности
+    closes = [c["close"] for c in candles_1h[-20:]]
+    avg_close = sum(closes) / len(closes)
+    std = (sum((x - avg_close) ** 2 for x in closes) / len(closes)) ** 0.5
+    bb_width = (std * 2) / avg_close * 100
+
+    if bb_width < 3:
+        score += 15
+        signals.append(f"✅ BB сжатие {bb_width:.1f}% (взрыв близко!)")
+    elif bb_width < 5:
+        score += 8
+        signals.append(f"⚡️ BB ширина {bb_width:.1f}% (сжимается)")
+
+    if not signals or score < 30:
+        return None
+
+    return {
+        "symbol": symbol,
+        "score": min(score, 100),
+        "price": price_now,
+        "range_pct": range_pct,
+        "vol_ratio": vol_ratio,
+        "bb_width": bb_width,
+        "signals": signals
+    }
+
+except Exception as e:
+    logging.error(f"Accumulation detect error {symbol}: {e}")
+    return None
+```
+
+def format_accumulation(acc):
+“”“Форматируем сигнал накопления”””
+score = acc[“score”]
+
+```
+if score >= 80:
+    grade = "🔥🔥🔥 МЕГА НАКОПЛЕНИЕ"
+    grade_note = "Высокая вероятность памп"
+elif score >= 60:
+    grade = "🔥🔥 СИЛЬНОЕ НАКОПЛЕНИЕ"
+    grade_note = "Следи внимательно"
+else:
+    grade = "🔥 НАКОПЛЕНИЕ"
+    grade_note = "Ранняя стадия"
+
+signals_text = "\n".join(acc["signals"])
+p = acc["price"]
+ps = f"${p:,.4f}" if p < 1 else f"${p:,.3f}" if p < 100 else f"${p:,.2f}"
+
+return (
+    f"{'━'*26}\n"
+    f"{grade}\n"
+    f"📦 <b>{acc['symbol']}</b> | {grade_note}\n"
+    f"{'━'*26}\n\n"
+    f"💰 Цена: <code>{ps}</code>\n"
+    f"📊 Скор накопления: <b>{score}/100</b>\n\n"
+    f"<b>Признаки:</b>\n{signals_text}\n\n"
+    f"💡 <i>Войти можно при пробое диапазона с объёмом</i>\n"
+    f"{'━'*26}"
+)
+```
 
 def format_market():
 market = get_live_prices()
@@ -446,18 +642,320 @@ return {
 }
 ```
 
-def full_scan(symbol, timeframe=“1h”):
-“”“Полный SMC анализ с мультитаймфреймом”””
+# ===== FEAR & GREED INDEX =====
+
+fg_cache = {}
+fg_cache_time = 0
+
+def get_fear_greed():
+global fg_cache, fg_cache_time
+if time.time() - fg_cache_time < 3600 and fg_cache:
+return fg_cache
 try:
-# Мультитаймфрейм
-mtf = multi_tf_analysis(symbol, [“15m”, “1h”, “4h”])
-if not mtf:
+r = requests.get(“https://api.alternative.me/fng/?limit=1”, timeout=8)
+data = r.json()[“data”][0]
+fg_cache = {
+“value”: int(data[“value”]),
+“label”: data[“value_classification”],
+“updated”: data[“timestamp”]
+}
+fg_cache_time = time.time()
+return fg_cache
+except:
+return None
+
+# ===== FUNDING RATE =====
+
+def get_funding_rate(symbol):
+try:
+r = requests.get(
+f”{BINANCE_F}/fapi/v1/fundingRate”,
+params={“symbol”: symbol, “limit”: 1},
+timeout=8
+)
+data = r.json()
+if data:
+return float(data[-1][“fundingRate”]) * 100
+return None
+except:
+return None
+
+# ===== OPEN INTEREST =====
+
+def get_open_interest(symbol):
+try:
+# Текущий OI
+r1 = requests.get(
+f”{BINANCE_F}/fapi/v1/openInterest”,
+params={“symbol”: symbol},
+timeout=8
+)
+current_oi = float(r1.json()[“openInterest”])
+
+```
+    # История OI (последние 4 часа)
+    r2 = requests.get(
+        f"{BINANCE_F}/futures/data/openInterestHist",
+        params={"symbol": symbol, "period": "1h", "limit": 5},
+        timeout=8
+    )
+    hist = r2.json()
+    if not hist:
+        return None
+
+    old_oi = float(hist[0]["sumOpenInterest"])
+    change_pct = (current_oi - old_oi) / old_oi * 100 if old_oi > 0 else 0
+
+    return {
+        "current": current_oi,
+        "change_pct": round(change_pct, 2),
+        "trend": "GROWING" if change_pct > 2 else "FALLING" if change_pct < -2 else "FLAT"
+    }
+except:
+    return None
+```
+
+# ===== DXY SIGNAL =====
+
+dxy_cache = {}
+dxy_cache_time = 0
+
+def get_dxy_signal():
+global dxy_cache, dxy_cache_time
+if time.time() - dxy_cache_time < 3600 and dxy_cache:
+return dxy_cache
+try:
+# DXY через Yahoo Finance RSS
+r = requests.get(
+“https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=5d”,
+headers={“User-Agent”: “Mozilla/5.0”},
+timeout=10
+)
+data = r.json()
+closes = data[“chart”][“result”][0][“indicators”][“quote”][0][“close”]
+closes = [c for c in closes if c is not None]
+if len(closes) < 2:
 return None
 
 ```
-    direction = mtf["direction"]
+    change = (closes[-1] - closes[-3]) / closes[-3] * 100 if len(closes) >= 3 else 0
 
-    # Детальный вход на выбранном ТФ
+    dxy_cache = {
+        "value": round(closes[-1], 2),
+        "change": round(change, 2),
+        "signal": "STRONG" if change > 0.3 else "WEAK" if change < -0.3 else "NEUTRAL"
+    }
+    dxy_cache_time = time.time()
+    return dxy_cache
+except:
+    return None
+```
+
+# ===== ECONOMIC CALENDAR =====
+
+econ_cache = []
+econ_cache_time = 0
+
+def get_upcoming_events():
+“”“Предупреждение о важных макро-событиях из ForexFactory RSS”””
+global econ_cache, econ_cache_time
+if time.time() - econ_cache_time < 1800 and econ_cache is not None:
+return econ_cache
+
+```
+high_impact = ["Federal Reserve", "Fed", "CPI", "NFP", "Non-Farm", "GDP",
+               "Interest Rate", "Inflation", "FOMC", "Powell", "SEC", "ECB"]
+try:
+    items = parse_rss("https://feeds.reuters.com/reuters/businessNews", "Reuters", limit=10)
+    now = datetime.now()
+    warnings = []
+    for item in items:
+        title = item.get("title", "")
+        if any(kw.lower() in title.lower() for kw in high_impact):
+            warnings.append(f"{item.get('date','')}: {title[:60]}")
+
+    econ_cache = " | ".join(warnings[:2]) if warnings else ""
+    econ_cache_time = time.time()
+    return econ_cache
+except:
+    return ""
+```
+
+# ===== РЫНОЧНЫЙ РЕЖИМ =====
+
+regime_cache = {}
+regime_cache_time = {}
+
+def get_market_regime(symbol):
+“””
+Определяет режим рынка: TRENDING / SIDEWAYS / VOLATILE
+Основано на ATR, BB Width, последовательности свечей
+“””
+global regime_cache, regime_cache_time
+now = time.time()
+if symbol in regime_cache and now - regime_cache_time.get(symbol, 0) < 1800:
+return regime_cache[symbol]
+
+```
+try:
+    candles = get_candles(symbol, "1h", 50)
+    if len(candles) < 20:
+        return {"mode": "UNKNOWN", "direction": "NONE", "confidence": 0}
+
+    closes = [c["close"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+
+    # ATR — средний диапазон свечи
+    atrs = [highs[i] - lows[i] for i in range(len(candles))]
+    avg_atr = sum(atrs[-14:]) / 14
+    atr_pct = avg_atr / closes[-1] * 100
+
+    # BB Width
+    avg20 = sum(closes[-20:]) / 20
+    std20 = (sum((x - avg20) ** 2 for x in closes[-20:]) / 20) ** 0.5
+    bb_width = std20 * 4 / avg20 * 100
+
+    # Направление тренда
+    ema9 = sum(closes[-9:]) / 9
+    ema21 = sum(closes[-21:]) / 21
+    trend_dir = "BULLISH" if ema9 > ema21 else "BEARISH"
+
+    # Последовательность — 3+ свечи в одну сторону
+    streak = 1
+    for i in range(len(candles) - 2, max(len(candles) - 8, 0), -1):
+        if (candles[i]["close"] > candles[i]["open"]) == (candles[-1]["close"] > candles[-1]["open"]):
+            streak += 1
+        else:
+            break
+
+    # Режим
+    if bb_width < 3 and atr_pct < 1.5:
+        mode = "SIDEWAYS"
+        confidence = 80
+    elif bb_width > 6 or atr_pct > 3:
+        mode = "VOLATILE"
+        confidence = 70
+    elif streak >= 3:
+        mode = "TRENDING"
+        confidence = 75
+    else:
+        mode = "TRENDING"
+        confidence = 50
+
+    result = {"mode": mode, "direction": trend_dir, "confidence": confidence,
+              "bb_width": round(bb_width, 2), "atr_pct": round(atr_pct, 2)}
+    regime_cache[symbol] = result
+    regime_cache_time[symbol] = now
+    return result
+except:
+    return {"mode": "UNKNOWN", "direction": "NONE", "confidence": 0}
+```
+
+# ===== ВЕСА CONFLUENCE (самообучение) =====
+
+def get_confluence_weights(symbol):
+“””
+Веса факторов обновляются на основе реальной статистики.
+Если OB давал победы чаще — его вес растёт.
+“””
+default = {“mtf”: 30, “ob”: 25, “fvg”: 15, “orderbook”: 10, “fg”: 10, “funding”: 8, “oi”: 7, “dxy”: 5}
+try:
+conn = sqlite3.connect(“brain.db”)
+row = conn.execute(
+“SELECT wins, total FROM signal_learning WHERE symbol=?”, (symbol,)
+).fetchone()
+conn.close()
+
+```
+    if not row or row[1] < 10:
+        return default
+
+    wr = row[0] / row[1]
+
+    # Динамически регулируем веса на основе WR этого символа
+    if wr > 0.65:
+        # Хорошая монета — повышаем вес MTF (основной фактор работает)
+        default["mtf"] = 35
+        default["ob"] = 28
+    elif wr < 0.4:
+        # Плохая монета — повышаем вес дополнительных фильтров
+        default["fg"] = 15
+        default["funding"] = 12
+        default["oi"] = 10
+
+    return default
+except:
+    return default
+```
+
+# ===== ПАМП ДЕТЕКТОР РЕАЛЬНОГО ВРЕМЕНИ (каждые 5 мин) =====
+
+pump_alerted = set()  # Чтобы не спамить одинаковыми
+
+async def realtime_pump_detector():
+“”“Каждые 5 минут ищет резкий рост объёма x3+ за 3 свечи”””
+try:
+prices = get_live_prices()
+pairs = get_top_pairs(50)
+
+```
+    for symbol in pairs:
+        if symbol in pump_alerted:
+            continue
+        try:
+            candles = get_candles(symbol, "5m", 20)
+            if len(candles) < 10:
+                continue
+
+            vols = [c["volume"] for c in candles]
+            avg_vol = sum(vols[:-3]) / len(vols[:-3]) if len(vols) > 3 else 1
+            recent_vol = sum(vols[-3:]) / 3
+            vol_spike = recent_vol / avg_vol if avg_vol > 0 else 1
+
+            price_change = (candles[-1]["close"] - candles[-4]["close"]) / candles[-4]["close"] * 100
+
+            if vol_spike >= 3 and abs(price_change) >= 1.5:
+                direction = "🚀 ПАМП" if price_change > 0 else "💥 ДАМП"
+                p = candles[-1]["close"]
+                ps = f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
+
+                pump_alerted.add(symbol)
+                # Снимаем алерт через 30 мин
+                asyncio.get_event_loop().call_later(1800, lambda s=symbol: pump_alerted.discard(s))
+
+                if ADMIN_ID:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"{direction} ДЕТЕКТОР\n\n"
+                        f"⚡️ <b>{symbol}</b> | {ps}\n"
+                        f"📊 Объём x{vol_spike:.1f} от среднего\n"
+                        f"📈 Изменение цены: {price_change:+.2f}% за 15 мин\n"
+                        f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+                        parse_mode="HTML"
+                    )
+            await asyncio.sleep(0.2)
+        except:
+            pass
+except Exception as e:
+    logging.error(f"Pump detector error: {e}")
+```
+
+def full_scan(symbol, timeframe=“1h”):
+“”“Полный SMC анализ с мультитаймфреймом + все новые фильтры”””
+try:
+# ── 0. Рыночный режим — в боковике сигналов нет ──
+regime = get_market_regime(symbol)
+if regime[“mode”] == “SIDEWAYS” and regime[“confidence”] > 70:
+return None  # В боковике не торгуем
+
+```
+    # ── 1. Мультитаймфрейм SMC ──
+    mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])
+    if not mtf:
+        return None
+
+    direction = mtf["direction"]
     candles = get_candles(symbol, timeframe, 150)
     if len(candles) < 20:
         return None
@@ -467,19 +965,93 @@ return None
     fvg = find_fvg(candles, direction)
     ob_data = get_orderbook(symbol)
 
+    # ── 2. Дополнительные фильтры ──
+    fg = get_fear_greed()
+    funding = get_funding_rate(symbol)
+    oi = get_open_interest(symbol)
+    dxy = get_dxy_signal()
+    econ = get_upcoming_events()
+
+    # ── 3. Взвешенный confluence ──
+    weights = get_confluence_weights(symbol)
     confluence = []
-    confluence.append(f"✅ {mtf['match_count']}/{mtf['total']} таймфреймов совпали")
+    total_weight = 0
+
+    # MTF — базовый вес
+    mtf_w = weights.get("mtf", 30)
+    confluence.append(f"✅ {mtf['match_count']}/{mtf['total']} ТФ совпали (вес {mtf_w})")
+    total_weight += mtf_w
+
     if ob:
-        confluence.append(f"✅ Order Block: {ob['bottom']:.4f}–{ob['top']:.4f}")
+        ob_w = weights.get("ob", 25)
+        confluence.append(f"✅ Order Block: {ob['bottom']:.4f}–{ob['top']:.4f} (вес {ob_w})")
+        total_weight += ob_w
+
     if fvg:
-        confluence.append(f"✅ FVG: {fvg['bottom']:.4f}–{fvg['top']:.4f}")
+        fvg_w = weights.get("fvg", 15)
+        confluence.append(f"✅ FVG: {fvg['bottom']:.4f}–{fvg['top']:.4f} (вес {fvg_w})")
+        total_weight += fvg_w
+
     if ob_data:
         match = (direction == "BULLISH" and ob_data["bias"] == "BUY") or \
                 (direction == "BEARISH" and ob_data["bias"] == "SELL")
         if match:
-            confluence.append(f"✅ OrderBook: {ob_data['bias']} PRESSURE")
+            ob_w2 = weights.get("orderbook", 10)
+            confluence.append(f"✅ OrderBook {ob_data['bias']} (вес {ob_w2})")
+            total_weight += ob_w2
 
-    # Уровни
+    # Fear & Greed
+    fg_ok = False
+    if fg:
+        if direction == "BULLISH" and fg["value"] < 75:
+            fg_ok = True
+            confluence.append(f"✅ F&G: {fg['value']} ({fg['label']}) — не перегрет")
+            total_weight += 10
+        elif direction == "BEARISH" and fg["value"] > 25:
+            fg_ok = True
+            confluence.append(f"✅ F&G: {fg['value']} ({fg['label']}) — не в панике")
+            total_weight += 10
+        else:
+            confluence.append(f"⚠️ F&G: {fg['value']} ({fg['label']}) — экстремум, осторожно")
+
+    # Funding Rate
+    if funding is not None:
+        if direction == "BULLISH" and funding < 0.05:
+            confluence.append(f"✅ Funding: {funding:+.4f}% — нейтральный")
+            total_weight += 8
+        elif direction == "BEARISH" and funding > -0.05:
+            confluence.append(f"✅ Funding: {funding:+.4f}% — нейтральный")
+            total_weight += 8
+        elif abs(funding) > 0.15:
+            confluence.append(f"⚠️ Funding: {funding:+.4f}% — перегрев, риск ликвидаций")
+
+    # Open Interest
+    if oi:
+        if oi["trend"] == "GROWING" and direction == "BULLISH":
+            confluence.append(f"✅ OI растёт +{oi['change_pct']:.1f}% — сильный тренд")
+            total_weight += 7
+        elif oi["trend"] == "GROWING" and direction == "BEARISH":
+            confluence.append(f"✅ OI растёт — шортисты добавляют")
+            total_weight += 7
+
+    # DXY
+    if dxy:
+        if direction == "BULLISH" and dxy["signal"] == "WEAK":
+            confluence.append(f"✅ DXY слабеет — хорошо для крипты")
+            total_weight += 5
+        elif direction == "BULLISH" and dxy["signal"] == "STRONG":
+            confluence.append(f"⚠️ DXY растёт — риск для лонгов")
+
+    # Режим рынка
+    if regime["mode"] == "TRENDING":
+        confluence.append(f"✅ Рынок в тренде ({regime['direction']})")
+        total_weight += 5
+
+    # Минимальный порог
+    if total_weight < 40:
+        return None
+
+    # ── 4. Уровни входа ──
     risk = price * 0.015
     if direction == "BULLISH":
         entry = ob["top"] if ob else price
@@ -494,26 +1066,31 @@ return None
         tp2 = round(entry - risk * 3, 4)
         tp3 = round(entry - risk * 5, 4)
 
-    # Время отработки
-    est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
-    if est_hours < 24:
-        time_str = f"~{est_hours}ч"
-    elif est_hours < 48:
-        time_str = "~1-2 дня"
-    else:
-        time_str = f"~{est_hours // 24} дн"
-
+    # ── 5. Время отработки ──
+    est_hours, confidence_str, win_rate = get_estimated_time(symbol, timeframe)
+    time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
     wr_str = f"{win_rate:.0f}% WR" if win_rate > 0 else "нет истории"
 
-    # Сохраняем сигнал
     save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"])
+
+    # ── 6. AI комментарий к сигналу ──
+    signal_comment = generate_signal_comment(
+        symbol, direction, mtf, total_weight, regime, fg, funding, ob, fvg
+    )
+
+    # ── 7. Уровень инвалидации (когда сигнал отменяется) ──
+    invalidation = sl  # Если цена закроется за стопом — сигнал недействителен
+    inv_text = f"Сигнал отменяется если цена закроется {'ниже' if direction == 'BULLISH' else 'выше'} <code>{invalidation:.4f}</code>"
+
+    # ── 8. Предупреждение об экономических событиях ──
+    econ_warn = f"\n⚠️ <b>Макро:</b> {econ}\n" if econ else ""
 
     emoji = "🟢" if direction == "BULLISH" else "🔴"
     conf_text = "\n".join(confluence)
 
     return (
         f"{'━'*26}\n"
-        f"{mtf['grade_emoji']} <b>{mtf['grade']}</b>\n"
+        f"{mtf['grade_emoji']} <b>{mtf['grade']}</b> [скор: {total_weight}/100]\n"
         f"{emoji} <b>{symbol}</b> — {direction}\n"
         f"{'━'*26}\n\n"
         f"📐 <b>Таймфреймы:</b>\n{mtf['tf_status']}\n"
@@ -524,8 +1101,12 @@ return None
         f"🎯 <b>TP2:</b> <code>{tp2:.4f}</code> (+3R)\n"
         f"🎯 <b>TP3:</b> <code>{tp3:.4f}</code> (+5R)\n\n"
         f"⏱ <b>Время отработки:</b> {time_str}\n"
-        f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
-        f"📋 <b>Confluence:</b>\n{conf_text}\n"
+        f"📊 <b>Точность:</b> {wr_str} | {confidence_str}\n"
+        f"🧠 <b>Режим рынка:</b> {regime['mode']} ({regime['direction']})\n"
+        f"{econ_warn}"
+        f"❌ <b>Инвалидация:</b> {inv_text}\n\n"
+        f"📋 <b>Confluence [{total_weight}/100]:</b>\n{conf_text}\n\n"
+        f"💬 <b>APEX думает:</b>\n<i>{signal_comment}</i>\n"
         f"{'━'*26}"
     )
 except Exception as e:
@@ -620,9 +1201,16 @@ conn.close()
             is_win = result in ("tp1", "tp2", "tp3")
             update_signal_learning(symbol, hours_elapsed, is_win, timeframe, result)
 
-            # Анализ проигрышных сделок для самообучения
-            if not is_win:
-                asyncio.create_task(analyze_loss(symbol, direction, entry, sl, timeframe))
+            # Рефлексия по КАЖДОМУ сигналу
+            asyncio.create_task(signal_reflection(
+                symbol, direction, entry, sl, tp1, result, hours_elapsed, timeframe
+            ))
+
+            # Глубокий анализ ошибок только для проигрышей
+            if not is_win and result != "expired":
+                asyncio.create_task(deep_error_analysis(
+                    sig_id, symbol, direction, entry, sl, result, hours_elapsed, timeframe
+                ))
 
             closed.append({
                 "signal_id": sig_id,
@@ -638,33 +1226,6 @@ except Exception as e:
     logging.error(f"Check signals error: {e}")
     return []
 ```
-
-async def analyze_loss(symbol, direction, entry, sl, timeframe):
-“”“Анализирует проигрышную сделку и улучшает стратегию”””
-try:
-candles = get_candles(symbol, timeframe, 100)
-if not candles:
-return
-price_now = candles[-1][“close”]
-prompt = f””“Ты SMC трейдер. Разбери проигрышную сделку и дай вывод для улучшения стратегии:
-Монета: {symbol}
-Направление: {direction}
-Вход: {entry}
-Стоп: {sl}
-Цена сейчас: {price_now}
-Таймфрейм: {timeframe}
-
-Что пошло не так? Как избежать в будущем? (2-3 предложения)”””
-r = groq_client.chat.completions.create(
-model=“llama-3.3-70b-versatile”,
-messages=[{“role”: “user”, “content”: prompt}],
-max_tokens=200
-)
-analysis = r.choices[0].message.content
-save_knowledge(f”loss_analysis_{symbol}”, analysis, “self-learning”)
-logging.info(f”Loss analysis saved for {symbol}: {analysis[:100]}”)
-except Exception as e:
-logging.error(f”Analyze loss error: {e}”)
 
 def update_signal_learning(symbol, hours_to_close, is_win, timeframe, result):
 try:
@@ -845,9 +1406,133 @@ except Exception as e:
 
 # ===== TAVILY =====
 
+def parse_rss(url, source_name, limit=5):
+“”“Парсим RSS без API ключей”””
+try:
+headers = {
+“User-Agent”: “Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36”
+}
+r = requests.get(url, headers=headers, timeout=10)
+r.encoding = “utf-8”
+content = r.text
+
+```
+    items = []
+    # Парсим XML вручную
+    import re
+    entries = re.findall(r"<item>(.*?)</item>", content, re.DOTALL)
+    if not entries:
+        entries = re.findall(r"<entry>(.*?)</entry>", content, re.DOTALL)
+
+    for entry in entries[:limit]:
+        # Заголовок
+        title_m = re.search(r"<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", entry, re.DOTALL)
+        title = title_m.group(1).strip() if title_m else ""
+
+        # Ссылка
+        link_m = re.search(r"<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", entry, re.DOTALL)
+        if not link_m:
+            link_m = re.search(r"<link[^>]*href=['\"]([^'\"]+)['\"]", entry)
+        link = link_m.group(1).strip() if link_m else ""
+
+        # Дата
+        date_m = re.search(r"<pubDate>(.*?)</pubDate>", entry, re.DOTALL)
+        if not date_m:
+            date_m = re.search(r"<published>(.*?)</published>", entry, re.DOTALL)
+        raw_date = date_m.group(1).strip() if date_m else ""
+
+        # Парсим дату
+        date_str = ""
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(raw_date)
+            date_str = dt.strftime("%d.%m %H:%M")
+        except:
+            try:
+                dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                date_str = dt.strftime("%d.%m %H:%M")
+            except:
+                date_str = raw_date[:16] if raw_date else ""
+
+        if title:
+            items.append({
+                "title": title,
+                "link": link,
+                "date": date_str,
+                "source": source_name
+            })
+
+    return items
+except Exception as e:
+    logging.error(f"RSS parse error {source_name}: {e}")
+    return []
+```
+
+def get_crypto_news(limit=15):
+“””
+Собираем новости с нескольких источников:
+CoinTelegraph, CoinDesk, Investing.com, Reuters, Bloomberg
+Без API ключей — прямой RSS парсинг
+“””
+sources = [
+(“https://cointelegraph.com/rss”, “CoinTelegraph”),
+(“https://www.coindesk.com/arc/outboundfeeds/rss/”, “CoinDesk”),
+(“https://cryptonews.com/news/feed/”, “CryptoNews”),
+(“https://decrypt.co/feed”, “Decrypt”),
+(“https://feeds.reuters.com/reuters/businessNews”, “Reuters”),
+(“https://investing.com/rss/news_301.rss”, “Investing.com”),
+(“https://www.forexfactory.com/ff_calendar_thisweek.xml”, “ForexFactory”),
+]
+
+```
+all_news = []
+for url, name in sources:
+    try:
+        items = parse_rss(url, name, limit=4)
+        all_news.extend(items)
+        time.sleep(0.3)
+    except:
+        pass
+
+# Сортируем по дате (свежие первые)
+return all_news[:limit]
+```
+
+def format_news(news_items):
+“”“Форматируем новости с датой и источником”””
+if not news_items:
+return “Новости временно недоступны”
+
+```
+lines = []
+for item in news_items:
+    date = f"[{item['date']}] " if item["date"] else ""
+    source = f" — {item['source']}"
+    lines.append(f"📰 {date}<b>{item['title']}</b>{source}")
+
+return "\n\n".join(lines)
+```
+
+def get_market_impact_news():
+“”“Макро-новости которые влияют на рынок: ФРС, CPI, геополитика”””
+sources = [
+(“https://feeds.reuters.com/reuters/businessNews”, “Reuters”),
+(“https://feeds.bloomberg.com/markets/news.rss”, “Bloomberg”),
+(“https://investing.com/rss/news_301.rss”, “Investing.com”),
+(“https://feeds.feedburner.com/streetinsider/crypto”, “StreetInsider”),
+]
+all_news = []
+for url, name in sources:
+try:
+items = parse_rss(url, name, limit=3)
+all_news.extend(items)
+except:
+pass
+return all_news[:8]
+
 def tavily_search(query, max_results=4):
-if not TAVILY_KEY:
-return “Поиск недоступен”
+“”“Tavily если есть ключ, иначе DuckDuckGo”””
+if TAVILY_KEY:
 try:
 r = requests.post(
 “https://api.tavily.com/search”,
@@ -860,9 +1545,30 @@ if data.get(“answer”):
 results.append(data[“answer”])
 for item in data.get(“results”, []):
 results.append(f”• {item.get(‘title’,’’)}: {item.get(‘content’,’’)[:200]}”)
-return “\n\n”.join(results) if results else “Нет результатов”
+return “\n\n”.join(results) if results else “”
 except:
-return “Поиск временно недоступен”
+pass
+
+```
+# Fallback: DuckDuckGo без API
+try:
+    r = requests.get(
+        "https://api.duckduckgo.com/",
+        params={"q": query, "format": "json", "no_html": 1},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10
+    )
+    data = r.json()
+    results = []
+    if data.get("AbstractText"):
+        results.append(data["AbstractText"])
+    for item in data.get("RelatedTopics", [])[:3]:
+        if isinstance(item, dict) and item.get("Text"):
+            results.append(f"• {item['Text'][:200]}")
+    return "\n".join(results) if results else ""
+except:
+    return ""
+```
 
 def save_news(query, content):
 try:
@@ -903,7 +1609,281 @@ return “\n”.join([r[0] for r in rows])
 except:
 return “”
 
-# ===== AI =====
+# ===== СИСТЕМА ОШИБОК БОТА =====
+
+ERROR_TYPES = {
+“against_trend”: “Вход против тренда”,
+“sideways_entry”: “Вход в боковик”,
+“bad_rr”: “Плохой RR (риск/прибыль)”,
+“news_stop”: “Новости срезали стоп”,
+“false_breakout”: “Ложный пробой”,
+“early_entry”: “Ранний вход (не дождался подтверждения)”,
+“late_entry”: “Поздний вход (перегнался за ценой)”,
+“weak_confluence”: “Слабый confluence”,
+“unknown”: “Неизвестная причина”
+}
+
+def classify_error(symbol, direction, entry, sl, result, hours, market_context=””):
+“”“AI классифицирует тип ошибки”””
+try:
+prompt = f””“Ты SMC трейдер. Классифицируй ошибку в сделке.
+
+СДЕЛКА:
+Монета: {symbol} | Направление: {direction}
+Вход: {entry} | Стоп: {sl}
+Результат: {result} | Время: {hours:.1f}ч
+Контекст рынка: {market_context}
+
+Выбери ОДИН тип ошибки из списка:
+
+- against_trend (вход против тренда)
+- sideways_entry (вход в боковик)
+- bad_rr (плохое соотношение риск/прибыль)
+- news_stop (новости срезали стоп)
+- false_breakout (ложный пробой)
+- early_entry (ранний вход)
+- late_entry (поздний вход)
+- weak_confluence (слабый confluence)
+- unknown
+
+Верни ТОЛЬКО код типа ошибки, без пояснений.”””
+
+```
+    result_type = ask_groq(prompt, max_tokens=20)
+    if result_type:
+        result_type = result_type.strip().lower().split()[0]
+        if result_type in ERROR_TYPES:
+            return result_type
+    return "unknown"
+except:
+    return "unknown"
+```
+
+async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, hours, timeframe):
+“””
+Полный AI разбор ошибки:
+- Что пошло не так
+- Урок
+- Как поступать в следующий раз
+Сохраняет в таблицу bot_errors
+“””
+try:
+candles = get_candles(symbol, timeframe, 100)
+price_now = candles[-1][“close”] if candles else 0
+
+```
+    # Получаем рыночный контекст на момент сделки
+    regime = get_market_regime(symbol)
+    fg = get_fear_greed()
+    funding = get_funding_rate(symbol)
+
+    market_context = (
+        f"Режим: {regime.get('mode','?')} | "
+        f"F&G: {fg['value'] if fg else '?'} | "
+        f"Funding: {funding:.4f}%" if funding else ""
+    )
+
+    # Классифицируем ошибку
+    error_type = classify_error(symbol, direction, entry, sl, result, hours, market_context)
+    error_label = ERROR_TYPES.get(error_type, "Неизвестно")
+
+    # Ищем в интернете что случилось с монетой
+    web_context = ""
+    symbol_name = symbol.replace("USDT", "")
+    items = parse_rss("https://cointelegraph.com/rss", "CT", limit=15)
+    relevant = [i for i in items if symbol_name.lower() in i["title"].lower()]
+    if relevant:
+        web_context = "\n".join([f"[{i['date']}] {i['title']}" for i in relevant[:3]])
+
+    # Глубокий AI анализ
+    analysis_prompt = f"""Ты APEX — проводишь честный разбор своей ошибки.
+```
+
+СДЕЛКА КОТОРАЯ ПРОВАЛИЛАСЬ:
+Монета: {symbol} | Направление: {direction}
+Вход: {entry} | Стоп: {sl} | Цена сейчас: {price_now}
+Время в позиции: {hours:.1f}ч
+Тип ошибки: {error_label}
+Рыночный контекст: {market_context}
+
+{f”ЧТО ПРОИСХОДИЛО С МОНЕТОЙ:{chr(10)}{web_context}” if web_context else “”}
+
+Дай честный разбор в 3 частях:
+
+1. АНАЛИЗ: Что конкретно пошло не так? (2-3 предложения)
+1. УРОК: Какой вывод из этой сделки? (1-2 предложения)
+1. В СЛЕДУЮЩИЙ РАЗ: Конкретное правило которое применю. (1 предложение, начни с “В следующий раз…”)”””
+   
+   ```
+    full_analysis = ask_groq(analysis_prompt, max_tokens=400)
+   
+    # Парсим части ответа
+    ai_analysis = ""
+    ai_lesson = ""
+    ai_next_time = ""
+   
+    if full_analysis:
+        lines = full_analysis.strip().split("\n")
+        current_section = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if "АНАЛИЗ" in line.upper() or line.startswith("1."):
+                current_section = "analysis"
+                continue
+            elif "УРОК" in line.upper() or line.startswith("2."):
+                current_section = "lesson"
+                continue
+            elif "СЛЕДУЮЩИЙ" in line.upper() or line.startswith("3."):
+                current_section = "next"
+                continue
+   
+            if current_section == "analysis":
+                ai_analysis += line + " "
+            elif current_section == "lesson":
+                ai_lesson += line + " "
+            elif current_section == "next":
+                ai_next_time += line + " "
+   
+        # Если парсинг не сработал — берём весь текст
+        if not ai_analysis:
+            ai_analysis = full_analysis[:300]
+   
+    # Сохраняем ошибку в БД
+    conn = sqlite3.connect("brain.db")
+    conn.execute("""INSERT INTO bot_errors VALUES
+        (NULL,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,CURRENT_TIMESTAMP,NULL)""",
+        (signal_id, symbol, direction, entry, sl, result,
+         error_type, error_label,
+         ai_analysis.strip(), ai_lesson.strip(), ai_next_time.strip(),
+         round(hours, 1), market_context)
+    )
+   
+    # Обновляем счётчик паттернов ошибок
+    existing = conn.execute(
+        "SELECT count FROM error_patterns WHERE error_type=?", (error_type,)
+    ).fetchone()
+   
+    if existing:
+        new_count = existing[0] + 1
+        conn.execute(
+            "UPDATE error_patterns SET count=?, last_seen=CURRENT_TIMESTAMP WHERE error_type=?",
+            (new_count, error_type)
+        )
+        # Если ошибка повторилась 3+ раз — добавляем правило автоматически
+        if new_count >= 3:
+            rule = await auto_add_rule(error_type, new_count)
+            if rule:
+                conn.execute(
+                    "UPDATE error_patterns SET rule_added=? WHERE error_type=?",
+                    (rule, error_type)
+                )
+                # Уведомляем пользователя
+                if ADMIN_ID:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🧠 <b>Новое правило добавлено в стратегию</b>\n\n"
+                        f"Ошибка <b>{ERROR_TYPES[error_type]}</b> повторилась {new_count} раз.\n\n"
+                        f"📌 <b>Правило:</b> {rule}",
+                        parse_mode="HTML"
+                    )
+    else:
+        conn.execute(
+            "INSERT INTO error_patterns VALUES (?,1,CURRENT_TIMESTAMP,NULL,1)",
+            (error_type,)
+        )
+   
+    conn.commit()
+    conn.close()
+   
+    # Сохраняем в базу знаний
+    save_knowledge(
+        f"error_{symbol}_{error_type}",
+        f"Ошибка: {error_label}. {ai_analysis} Урок: {ai_lesson} Правило: {ai_next_time}",
+        "error-analysis"
+    )
+   
+    logging.info(f"Error analyzed: {symbol} {error_type}")
+   ```
+   
+   except Exception as e:
+   logging.error(f”Deep error analysis failed: {e}”)
+
+async def auto_add_rule(error_type, count):
+“”“Когда ошибка повторяется 3+ раз — AI формулирует правило для стратегии”””
+try:
+# Достаём последние 3 анализа этого типа
+conn = sqlite3.connect(“brain.db”)
+rows = conn.execute(
+“SELECT symbol, ai_analysis, ai_lesson FROM bot_errors WHERE error_type=? ORDER BY id DESC LIMIT 3”,
+(error_type,)
+).fetchall()
+conn.close()
+
+```
+    examples = "\n".join([f"- {r[0]}: {r[1][:100]}" for r in rows])
+
+    prompt = f"""Ошибка типа "{ERROR_TYPES[error_type]}" повторилась {count} раз.
+```
+
+Примеры:
+{examples}
+
+Сформулируй ОДНО конкретное правило для стратегии которое предотвратит эту ошибку.
+Начни с “Не входить если…” или “Всегда проверять…” или “Обязательно…”
+Максимум 1 предложение.”””
+
+```
+    rule = ask_groq(prompt, max_tokens=100)
+    return rule.strip() if rule else None
+except:
+    return None
+```
+
+def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg):
+“”“Короткий AI-комментарий к сигналу — почему бот так считает”””
+try:
+factors = []
+if mtf:
+factors.append(f”{mtf[‘match_count’]} из {mtf[‘total’]} таймфреймов показывают {direction}”)
+if ob:
+factors.append(f”Order Block на уровне {ob[‘bottom’]:.4f}–{ob[‘top’]:.4f}”)
+if fvg:
+factors.append(f”Fair Value Gap заполняется”)
+if fg:
+factors.append(f”Fear & Greed = {fg[‘value’]} ({fg[‘label’]})”)
+if funding is not None:
+factors.append(f”Funding Rate {funding:+.4f}%”)
+if regime:
+factors.append(f”рынок в режиме {regime[‘mode’]}”)
+
+```
+    factors_text = ", ".join(factors)
+
+    # Достаём уроки из ошибок по этому символу
+    past_errors = get_knowledge(f"error_{symbol}")
+
+    prompt = f"""Ты APEX. Напиши короткий комментарий (2-3 предложения) к сигналу.
+```
+
+Сигнал: {symbol} {direction}
+Скор уверенности: {confluence_score}/100
+Факторы: {factors_text}
+{f”Прошлые ошибки по этой монете: {past_errors[:200]}” if past_errors else “”}
+
+Объясни ПОЧЕМУ ты даёшь этот сигнал и НА ЧТО опираешься.
+Если были ошибки — упомяни что учёл.
+Коротко, дерзко, по делу.”””
+
+```
+    comment = ask_groq(prompt, max_tokens=150)
+    return comment.strip() if comment else ""
+except:
+    return ""
+```
+
+# ===== AI BRAIN =====
 
 def ask_groq(prompt, max_tokens=800):
 try:
@@ -917,12 +1897,219 @@ except Exception as e:
 logging.error(f”Groq error: {e}”)
 return None
 
+# ===== СИСТЕМА 1: ГЛУБОКИЙ РЕСЁРЧ =====
+
+# Бот сам ищет инфу в интернете, читает статьи, строит выводы
+
+def deep_research(topic, context=””):
+“””
+Многошаговый ресёрч:
+1. Ищем через RSS + DuckDuckGo
+2. Читаем найденное
+3. AI строит выводы и сохраняет факты
+“””
+try:
+# Шаг 1: Ищем по RSS источникам
+sources = [
+(f”https://cointelegraph.com/rss/tag/{topic.lower().replace(’ ‘,’-’)}”, “CoinTelegraph”),
+(“https://cointelegraph.com/rss”, “CoinTelegraph”),
+(“https://www.coindesk.com/arc/outboundfeeds/rss/”, “CoinDesk”),
+(“https://decrypt.co/feed”, “Decrypt”),
+]
+raw_news = []
+for url, name in sources[:2]:
+items = parse_rss(url, name, limit=3)
+raw_news.extend(items)
+
+```
+    # Шаг 2: DuckDuckGo поиск
+    ddg_result = ""
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": f"{topic} crypto 2025", "format": "json", "no_html": 1},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        data = r.json()
+        if data.get("AbstractText"):
+            ddg_result = data["AbstractText"]
+        for item in data.get("RelatedTopics", [])[:3]:
+            if isinstance(item, dict) and item.get("Text"):
+                ddg_result += f"\n• {item['Text'][:150]}"
+    except:
+        pass
+
+    # Шаг 3: AI строит глубокий вывод
+    news_text = "\n".join([f"[{n['date']}] {n['title']}" for n in raw_news[:6]])
+    prompt = f"""Ты APEX — крипто аналитик. Проведи глубокий анализ темы.
+```
+
+ТЕМА: {topic}
+КОНТЕКСТ: {context}
+
+НАЙДЕННЫЕ НОВОСТИ:
+{news_text}
+
+ДАННЫЕ ИЗ ИНТЕРНЕТА:
+{ddg_result[:600]}
+
+Сделай структурированный анализ:
+
+1. Что происходит сейчас
+1. Ключевые факты и цифры
+1. Влияние на рынок
+1. Вывод для трейдера (конкретно)
+
+Только реальные данные, без воды.”””
+
+```
+    analysis = ask_groq(prompt, max_tokens=600)
+
+    if analysis:
+        # Сохраняем как знание
+        save_knowledge(topic, analysis, "deep-research")
+        logging.info(f"Deep research done: {topic}")
+
+    return analysis or "Недостаточно данных для анализа"
+
+except Exception as e:
+    logging.error(f"Deep research error: {e}")
+    return None
+```
+
+# ===== СИСТЕМА 2: САМО-РЕФЛЕКСИЯ СИГНАЛОВ =====
+
+# После закрытия сигнала бот думает: почему так вышло?
+
+async def signal_reflection(symbol, direction, entry, sl, tp1, result, hours, timeframe):
+“””
+Бот сам анализирует закрытый сигнал:
+- Если выиграл — что сработало хорошо
+- Если проиграл — ищет в интернете что случилось с монетой
+- Строит вывод и обновляет стратегию
+“””
+try:
+candles = get_candles(symbol, timeframe, 100)
+price_now = candles[-1][“close”] if candles else 0
+is_win = result in (“tp1”, “tp2”, “tp3”)
+
+```
+    # Ищем что случилось с монетой в интернете
+    web_context = ""
+    if not is_win:
+        items = parse_rss("https://cointelegraph.com/rss", "CT", limit=10)
+        symbol_name = symbol.replace("USDT", "")
+        relevant = [i for i in items if symbol_name.lower() in i["title"].lower()]
+        if relevant:
+            web_context = "\n".join([f"[{i['date']}] {i['title']}" for i in relevant[:3]])
+
+    prompt = f"""Ты APEX — ты только что закрыл сигнал. Проведи честный разбор.
+```
+
+СИГНАЛ:
+Монета: {symbol} | Направление: {direction}
+Вход: {entry} | Стоп: {sl} | TP1: {tp1}
+Результат: {result} | Время в позиции: {hours:.1f}ч
+Цена сейчас: {price_now}
+
+{f”ЧТО ПРОИСХОДИЛО С МОНЕТОЙ:{chr(10)}{web_context}” if web_context else “”}
+
+Ответь на вопросы:
+
+1. Почему сигнал {“сработал” if is_win else “провалился”}?
+1. Что нужно учесть в следующий раз для {symbol}?
+1. Одно конкретное правило которое добавить в стратегию.
+
+Коротко и честно.”””
+
+```
+    reflection = ask_groq(prompt, max_tokens=300)
+
+    if reflection:
+        topic = f"reflection_{symbol}_{result}"
+        save_knowledge(topic, reflection, "self-reflection")
+        logging.info(f"Reflection saved: {symbol} {result}")
+
+    return reflection
+
+except Exception as e:
+    logging.error(f"Reflection error: {e}")
+    return None
+```
+
+# ===== СИСТЕМА 3: НОЧНЫЕ ЗАДАЧИ (пока ты спишь) =====
+
+# Бот сам ставит себе задачи и выполняет их
+
+NIGHT_TASKS = [
+“bitcoin dominance trend analysis”,
+“ethereum layer2 development news”,
+“DXY dollar index crypto correlation”,
+“crypto whale movements today”,
+“altseason indicators 2025”,
+“federal reserve crypto market impact”,
+“solana ecosystem updates”,
+“defi tvl trends analysis”,
+]
+
+async def night_brain_tasks():
+“””
+Каждые 4 часа бот сам:
+1. Выбирает тему для изучения
+2. Ищет инфу в интернете
+3. Строит выводы
+4. Сравнивает с прошлыми прогнозами
+5. Сохраняет в базу знаний
+“””
+try:
+now_hour = datetime.now().hour
+# Выбираем задачу по времени суток
+task_idx = (now_hour // 4) % len(NIGHT_TASKS)
+topic = NIGHT_TASKS[task_idx]
+
+```
+    logging.info(f"Ночная задача: {topic}")
+
+    # Достаём старый прогноз по этой теме
+    old_knowledge = get_knowledge(topic)
+
+    # Делаем новый ресёрч
+    new_analysis = deep_research(topic)
+    if not new_analysis:
+        return
+
+    # Сравниваем с прошлым прогнозом
+    if old_knowledge:
+        comparison_prompt = f"""Сравни старый и новый анализ по теме: {topic}
+```
+
+СТАРЫЙ АНАЛИЗ:
+{old_knowledge[:500]}
+
+НОВЫЙ АНАЛИЗ:
+{new_analysis[:500]}
+
+Что изменилось? Прошлый прогноз сбылся? Что нужно обновить в стратегии?
+(2-3 предложения)”””
+
+```
+        comparison = ask_groq(comparison_prompt, max_tokens=200)
+        if comparison:
+            save_knowledge(f"comparison_{topic}", comparison, "self-compare")
+            logging.info(f"Сравнение сохранено: {topic}")
+
+    logging.info(f"Ночная задача выполнена: {topic}")
+
+except Exception as e:
+    logging.error(f"Night brain error: {e}")
+```
+
+# ===== СИСТЕМА 4: УМНЫЙ ASK_AI С АВТО-РЕСЁРЧЕМ =====
+
 def ask_ai(user_id, user_name, user_message):
 mem = get_user_memory(user_id)
 history_rows = get_chat_history(user_id, limit=15)
-knowledge = get_knowledge(user_message[:40])
-recent_news = get_recent_news()
-market = format_market()
 now = datetime.now().strftime(”%Y-%m-%d %H:%M”)
 
 ```
@@ -931,39 +2118,68 @@ for row in history_rows:
     role_label = "Ты" if row[0] == "user" else "APEX"
     history_text += f"{role_label}: {row[1]}\n"
 
-search_kw = ["новост", "почему", "что случилось", "прогноз", "сегодня", "упал", "вырос"]
-search_results = ""
-if any(kw in user_message.lower() for kw in search_kw):
-    search_results = tavily_search(f"crypto {user_message} 2025", max_results=3)
+# Определяем нужен ли ресёрч
+needs_research = any(kw in user_message.lower() for kw in [
+    "почему", "что случилось", "прогноз", "анализ", "расскажи",
+    "новости", "что думаешь", "объясни", "как дела у", "что с"
+])
+
+needs_price = any(kw in user_message.lower() for kw in [
+    "цена", "сколько стоит", "курс", "рынок"
+])
+
+# Собираем контекст
+market = format_market() if needs_price or len(user_message) < 30 else ""
+knowledge = get_knowledge(user_message[:50])
+recent_news = get_recent_news()
+
+# Авто-ресёрч если бот не уверен
+research_result = ""
+if needs_research:
+    # Сначала смотрим в базе знаний
+    existing = get_knowledge(user_message[:40])
+    if existing and len(existing) > 100:
+        research_result = f"ИЗ МОЕЙ БАЗЫ ЗНАНИЙ:\n{existing[:400]}"
+    else:
+        # Ищем в интернете
+        news_items = parse_rss("https://cointelegraph.com/rss", "CT", limit=5)
+        relevant = [i for i in news_items
+                   if any(w in i["title"].lower() for w in user_message.lower().split()[:3])]
+        if relevant:
+            research_result = "НАШЁЛ В ИНТЕРНЕТЕ:\n" + "\n".join(
+                [f"[{i['date']}] {i['title']}" for i in relevant[:3]]
+            )
 
 user_context = ""
 if mem["name"] or mem["profile"]:
-    user_context = f"""ЧТО Я ЗНАЮ О ПОЛЬЗОВАТЕЛЕ:
+    user_context = f"""ПОЛЬЗОВАТЕЛЬ:
 ```
 
-Имя: {mem[“name”] or user_name}
+Имя: {mem[“name”] or user_name} | Сообщений: {mem[“messages”]}
 Профиль: {mem[“profile”] or “нет”}
-Предпочтения: {mem[“preferences”] or “нет”}
 Монеты: {mem[“coins”] or “нет”}
 Депозит: ${mem[“deposit”]} | Риск: {mem[“risk”]}%”””
 
 ```
-prompt = f"""Ты APEX — дерзкий AI трейдер. Дата: {now}
+prompt = f"""Ты APEX — дерзкий AI трейдер с живым мозгом. Дата: {now}
 ```
 
 {user_context}
 
-ЖИВЫЕ ЦЕНЫ (Binance):
-{market}
-
-{f”ПОИСК:{chr(10)}{search_results}” if search_results else “”}
-{f”НОВОСТИ:{chr(10)}{recent_news}” if recent_news and not search_results else “”}
-{f”ЗНАНИЯ:{chr(10)}{knowledge}” if knowledge else “”}
+{f”ЖИВЫЕ ЦЕНЫ:{chr(10)}{market}” if market else “”}
+{f”РЕСЁРЧ:{chr(10)}{research_result}” if research_result else “”}
+{f”НОВОСТИ:{chr(10)}{recent_news[:300]}” if recent_news and not research_result else “”}
+{f”ЗНАНИЯ:{chr(10)}{knowledge[:300]}” if knowledge and not research_result else “”}
 
 ИСТОРИЯ:
 {history_text}
 
-ПРАВИЛА: Помни пользователя. Говори дерзко и кратко. Используй живые цены.
+ПРАВИЛА:
+
+- Помни пользователя по имени и истории
+- Если не знаешь — честно скажи “не уверен, но по данным…”
+- Используй живые цены и реальные данные
+- Говори дерзко, кратко, по делу
 
 {user_name}: {user_message}
 APEX:”””
@@ -984,7 +2200,9 @@ InlineKeyboardButton(text=“🔬 Бектест”, callback_data=“menu_backt
 InlineKeyboardButton(text=“📓 Дневник сделок”, callback_data=“menu_journal”)],
 [InlineKeyboardButton(text=“🔔 Алерты”, callback_data=“menu_alerts”),
 InlineKeyboardButton(text=“📈 Статистика”, callback_data=“menu_stats”)],
-[InlineKeyboardButton(text=“📰 Новости”, callback_data=“menu_news”)]
+[InlineKeyboardButton(text=“📰 Новости”, callback_data=“menu_news”),
+InlineKeyboardButton(text=“📦 Накопления”, callback_data=“menu_pump”)],
+[InlineKeyboardButton(text=“🔍 Ошибки бота”, callback_data=“menu_errors”)]
 ])
 
 def tf_keyboard():
@@ -1262,6 +2480,29 @@ await message.answer(
 )
 ```
 
+@dp.message(Command(“news”))
+async def cmd_news(message: types.Message):
+await message.answer(“📰 Собираю свежие новости…”)
+now_str = datetime.now().strftime(”%d.%m.%Y %H:%M:%S”)
+crypto_news = await asyncio.get_event_loop().run_in_executor(None, get_crypto_news)
+macro_news = await asyncio.get_event_loop().run_in_executor(None, get_market_impact_news)
+crypto_text = format_news(crypto_news[:5])
+macro_text = format_news(macro_news[:3])
+all_titles = “\n”.join([item[“title”] for item in (crypto_news + macro_news)[:10]])
+analysis = ask_groq(
+f”Оцени эти новости для трейдера — что важно прямо сейчас? (3 пункта кратко):\n{all_titles}”,
+max_tokens=250
+)
+save_news(“crypto news”, all_titles[:500])
+msg = (
+f”📰 <b>Новости крипторынка</b>\n”
+f”🕐 {now_str}\n{‘━’*24}\n\n”
+f”<b>🔥 Крипто:</b>\n{crypto_text}\n\n”
+f”<b>🌍 Макро:</b>\n{macro_text}\n\n”
+f”<b>⚡️ APEX:</b>\n{analysis or ‘Анализирую…’}”
+)
+await message.answer(msg[:4000], parse_mode=“HTML”)
+
 async def run_backtest(target, symbol, timeframe):
 “”“Запуск бектеста”””
 send = target.message.answer if hasattr(target, “message”) else target.answer
@@ -1301,12 +2542,46 @@ elif data == "menu_scan":
     await callback.message.edit_text("Выбери монету:", reply_markup=pairs_keyboard("scan"))
 
 elif data == "menu_market":
+    await callback.message.edit_text("📊 Собираю данные рынка...")
     market = format_market()
-    comment = ask_groq(f"Короткий комментарий по рынку (2 предложения):\n{market}", max_tokens=150)
+    fg = get_fear_greed()
+    dxy = get_dxy_signal()
+    regime_btc = get_market_regime("BTCUSDT")
+    econ = get_upcoming_events()
+
+    # Блок настроения
+    sentiment_block = ""
+    if fg:
+        fg_bar = "█" * (fg["value"] // 10) + "░" * (10 - fg["value"] // 10)
+        fg_emoji = "😱" if fg["value"] < 25 else "😨" if fg["value"] < 45 else "😐" if fg["value"] < 55 else "😊" if fg["value"] < 75 else "🤑"
+        sentiment_block += f"{fg_emoji} <b>Fear & Greed:</b> {fg['value']} [{fg_bar}] {fg['label']}\n"
+
+    if dxy:
+        dxy_emoji = "📈" if dxy["signal"] == "STRONG" else "📉" if dxy["signal"] == "WEAK" else "➡️"
+        warn = " ⚠️ давит на крипту" if dxy["signal"] == "STRONG" else " ✅ хорошо для крипты" if dxy["signal"] == "WEAK" else ""
+        sentiment_block += f"{dxy_emoji} <b>DXY:</b> {dxy['value']} ({dxy['change']:+.2f}%){warn}\n"
+
+    if regime_btc:
+        regime_emoji = "🔥" if regime_btc["mode"] == "TRENDING" else "😴" if regime_btc["mode"] == "SIDEWAYS" else "⚡️"
+        sentiment_block += f"{regime_emoji} <b>Режим BTC:</b> {regime_btc['mode']} {regime_btc['direction']}\n"
+
+    if econ:
+        sentiment_block += f"\n⚠️ <b>Макро:</b> {econ}\n"
+
+    comment = ask_groq(
+        f"2 предложения по рынку для трейдера:\n{market[:300]}\nF&G:{fg}\nDXY:{dxy}",
+        max_tokens=120
+    )
+
     await callback.message.edit_text(
-        f"📊 <b>Рынок (Binance)</b>\n\n{market}\n\n💬 {comment or ''}",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+        f"📊 <b>Рынок сейчас</b>\n{'━'*24}\n\n"
+        f"{sentiment_block}\n"
+        f"<b>Цены:</b>\n{market}\n\n"
+        f"💬 {comment or ''}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_market"),
+             InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
         ])
     )
 
@@ -1452,19 +2727,326 @@ elif data == "menu_stats":
     )
 
 elif data == "menu_news":
-    await callback.message.edit_text("📰 Собираю новости...")
-    news = tavily_search("crypto bitcoin news today", max_results=4)
-    summary = ask_groq(f"Выжимка новостей (5 пунктов):\n{news[:1200]}", max_tokens=350)
-    save_news("crypto news", summary or news[:500])
+    await callback.message.edit_text("📰 Собираю свежие новости...")
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+    # Крипто новости
+    crypto_news = await asyncio.get_event_loop().run_in_executor(None, get_crypto_news)
+    # Макро новости
+    macro_news = await asyncio.get_event_loop().run_in_executor(None, get_market_impact_news)
+
+    crypto_text = format_news(crypto_news[:6])
+    macro_text = format_news(macro_news[:4])
+
+    # AI анализ влияния на рынок
+    all_titles = "\n".join([item["title"] for item in (crypto_news + macro_news)[:10]])
+    analysis = ask_groq(
+        f"Ты крипто трейдер. Оцени эти новости — что важно для рынка прямо сейчас? (3-4 пункта, дерзко и кратко):\n{all_titles}",
+        max_tokens=300
+    )
+    save_news("crypto news", all_titles[:500])
+
+    msg = (
+        f"📰 <b>Новости крипторынка</b>\n"
+        f"🕐 Обновлено: {now_str}\n"
+        f"{'━'*24}\n\n"
+        f"<b>🔥 Крипто:</b>\n{crypto_text}\n\n"
+        f"{'━'*24}\n"
+        f"<b>🌍 Макро (влияет на рынок):</b>\n{macro_text}\n\n"
+        f"{'━'*24}\n"
+        f"<b>⚡️ APEX анализ:</b>\n{analysis or 'Анализирую...'}"
+    )
+
+    # Telegram лимит 4096 символов
+    if len(msg) > 4000:
+        msg = msg[:3990] + "..."
+
     await callback.message.edit_text(
-        f"📰 <b>Новости рынка</b>\n\n{summary or news[:800]}",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+        msg,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_news"),
+             InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+        ])
+    )
+
+elif data == "menu_pump":
+    await callback.message.edit_text("📦 Сканирую топ-50 на накопление перед пампом...\n⏳ ~30 секунд")
+    pairs = await asyncio.get_event_loop().run_in_executor(None, get_top_pairs, 50)
+    found = []
+    for symbol in pairs:
+        try:
+            acc = await asyncio.get_event_loop().run_in_executor(None, detect_accumulation, symbol)
+            if acc and acc["score"] >= 50:
+                found.append(acc)
+        except:
+            pass
+
+    found.sort(key=lambda x: x["score"], reverse=True)
+
+    if not found:
+        await callback.message.edit_text(
+            "📦 Накоплений не найдено.\nРынок в движении — боковиков нет.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_pump"),
+                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+        return
+
+    summary = f"📦 <b>Накопления перед пампом</b>\nНайдено: {len(found)} монет\n{'━'*24}\n\n"
+    for acc in found[:3]:
+        p = acc["price"]
+        ps = f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
+        bar = "█" * (acc["score"] // 10) + "░" * (10 - acc["score"] // 10)
+        summary += (
+            f"📦 <b>{acc['symbol']}</b> | {ps}\n"
+            f"Скор: [{bar}] {acc['score']}/100\n"
+            f"{acc['signals'][0] if acc['signals'] else ''}\n\n"
+        )
+
+    summary += f"<i>Полный разбор каждой — команда /pump BTCUSDT</i>"
+
+    await callback.message.edit_text(
+        summary,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_pump"),
+             InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
         ])
     )
 ```
 
-# ===== TEXT HANDLER =====
+@dp.message(Command(“pump”))
+async def cmd_pump(message: types.Message):
+args = message.text.split()
+if len(args) == 2:
+symbol = args[1].upper().replace(“USDT”,””) + “USDT”
+await message.answer(f”📦 Анализирую накопление {symbol}…”)
+acc = await asyncio.get_event_loop().run_in_executor(None, detect_accumulation, symbol)
+if acc:
+await message.answer(format_accumulation(acc), parse_mode=“HTML”)
+else:
+await message.answer(f”😴 {symbol} — накоплений не обнаружено.”)
+else:
+await message.answer(“📦 Сканирую топ-20 на накопление…”)
+pairs = get_top_pairs(20)
+found = []
+for symbol in pairs:
+acc = detect_accumulation(symbol)
+if acc and acc[“score”] >= 50:
+found.append(acc)
+time.sleep(0.2)
+found.sort(key=lambda x: x[“score”], reverse=True)
+if not found:
+await message.answer(“😴 Накоплений не найдено.”)
+return
+await message.answer(f”📦 Найдено накоплений: {len(found)}”)
+for acc in found[:3]:
+await message.answer(format_accumulation(acc), parse_mode=“HTML”)
+await asyncio.sleep(0.5)
+
+@dp.message(Command(“think”))
+async def cmd_think(message: types.Message):
+“”“Бот думает вслух — глубокий ресёрч по теме”””
+args = message.text.split(maxsplit=1)
+topic = args[1].strip() if len(args) > 1 else “bitcoin market analysis”
+await message.answer(f”🧠 Думаю над темой: <b>{topic}</b>…\n⏳ Ищу в интернете, анализирую…”, parse_mode=“HTML”)
+result = await asyncio.get_event_loop().run_in_executor(None, deep_research, topic)
+if result:
+await message.answer(
+f”🧠 <b>Глубокий анализ: {topic}</b>\n\n{result}”,
+parse_mode=“HTML”
+)
+else:
+await message.answer(“Не удалось найти достаточно данных.”)
+
+@dp.message(Command(“brain”))
+async def cmd_brain(message: types.Message):
+“”“Показываем что бот знает — его база знаний”””
+try:
+conn = sqlite3.connect(“brain.db”)
+total_k = conn.execute(“SELECT COUNT(*) FROM knowledge”).fetchone()[0]
+sources = conn.execute(
+“SELECT source, COUNT(*) as cnt FROM knowledge GROUP BY source ORDER BY cnt DESC LIMIT 8”
+).fetchall()
+recent = conn.execute(
+“SELECT topic, source, created_at FROM knowledge ORDER BY id DESC LIMIT 5”
+).fetchall()
+reflections = conn.execute(
+“SELECT COUNT(*) FROM knowledge WHERE source=‘self-reflection’”
+).fetchone()[0]
+comparisons = conn.execute(
+“SELECT COUNT(*) FROM knowledge WHERE source=‘self-compare’”
+).fetchone()[0]
+conn.close()
+
+```
+    sources_text = "\n".join([f"• {r[0]}: {r[1]} записей" for r in sources])
+    recent_text = "\n".join([f"• [{r[2][:10]}] {r[0][:40]} ({r[1]})" for r in recent])
+
+    await message.answer(
+        f"🧠 <b>Мозг APEX</b>\n\n"
+        f"📚 Всего знаний: <b>{total_k}</b>\n"
+        f"🔄 Само-рефлексий: <b>{reflections}</b>\n"
+        f"📊 Сравнений прогнозов: <b>{comparisons}</b>\n\n"
+        f"<b>Источники знаний:</b>\n{sources_text}\n\n"
+        f"<b>Последние 5 знаний:</b>\n{recent_text}\n\n"
+        f"<i>Используй /think [тема] — заставить думать над конкретным вопросом</i>",
+        parse_mode="HTML"
+    )
+except Exception as e:
+    await message.answer(f"Ошибка: {e}")
+```
+
+@dp.message(Command(“errors”))
+async def cmd_errors(message: types.Message):
+“”“Раздел ошибок бота — просмотр, анализ, исправления”””
+args = message.text.split()
+
+```
+# /errors fix <id> — отметить ошибку как исправленную
+if len(args) == 3 and args[1] == "fix":
+    try:
+        error_id = int(args[2])
+        conn = sqlite3.connect("brain.db")
+        row = conn.execute(
+            "SELECT symbol, error_type, ai_next_time FROM bot_errors WHERE id=?",
+            (error_id,)
+        ).fetchone()
+
+        if not row:
+            await message.answer(f"Ошибка #{error_id} не найдена.")
+            conn.close()
+            return
+
+        # AI формулирует что именно исправлено
+        fix_prompt = f"""Ошибка типа "{ERROR_TYPES.get(row[1], row[1])}" по монете {row[0]} отмечена как исправленная.
+```
+
+Правило было: {row[2]}
+
+Напиши 1-2 предложения:
+
+1. Что именно было исправлено в стратегии
+1. Как бот будет поступать теперь”””
+   
+   ```
+        fix_desc = ask_groq(fix_prompt, max_tokens=150)
+   
+        conn.execute(
+            "UPDATE bot_errors SET fixed=1, fix_description=?, fixed_at=CURRENT_TIMESTAMP WHERE id=?",
+            (fix_desc or "Исправлено вручную", error_id)
+        )
+        conn.commit()
+        conn.close()
+   
+        await message.answer(
+            f"✅ <b>Ошибка #{error_id} отмечена как исправленная</b>\n\n"
+            f"<b>{row[0]}</b> | {ERROR_TYPES.get(row[1], row[1])}\n\n"
+            f"📌 <b>Что изменено:</b>\n{fix_desc or 'Исправлено'}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+    return
+   ```
+   
+   # /errors <id> — детальный просмотр конкретной ошибки
+   
+   if len(args) == 2:
+   try:
+   error_id = int(args[1])
+   conn = sqlite3.connect(“brain.db”)
+   row = conn.execute(
+   “”“SELECT id, symbol, direction, entry, sl, result, error_type,
+   error_description, ai_analysis, ai_lesson, ai_next_time,
+   fixed, fix_description, hours_in_trade, market_context, created_at
+   FROM bot_errors WHERE id=?”””,
+   (error_id,)
+   ).fetchone()
+   conn.close()
+   
+   ```
+        if not row:
+            await message.answer(f"Ошибка #{error_id} не найдена.")
+            return
+   
+        fixed_block = ""
+        if row[11]:  # fixed == 1
+            fixed_block = f"\n\n✅ <b>ИСПРАВЛЕНО:</b>\n{row[12]}"
+        else:
+            fixed_block = f"\n\n❌ Ещё не исправлено\n/errors fix {error_id} — отметить как исправленное"
+   
+        await message.answer(
+            f"🔍 <b>Разбор ошибки #{row[0]}</b>\n"
+            f"{'━'*24}\n\n"
+            f"📊 <b>Сделка:</b> {row[1]} {row[2]}\n"
+            f"💰 Вход: <code>{row[3]}</code> | Стоп: <code>{row[4]}</code>\n"
+            f"❌ Результат: {row[5]} за {row[13]}ч\n"
+            f"🏷 Тип ошибки: <b>{ERROR_TYPES.get(row[6], row[6])}</b>\n"
+            f"📅 {row[15][:16]}\n\n"
+            f"📋 <b>Рыночный контекст:</b>\n{row[14]}\n\n"
+            f"🧠 <b>Анализ:</b>\n{row[8]}\n\n"
+            f"📚 <b>Урок:</b>\n{row[9]}\n\n"
+            f"📌 <b>В следующий раз:</b>\n{row[10]}"
+            f"{fixed_block}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+    return
+   ```
+   
+   # /errors — список всех ошибок
+   
+   try:
+   conn = sqlite3.connect(“brain.db”)
+   total = conn.execute(“SELECT COUNT(*) FROM bot_errors”).fetchone()[0]
+   unfixed = conn.execute(“SELECT COUNT(*) FROM bot_errors WHERE fixed=0”).fetchone()[0]
+   fixed = conn.execute(“SELECT COUNT(*) FROM bot_errors WHERE fixed=1”).fetchone()[0]
+   
+   ```
+    # Последние 10 ошибок
+    errors = conn.execute(
+        """SELECT id, symbol, direction, error_type, result, fixed, created_at
+           FROM bot_errors ORDER BY id DESC LIMIT 10"""
+    ).fetchall()
+   
+    # Паттерны — повторяющиеся ошибки
+    patterns = conn.execute(
+        "SELECT error_type, count, rule_added FROM error_patterns ORDER BY count DESC LIMIT 5"
+    ).fetchall()
+    conn.close()
+   
+    errors_text = ""
+    for e in errors:
+        status = "✅" if e[5] else "❌"
+        errors_text += f"{status} #{e[0]} <b>{e[1]}</b> {e[2]} — {ERROR_TYPES.get(e[3], e[3])} ({e[4]}) [{e[6][:10]}]\n"
+   
+    patterns_text = ""
+    for p in patterns:
+        rule_icon = "📌" if p[2] else "⚠️"
+        patterns_text += f"{rule_icon} {ERROR_TYPES.get(p[0], p[0])}: {p[1]}x"
+        if p[2]:
+            patterns_text += f" → правило: {p[2][:60]}"
+        patterns_text += "\n"
+   
+    await message.answer(
+        f"🔍 <b>Ошибки бота APEX</b>\n"
+        f"{'━'*24}\n\n"
+        f"Всего: {total} | ❌ Открыто: {unfixed} | ✅ Исправлено: {fixed}\n\n"
+        f"<b>Последние ошибки:</b>\n{errors_text}\n"
+        f"<b>Паттерны (повторяющиеся):</b>\n{patterns_text}\n"
+        f"{'━'*24}\n"
+        f"<i>/errors [id] — детальный разбор\n"
+        f"/errors fix [id] — отметить как исправленное</i>",
+        parse_mode="HTML"
+    )
+   ```
+   
+   except Exception as e:
+   await message.answer(f”Ошибка: {e}”)
 
 @dp.message()
 async def handle_text(message: types.Message):
@@ -1531,8 +3113,8 @@ except:
 pass
 
 async def auto_scan_job():
+“”“Каждые 30 мин: SMC сканирование топ-50 пар”””
 closed = check_pending_signals()
-# Отправляем только выигрышные — проигрышные уходят в анализ тихо
 for c in closed:
 if c[“is_win”] and ADMIN_ID:
 tp_icons = {“tp1”: “🎯”, “tp2”: “🎯🎯”, “tp3”: “🎯🎯🎯”}
@@ -1542,28 +3124,160 @@ await bot.send_message(
 ADMIN_ID,
 f”{icon} <b>{c[‘symbol’]}</b> — {c[‘result’].upper()}!\n”
 f”⏱ Закрыто за {c[‘hours’]}ч\n”
-f”Оценка сигнала: {c.get(‘grade’, ‘-’)}”,
+f”Оценка: {c.get(‘grade’, ‘-’)}”,
 parse_mode=“HTML”
 )
 except:
 pass
 
 ```
-# Новые сигналы
-signals = []
-for symbol in PAIRS:
-    sig = full_scan(symbol)
-    if sig:
-        signals.append(sig)
-    await asyncio.sleep(2)
+pairs = get_top_pairs(50)
+mega_signals = []
+good_signals = []
 
-if signals and ADMIN_ID:
-    for sig in signals[:3]:
+for symbol in pairs:
+    try:
+        sig_data = full_scan_raw(symbol)
+        if sig_data:
+            if sig_data["grade"] == "МЕГА ТОП":
+                mega_signals.append(sig_data)
+            elif sig_data["grade"] in ("ТОП СДЕЛКА",):
+                good_signals.append(sig_data)
+        await asyncio.sleep(0.5)
+    except:
+        pass
+
+# Отправляем только МЕГА ТОП автоматически
+if mega_signals and ADMIN_ID:
+    await bot.send_message(
+        ADMIN_ID,
+        f"🔥🔥🔥 <b>МЕГА ТОП сигналов: {len(mega_signals)}</b>\n"
+        f"📊 Просканировано пар: {len(pairs)}",
+        parse_mode="HTML"
+    )
+    for sd in mega_signals[:5]:
         try:
-            await bot.send_message(ADMIN_ID, sig, parse_mode="HTML")
+            await bot.send_message(ADMIN_ID, sd["text"], parse_mode="HTML")
             await asyncio.sleep(1)
         except:
             pass
+
+logging.info(f"Скан: {len(pairs)} пар | МЕГА: {len(mega_signals)} | ТОП: {len(good_signals)}")
+```
+
+async def auto_accumulation_scan():
+“”“Каждый час: сканируем все топ-50 на накопление перед пампом”””
+pairs = get_top_pairs(50)
+found = []
+
+```
+for symbol in pairs:
+    try:
+        acc = detect_accumulation(symbol)
+        if acc and acc["score"] >= 60:
+            found.append(acc)
+        await asyncio.sleep(0.3)
+    except:
+        pass
+
+# Сортируем по скору
+found.sort(key=lambda x: x["score"], reverse=True)
+
+if found and ADMIN_ID:
+    await bot.send_message(
+        ADMIN_ID,
+        f"📦 <b>Накопления перед пампом: {len(found)}</b>\n"
+        f"Топ монеты по скору накопления:",
+        parse_mode="HTML"
+    )
+    for acc in found[:4]:
+        try:
+            await bot.send_message(ADMIN_ID, format_accumulation(acc), parse_mode="HTML")
+            await asyncio.sleep(1)
+        except:
+            pass
+
+logging.info(f"Накопление скан: {len(pairs)} пар | найдено: {len(found)}")
+```
+
+def full_scan_raw(symbol):
+“”“Возвращает dict с текстом и grade для фильтрации”””
+try:
+mtf = multi_tf_analysis(symbol, [“15m”, “1h”, “4h”])
+if not mtf:
+return None
+
+```
+    direction = mtf["direction"]
+    candles = get_candles(symbol, "1h", 150)
+    if len(candles) < 20:
+        return None
+
+    price = candles[-1]["close"]
+    ob = find_ob(candles, direction)
+    fvg = find_fvg(candles, direction)
+    ob_data = get_orderbook(symbol)
+
+    confluence = [f"✅ {mtf['match_count']}/{mtf['total']} ТФ совпали"]
+    if ob:
+        confluence.append(f"✅ Order Block: {ob['bottom']:.4f}–{ob['top']:.4f}")
+    if fvg:
+        confluence.append(f"✅ FVG: {fvg['bottom']:.4f}–{fvg['top']:.4f}")
+    if ob_data:
+        match = (direction == "BULLISH" and ob_data["bias"] == "BUY") or \
+                (direction == "BEARISH" and ob_data["bias"] == "SELL")
+        if match:
+            confluence.append(f"✅ OrderBook: {ob_data['bias']}")
+
+    if len(confluence) < 2:
+        return None
+
+    risk = price * 0.015
+    if direction == "BULLISH":
+        entry = ob["top"] if ob else price
+        sl = round(entry - risk, 4)
+        tp1 = round(entry + risk * 2, 4)
+        tp2 = round(entry + risk * 3, 4)
+        tp3 = round(entry + risk * 5, 4)
+    else:
+        entry = ob["bottom"] if ob else price
+        sl = round(entry + risk, 4)
+        tp1 = round(entry - risk * 2, 4)
+        tp2 = round(entry - risk * 3, 4)
+        tp3 = round(entry - risk * 5, 4)
+
+    est_hours, confidence, win_rate = get_estimated_time(symbol, "1h")
+    time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
+    wr_str = f"{win_rate:.0f}% WR" if win_rate > 0 else "нет истории"
+
+    save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, "1h", est_hours, mtf["grade"])
+
+    emoji = "🟢" if direction == "BULLISH" else "🔴"
+    conf_text = "\n".join(confluence)
+
+    text = (
+        f"{'━'*26}\n"
+        f"{mtf['grade_emoji']} <b>{mtf['grade']}</b>\n"
+        f"{emoji} <b>{symbol}</b> — {direction}\n"
+        f"{'━'*26}\n\n"
+        f"📐 <b>Таймфреймы:</b>\n{mtf['tf_status']}\n"
+        f"{mtf['stars']}\n\n"
+        f"💰 <b>Вход:</b> <code>{entry:.4f}</code>\n"
+        f"🛑 <b>Стоп:</b> <code>{sl:.4f}</code>\n"
+        f"🎯 <b>TP1:</b> <code>{tp1:.4f}</code> (+2R)\n"
+        f"🎯 <b>TP2:</b> <code>{tp2:.4f}</code> (+3R)\n"
+        f"🎯 <b>TP3:</b> <code>{tp3:.4f}</code> (+5R)\n\n"
+        f"⏱ <b>Время отработки:</b> {time_str}\n"
+        f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
+        f"📋 <b>Confluence:</b>\n{conf_text}\n"
+        f"{'━'*26}"
+    )
+
+    return {"symbol": symbol, "grade": mtf["grade"], "text": text, "direction": direction}
+
+except Exception as e:
+    logging.error(f"full_scan_raw error {symbol}: {e}")
+    return None
 ```
 
 # ===== MAIN =====
@@ -1571,13 +3285,22 @@ if signals and ADMIN_ID:
 async def main():
 init_db()
 threading.Thread(target=run_server, daemon=True).start()
+
+```
+# Прогреваем кэш пар при старте
+threading.Thread(target=get_top_pairs, daemon=True).start()
+
 scheduler = AsyncIOScheduler()
-scheduler.add_job(auto_scan_job, “interval”, minutes=30)
-scheduler.add_job(auto_research, “interval”, hours=2)
-scheduler.add_job(check_alerts, “interval”, minutes=5)
+scheduler.add_job(auto_scan_job, "interval", minutes=30)
+scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+scheduler.add_job(auto_research, "interval", hours=2)
+scheduler.add_job(check_alerts, "interval", minutes=5)
+scheduler.add_job(night_brain_tasks, "interval", hours=4)
+scheduler.add_job(realtime_pump_detector, "interval", minutes=5)
 scheduler.start()
-logging.info(“APEX запущен!”)
+logging.info("APEX запущен! Топ-50 пар, накопление + SMC")
 await dp.start_polling(bot)
+```
 
 if **name** == “**main**”:
 asyncio.run(main())
