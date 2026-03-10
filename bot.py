@@ -3474,6 +3474,9 @@ async def night_brain_tasks():
 
         logging.info(f"Ночная задача выполнена. Новых правил: {new_rules}, всего: {rules_after}")
 
+        # Бэкап brain.db в GitHub
+        await backup_db_to_github()
+
     except Exception as e:
         logging.error(f"Night brain error: {e}")
 
@@ -5691,8 +5694,73 @@ def setup_error_capture():
 
 # ===== MAIN =====
 
+async def restore_db_from_github():
+    """При старте скачиваем brain.db из GitHub"""
+    try:
+        gh_token = os.environ.get("GH_TOKEN", "")
+        gh_repo = os.environ.get("GH_REPO", "")
+        if not gh_token or not gh_repo:
+            logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
+            return
+        import base64
+        r = requests.get(
+            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
+            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            content = base64.b64decode(r.json()["content"])
+            with open("brain.db", "wb") as f:
+                f.write(content)
+            logging.info(f"brain.db восстановлен из GitHub ({len(content)//1024}KB)")
+        else:
+            logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
+    except Exception as e:
+        logging.warning(f"restore_db_from_github: {e}")
+
+
+async def backup_db_to_github():
+    """Сохраняем brain.db в GitHub"""
+    try:
+        gh_token = os.environ.get("GH_TOKEN", "")
+        gh_repo = os.environ.get("GH_REPO", "")
+        if not gh_token or not gh_repo:
+            return
+        import base64
+        with open("brain.db", "rb") as f:
+            content = f.read()
+        encoded = base64.b64encode(content).decode()
+        # Получаем SHA для обновления
+        r = requests.get(
+            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
+            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+            timeout=10
+        )
+        sha = r.json().get("sha", "") if r.status_code == 200 else ""
+        payload = {
+            "message": f"brain.db backup {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "content": encoded,
+            "branch": "main"
+        }
+        if sha:
+            payload["sha"] = sha
+        r2 = requests.put(
+            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
+            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+            json=payload,
+            timeout=20
+        )
+        if r2.status_code in (200, 201):
+            logging.info(f"brain.db сохранён в GitHub ({len(content)//1024}KB)")
+        else:
+            logging.warning(f"backup_db_to_github: {r2.status_code}")
+    except Exception as e:
+        logging.warning(f"backup_db_to_github: {e}")
+
+
 async def on_startup(app):
     init_db()
+    await restore_db_from_github()
     threading.Thread(target=get_top_pairs, daemon=True).start()
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
