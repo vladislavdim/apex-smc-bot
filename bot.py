@@ -601,6 +601,36 @@ COINGECKO_IDS = {
     "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink", "TONUSDT": "toncoin",
     "ARBUSDT": "arbitrum", "SUIUSDT": "sui", "NEARUSDT": "near",
     "INJUSDT": "injective-protocol", "APTUSDT": "aptos",
+    "DOTUSDT": "polkadot", "ADAUSDT": "cardano", "MATICUSDT": "matic-network",
+    "LTCUSDT": "litecoin", "ATOMUSDT": "cosmos", "UNIUSDT": "uniswap",
+    "OPUSDT": "optimism", "STXUSDT": "blockstack",
+    "RENDERUSDT": "render-token", "FETUSDT": "fetch-ai", "WIFUSDT": "dogwifcoin",
+    "PEPEUSDT": "pepe", "SHIBUSDT": "shiba-inu", "TRXUSDT": "tron",
+    "XLMUSDT": "stellar", "HBARUSDT": "hedera-hashgraph",
+}
+
+# Псевдонимы монет для распознавания в тексте
+SYMBOL_ALIASES = {
+    "btc": "BTCUSDT", "биткоин": "BTCUSDT", "бтк": "BTCUSDT", "bitcoin": "BTCUSDT",
+    "eth": "ETHUSDT", "эфир": "ETHUSDT", "эфириум": "ETHUSDT", "ethereum": "ETHUSDT",
+    "sol": "SOLUSDT", "соль": "SOLUSDT", "солана": "SOLUSDT", "solana": "SOLUSDT",
+    "bnb": "BNBUSDT", "бнб": "BNBUSDT",
+    "xrp": "XRPUSDT", "рипл": "XRPUSDT", "ripple": "XRPUSDT",
+    "doge": "DOGEUSDT", "додж": "DOGEUSDT", "dogecoin": "DOGEUSDT",
+    "avax": "AVAXUSDT", "авакс": "AVAXUSDT",
+    "link": "LINKUSDT", "линк": "LINKUSDT",
+    "ton": "TONUSDT", "тон": "TONUSDT",
+    "arb": "ARBUSDT", "арб": "ARBUSDT",
+    "sui": "SUIUSDT", "dot": "DOTUSDT", "полкадот": "DOTUSDT",
+    "ada": "ADAUSDT", "кардано": "ADAUSDT",
+    "matic": "MATICUSDT", "матик": "MATICUSDT",
+    "ltc": "LTCUSDT", "лайткоин": "LTCUSDT",
+    "atom": "ATOMUSDT", "near": "NEARUSDT",
+    "pepe": "PEPEUSDT", "пепе": "PEPEUSDT",
+    "shib": "SHIBUSDT", "шиб": "SHIBUSDT",
+    "trx": "TRXUSDT", "трон": "TRXUSDT",
+    "wif": "WIFUSDT", "render": "RENDERUSDT", "fet": "FETUSDT",
+    "inj": "INJUSDT", "apt": "APTUSDT", "op": "OPUSDT",
 }
 
 def get_candles(symbol, interval="1h", limit=200):
@@ -684,6 +714,12 @@ def get_candles(symbol, interval="1h", limit=200):
                 return candles
         except Exception as e:
             logging.warning(f"CoinGecko {symbol}: {e}")
+
+    # 5. CryptoCompare — дополнительный источник свечей
+    cc_candles = get_cryptocompare_candles(symbol, interval, limit)
+    if cc_candles and len(cc_candles) >= 20:
+        candle_cache[cache_key] = (cc_candles, time.time())
+        return cc_candles
 
     logging.error(f"Нет свечей для {symbol} {interval}")
     return []
@@ -2725,11 +2761,245 @@ def get_price_realtime(symbol="BTCUSDT"):
     return None
 
 
+# ===== ДОПОЛНИТЕЛЬНЫЕ ИСТОЧНИКИ ДАННЫХ =====
+
+# Yahoo Finance символы для крипты
+YAHOO_SYMBOLS = {
+    "BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
+    "BNBUSDT": "BNB-USD", "XRPUSDT": "XRP-USD", "DOGEUSDT": "DOGE-USD",
+    "AVAXUSDT": "AVAX-USD", "LINKUSDT": "LINK-USD", "ADAUSDT": "ADA-USD",
+    "DOTUSDT": "DOT-USD", "MATICUSDT": "MATIC-USD", "LTCUSDT": "LTC-USD",
+    "ATOMUSDT": "ATOM-USD", "TRXUSDT": "TRX-USD", "XLMUSDT": "XLM-USD",
+}
+
+# CryptoCompare символы
+CRYPTOCOMPARE_SYMS = [
+    "BTC","ETH","SOL","BNB","XRP","DOGE","AVAX","LINK","ADA","DOT",
+    "MATIC","LTC","ATOM","TRX","XLM","NEAR","ARB","OP","UNI","PEPE",
+    "SHIB","TON","SUI","INJ","APT","WIF","RENDER","FET","STX","HBAR"
+]
+
+yahoo_cache = {}
+yahoo_cache_time = 0
+cryptocompare_cache = {}
+cryptocompare_cache_time = 0
+messari_cache = {}
+messari_cache_time = 0
+
+
+def get_yahoo_finance_prices():
+    """Yahoo Finance — цены крипты + DXY + индексы"""
+    global yahoo_cache, yahoo_cache_time
+    if time.time() - yahoo_cache_time < 60 and yahoo_cache:
+        return yahoo_cache
+    try:
+        syms = " ".join(YAHOO_SYMBOLS.values())
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v7/finance/quote",
+            params={"symbols": syms, "fields": "regularMarketPrice,regularMarketChangePercent"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        data = r.json()
+        result = {}
+        reverse = {v: k for k, v in YAHOO_SYMBOLS.items()}
+        for item in data.get("quoteResponse", {}).get("result", []):
+            sym = item.get("symbol", "")
+            our_sym = reverse.get(sym)
+            if our_sym and item.get("regularMarketPrice"):
+                result[our_sym] = {
+                    "price": float(item["regularMarketPrice"]),
+                    "change": round(float(item.get("regularMarketChangePercent", 0)), 2),
+                    "source": "Yahoo"
+                }
+        if result:
+            yahoo_cache = result
+            yahoo_cache_time = time.time()
+            logging.info(f"Yahoo Finance: {len(result)} монет")
+        return result
+    except Exception as e:
+        logging.warning(f"Yahoo Finance: {e}")
+        return {}
+
+
+def get_cryptocompare_prices():
+    """CryptoCompare — свечи и цены без API ключа"""
+    global cryptocompare_cache, cryptocompare_cache_time
+    if time.time() - cryptocompare_cache_time < 60 and cryptocompare_cache:
+        return cryptocompare_cache
+    try:
+        fsyms = ",".join(CRYPTOCOMPARE_SYMS)
+        r = requests.get(
+            "https://min-api.cryptocompare.com/data/pricemultifull",
+            params={"fsyms": fsyms, "tsyms": "USD"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        data = r.json().get("RAW", {})
+        result = {}
+        for sym, val in data.items():
+            usd = val.get("USD", {})
+            our_sym = sym + "USDT"
+            if usd.get("PRICE"):
+                result[our_sym] = {
+                    "price": float(usd["PRICE"]),
+                    "change": round(float(usd.get("CHANGEPCT24HOUR", 0)), 2),
+                    "volume": float(usd.get("VOLUME24HOURTO", 0)),
+                    "source": "CryptoCompare"
+                }
+        if result:
+            cryptocompare_cache = result
+            cryptocompare_cache_time = time.time()
+            logging.info(f"CryptoCompare: {len(result)} монет")
+        return result
+    except Exception as e:
+        logging.warning(f"CryptoCompare: {e}")
+        return {}
+
+
+def get_cryptocompare_candles(symbol, interval="1h", limit=200):
+    """Свечи с CryptoCompare — запасной источник для графиков"""
+    try:
+        base = symbol.replace("USDT", "")
+        endpoint_map = {
+            "1m": "histominute", "5m": "histominute", "15m": "histominute",
+            "30m": "histominute", "1h": "histohour", "4h": "histohour",
+            "1d": "histoday"
+        }
+        endpoint = endpoint_map.get(interval, "histohour")
+        aggregate_map = {
+            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+            "1h": 1, "4h": 4, "1d": 1
+        }
+        aggregate = aggregate_map.get(interval, 1)
+        r = requests.get(
+            f"https://min-api.cryptocompare.com/data/{endpoint}",
+            params={"fsym": base, "tsym": "USD", "limit": limit, "aggregate": aggregate},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        data = r.json().get("Data", [])
+        if not data:
+            return []
+        candles = [{
+            "open": float(c["open"]), "high": float(c["high"]),
+            "low": float(c["low"]), "close": float(c["close"]),
+            "volume": float(c["volumeto"])
+        } for c in data if c.get("close")]
+        if candles:
+            logging.info(f"CryptoCompare candles: {symbol} {interval} {len(candles)}шт")
+        return candles
+    except Exception as e:
+        logging.warning(f"CryptoCompare candles {symbol}: {e}")
+        return []
+
+
+def get_messari_data(symbol):
+    """Messari — фундаментальные данные монеты"""
+    global messari_cache, messari_cache_time
+    cache_key = symbol
+    if cache_key in messari_cache and time.time() - messari_cache_time < 3600:
+        return messari_cache.get(cache_key)
+    try:
+        base = symbol.replace("USDT", "").lower()
+        r = requests.get(
+            f"https://data.messari.io/api/v1/assets/{base}/metrics",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        data = r.json().get("data", {})
+        market = data.get("market_data", {})
+        roi = data.get("roi_data", {})
+        dev = data.get("developer_activity", {})
+        result = {
+            "price": market.get("price_usd"),
+            "volume_24h": market.get("volume_last_24_hours"),
+            "market_cap": market.get("real_volume_last_24_hours"),
+            "change_1h": market.get("percent_change_usd_last_1_hour"),
+            "change_24h": market.get("percent_change_usd_last_24_hours"),
+            "change_7d": market.get("percent_change_usd_last_7_days"),
+            "roi_7d": roi.get("percent_change_last_1_week"),
+            "github_commits": dev.get("commit_count_4_weeks"),
+            "source": "Messari"
+        }
+        if result["price"]:
+            messari_cache[cache_key] = result
+            messari_cache_time = time.time()
+        return result
+    except Exception as e:
+        logging.warning(f"Messari {symbol}: {e}")
+        return None
+
+
+def get_all_prices_merged():
+    """
+    Объединяет данные со ВСЕХ источников.
+    Bybit — основной, остальные дополняют недостающие монеты.
+    """
+    # Параллельно запрашиваем несколько источников
+    import concurrent.futures
+    result = {}
+
+    def fetch_bybit():
+        try:
+            r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=8)
+            data = r.json()
+            if data.get("retCode") == 0:
+                items = data["result"]["list"]
+                items.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+                out = {}
+                for t in items:
+                    sym = t.get("symbol", "")
+                    if sym.endswith("USDT") and t.get("lastPrice"):
+                        out[sym] = {
+                            "price": float(t["lastPrice"]),
+                            "change": round(float(t.get("price24hPcnt", 0)) * 100, 2),
+                            "source": "Bybit"
+                        }
+                    if len(out) >= 50:
+                        break
+                return out
+        except:
+            return {}
+
+    def fetch_cryptocompare():
+        return get_cryptocompare_prices()
+
+    def fetch_yahoo():
+        return get_yahoo_finance_prices()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        f_bybit = ex.submit(fetch_bybit)
+        f_cc = ex.submit(fetch_cryptocompare)
+        f_yf = ex.submit(fetch_yahoo)
+
+        bybit_data = f_bybit.result()
+        cc_data = f_cc.result()
+        yf_data = f_yf.result()
+
+    # Bybit — приоритет
+    result.update(cc_data)   # сначала CC как база
+    result.update(yf_data)   # Yahoo поверх
+    result.update(bybit_data)  # Bybit всегда побеждает (самый точный)
+
+    logging.info(f"Merged prices: {len(result)} монет (Bybit:{len(bybit_data)} CC:{len(cc_data)} YF:{len(yf_data)})")
+    return result
+
+
 def get_multiple_prices_realtime():
     """
-    Живые цены: Bybit (основной) → Binance Futures → Binance Spot → CoinGecko
-    Возвращает топ-20 монет с ценой и изменением за 24ч
+    Живые цены со ВСЕХ источников параллельно:
+    Bybit + CryptoCompare + Yahoo Finance → merge → Binance → CoinGecko fallback
     """
+    # Пробуем получить с всех источников параллельно
+    try:
+        merged = get_all_prices_merged()
+        if len(merged) >= 10:
+            return merged
+    except Exception as e:
+        logging.warning(f"get_all_prices_merged failed: {e}")
+
+    # Fallback цепочка если параллельный запрос не сработал
     # 1. Bybit — быстро, много монет, работает с Render
     try:
         r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=8)
@@ -2903,6 +3173,21 @@ def ask_ai(user_id, user_name, user_message):
     elif news_items:
         research_result = "ПОСЛЕДНИЕ НОВОСТИ:\n" + "\n".join([f"[{i['date']}] {i['title']} — {i['source']}" for i in news_items[:4]])
 
+    # Если спрашивают про конкретную монету — тянем фундаментал с Messari
+    messari_context = ""
+    for alias, sym in SYMBOL_ALIASES.items():
+        if alias in msg_lower:
+            m_data = get_messari_data(sym)
+            if m_data and m_data.get("price"):
+                messari_context = (
+                    f"ФУНДАМЕНТАЛ {sym} (Messari):\n"
+                    f"Цена: ${m_data['price']:.4f} | "
+                    f"24ч: {m_data.get('change_24h', 0):+.2f}% | "
+                    f"7д: {m_data.get('change_7d', 0):+.2f}%\n"
+                    f"GitHub коммитов (4 нед): {m_data.get('github_commits', 'н/д')}"
+                )
+            break
+
     knowledge = get_knowledge(user_message[:50])
     recent_news = get_recent_news()
 
@@ -2922,6 +3207,7 @@ def ask_ai(user_id, user_name, user_message):
 {f"РЕСЁРЧ:{chr(10)}{research_result}" if research_result else ""}
 {f"НОВОСТИ:{chr(10)}{recent_news[:400]}" if recent_news and not research_result else ""}
 {f"ЗНАНИЯ:{chr(10)}{knowledge[:300]}" if knowledge else ""}
+{f"ФУНДАМЕНТАЛ (Messari):{chr(10)}{messari_context}" if messari_context else ""}
 {f"МОЙ ОПЫТ (самообучение):{chr(10)}{brain_context[:500]}" if brain_context else ""}
 
 ИСТОРИЯ:
@@ -3382,6 +3668,23 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data == "noop":
         pass  # Кнопка номера страницы — ничего не делаем
+
+    elif data.startswith("patch_apply_"):
+        patch_id = data.replace("patch_apply_", "")
+        await callback.message.edit_text("⏳ Применяю патч и пушу в GitHub...")
+        success, result = await apply_patch(patch_id)
+        if success:
+            ok_text = "✅ <b>Патч применён!</b>\n\n" + "Commit: <code>" + str(result) + "</code>\n" + "Render сейчас задеплоит новую версию автоматически.\n\n⏳ 1-3 мин."
+            await callback.message.edit_text(ok_text, parse_mode="HTML")
+        else:
+            err_text = "❌ <b>Ошибка при пуше в GitHub:</b>\n<code>" + str(result) + "</code>"
+            await callback.message.edit_text(err_text, parse_mode="HTML")
+
+    elif data.startswith("patch_cancel_"):
+        patch_id = data.replace("patch_cancel_", "")
+        if patch_id in pending_patches:
+            del pending_patches[patch_id]
+        await callback.message.edit_text("❌ Патч отменён. Код не изменён.")
 
     elif data == "menu_market":
         await callback.message.edit_text("📊 Собираю данные рынка...")
@@ -3870,6 +4173,17 @@ async def handle_callback(callback: CallbackQuery):
             ])
         )
 
+@dp.message(Command("patch"))
+async def cmd_patch(message: types.Message):
+    """Ручной запуск авто-патча — /patch [описание ошибки]"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = message.text.split(maxsplit=1)
+    error_text = args[1].strip() if len(args) > 1 else "manual patch request"
+    await message.answer("🔧 Запускаю анализ кода через Groq...")
+    await analyze_and_patch(error_text, "manual")
+
+
 @dp.message(Command("pump"))
 async def cmd_pump(message: types.Message):
     args = message.text.split()
@@ -4344,6 +4658,235 @@ def full_scan_raw(symbol, timeframe="1h"):
         return None
 
 
+# ===== АВТО-ПАТЧ GITHUB =====
+# Бот сам чинит код: ловит ошибку → анализирует → спрашивает разрешения → пушит коммит
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")   # например: vladislavdim/apex-smc-bot
+GITHUB_FILE = os.environ.get("GITHUB_FILE", "bot.py")
+
+# Очередь ожидающих патчей: patch_id -> {code, description, error}
+pending_patches = {}
+patch_counter = 0
+
+def github_get_file():
+    """Читаем текущий bot.py прямо из GitHub"""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None, None
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
+            headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json"
+            },
+            timeout=15
+        )
+        data = r.json()
+        if "content" in data:
+            import base64
+            code = base64.b64decode(data["content"]).decode("utf-8")
+            sha = data["sha"]
+            return code, sha
+        return None, None
+    except Exception as e:
+        logging.error(f"GitHub get file: {e}")
+        return None, None
+
+
+def github_push_patch(new_code, sha, commit_message):
+    """Пушим исправленный код в GitHub"""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False, "GITHUB_TOKEN или GITHUB_REPO не заданы"
+    try:
+        import base64
+        encoded = base64.b64encode(new_code.encode("utf-8")).decode("utf-8")
+        r = requests.put(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
+            headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json"
+            },
+            json={
+                "message": commit_message,
+                "content": encoded,
+                "sha": sha
+            },
+            timeout=20
+        )
+        if r.status_code in (200, 201):
+            return True, r.json().get("commit", {}).get("sha", "")[:7]
+        return False, f"GitHub API error: {r.status_code} — {r.text[:200]}"
+    except Exception as e:
+        return False, str(e)
+
+
+async def analyze_and_patch(error_text, error_source="runtime"):
+    """
+    Главная функция авто-патча:
+    1. Читает код из GitHub
+    2. Отправляет Groq на анализ
+    3. Получает исправленный код
+    4. Отправляет в Telegram с кнопками ✅/❌
+    """
+    global patch_counter
+    if not ADMIN_ID:
+        return
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        await bot.send_message(
+            ADMIN_ID,
+            "⚠️ Авто-патч: GITHUB_TOKEN или GITHUB_REPO не заданы. Добавь переменные в Render.",
+            parse_mode="HTML"
+        )
+        return
+
+    send_text = (
+        "🔧 <b>Обнаружена ошибка</b>\n\n"
+        + "<code>" + error_text[:400] + "</code>\n\n"
+        + "⏳ Читаю код из GitHub и анализирую..."
+    )
+    await bot.send_message(ADMIN_ID, send_text, parse_mode="HTML")
+
+
+    # Читаем текущий код
+    current_code, sha = github_get_file()
+    if not current_code:
+        await bot.send_message(ADMIN_ID, "❌ Не удалось прочитать код из GitHub.")
+        return
+
+    # Groq анализирует ошибку и предлагает исправление
+    prompt = f"""Ты senior Python разработчик. В боте произошла ошибка.
+
+ОШИБКА:
+{error_text[:800]}
+
+КОД (первые 3000 символов для контекста):
+{current_code[:3000]}
+
+Задача:
+1. Найди причину ошибки
+2. Предложи минимальное исправление
+3. Верни ТОЛЬКО JSON:
+{{"description": "что исправлено (1-2 предложения)", "search": "точный текст который нужно заменить", "replace": "исправленный текст", "risk": "low/medium/high"}}
+
+Важно: search должен быть уникальным фрагментом кода который встречается ОДИН раз."""
+
+    response = ask_groq(prompt, max_tokens=800)
+    if not response:
+        await bot.send_message(ADMIN_ID, "❌ Groq не смог проанализировать ошибку.")
+        return
+
+    # Парсим ответ
+    try:
+        clean = response.strip().replace("```json", "").replace("```", "").strip()
+        start = clean.find("{")
+        end = clean.rfind("}") + 1
+        patch_data = json.loads(clean[start:end])
+    except Exception as e:
+        await bot.send_message(ADMIN_ID, "❌ Groq вернул некорректный JSON: " + str(e) + "\n\n" + str(response)[:300])
+
+        return
+        return
+
+    search_text = patch_data.get("search", "")
+    replace_text = patch_data.get("replace", "")
+    description = patch_data.get("description", "нет описания")
+    risk = patch_data.get("risk", "unknown")
+
+    if not search_text or search_text not in current_code:
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚠️ <b>Groq предложил исправление, но не смог найти точный фрагмент в коде.</b>"
+            f"📝 Описание: {description}"
+            f"Возможно нужно исправить вручную.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем патч в очередь
+    patch_counter += 1
+    patch_id = str(patch_counter)
+    new_code = current_code.replace(search_text, replace_text, 1)
+
+    pending_patches[patch_id] = {
+        "new_code": new_code,
+        "sha": sha,
+        "description": description,
+        "error": error_text[:200],
+        "risk": risk,
+        "search": search_text[:150],
+        "replace": replace_text[:150]
+    }
+
+    risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk, "⚪️")
+
+    await bot.send_message(
+        ADMIN_ID,
+        "🔧 <b>APEX хочет исправить код</b>\n" +
+        "━" * 24 + "\n\n" +
+        "📋 <b>Что исправить:</b>\n" + description + "\n\n" +
+        risk_emoji + " <b>Риск:</b> " + risk + "\n\n" +
+        "<b>Заменить:</b>\n<code>" + search_text[:200] + "</code>\n\n" +
+        "<b>На:</b>\n<code>" + replace_text[:200] + "</code>\n\n" +
+        "━" * 24 + "\nПрименить изменение и задеплоить?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Применить и деплоить", callback_data=f"patch_apply_{patch_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"patch_cancel_{patch_id}")
+            ]
+        ])
+    )
+
+async def apply_patch(patch_id):
+    """Применяем патч — пушим в GitHub"""
+    patch = pending_patches.get(patch_id)
+    if not patch:
+        return False, "Патч не найден или устарел"
+
+    success, result = github_push_patch(
+        patch["new_code"],
+        patch["sha"],
+        f"🤖 APEX auto-fix: {patch['description'][:60]}"
+    )
+
+    del pending_patches[patch_id]
+    return success, result
+
+
+# Обработчик глобальных ошибок — ловим всё что падает в боте
+last_error_time = {}
+error_cooldown = 300  # 5 минут между одинаковыми ошибками
+
+class ErrorCapture(logging.Handler):
+    """Перехватывает ERROR логи и запускает авто-патч"""
+    def emit(self, record):
+        if record.levelno >= logging.ERROR:
+            error_text = self.format(record)
+            # Дедупликация — не спамим одной ошибкой
+            error_key = error_text[:100]
+            now = time.time()
+            if now - last_error_time.get(error_key, 0) < error_cooldown:
+                return
+            last_error_time[error_key] = now
+
+            # Запускаем авто-патч асинхронно
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(analyze_and_patch(error_text, "runtime"))
+            except:
+                pass
+
+
+def setup_error_capture():
+    """Подключаем перехватчик ошибок"""
+    handler = ErrorCapture()
+    handler.setLevel(logging.ERROR)
+    logging.getLogger().addHandler(handler)
+    logging.info("ErrorCapture активирован — авто-патч включён")
+
+
 # ===== MAIN =====
 
 async def on_startup(app):
@@ -4365,6 +4908,7 @@ async def on_startup(app):
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
     scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
     scheduler.start()
+    setup_error_capture()
     logging.info("APEX запущен!")
 
 
