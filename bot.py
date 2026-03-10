@@ -181,8 +181,8 @@ def update_user_memory(user_id, name="", profile=None, preferences=None, coins=N
             conn.execute(f"UPDATE user_memory SET {', '.join(updates)} WHERE user_id=?", params)
         else:
             conn.execute(
-                "INSERT INTO user_memory VALUES (?,?,?,?,?,?,1,?,?)",
-                (user_id, name, profile or "", preferences or "", coins or "", deposit or 0, now, now)
+                "INSERT INTO user_memory VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (user_id, name, profile or "", preferences or "", coins or "", deposit or 0, 1.0, 0, now, now)
             )
         conn.commit()
         conn.close()
@@ -3196,10 +3196,11 @@ async def main():
     # Прогреваем кэш пар при старте
     threading.Thread(target=get_top_pairs, daemon=True).start()
 
-    # Убиваем старые сессии и вебхуки — решает TelegramConflictError
+    # Убиваем старые сессии — решает TelegramConflictError при редеплое
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        logging.info("Webhook удалён, очередь обновлений очищена")
+        await asyncio.sleep(2)  # Даём Telegram время закрыть старое соединение
+        logging.info("Webhook удалён, старые сессии закрыты")
     except Exception as e:
         logging.warning(f"delete_webhook: {e}")
 
