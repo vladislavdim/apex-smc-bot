@@ -1,7 +1,6 @@
 name: APEX AI Auto-Fix
 
 on:
-  # Триггер 1: Ручной запуск с текстом ошибки
   workflow_dispatch:
     inputs:
       error_log:
@@ -9,7 +8,6 @@ on:
         required: true
         type: string
 
-  # Триггер 2: Push в main — проверяем синтаксис и фиксим
   push:
     branches: [main]
     paths:
@@ -33,17 +31,15 @@ jobs:
       - name: Install dependencies
         run: pip install groq requests
 
-      - name: Check syntax first
+      - name: Check syntax
         id: syntax
         run: |
-          if python3 -m py_compile bot.py 2>&1; then
+          if python3 -m py_compile bot.py 2>/dev/null; then
             echo "syntax_ok=true" >> $GITHUB_OUTPUT
-            echo "✅ Синтаксис OK"
           else
-            ERROR=$(python3 -m py_compile bot.py 2>&1)
             echo "syntax_ok=false" >> $GITHUB_OUTPUT
-            echo "error_text=$ERROR" >> $GITHUB_OUTPUT
-            echo "❌ Синтаксис сломан: $ERROR"
+            python3 -m py_compile bot.py 2> /tmp/syntax_error.txt || true
+            echo "error_text=$(cat /tmp/syntax_error.txt)" >> $GITHUB_OUTPUT
           fi
 
       - name: AI Fix Syntax Error
@@ -51,7 +47,8 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          python3 << 'PYEOF'
+          cat /tmp/syntax_error.txt
+          python3 - << 'PYEOF'
           import os, json, sys
           from groq import Groq
 
@@ -60,29 +57,19 @@ jobs:
           with open("bot.py", "r") as f:
               code = f.read()
 
-          error = """${{ steps.syntax.outputs.error_text }}"""
+          with open("/tmp/syntax_error.txt", "r") as f:
+              error = f.read()
 
-          print(f"Ошибка: {error}")
-
-          prompt = f"""Ты опытный Python разработчик. В файле bot.py синтаксическая ошибка.
+          prompt = """Ты Python разработчик. Синтаксическая ошибка в bot.py.
 
 ОШИБКА:
-{error}
+""" + error + """
 
-КОД (первые 200 строк для контекста):
-{code[:8000]}
+КОД (начало):
+""" + code[:8000] + """
 
-Задача: Найди и исправь ТОЛЬКО синтаксическую ошибку. 
-
-Ответь СТРОГО в формате JSON:
-{{
-  "line": <номер строки>,
-  "old_code": "<точный текст строки с ошибкой>",
-  "new_code": "<исправленная строка>",
-  "explanation": "<кратко что исправил>"
-}}
-
-Только JSON, без markdown."""
+Ответь ТОЛЬКО JSON без markdown:
+{"old_code": "точная строка с ошибкой", "new_code": "исправленная строка", "explanation": "что исправил"}"""
 
           response = client.chat.completions.create(
               model="llama-3.3-70b-versatile",
@@ -97,21 +84,17 @@ jobs:
           try:
               fix = json.loads(result)
               old = fix["old_code"]
-              new = fix["new_code"]
-              explanation = fix["explanation"]
-
+              new_text = fix["new_code"]
               if old in code:
-                  new_code = code.replace(old, new, 1)
+                  new_code = code.replace(old, new_text, 1)
                   with open("bot.py", "w") as f:
                       f.write(new_code)
-                  print(f"✅ Исправлено: {explanation}")
-                  print(f"Строка {fix['line']}: {old!r} → {new!r}")
+                  print("Fixed: " + fix["explanation"])
               else:
-                  print(f"❌ Не нашёл строку для замены: {old!r}")
+                  print("Could not find string to replace")
                   sys.exit(1)
           except Exception as e:
-              print(f"❌ Не смог распарсить ответ AI: {e}")
-              print(f"Ответ: {result}")
+              print("Parse error: " + str(e))
               sys.exit(1)
           PYEOF
 
@@ -119,8 +102,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          ERROR_LOG: ${{ github.event.inputs.error_log }}
         run: |
-          python3 << 'PYEOF'
+          python3 - << 'PYEOF'
           import os, json, sys
           from groq import Groq
 
@@ -129,36 +113,19 @@ jobs:
           with open("bot.py", "r") as f:
               code = f.read()
 
-          error_log = """${{ github.event.inputs.error_log }}"""
+          error_log = os.environ["ERROR_LOG"]
+          print("Analyzing: " + error_log[:200])
 
-          print(f"Анализирую ошибку: {error_log[:200]}")
-
-          prompt = f"""Ты опытный Python разработчик. Telegram бот упал с ошибкой.
+          prompt = """Ты Python разработчик. Telegram бот упал с ошибкой.
 
 ЛОГ ОШИБКИ:
-{error_log}
+""" + error_log + """
 
 КОД bot.py:
-{code[:10000]}
+""" + code[:10000] + """
 
-Задача: Найди причину ошибки и исправь её.
-
-Ответь СТРОГО в формате JSON:
-{{
-  "diagnosis": "<что за ошибка и почему>",
-  "fixes": [
-    {{
-      "old_code": "<точный текст который нужно заменить>",
-      "new_code": "<исправленный текст>",
-      "reason": "<почему>"
-    }}
-  ]
-}}
-
-Правила:
-- old_code должен быть точной подстрокой из кода
-- Исправляй только то что сломано
-- Только JSON, без markdown"""
+Ответь ТОЛЬКО JSON без markdown:
+{"diagnosis": "что за ошибка", "fixes": [{"old_code": "точный текст для замены", "new_code": "исправление", "reason": "почему"}]}"""
 
           response = client.chat.completions.create(
               model="llama-3.3-70b-versatile",
@@ -172,52 +139,43 @@ jobs:
 
           try:
               fix_data = json.loads(result)
-              print(f"Диагноз: {fix_data['diagnosis']}")
-
+              print("Diagnosis: " + fix_data["diagnosis"])
               new_code = code
               applied = 0
               for fix in fix_data.get("fixes", []):
                   old = fix["old_code"]
-                  new = fix["new_code"]
+                  new_text = fix["new_code"]
                   if old in new_code:
-                      new_code = new_code.replace(old, new, 1)
+                      new_code = new_code.replace(old, new_text, 1)
                       applied += 1
-                      print(f"✅ Применён фикс: {fix['reason']}")
+                      print("Applied: " + fix["reason"])
                   else:
-                      print(f"⚠️ Не нашёл: {old[:50]!r}")
-
+                      print("Not found: " + old[:50])
               if applied > 0:
                   with open("bot.py", "w") as f:
                       f.write(new_code)
-                  print(f"Применено фиксов: {applied}")
+                  print("Total fixes: " + str(applied))
               else:
-                  print("❌ Ни один фикс не применён")
+                  print("No fixes applied")
                   sys.exit(1)
-
           except Exception as e:
-              print(f"❌ Ошибка парсинга: {e}")
-              print(f"Ответ AI: {result[:500]}")
+              print("Error: " + str(e))
               sys.exit(1)
           PYEOF
 
       - name: Verify fix
         run: |
-          if python3 -m py_compile bot.py; then
-            echo "✅ Синтаксис после фикса OK"
-          else
-            echo "❌ Фикс не помог — синтаксис всё ещё сломан"
-            exit 1
-          fi
+          python3 -m py_compile bot.py && echo "Syntax OK" || exit 1
 
-      - name: Commit and push fix
+      - name: Commit fix
         run: |
           git config user.name "APEX AI Bot"
           git config user.email "apex-ai@auto-fix.bot"
           git add bot.py
           if git diff --staged --quiet; then
-            echo "Изменений нет"
+            echo "No changes"
           else
-            git commit -m "🤖 AI auto-fix: $(date '+%Y-%m-%d %H:%M')"
+            git commit -m "AI auto-fix $(date '+%Y-%m-%d %H:%M')"
             git push
-            echo "✅ Фикс запушен — Render начнёт деплой"
+            echo "Pushed - Render will redeploy"
           fi
