@@ -295,12 +295,87 @@ BINANCE = "https://api.binance.com"
 BINANCE_F = "https://fapi.binance.com"
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
+
+# Все таймфреймы: от 1м до 1М
 BYBIT_INTERVALS = {
     "1m": "1", "3m": "3", "5m": "5", "15m": "15",
-    "30m": "30", "1h": "60", "2h": "120", "4h": "240", "1d": "D"
+    "30m": "30", "1h": "60", "2h": "120", "4h": "240",
+    "1d": "D", "3d": "D", "1w": "W", "1M": "M"
 }
 
-# Динамический кэш топ-50 пар
+# Binance API intervals (официальные строки)
+BINANCE_INTERVALS = {
+    "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m",
+    "30m": "30m", "1h": "1h", "2h": "2h", "4h": "4h",
+    "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M"
+}
+
+# Категории таймфреймов для разных типов сделок
+TF_CATEGORIES = {
+    "scalp":  ["1m", "5m", "15m"],
+    "swing":  ["1h", "4h"],
+    "long":   ["1d", "1w", "1M"],
+}
+
+# Метки таймфреймов для отображения
+TF_LABELS = {
+    "1m": "1 мин", "3m": "3 мин", "5m": "5 мин", "15m": "15 мин",
+    "30m": "30 мин", "1h": "1 час", "2h": "2 часа", "4h": "4 часа",
+    "1d": "1 день", "3d": "3 дня", "1w": "1 неделя", "1M": "1 месяц"
+}
+
+TF_HOURS = {
+    "1m": 0.1, "5m": 0.5, "15m": 4, "30m": 8,
+    "1h": 12, "2h": 24, "4h": 48,
+    "1d": 120, "3d": 360, "1w": 720, "1M": 2880
+}
+
+# ===== BINANCE API CLIENT (авторизованный) =====
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+_binance_client = None
+
+def get_binance_client():
+    """Возвращает авторизованный Binance клиент (lazy init)"""
+    global _binance_client
+    if _binance_client:
+        return _binance_client
+    if BINANCE_API_KEY and BINANCE_API_SECRET:
+        try:
+            from binance.client import Client
+            _binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+            logging.info("Binance API client инициализирован ✅")
+            return _binance_client
+        except Exception as e:
+            logging.warning(f"Binance Client init failed: {e}")
+    return None
+
+
+def get_full_history_binance(symbol, interval, limit=1000):
+    """
+    Получаем ПОЛНУЮ историю с авторизованного Binance API.
+    Используется для старших ТФ (1d, 1w, 1M) и скальпа (1m, 5m).
+    """
+    client = get_binance_client()
+    if not client:
+        return []
+    try:
+        bi = BINANCE_INTERVALS.get(interval, interval)
+        klines = client.get_klines(symbol=symbol, interval=bi, limit=limit)
+        if not klines:
+            return []
+        candles = [{
+            "open": float(k[1]), "high": float(k[2]),
+            "low": float(k[3]), "close": float(k[4]),
+            "volume": float(k[5])
+        } for k in klines]
+        logging.info(f"Binance API: {symbol} {interval} — {len(candles)} свечей")
+        return candles
+    except Exception as e:
+        logging.warning(f"Binance API get_klines {symbol} {interval}: {e}")
+        return []
+
+# Динамический кэш топ-100 пар
 pairs_cache = []
 pairs_cache_time = 0
 price_cache = {}
@@ -726,16 +801,30 @@ SYMBOL_ALIASES = {
 }
 
 def get_candles(symbol, interval="1h", limit=200):
-    """Свечи: кэш → Bybit (основной) → Binance Futures → Binance Spot → CoinGecko"""
+    """
+    Свечи: кэш → Binance API (авторизованный, для 1m/1w/1M) →
+           Bybit (основной) → Binance Futures → Binance Spot → CoinGecko → CryptoCompare
+    """
     global candle_cache
     cache_key = f"{symbol}_{interval}"
 
+    # Кэш (старший ТФ живёт дольше)
+    cache_ttl = 60 if interval in ("1m", "3m", "5m") else 300 if interval in ("15m", "30m", "1h") else 600
     if cache_key in candle_cache:
         cached, ts = candle_cache[cache_key]
-        if time.time() - ts < 120 and len(cached) >= 20:
+        if time.time() - ts < cache_ttl and len(cached) >= 20:
             return cached
 
-    # 1. Bybit — работает с Render без блокировок
+    # 0. Binance API (авторизованный) — приоритет для скальп TF и старших TF
+    senior_tfs = {"1d", "3d", "1w", "1M"}
+    scalp_tfs = {"1m", "3m", "5m"}
+    if interval in senior_tfs or interval in scalp_tfs:
+        candles = get_full_history_binance(symbol, interval, limit)
+        if candles and len(candles) >= 20:
+            candle_cache[cache_key] = (candles, time.time())
+            return candles
+
+    # 1. Bybit — основной для средних TF
     try:
         bybit_int = BYBIT_INTERVALS.get(interval, "60")
         r = requests.get(BYBIT_URL, params={
@@ -757,10 +846,11 @@ def get_candles(symbol, interval="1h", limit=200):
     except Exception as e:
         logging.warning(f"Bybit klines {symbol} {interval}: {e}")
 
-    # 2. Binance Futures
+    # 2. Binance Futures (REST без ключа)
     try:
+        bi = BINANCE_INTERVALS.get(interval, interval)
         r = requests.get(f"{BINANCE_F}/fapi/v1/klines", params={
-            "symbol": symbol, "interval": interval, "limit": limit
+            "symbol": symbol, "interval": bi, "limit": limit
         }, timeout=8)
         data = r.json()
         if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
@@ -772,10 +862,11 @@ def get_candles(symbol, interval="1h", limit=200):
     except Exception as e:
         logging.warning(f"Binance Futures {symbol}: {e}")
 
-    # 3. Binance Spot
+    # 3. Binance Spot (REST без ключа)
     try:
+        bi = BINANCE_INTERVALS.get(interval, interval)
         r = requests.get(f"{BINANCE}/api/v3/klines", params={
-            "symbol": symbol, "interval": interval, "limit": limit
+            "symbol": symbol, "interval": bi, "limit": limit
         }, timeout=8)
         data = r.json()
         if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
@@ -1056,22 +1147,6 @@ def smc_on_tf(symbol, interval):
     return events[0]["direction"]  # BULLISH / BEARISH
 
 # ===== МУЛЬТИТАЙМФРЕЙМНЫЙ АНАЛИЗ =====
-
-TF_LABELS = {
-    "5m": "5 мин",
-    "15m": "15 мин",
-    "1h": "1 час",
-    "4h": "4 часа",
-    "1d": "1 день"
-}
-
-TF_HOURS = {
-    "5m": 1,
-    "15m": 4,
-    "1h": 12,
-    "4h": 48,
-    "1d": 120
-}
 
 def multi_tf_analysis(symbol, timeframes=None):
     """
@@ -1433,6 +1508,146 @@ async def realtime_pump_detector():
                 pass
     except Exception as e:
         logging.error(f"Pump detector error: {e}")
+
+def analyze_trade_type(symbol, trade_type="swing"):
+    """
+    Анализ под конкретный тип сделки: scalp / swing / long.
+    Использует соответствующие таймфреймы и формирует готовый сигнал.
+
+    trade_type:
+      scalp — 1m, 5m, 15m  (скальпинг, быстрые сделки)
+      swing — 1h, 4h        (среднесрок)
+      long  — 1d, 1w, 1M   (долгосрок)
+    """
+    try:
+        tfs = TF_CATEGORIES.get(trade_type, ["1h", "4h"])
+
+        # SMC анализ по каждому ТФ
+        results = {}
+        for tf in tfs:
+            d = smc_on_tf(symbol, tf)
+            results[tf] = d
+
+        bullish = [tf for tf, d in results.items() if d == "BULLISH"]
+        bearish = [tf for tf, d in results.items() if d == "BEARISH"]
+
+        if len(bullish) > len(bearish):
+            direction = "BULLISH"
+            matched = bullish
+        elif len(bearish) > len(bullish):
+            direction = "BEARISH"
+            matched = bearish
+        else:
+            return None
+
+        match_count = len(matched)
+        total = len(tfs)
+
+        # Определяем качество сигнала
+        if match_count == total:
+            grade = "МЕГА ТОП" if total >= 3 else "ТОП СДЕЛКА"
+            grade_emoji = "🔥🔥🔥" if total >= 3 else "🔥🔥"
+        elif match_count >= 2:
+            grade = "ХОРОШАЯ"
+            grade_emoji = "✅"
+        else:
+            grade = "СЛАБАЯ"
+            grade_emoji = "⚠️"
+
+        # Свечи для уровней (выбираем средний ТФ из категории)
+        main_tf = tfs[len(tfs)//2]
+        candles = get_candles(symbol, main_tf, 200)
+        if not candles or len(candles) < 20:
+            return None
+
+        price = candles[-1]["close"]
+        ob = find_ob(candles, direction)
+        fvg = find_fvg(candles, direction)
+        risk = price * (0.008 if trade_type == "scalp" else 0.015 if trade_type == "swing" else 0.03)
+
+        if direction == "BULLISH":
+            entry = ob["top"] if ob else price
+            sl = round(entry - risk, 6)
+            tp1 = round(entry + risk * 2, 6)
+            tp2 = round(entry + risk * 3, 6)
+            tp3 = round(entry + risk * 5, 6)
+        else:
+            entry = ob["bottom"] if ob else price
+            sl = round(entry + risk, 6)
+            tp1 = round(entry - risk * 2, 6)
+            tp2 = round(entry - risk * 3, 6)
+            tp3 = round(entry - risk * 5, 6)
+
+        # Исторический контекст
+        hist = get_historical_context(symbol, "1d" if trade_type != "scalp" else "4h")
+
+        # Долгосрочный тренд (для контекста)
+        long_trend = ""
+        if trade_type in ("scalp", "swing"):
+            d_dir = smc_on_tf(symbol, "1d")
+            w_dir = smc_on_tf(symbol, "1w")
+            if d_dir or w_dir:
+                long_trend = f"📅 Дневной: {d_dir or '?'} | Недельный: {w_dir or '?'}"
+
+        # Формат цены
+        fmt = lambda x: f"${x:,.6f}" if x < 0.01 else f"${x:,.4f}" if x < 1 else f"${x:,.3f}" if x < 100 else f"${x:,.2f}"
+
+        # Время отработки по типу
+        time_map = {"scalp": "15-60 мин", "swing": "4-24 ч", "long": "1-4 нед"}
+        time_str = time_map.get(trade_type, "?")
+
+        type_labels = {"scalp": "⚡️ СКАЛЬП", "swing": "🔄 СВИНГ", "long": "📈 ДОЛГОСРОК"}
+        type_label = type_labels.get(trade_type, trade_type.upper())
+
+        tf_status = ""
+        for tf in tfs:
+            d = results.get(tf)
+            icon = "🟢" if d == "BULLISH" else "🔴" if d == "BEARISH" else "⚪️"
+            tf_status += f"{icon} {TF_LABELS.get(tf, tf)}: {d or 'нет сигнала'}\n"
+
+        hist_block = ""
+        if hist:
+            hist_block = (
+                f"\n📊 <b>История:</b>\n"
+                f"Тренд: {hist['trend']} | Фаза: {hist['phase']}\n"
+                f"От хая периода: {hist['pct_from_ath']:+.1f}%\n"
+                f"Поддержка: {fmt(hist['support'])} | Сопротивление: {fmt(hist['resistance'])}\n"
+            )
+
+        emoji = "🟢" if direction == "BULLISH" else "🔴"
+
+        text = (
+            f"{'━'*26}\n"
+            f"{grade_emoji} {type_label} | <b>{grade}</b>\n"
+            f"{emoji} <b>{symbol}</b> — {direction}\n"
+            f"{'━'*26}\n\n"
+            f"📐 <b>Таймфреймы ({trade_type}):</b>\n{tf_status}\n"
+            f"💰 <b>Вход:</b> <code>{fmt(entry)}</code>\n"
+            f"🛑 <b>Стоп:</b> <code>{fmt(sl)}</code>\n"
+            f"🎯 <b>TP1:</b> <code>{fmt(tp1)}</code> (+2R)\n"
+            f"🎯 <b>TP2:</b> <code>{fmt(tp2)}</code> (+3R)\n"
+            f"🎯 <b>TP3:</b> <code>{fmt(tp3)}</code> (+5R)\n\n"
+            f"⏱ <b>Время отработки:</b> {time_str}\n"
+            f"{long_trend}\n"
+            f"{hist_block}"
+            f"{'━'*26}"
+        )
+
+        return {
+            "symbol": symbol,
+            "trade_type": trade_type,
+            "direction": direction,
+            "grade": grade,
+            "text": text,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+        }
+
+    except Exception as e:
+        logging.error(f"analyze_trade_type {symbol} {trade_type}: {e}")
+        return None
+
 
 def full_scan(symbol, timeframe="1h"):
     """Полный SMC анализ с мультитаймфреймом + все новые фильтры"""
@@ -4062,6 +4277,9 @@ def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Сканировать рынок", callback_data="menu_scan"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
+        [InlineKeyboardButton(text="⚡️ Скальп", callback_data="menu_trade_scalp"),
+         InlineKeyboardButton(text="🔄 Свинг", callback_data="menu_trade_swing"),
+         InlineKeyboardButton(text="📈 Долгосрок", callback_data="menu_trade_long")],
         [InlineKeyboardButton(text="⏱ Выбрать таймфрейм", callback_data="menu_tf"),
          InlineKeyboardButton(text="🔬 Бектест", callback_data="menu_backtest")],
         [InlineKeyboardButton(text="💰 Риск калькулятор", callback_data="menu_risk"),
@@ -5058,6 +5276,51 @@ async def handle_callback(callback: CallbackQuery):
             ])
         )
 
+    elif data.startswith("menu_trade_"):
+        trade_type = data.replace("menu_trade_", "")
+        type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
+        tfs = TF_CATEGORIES.get(trade_type, [])
+        label = type_labels.get(trade_type, trade_type)
+        # Показываем клавиатуру выбора монеты
+        try:
+            await callback.message.edit_text(
+                f"{label} — выбери монету:\n"
+                f"Таймфреймы: {', '.join([TF_LABELS.get(t,t) for t in tfs])}\n\n"
+                f"Или напиши: /trade BTC {trade_type}",
+                reply_markup=pairs_keyboard(f"trade_{trade_type}", 0)
+            )
+        except:
+            await callback.message.answer(
+                f"{label} — выбери монету:",
+                reply_markup=pairs_keyboard(f"trade_{trade_type}", 0)
+            )
+
+    elif data.startswith("trade_scalp_") or data.startswith("trade_swing_") or data.startswith("trade_long_"):
+        parts = data.split("_", 2)
+        trade_type = parts[1]
+        symbol = parts[2]
+        type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
+        await callback.message.edit_text(f"🔍 Анализирую {symbol} [{type_labels.get(trade_type, trade_type)}]...")
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, analyze_trade_type, symbol, trade_type
+        )
+        if result:
+            await callback.message.edit_text(
+                result["text"],
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 К монетам", callback_data=f"menu_trade_{trade_type}")]
+                ])
+            )
+        else:
+            await callback.message.edit_text(
+                f"😴 {symbol} — нет сигнала для {trade_type}.\nПопробуй другую монету или тип сделки.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Повторить", callback_data=data),
+                     InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu_trade_{trade_type}")]
+                ])
+            )
+
     elif data == "menu_pump":
         await callback.message.edit_text("📦 Сканирую топ-50 на накопление перед пампом...\n⏳ ~30 секунд")
         pairs = await asyncio.get_running_loop().run_in_executor(None, get_top_pairs, 50)
@@ -5143,6 +5406,71 @@ async def cmd_pump(message: types.Message):
         for acc in found[:3]:
             await message.answer(format_accumulation(acc), parse_mode="HTML")
             await asyncio.sleep(0.5)
+
+
+@dp.message(Command("trade"))
+async def cmd_trade(message: types.Message):
+    """
+    /trade BTC          — все типы сделок (скальп + свинг + долгосрок)
+    /trade BTC scalp    — только скальп
+    /trade BTC swing    — только свинг
+    /trade BTC long     — только долгосрок
+    """
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "📊 <b>Анализ по типу сделки</b>\n\n"
+            "Использование:\n"
+            "/trade BTC — все типы\n"
+            "/trade BTC scalp — скальп (1m/5m/15m)\n"
+            "/trade BTC swing — свинг (1h/4h)\n"
+            "/trade BTC long — долгосрок (1d/1w/1M)\n\n"
+            "<i>Примеры: /trade TON, /trade ETH swing, /trade SOL long</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Распознаём символ через алиасы
+    raw = args[1].lower()
+    symbol = SYMBOL_ALIASES.get(raw, raw.upper())
+    if not symbol.endswith("USDT"):
+        symbol = symbol.upper() + "USDT"
+
+    trade_type = args[2].lower() if len(args) >= 3 else "all"
+    valid_types = {"scalp", "swing", "long", "all"}
+    if trade_type not in valid_types:
+        trade_type = "all"
+
+    types_to_run = ["scalp", "swing", "long"] if trade_type == "all" else [trade_type]
+
+    type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
+    await message.answer(
+        f"🔍 Анализирую <b>{symbol}</b>\n"
+        f"Типы: {' | '.join([type_labels[t] for t in types_to_run])}\n"
+        f"⏳ Подожди...",
+        parse_mode="HTML"
+    )
+
+    found_any = False
+    for tt in types_to_run:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, analyze_trade_type, symbol, tt
+        )
+        if result:
+            found_any = True
+            await message.answer(result["text"], parse_mode="HTML")
+            await asyncio.sleep(0.5)
+        else:
+            await message.answer(
+                f"{type_labels[tt]}: нет чёткого сигнала по {symbol} на таймфреймах {', '.join(TF_CATEGORIES[tt])}"
+            )
+
+    if not found_any:
+        await message.answer(
+            f"😴 <b>{symbol}</b> — нет сигналов ни по одному типу сделки.\n"
+            f"Рынок, возможно, в боковике или данных недостаточно.",
+            parse_mode="HTML"
+        )
 
 @dp.message(Command("think"))
 async def cmd_think(message: types.Message):
