@@ -7,7 +7,6 @@ on:
         description: 'Вставь текст ошибки из Render'
         required: true
         type: string
-
   push:
     branches: [main]
     paths:
@@ -16,9 +15,8 @@ on:
 jobs:
   ai-fix:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
@@ -28,154 +26,42 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install groq requests
+      - name: Install deps
+        run: pip install groq
 
       - name: Check syntax
         id: syntax
         run: |
-          if python3 -m py_compile bot.py 2>/dev/null; then
-            echo "syntax_ok=true" >> $GITHUB_OUTPUT
+          if python3 -m py_compile bot.py 2>/tmp/err.txt; then
+            echo "ok=true" >> $GITHUB_OUTPUT
           else
-            echo "syntax_ok=false" >> $GITHUB_OUTPUT
-            python3 -m py_compile bot.py 2> /tmp/syntax_error.txt || true
-            echo "error_text=$(cat /tmp/syntax_error.txt)" >> $GITHUB_OUTPUT
+            echo "ok=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: AI Fix Syntax Error
-        if: steps.syntax.outputs.syntax_ok == 'false'
+      - name: Fix syntax error
+        if: steps.syntax.outputs.ok == 'false'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: |
-          cat /tmp/syntax_error.txt
-          python3 - << 'PYEOF'
-          import os, json, sys
-          from groq import Groq
+        run: python3 .github/scripts/fix_syntax.py
 
-          client = Groq(api_key=os.environ["GROQ_API_KEY"])
-
-          with open("bot.py", "r") as f:
-              code = f.read()
-
-          with open("/tmp/syntax_error.txt", "r") as f:
-              error = f.read()
-
-          prompt = """Ты Python разработчик. Синтаксическая ошибка в bot.py.
-
-ОШИБКА:
-""" + error + """
-
-КОД (начало):
-""" + code[:8000] + """
-
-Ответь ТОЛЬКО JSON без markdown:
-{"old_code": "точная строка с ошибкой", "new_code": "исправленная строка", "explanation": "что исправил"}"""
-
-          response = client.chat.completions.create(
-              model="llama-3.3-70b-versatile",
-              messages=[{"role": "user", "content": prompt}],
-              max_tokens=500,
-              temperature=0.1
-          )
-
-          result = response.choices[0].message.content.strip()
-          result = result.replace("```json", "").replace("```", "").strip()
-
-          try:
-              fix = json.loads(result)
-              old = fix["old_code"]
-              new_text = fix["new_code"]
-              if old in code:
-                  new_code = code.replace(old, new_text, 1)
-                  with open("bot.py", "w") as f:
-                      f.write(new_code)
-                  print("Fixed: " + fix["explanation"])
-              else:
-                  print("Could not find string to replace")
-                  sys.exit(1)
-          except Exception as e:
-              print("Parse error: " + str(e))
-              sys.exit(1)
-          PYEOF
-
-      - name: AI Fix from Manual Error Log
+      - name: Fix from error log
         if: github.event_name == 'workflow_dispatch'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           ERROR_LOG: ${{ github.event.inputs.error_log }}
-        run: |
-          python3 - << 'PYEOF'
-          import os, json, sys
-          from groq import Groq
+        run: python3 .github/scripts/fix_error.py
 
-          client = Groq(api_key=os.environ["GROQ_API_KEY"])
-
-          with open("bot.py", "r") as f:
-              code = f.read()
-
-          error_log = os.environ["ERROR_LOG"]
-          print("Analyzing: " + error_log[:200])
-
-          prompt = """Ты Python разработчик. Telegram бот упал с ошибкой.
-
-ЛОГ ОШИБКИ:
-""" + error_log + """
-
-КОД bot.py:
-""" + code[:10000] + """
-
-Ответь ТОЛЬКО JSON без markdown:
-{"diagnosis": "что за ошибка", "fixes": [{"old_code": "точный текст для замены", "new_code": "исправление", "reason": "почему"}]}"""
-
-          response = client.chat.completions.create(
-              model="llama-3.3-70b-versatile",
-              messages=[{"role": "user", "content": prompt}],
-              max_tokens=1000,
-              temperature=0.1
-          )
-
-          result = response.choices[0].message.content.strip()
-          result = result.replace("```json", "").replace("```", "").strip()
-
-          try:
-              fix_data = json.loads(result)
-              print("Diagnosis: " + fix_data["diagnosis"])
-              new_code = code
-              applied = 0
-              for fix in fix_data.get("fixes", []):
-                  old = fix["old_code"]
-                  new_text = fix["new_code"]
-                  if old in new_code:
-                      new_code = new_code.replace(old, new_text, 1)
-                      applied += 1
-                      print("Applied: " + fix["reason"])
-                  else:
-                      print("Not found: " + old[:50])
-              if applied > 0:
-                  with open("bot.py", "w") as f:
-                      f.write(new_code)
-                  print("Total fixes: " + str(applied))
-              else:
-                  print("No fixes applied")
-                  sys.exit(1)
-          except Exception as e:
-              print("Error: " + str(e))
-              sys.exit(1)
-          PYEOF
-
-      - name: Verify fix
-        run: |
-          python3 -m py_compile bot.py && echo "Syntax OK" || exit 1
+      - name: Verify
+        run: python3 -m py_compile bot.py && echo "Syntax OK"
 
       - name: Commit fix
         run: |
-          git config user.name "APEX AI Bot"
-          git config user.email "apex-ai@auto-fix.bot"
+          git config user.name "APEX AI"
+          git config user.email "apex@bot.ai"
           git add bot.py
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "AI auto-fix $(date '+%Y-%m-%d %H:%M')"
+            git commit -m "AI fix $(date '+%Y-%m-%d %H:%M')"
             git push
-            echo "Pushed - Render will redeploy"
           fi
