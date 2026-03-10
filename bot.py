@@ -501,16 +501,40 @@ def classify_swings(highs, lows):
     return sorted(result, key=lambda x: x["idx"])
 
 def detect_events(candles, classified):
-    last_close = candles[-1]["close"]
+    """Определяем направление тренда по структуре свингов — не требуем точного пробоя прямо сейчас"""
     events = []
+    if not classified:
+        return events
+
     highs = [s for s in classified if s["kind"] in ("HH", "LH")]
     lows = [s for s in classified if s["kind"] in ("HL", "LL")]
+    last_close = candles[-1]["close"]
+
+    # Бычья структура: больше HH чем LH — восходящий тренд
+    hh_count = sum(1 for s in classified if s["kind"] == "HH")
+    lh_count = sum(1 for s in classified if s["kind"] == "LH")
+    hl_count = sum(1 for s in classified if s["kind"] == "HL")
+    ll_count = sum(1 for s in classified if s["kind"] == "LL")
+
+    # CHoCH/BOS — точный пробой свинга
     if highs and last_close > highs[-1]["price"]:
         etype = "CHoCH" if highs[-1]["kind"] == "LH" else "BOS"
         events.append({"type": etype, "direction": "BULLISH", "level": highs[-1]["price"]})
     if lows and last_close < lows[-1]["price"]:
         etype = "CHoCH" if lows[-1]["kind"] == "HL" else "BOS"
         events.append({"type": etype, "direction": "BEARISH", "level": lows[-1]["price"]})
+
+    # Если нет точного пробоя — определяем по структуре свингов
+    if not events:
+        if hh_count >= 2 and hl_count >= 1:
+            events.append({"type": "TREND", "direction": "BULLISH", "level": 0})
+        elif ll_count >= 2 and lh_count >= 1:
+            events.append({"type": "TREND", "direction": "BEARISH", "level": 0})
+        elif hh_count > ll_count:
+            events.append({"type": "BIAS", "direction": "BULLISH", "level": 0})
+        elif ll_count > hh_count:
+            events.append({"type": "BIAS", "direction": "BEARISH", "level": 0})
+
     return events
 
 def find_ob(candles, direction):
@@ -927,7 +951,7 @@ def full_scan(symbol, timeframe="1h"):
     try:
         # ── 0. Рыночный режим — в боковике сигналов нет ──
         regime = get_market_regime(symbol)
-        if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 70:
+        if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
             return None  # В боковике не торгуем
 
         # ── 1. Мультитаймфрейм SMC ──
@@ -1028,7 +1052,7 @@ def full_scan(symbol, timeframe="1h"):
             total_weight += 5
 
         # Минимальный порог
-        if total_weight < 40:
+        if total_weight < 25:
             return None
 
         # ── 4. Уровни входа ──
@@ -2455,6 +2479,57 @@ async def run_backtest(target, symbol, timeframe):
         parse_mode="HTML"
     )
 
+def scan_diagnostics(symbol):
+    """Объясняет почему нет сигнала — что именно не прошло"""
+    try:
+        lines = [f"😴 <b>{symbol} — сигнал не найден</b>\n"]
+
+        # Проверяем свечи
+        candles = get_candles(symbol, "1h", 150)
+        if not candles or len(candles) < 20:
+            return f"😴 <b>{symbol}</b>\n❌ Нет данных с Binance"
+
+        price = candles[-1]["close"]
+        ps = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
+        lines.append(f"💰 Цена: <code>{ps}</code>\n")
+
+        # MTF проверка
+        results = {}
+        for tf in ["15m", "1h", "4h"]:
+            d = smc_on_tf(symbol, tf)
+            results[tf] = d
+            icon = "🟢" if d == "BULLISH" else "🔴" if d == "BEARISH" else "⚪️"
+            lines.append(f"{icon} {TF_LABELS.get(tf, tf)}: {d or 'нет структуры'}")
+
+        bullish = [tf for tf, d in results.items() if d == "BULLISH"]
+        bearish = [tf for tf, d in results.items() if d == "BEARISH"]
+
+        if not bullish and not bearish:
+            lines.append("\n⚠️ SMC структура не определена — рынок в боковике или нет данных")
+        elif len(bullish) == len(bearish):
+            lines.append("\n⚠️ Таймфреймы конфликтуют — нет чёткого направления")
+        else:
+            direction = "BULLISH" if len(bullish) > len(bearish) else "BEARISH"
+            lines.append(f"\n✅ Направление: {direction}")
+
+            # OB и FVG
+            ob = find_ob(candles, direction)
+            fvg = find_fvg(candles, direction)
+            lines.append(f"{'✅' if ob else '❌'} Order Block: {'найден' if ob else 'не найден'}")
+            lines.append(f"{'✅' if fvg else '❌'} FVG: {'найден' if fvg else 'не найден'}")
+
+            # Режим рынка
+            regime = get_market_regime(symbol)
+            lines.append(f"🧠 Режим: {regime['mode']} (уверенность {regime['confidence']}%)")
+            if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
+                lines.append("⛔️ Заблокировано: рынок в глубоком боковике")
+
+        lines.append("\n<i>Попробуй через 15-30 минут или выбери другую монету</i>")
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"😴 {symbol} — ошибка диагностики: {e}"
+
 # ===== CALLBACK HANDLERS =====
 
 @dp.callback_query()
@@ -2554,7 +2629,6 @@ async def handle_callback(callback: CallbackQuery):
         await callback.message.edit_text(f"🔍 Анализирую {symbol}...")
         sig = full_scan(symbol)
 
-        # Добавляем риск-расчёт если есть депозит
         mem = get_user_memory(user_id)
         risk_text = ""
         if mem["deposit"] > 0 and sig:
@@ -2580,10 +2654,14 @@ async def handle_callback(callback: CallbackQuery):
                 ])
             )
         else:
+            # Диагностика — объясняем почему нет сигнала
+            diag = await asyncio.get_event_loop().run_in_executor(None, scan_diagnostics, symbol)
             await callback.message.edit_text(
-                f"😴 {symbol} — нет сигнала\nНедостаточный confluence",
+                diag,
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 К монетам", callback_data="menu_scan")]
+                    [InlineKeyboardButton(text="🔄 Повторить", callback_data=f"scan_{symbol}"),
+                     InlineKeyboardButton(text="🔙 К монетам", callback_data="menu_scan")]
                 ])
             )
 
