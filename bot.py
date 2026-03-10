@@ -247,29 +247,39 @@ price_cache = {}
 last_price_update = 0
 
 def get_top_pairs(limit=50):
-    """Топ-50 фьючерсных пар по объёму с Binance — авто-обновление каждый час"""
+    """Топ-N фьючерсных пар по объёму — авто-обновление каждый час"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache
     try:
-        r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=15)
-        tickers = r.json()
-        # API может вернуть список или dict (если запрошен один символ)
-        if isinstance(tickers, dict):
-            tickers = [tickers]
-        usdt = [t for t in tickers if isinstance(t, dict) and t.get("symbol", "").endswith("USDT")]
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/ticker/24hr",
+            timeout=15
+        )
+        data = r.json()
+
+        # Защита от разных форматов ответа
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list) or len(data) == 0:
+            raise ValueError(f"Unexpected response: {str(data)[:100]}")
+
+        usdt = [t for t in data if isinstance(t, dict) and str(t.get("symbol", "")).endswith("USDT")]
         usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        pairs_cache = [t["symbol"] for t in usdt[:limit]]
-        pairs_cache_time = time.time()
-        logging.info(f"Обновлено {len(pairs_cache)} пар")
-        return pairs_cache
+        top = [t["symbol"] for t in usdt[:limit]]
+
+        if top:
+            pairs_cache = top
+            pairs_cache_time = time.time()
+            logging.info(f"Обновлено {len(pairs_cache)} пар: {top[:5]}...")
+        else:
+            logging.warning("get_top_pairs: пустой список после фильтрации")
+
+        return pairs_cache if pairs_cache else PAIRS
+
     except Exception as e:
         logging.error(f"get_top_pairs error: {e}")
-        # Fallback список если API недоступен
-        return ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
-                "TONUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","ARBUSDT",
-                "SUIUSDT","SEIUSDT","TIAUSDT","INJUSDT","APTUSDT",
-                "OPUSDT","LDOUSDT","FTMUSDT","NEARUSDT","ATOMUSDT"]
+        return pairs_cache if pairs_cache else PAIRS
 
 # Обратная совместимость
 PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
@@ -3271,16 +3281,21 @@ async def main():
     init_db()
     threading.Thread(target=run_server, daemon=True).start()
 
-    # Прогреваем кэш пар при старте
-    threading.Thread(target=get_top_pairs, daemon=True).start()
+    # Убиваем старые сессии ПЕРВЫМ ДЕЛОМ — до всего остального
+    for attempt in range(3):
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logging.info(f"Webhook удалён (попытка {attempt+1})")
+            break
+        except Exception as e:
+            logging.warning(f"delete_webhook попытка {attempt+1}: {e}")
+            await asyncio.sleep(2)
 
-    # Убиваем старые сессии — решает TelegramConflictError при редеплое
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await asyncio.sleep(2)  # Даём Telegram время закрыть старое соединение
-        logging.info("Webhook удалён, старые сессии закрыты")
-    except Exception as e:
-        logging.warning(f"delete_webhook: {e}")
+    # Ждём пока Telegram закроет старое соединение
+    await asyncio.sleep(3)
+
+    # Прогреваем кэш пар в фоне
+    threading.Thread(target=get_top_pairs, daemon=True).start()
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_scan_job, "interval", minutes=30)
