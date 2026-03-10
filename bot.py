@@ -13,6 +13,8 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -36,6 +38,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def run_server():
+    """Fallback health check - only used if webhook not configured"""
     server = HTTPServer(("0.0.0.0", 10000), HealthHandler)
     server.serve_forever()
 
@@ -546,42 +549,12 @@ COINGECKO_IDS = {
 }
 
 def get_candles(symbol, interval="1h", limit=150):
-    """Свечи: Futures → Spot → CoinGecko OHLC"""
-    # 1. Binance Futures
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=10
-        )
-        data = r.json()
-        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
-            return [{"open": float(c[1]), "high": float(c[2]),
-                     "low": float(c[3]), "close": float(c[4]),
-                     "volume": float(c[5])} for c in data]
-    except Exception as e:
-        logging.warning(f"Futures klines {symbol}: {e}")
+    """Свечи: CoinGecko (основной) → Binance Futures → Binance Spot"""
 
-    # 2. Binance Spot
-    try:
-        r = requests.get(
-            f"{BINANCE}/api/v3/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=10
-        )
-        data = r.json()
-        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
-            return [{"open": float(c[1]), "high": float(c[2]),
-                     "low": float(c[3]), "close": float(c[4]),
-                     "volume": float(c[5])} for c in data]
-    except Exception as e:
-        logging.warning(f"Spot klines {symbol}: {e}")
-
-    # 3. CoinGecko OHLC
+    # 1. CoinGecko OHLC — первый и основной (работает без ограничений)
     cg_id = COINGECKO_IDS.get(symbol)
     if cg_id:
         try:
-            # days зависит от interval
             days_map = {"5m": 1, "15m": 1, "1h": 7, "4h": 30, "1d": 90}
             days = days_map.get(interval, 7)
             r = requests.get(
@@ -592,19 +565,45 @@ def get_candles(symbol, interval="1h", limit=150):
             )
             data = r.json()
             if isinstance(data, list) and len(data) > 5:
-                candles = []
-                for c in data[-limit:]:
-                    # CoinGecko: [timestamp, open, high, low, close]
-                    candles.append({
-                        "open": float(c[1]), "high": float(c[2]),
-                        "low": float(c[3]), "close": float(c[4]),
-                        "volume": 0.0
-                    })
-                if candles:
-                    logging.info(f"Свечи CoinGecko: {symbol} {len(candles)} шт")
-                    return candles
+                candles = [{"open": float(c[1]), "high": float(c[2]),
+                            "low": float(c[3]), "close": float(c[4]),
+                            "volume": 0.0} for c in data[-limit:]]
+                logging.info(f"Свечи CoinGecko: {symbol} {interval} {len(candles)}шт")
+                return candles
         except Exception as e:
             logging.warning(f"CoinGecko OHLC {symbol}: {e}")
+
+    # 2. Binance Futures (короткий таймаут)
+    try:
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=5
+        )
+        data = r.json()
+        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
+            logging.info(f"Свечи Binance Futures: {symbol}")
+            return [{"open": float(c[1]), "high": float(c[2]),
+                     "low": float(c[3]), "close": float(c[4]),
+                     "volume": float(c[5])} for c in data]
+    except Exception as e:
+        logging.warning(f"Futures klines {symbol}: {e}")
+
+    # 3. Binance Spot (короткий таймаут)
+    try:
+        r = requests.get(
+            f"{BINANCE}/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=5
+        )
+        data = r.json()
+        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
+            logging.info(f"Свечи Binance Spot: {symbol}")
+            return [{"open": float(c[1]), "high": float(c[2]),
+                     "low": float(c[3]), "close": float(c[4]),
+                     "volume": float(c[5])} for c in data]
+    except Exception as e:
+        logging.warning(f"Spot klines {symbol}: {e}")
 
     logging.error(f"Нет свечей для {symbol} {interval}")
     return []
@@ -2744,13 +2743,19 @@ def scan_diagnostics(symbol):
 async def handle_callback(callback: CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
     if data == "menu_back":
         await callback.message.edit_text("Главное меню 👇", reply_markup=main_menu())
 
     elif data == "menu_scan":
-        await callback.message.edit_text("Выбери монету:", reply_markup=pairs_keyboard("scan"))
+        try:
+            await callback.message.edit_text("Выбери монету:", reply_markup=pairs_keyboard("scan"))
+        except Exception:
+            await callback.message.answer("Выбери монету:", reply_markup=pairs_keyboard("scan"))
 
     elif data == "menu_market":
         await callback.message.edit_text("📊 Собираю данные рынка...")
@@ -3475,24 +3480,16 @@ def full_scan_raw(symbol):
 
 # ===== MAIN =====
 
-async def main():
+async def on_startup(app):
     init_db()
-    threading.Thread(target=run_server, daemon=True).start()
-
-    # Убиваем старые сессии ПЕРВЫМ ДЕЛОМ
-    for attempt in range(3):
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            logging.info(f"Webhook удалён (попытка {attempt+1})")
-            break
-        except Exception as e:
-            logging.warning(f"delete_webhook попытка {attempt+1}: {e}")
-            await asyncio.sleep(2)
-
-    await asyncio.sleep(3)
-
-    # Прогреваем кэш пар в фоне
     threading.Thread(target=get_top_pairs, daemon=True).start()
+
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+    if WEBHOOK_URL:
+        await bot.set_webhook(f"{WEBHOOK_URL}/webhook", drop_pending_updates=True)
+        logging.info(f"Webhook установлен: {WEBHOOK_URL}/webhook")
+    else:
+        logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_scan_job, "interval", minutes=30)
@@ -3502,8 +3499,64 @@ async def main():
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
     scheduler.add_job(realtime_pump_detector, "interval", minutes=5)
     scheduler.start()
-    logging.info("APEX запущен! Топ-50 пар, накопление + SMC")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    logging.info("APEX запущен!")
+
+
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    logging.info("Webhook удалён")
+
+
+def main():
+    init_db()
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+
+    if WEBHOOK_URL:
+        # Webhook режим — решает TelegramConflictError навсегда
+        app = web.Application()
+        app.on_startup.append(on_startup)
+        app.on_shutdown.append(on_shutdown)
+
+        # Health check endpoint
+        async def health(request):
+            return web.Response(text="APEX OK")
+        app.router.add_get("/", health)
+        app.router.add_get("/health", health)
+
+        # Webhook handler
+        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+        setup_application(app, dp, bot=bot)
+
+        port = int(os.environ.get("PORT", 10000))
+        logging.info(f"Запуск в webhook режиме на порту {port}")
+        web.run_app(app, host="0.0.0.0", port=port)
+    else:
+        # Polling режим — fallback если нет WEBHOOK_URL
+        async def polling_main():
+            init_db()
+            threading.Thread(target=get_top_pairs, daemon=True).start()
+            for attempt in range(3):
+                try:
+                    await bot.delete_webhook(drop_pending_updates=True)
+                    logging.info(f"Webhook удалён (попытка {attempt+1})")
+                    break
+                except Exception as e:
+                    logging.warning(f"delete_webhook: {e}")
+                    await asyncio.sleep(2)
+            await asyncio.sleep(2)
+            scheduler = AsyncIOScheduler()
+            scheduler.add_job(auto_scan_job, "interval", minutes=30)
+            scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+            scheduler.add_job(auto_research, "interval", hours=2)
+            scheduler.add_job(check_alerts, "interval", minutes=5)
+            scheduler.add_job(night_brain_tasks, "interval", hours=4)
+            scheduler.add_job(realtime_pump_detector, "interval", minutes=5)
+            scheduler.start()
+            logging.info("APEX запущен в polling режиме")
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+        asyncio.run(polling_main())
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
