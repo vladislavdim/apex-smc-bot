@@ -254,8 +254,10 @@ def get_top_pairs(limit=50):
     try:
         r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=15)
         tickers = r.json()
-        # Фильтруем только USDT пары, сортируем по объёму
-        usdt = [t for t in tickers if t["symbol"].endswith("USDT")]
+        # API может вернуть список или dict (если запрошен один символ)
+        if isinstance(tickers, dict):
+            tickers = [tickers]
+        usdt = [t for t in tickers if isinstance(t, dict) and t.get("symbol", "").endswith("USDT")]
         usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
         pairs_cache = [t["symbol"] for t in usdt[:limit]]
         pairs_cache_time = time.time()
@@ -3194,6 +3196,13 @@ async def main():
     # Прогреваем кэш пар при старте
     threading.Thread(target=get_top_pairs, daemon=True).start()
 
+    # Убиваем старые сессии и вебхуки — решает TelegramConflictError
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Webhook удалён, очередь обновлений очищена")
+    except Exception as e:
+        logging.warning(f"delete_webhook: {e}")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_scan_job, "interval", minutes=30)
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
@@ -3203,7 +3212,7 @@ async def main():
     scheduler.add_job(realtime_pump_detector, "interval", minutes=5)
     scheduler.start()
     logging.info("APEX запущен! Топ-50 пар, накопление + SMC")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
     asyncio.run(main())
