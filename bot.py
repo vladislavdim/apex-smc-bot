@@ -45,9 +45,6 @@ def run_server():
 # ===== DATABASE =====
 
 def init_db():
-    # Добавляем проверку на наличие свечей для ETHUSDT 1h
-    if not (groq_client.get_candles(symbol='ETHUSDT', timeframe='1h') or groq_client.get_candles(symbol='BTCUSDT', timeframe='1h') or groq_client.get_candles(symbol='BTCUSDT', timeframe='4h') or groq_client.get_candles(symbol='BNBUSDT', timeframe='5m')):
-        logging.error('Нет свечей для ETHUSDT 1h')
     conn = sqlite3.connect("brain.db")
     c = conn.cursor()
 
@@ -300,22 +297,34 @@ price_cache = {}
 last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
-def get_top_pairs(limit=50):
+def get_top_pairs(limit=100):
     """Топ-N пар по объёму: Bybit → Binance Futures → Binance Spot"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache
 
+    # Принудительные монеты — всегда в списке первыми
+    FORCED = [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+        "TONUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
+        "ADAUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT", "ATOMUSDT",
+        "NEARUSDT", "INJUSDT", "SUIUSDT", "APTUSDT", "OPUSDT",
+        "UNIUSDT", "PEPEUSDT", "SHIBUSDT", "TRXUSDT", "XLMUSDT",
+        "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
+    ]
+
     # 1. Bybit
     try:
         r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=10)
         data = r.json()["result"]["list"]
-        data.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-        top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
-        if top:
-            pairs_cache = top
+        data.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+        bybit_top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
+        if bybit_top:
+            # Объединяем: сначала форсированные, потом остальные по объёму
+            combined = list(dict.fromkeys(FORCED + bybit_top))[:limit]
+            pairs_cache = combined
             pairs_cache_time = time.time()
-            logging.info(f"Пары Bybit: {len(top)} шт, топ: {top[:3]}")
+            logging.info(f"Пары Bybit: {len(combined)} шт, топ: {combined[:5]}")
             return pairs_cache
     except Exception as e:
         logging.warning(f"Bybit tickers: {e}")
@@ -329,14 +338,15 @@ def get_top_pairs(limit=50):
                 data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
                 top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
                 if top:
-                    pairs_cache = top
+                    combined = list(dict.fromkeys(FORCED + top))[:limit]
+                    pairs_cache = combined
                     pairs_cache_time = time.time()
                     return pairs_cache
         except:
             continue
 
     logging.warning("get_top_pairs: используем fallback список")
-    return pairs_cache if pairs_cache else PAIRS
+    return pairs_cache if pairs_cache else FORCED
 
 # Обратная совместимость
 PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
@@ -614,26 +624,92 @@ COINGECKO_IDS = {
 
 # Псевдонимы монет для распознавания в тексте
 SYMBOL_ALIASES = {
+    # BTC
     "btc": "BTCUSDT", "биткоин": "BTCUSDT", "бтк": "BTCUSDT", "bitcoin": "BTCUSDT",
+    "биток": "BTCUSDT", "битка": "BTCUSDT", "бит": "BTCUSDT",
+    # ETH
     "eth": "ETHUSDT", "эфир": "ETHUSDT", "эфириум": "ETHUSDT", "ethereum": "ETHUSDT",
+    "эф": "ETHUSDT", "ефир": "ETHUSDT",
+    # SOL
     "sol": "SOLUSDT", "соль": "SOLUSDT", "солана": "SOLUSDT", "solana": "SOLUSDT",
-    "bnb": "BNBUSDT", "бнб": "BNBUSDT",
-    "xrp": "XRPUSDT", "рипл": "XRPUSDT", "ripple": "XRPUSDT",
-    "doge": "DOGEUSDT", "додж": "DOGEUSDT", "dogecoin": "DOGEUSDT",
-    "avax": "AVAXUSDT", "авакс": "AVAXUSDT",
-    "link": "LINKUSDT", "линк": "LINKUSDT",
-    "ton": "TONUSDT", "тон": "TONUSDT",
-    "arb": "ARBUSDT", "арб": "ARBUSDT",
-    "sui": "SUIUSDT", "dot": "DOTUSDT", "полкадот": "DOTUSDT",
-    "ada": "ADAUSDT", "кардано": "ADAUSDT",
-    "matic": "MATICUSDT", "матик": "MATICUSDT",
-    "ltc": "LTCUSDT", "лайткоин": "LTCUSDT",
-    "atom": "ATOMUSDT", "near": "NEARUSDT",
+    "сол": "SOLUSDT",
+    # BNB
+    "bnb": "BNBUSDT", "бнб": "BNBUSDT", "бинанс коин": "BNBUSDT",
+    # XRP
+    "xrp": "XRPUSDT", "рипл": "XRPUSDT", "ripple": "XRPUSDT", "хрп": "XRPUSDT",
+    "xrpusdt": "XRPUSDT",
+    # DOGE
+    "doge": "DOGEUSDT", "додж": "DOGEUSDT", "dogecoin": "DOGEUSDT", "доге": "DOGEUSDT",
+    # AVAX
+    "avax": "AVAXUSDT", "авакс": "AVAXUSDT", "avalanche": "AVAXUSDT",
+    # LINK
+    "link": "LINKUSDT", "линк": "LINKUSDT", "chainlink": "LINKUSDT",
+    # TON
+    "ton": "TONUSDT", "тон": "TONUSDT", "toncoin": "TONUSDT", "тонкоин": "TONUSDT",
+    # ARB
+    "arb": "ARBUSDT", "арб": "ARBUSDT", "arbitrum": "ARBUSDT",
+    # SUI
+    "sui": "SUIUSDT", "суи": "SUIUSDT",
+    # DOT
+    "dot": "DOTUSDT", "полкадот": "DOTUSDT", "polkadot": "DOTUSDT",
+    # ADA
+    "ada": "ADAUSDT", "кардано": "ADAUSDT", "cardano": "ADAUSDT",
+    # MATIC / POL
+    "matic": "MATICUSDT", "матик": "MATICUSDT", "polygon": "MATICUSDT",
+    # LTC
+    "ltc": "LTCUSDT", "лайткоин": "LTCUSDT", "litecoin": "LTCUSDT",
+    # ATOM
+    "atom": "ATOMUSDT", "космос": "ATOMUSDT", "cosmos": "ATOMUSDT",
+    # NEAR
+    "near": "NEARUSDT", "ниар": "NEARUSDT",
+    # PEPE
     "pepe": "PEPEUSDT", "пепе": "PEPEUSDT",
-    "shib": "SHIBUSDT", "шиб": "SHIBUSDT",
-    "trx": "TRXUSDT", "трон": "TRXUSDT",
-    "wif": "WIFUSDT", "render": "RENDERUSDT", "fet": "FETUSDT",
-    "inj": "INJUSDT", "apt": "APTUSDT", "op": "OPUSDT",
+    # SHIB
+    "shib": "SHIBUSDT", "шиб": "SHIBUSDT", "shiba": "SHIBUSDT",
+    # TRX
+    "trx": "TRXUSDT", "трон": "TRXUSDT", "tron": "TRXUSDT",
+    # WIF
+    "wif": "WIFUSDT",
+    # RENDER
+    "render": "RENDERUSDT", "рендер": "RENDERUSDT",
+    # FET
+    "fet": "FETUSDT", "fetch": "FETUSDT",
+    # INJ
+    "inj": "INJUSDT", "injective": "INJUSDT",
+    # APT
+    "apt": "APTUSDT", "aptos": "APTUSDT",
+    # OP
+    "op": "OPUSDT", "optimism": "OPUSDT",
+    # UNI
+    "uni": "UNIUSDT", "uniswap": "UNIUSDT", "юни": "UNIUSDT",
+    # STX
+    "stx": "STXUSDT", "stacks": "STXUSDT",
+    # HBAR
+    "hbar": "HBARUSDT", "hedera": "HBARUSDT",
+    # XLM
+    "xlm": "XLMUSDT", "stellar": "XLMUSDT", "стеллар": "XLMUSDT",
+    # LDO
+    "ldo": "LDOUSDT", "lido": "LDOUSDT",
+    # AAVE
+    "aave": "AAVEUSDT", "аав": "AAVEUSDT",
+    # MKR
+    "mkr": "MKRUSDT", "maker": "MKRUSDT",
+    # CRV
+    "crv": "CRVUSDT", "curve": "CRVUSDT",
+    # FLOKI
+    "floki": "FLOKIUSDT", "флоки": "FLOKIUSDT",
+    # BONK
+    "bonk": "BONKUSDT", "бонк": "BONKUSDT",
+    # JUP
+    "jup": "JUPUSDT", "jupiter": "JUPUSDT",
+    # SEI
+    "sei": "SEIUSDT",
+    # TIA
+    "tia": "TIAUSDT", "celestia": "TIAUSDT",
+    # PYTH
+    "pyth": "PYTHUSDT",
+    # WLD
+    "wld": "WLDUSDT", "worldcoin": "WLDUSDT",
 }
 
 def get_candles(symbol, interval="1h", limit=200):
@@ -724,7 +800,7 @@ def get_candles(symbol, interval="1h", limit=200):
         candle_cache[cache_key] = (cc_candles, time.time())
         return cc_candles
 
-    logging.error(f"Нет свечей для {symbol} {interval}")
+    logging.warning(f"Нет свечей для {symbol} {interval}")
     return []
 
 
@@ -737,6 +813,143 @@ def get_orderbook(symbol):
         return {"bids": bids, "asks": asks, "bias": "BUY" if bids > asks else "SELL"}
     except:
         return None
+
+
+def get_historical_context(symbol, timeframe="1d"):
+    """
+    Анализ истории монеты — на каком уровне мы сейчас:
+    - ATH / ATL за доступный период
+    - Текущий уровень: где мы относительно хая/лоя (% от ATH)
+    - Тренд: нисходящий / восходящий / боковик
+    - Ключевые исторические уровни поддержки/сопротивления
+    - Фаза рынка: накопление / распределение / рост / падение
+    """
+    try:
+        # Берём 200 дневных свечей (~8 месяцев истории)
+        candles = get_candles(symbol, "1d", 200)
+        if len(candles) < 30:
+            # Fallback — недельный TF
+            candles = get_candles(symbol, "4h", 200)
+        if len(candles) < 20:
+            return None
+
+        closes = [c["close"] for c in candles]
+        highs = [c["high"] for c in candles]
+        lows = [c["low"] for c in candles]
+        current = closes[-1]
+
+        # ATH / ATL за период
+        period_high = max(highs)
+        period_low = min(lows)
+
+        # % от ATH и ATL
+        pct_from_ath = round((current - period_high) / period_high * 100, 1)
+        pct_from_atl = round((current - period_low) / period_low * 100, 1)
+
+        # Тренд за последние 50 свечей
+        if len(closes) >= 50:
+            ma50 = sum(closes[-50:]) / 50
+            ma20 = sum(closes[-20:]) / 20
+            ma10 = sum(closes[-10:]) / 10
+        else:
+            ma50 = ma20 = ma10 = current
+
+        # Определяем тренд
+        if ma10 > ma20 > ma50:
+            trend = "ВОСХОДЯЩИЙ ↗️"
+            trend_key = "uptrend"
+        elif ma10 < ma20 < ma50:
+            trend = "НИСХОДЯЩИЙ ↘️"
+            trend_key = "downtrend"
+        elif abs(ma10 - ma50) / ma50 * 100 < 3:
+            trend = "БОКОВИК ↔️"
+            trend_key = "sideways"
+        else:
+            trend = "ПЕРЕХОДНЫЙ ⚡️"
+            trend_key = "transition"
+
+        # Ключевые уровни — смотрим на кластеры объёма и экстремумы
+        # Разбиваем диапазон на 10 зон, ищем где больше всего свечей
+        price_range = period_high - period_low
+        zone_size = price_range / 10
+        zones = {}
+        for c in candles:
+            zone = int((c["close"] - period_low) / zone_size)
+            zone = max(0, min(9, zone))
+            zones[zone] = zones.get(zone, 0) + 1
+
+        # Топ-3 зоны по плотности = ключевые уровни
+        top_zones = sorted(zones.items(), key=lambda x: x[1], reverse=True)[:3]
+        key_levels = []
+        for z, count in top_zones:
+            level = period_low + z * zone_size + zone_size / 2
+            key_levels.append(round(level, 4 if current < 10 else 2))
+
+        key_levels.sort()
+
+        # Ближайшая поддержка и сопротивление из ключевых уровней
+        support = max([l for l in key_levels if l < current], default=period_low)
+        resistance = min([l for l in key_levels if l > current], default=period_high)
+
+        # Фаза рынка
+        if pct_from_ath > -10:
+            phase = "📈 У ХАЁВ — возможен разворот"
+            phase_key = "near_high"
+        elif pct_from_ath > -30:
+            phase = "💪 СИЛЬНАЯ ЗОНА — выше середины"
+            phase_key = "strong"
+        elif pct_from_ath > -60:
+            phase = "⚖️ СРЕДНЯЯ ЗОНА — середина диапазона"
+            phase_key = "middle"
+        elif pct_from_ath > -80:
+            phase = "🔍 ЗОНА НАКОПЛЕНИЯ — возможен разворот вверх"
+            phase_key = "accumulation"
+        else:
+            phase = "💎 ГЛУБОКИЙ ЛОУ — экстремальное значение"
+            phase_key = "deep_low"
+
+        # Последние 5 и 20 свечей — краткосрочный momentum
+        change_5 = round((closes[-1] - closes[-5]) / closes[-5] * 100, 2) if len(closes) >= 5 else 0
+        change_20 = round((closes[-1] - closes[-20]) / closes[-20] * 100, 2) if len(closes) >= 20 else 0
+
+        return {
+            "current": current,
+            "period_high": period_high,
+            "period_low": period_low,
+            "pct_from_ath": pct_from_ath,
+            "pct_from_atl": pct_from_atl,
+            "trend": trend,
+            "trend_key": trend_key,
+            "phase": phase,
+            "phase_key": phase_key,
+            "support": support,
+            "resistance": resistance,
+            "key_levels": key_levels,
+            "change_5": change_5,
+            "change_20": change_20,
+            "candles_count": len(candles),
+        }
+    except Exception as e:
+        logging.warning(f"get_historical_context {symbol}: {e}")
+        return None
+
+
+def format_historical_context(symbol, hist):
+    """Форматируем исторический контекст для сигнала"""
+    if not hist:
+        return ""
+    p = hist["current"]
+    fmt = lambda x: f"${x:,.4f}" if x < 1 else f"${x:,.3f}" if x < 100 else f"${x:,.2f}"
+    return (
+        f"📈 <b>Исторический контекст ({hist['candles_count']} свечей):</b>\n"
+        f"🏔 Хай периода: <code>{fmt(hist['period_high'])}</code> ({hist['pct_from_ath']:+.1f}% от него)\n"
+        f"🏔 Лоу периода: <code>{fmt(hist['period_low'])}</code> (+{hist['pct_from_atl']:.1f}% от него)\n"
+        f"📊 Тренд: <b>{hist['trend']}</b>\n"
+        f"🎯 Фаза: {hist['phase']}\n"
+        f"🛡 Ближ. поддержка: <code>{fmt(hist['support'])}</code>\n"
+        f"⚡️ Ближ. сопротивление: <code>{fmt(hist['resistance'])}</code>\n"
+        f"📉 Изм. за 5 свечей: {hist['change_5']:+.2f}% | за 20: {hist['change_20']:+.2f}%"
+    )
 
 # ===== SMC ENGINE =====
 
@@ -797,125 +1010,6 @@ def detect_events(candles, classified):
             events.append({"type": "BIAS", "direction": "BEARISH", "level": 0})
 
     return events
-
-def market_structure_analysis(symbol):
-    """
-    Исторический анализ монеты:
-    - Тренд по 200 свечам (1d)
-    - Где мы сейчас относительно 30/90-дневного диапазона
-    - Ключевые уровни поддержки/сопротивления
-    - Глобальный тренд: восходящий/нисходящий/боковик
-    """
-    try:
-        candles_1d = get_candles(symbol, "1d", 200)
-        candles_4h = get_candles(symbol, "4h", 100)
-
-        if len(candles_1d) < 30:
-            return None
-
-        closes = [c["close"] for c in candles_1d]
-        highs  = [c["high"]  for c in candles_1d]
-        lows   = [c["low"]   for c in candles_1d]
-
-        current = closes[-1]
-
-        # Диапазоны
-        high_30  = max(highs[-30:])
-        low_30   = min(lows[-30:])
-        high_90  = max(highs[-90:]) if len(highs) >= 90 else max(highs)
-        low_90   = min(lows[-90:])  if len(lows)  >= 90 else min(lows)
-        high_all = max(highs)
-        low_all  = min(lows)
-
-        # Позиция в диапазоне (0% = дно, 100% = вершина)
-        range_30 = high_30 - low_30
-        pos_30 = round((current - low_30) / range_30 * 100, 1) if range_30 > 0 else 50
-
-        range_90 = high_90 - low_90
-        pos_90 = round((current - low_90) / range_90 * 100, 1) if range_90 > 0 else 50
-
-        range_all = high_all - low_all
-        pos_all = round((current - low_all) / range_all * 100, 1) if range_all > 0 else 50
-
-        # Глобальный тренд — скользящие средние
-        ma50  = sum(closes[-50:]) / 50  if len(closes) >= 50  else sum(closes) / len(closes)
-        ma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else sum(closes) / len(closes)
-
-        if current > ma50 > ma200:
-            global_trend = "📈 ВОСХОДЯЩИЙ"
-            trend_short = "UP"
-        elif current < ma50 < ma200:
-            global_trend = "📉 НИСХОДЯЩИЙ"
-            trend_short = "DOWN"
-        elif current > ma200:
-            global_trend = "↗️ ВЫШЕ MA200 (бычья зона)"
-            trend_short = "ABOVE_MA200"
-        else:
-            global_trend = "↘️ НИЖЕ MA200 (медвежья зона)"
-            trend_short = "BELOW_MA200"
-
-        # Локальный тренд — последние 14 свечей 4h
-        if len(candles_4h) >= 14:
-            local_closes = [c["close"] for c in candles_4h[-14:]]
-            if local_closes[-1] > local_closes[0] * 1.02:
-                local_trend = "📈 локальный рост"
-            elif local_closes[-1] < local_closes[0] * 0.98:
-                local_trend = "📉 локальное падение"
-            else:
-                local_trend = "➡️ боковик"
-        else:
-            local_trend = "—"
-
-        # Ключевые уровни — пики и впадины на дневках
-        resistance_levels = sorted(set([round(h, 2) for h in highs[-60:] if h > current]), reverse=True)[:3]
-        support_levels    = sorted(set([round(l, 2) for l in lows[-60:]  if l < current]), reverse=False)[:3]
-
-        # Зона: перекуплен/перепродан/нейтрал
-        if pos_30 > 75:
-            zone = "🔴 у верхней границы 30д"
-        elif pos_30 < 25:
-            zone = "🟢 у нижней границы 30д"
-        else:
-            zone = "🟡 середина диапазона"
-
-        return {
-            "symbol": symbol,
-            "current": current,
-            "global_trend": global_trend,
-            "trend_short": trend_short,
-            "local_trend": local_trend,
-            "pos_30": pos_30,
-            "pos_90": pos_90,
-            "pos_all": pos_all,
-            "zone": zone,
-            "high_30": high_30,
-            "low_30": low_30,
-            "high_90": high_90,
-            "low_90": low_90,
-            "ma50": round(ma50, 4),
-            "ma200": round(ma200, 4),
-            "resistance": resistance_levels,
-            "support": support_levels,
-        }
-    except Exception as e:
-        logging.warning(f"market_structure_analysis {symbol}: {e}")
-        return None
-
-def format_market_structure(ms):
-    """Форматирует исторический анализ для Telegram"""
-    if not ms:
-        return ""
-    res = "  ".join([f"<code>{r}</code>" for r in ms["resistance"][:2]]) if ms["resistance"] else "—"
-    sup = "  ".join([f"<code>{s}</code>" for s in ms["support"][:2]])    if ms["support"]    else "—"
-    return (
-        f"\n📊 <b>Исторический контекст</b>\n"
-        f"Тренд: {ms['global_trend']} | {ms['local_trend']}\n"
-        f"Позиция: {ms['pos_30']}% от 30д диапазона — {ms['zone']}\n"
-        f"За 90 дней: {ms['pos_90']}% | За всё время: {ms['pos_all']}%\n"
-        f"MA50: <code>{ms['ma50']}</code> | MA200: <code>{ms['ma200']}</code>\n"
-        f"Сопротивление: {res}\n"
-        f"Поддержка: {sup}\n"
-    )
 
 def find_ob(candles, direction):
     for i in range(len(candles) - 2, max(0, len(candles) - 25), -1):
@@ -1480,15 +1574,9 @@ def full_scan(symbol, timeframe="1h"):
         # ── 8. Предупреждение об экономических событиях ──
         econ_warn = f"\n⚠️ <b>Макро:</b> {econ}\n" if econ else ""
 
-        # ── 9. Исторический анализ ──
-        ms = market_structure_analysis(symbol)
-        ms_text = format_market_structure(ms) if ms else ""
-        trend_warning = ""
-        if ms:
-            if direction == "BULLISH" and ms["trend_short"] == "DOWN":
-                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
-            elif direction == "BEARISH" and ms["trend_short"] == "UP":
-                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
+        # ── 9. Исторический контекст ──
+        hist = get_historical_context(symbol)
+        hist_text = "\n" + format_historical_context(symbol, hist) + "\n" if hist else ""
 
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
@@ -1510,9 +1598,8 @@ def full_scan(symbol, timeframe="1h"):
             f"🧠 <b>Режим рынка:</b> {regime['mode']} ({regime['direction']})\n"
             f"{econ_warn}"
             f"❌ <b>Инвалидация:</b> {inv_text}\n\n"
-            f"📋 <b>Confluence [{total_weight}/100]:</b>\n{conf_text}\n\n"
-            f"{ms_text}"
-            f"{trend_warning}"
+            f"📋 <b>Confluence [{total_weight}/100]:</b>\n{conf_text}\n"
+            f"{hist_text}\n"
             f"💬 <b>APEX думает:</b>\n<i>{signal_comment}</i>\n"
             f"{'━'*26}"
         )
@@ -4613,42 +4700,28 @@ async def auto_scan_job():
             except:
                 pass
 
-    # Обязательные монеты всегда в начале списка
-    MUST_HAVE = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-                 "TONUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT", "AVAXUSDT",
-                 "LINKUSDT", "DOTUSDT", "NEARUSDT", "ARBUSDT", "INJUSDT"]
-
     pairs = get_top_pairs(100)
-    # Добавляем обязательные в начало если их нет
-    for m in reversed(MUST_HAVE):
-        if m not in pairs:
-            pairs.insert(0, m)
-        else:
-            pairs.remove(m)
-            pairs.insert(0, m)
-
     mega_signals = []
-    sent_symbols = set()
 
-    # Сканируем все пары по всем таймфреймам
+    # Сканируем все пары — ищем только МЕГА ТОП
     for symbol in pairs:
-        if symbol in sent_symbols:
-            continue
         try:
             sig_data = full_scan_raw(symbol, "1h")
             if sig_data and sig_data["grade"] == "МЕГА ТОП":
-                mega_signals.append(sig_data)
-                sent_symbols.add(symbol)
+                # Не дублируем символ
+                existing = [s for s in mega_signals if s["symbol"] == symbol]
+                if not existing:
+                    mega_signals.append(sig_data)
             await asyncio.sleep(0.2)
         except:
             pass
 
-    logging.info(f"Скан 15м: {len(pairs)} пар | 🔥🔥🔥 МЕГА ТОП: {len(mega_signals)}")
+    logging.info(f"Скан 15мин: {len(pairs)} пар | 🔥🔥🔥 МЕГА ТОП: {len(mega_signals)}")
 
     if not ADMIN_ID:
         return
 
-    # Присылаем только МЕГА ТОП
+    # Отправляем только МЕГА ТОП — без спама
     for sd in mega_signals[:5]:
         try:
             await bot.send_message(ADMIN_ID, sd["text"], parse_mode="HTML")
@@ -4746,18 +4819,6 @@ def full_scan_raw(symbol, timeframe="1h"):
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
-        # Исторический анализ
-        ms = market_structure_analysis(symbol)
-        ms_text = format_market_structure(ms) if ms else ""
-
-        # Предупреждение если торгуем против глобального тренда
-        trend_warning = ""
-        if ms:
-            if direction == "BULLISH" and ms["trend_short"] == "DOWN":
-                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
-            elif direction == "BEARISH" and ms["trend_short"] == "UP":
-                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
-
         text = (
             f"{'━'*26}\n"
             f"{mtf['grade_emoji']} <b>{mtf['grade']}</b> [{tf_label}]\n"
@@ -4773,8 +4834,6 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
             f"📋 <b>Confluence:</b>\n{conf_text}\n"
-            f"{ms_text}"
-            f"{trend_warning}"
             f"{'━'*26}"
         )
 
@@ -4850,82 +4909,64 @@ def github_push_patch(new_code, sha, commit_message):
 
 async def analyze_and_patch(error_text, error_source="runtime"):
     """
-    Авто-патч без разрешения:
-    1. Читает код из GitHub
-    2. Groq анализирует ошибку
-    3. Применяет исправление сразу и пушит в GitHub
-    4. Никаких уведомлений в Telegram
+    Авто-патч без разрешения — тихо чинит и деплоит.
+    Высокий риск — пропускает. Низкий/средний — применяет автоматически.
     """
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return
 
-    # Читаем текущий код
-    current_code, sha = github_get_file()
-    if not current_code:
-        return
+    try:
+        current_code, sha = github_get_file()
+        if not current_code:
+            return
 
-    # Groq анализирует ошибку и предлагает исправление
-    prompt = f"""Ты senior Python разработчик. В боте произошла ошибка.
+        prompt = f"""Ты senior Python разработчик. В боте произошла ошибка.
 
 ОШИБКА:
 {error_text[:800]}
 
-КОД (первые 3000 символов для контекста):
+КОД (первые 3000 символов):
 {current_code[:3000]}
 
-Задача:
-1. Найди причину ошибки
-2. Предложи минимальное исправление
-3. Верни ТОЛЬКО JSON:
-{{"description": "что исправлено (1-2 предложения)", "search": "точный текст который нужно заменить", "replace": "исправленный текст", "risk": "low/medium/high"}}
+Верни ТОЛЬКО JSON:
+{{"description": "что исправлено (1 предложение)", "search": "точный уникальный фрагмент для замены", "replace": "исправленный фрагмент", "risk": "low/medium/high"}}"""
 
-Важно: search должен быть уникальным фрагментом кода который встречается ОДИН раз."""
+        response = ask_groq(prompt, max_tokens=800)
+        if not response:
+            return
 
-    response = ask_groq(prompt, max_tokens=800)
-    if not response:
-        return
-
-    # Парсим ответ
-    try:
         clean = response.strip().replace("```json", "").replace("```", "").strip()
         start = clean.find("{")
         end = clean.rfind("}") + 1
+        if start < 0 or end <= start:
+            return
         patch_data = json.loads(clean[start:end])
+
+        search_text = patch_data.get("search", "")
+        replace_text = patch_data.get("replace", "")
+        description = patch_data.get("description", "auto-fix")
+        risk = patch_data.get("risk", "high")
+
+        # Высокий риск — не применяем автоматически
+        if risk == "high":
+            logging.warning(f"Auto-patch skipped (high risk): {description}")
+            return
+
+        if not search_text or search_text not in current_code:
+            return
+
+        new_code = current_code.replace(search_text, replace_text, 1)
+        success, commit_sha = github_push_patch(
+            new_code, sha,
+            f"🤖 APEX auto-fix: {description[:60]}"
+        )
+        if success:
+            logging.info(f"Auto-patch OK: {description} | {commit_sha}")
+        else:
+            logging.error(f"Auto-patch push failed: {commit_sha}")
+
     except Exception as e:
-        logging.warning(f"auto_patch: Groq вернул некорректный JSON: {e}")
-        return
-
-    search_text = patch_data.get("search", "")
-    replace_text = patch_data.get("replace", "")
-    description = patch_data.get("description", "нет описания")
-    risk = patch_data.get("risk", "unknown")
-
-    # Пропускаем высокорискованные патчи
-    if risk == "high":
-        logging.warning(f"auto_patch: пропускаем high-risk патч: {description}")
-        return
-
-    if not search_text or search_text not in current_code:
-        logging.warning(f"auto_patch: фрагмент не найден в коде: {description}")
-        return
-
-    # Если search == replace — патч бесполезен, пропускаем
-    if search_text.strip() == replace_text.strip():
-        logging.warning(f"auto_patch: search == replace, пропускаем: {description}")
-        return
-
-    new_code = current_code.replace(search_text, replace_text, 1)
-
-    # Применяем сразу без разрешения
-    success, result = github_push_patch(
-        new_code,
-        sha,
-        f"🤖 APEX auto-fix: {description[:60]}"
-    )
-    if success:
-        logging.info(f"auto_patch: применён и задеплоен — {description}")
-    else:
-        logging.warning(f"auto_patch: не удалось запушить — {result}")
+        logging.error(f"analyze_and_patch error: {e}")
 
 async def apply_patch(patch_id):
     """Применяем патч — пушим в GitHub"""
@@ -4948,31 +4989,37 @@ last_error_time = {}
 error_cooldown = 300  # 5 минут между одинаковыми ошибками
 
 class ErrorCapture(logging.Handler):
-    """Перехватывает ERROR логи и запускает авто-патч (только настоящие ошибки)"""
-    # Фильтр — эти сообщения НЕ патчим (это нормальные ситуации, не баги)
+    """Перехватывает ERROR логи и запускает авто-патч — только реальные ошибки кода"""
+
+    # Эти сообщения — не ошибки кода, игнорируем
     IGNORE_PATTERNS = [
-        "Нет свечей", "нет свечей", "no candles", "пропущен по правилу",
-        "get_top_pairs", "Bybit tickers", "CryptoCompare", "Yahoo Finance",
-        "CoinGecko", "Binance", "timeout", "ConnectionError", "ConnectTimeout",
-        "ReadTimeout", "HTTPError", "fallback", "warning"
+        "нет свечей", "no candles", "свечей для", "klines",
+        "bybit klines", "binance futures", "binance spot", "coingecko",
+        "cryptocompare candles", "yahoo finance", "messari",
+        "tavily", "rss parse", "pump detector",
+        "накопление", "accumulation detect",
     ]
 
     def emit(self, record):
         if record.levelno >= logging.ERROR:
             error_text = self.format(record)
-            # Пропускаем сетевые ошибки и отсутствие данных — это не баги кода
-            for pattern in self.IGNORE_PATTERNS:
-                if pattern.lower() in error_text.lower():
-                    return
-            # Пропускаем если нет Traceback — значит это просто warning уровня ERROR
-            if "Traceback" not in error_text and "Exception" not in error_text:
+            error_lower = error_text.lower()
+
+            # Игнорируем не-ошибки (проблемы с внешними API — это нормально)
+            if any(pattern in error_lower for pattern in self.IGNORE_PATTERNS):
                 return
+
+            # Только реальные ошибки Python — Traceback, Exception
+            if not any(kw in error_text for kw in ["Traceback", "Exception", "Error:", "raise ", "line "]):
+                return
+
             # Дедупликация — не спамим одной ошибкой
             error_key = error_text[:100]
             now = time.time()
             if now - last_error_time.get(error_key, 0) < error_cooldown:
                 return
             last_error_time[error_key] = now
+
             # Запускаем авто-патч асинхронно
             try:
                 loop = asyncio.get_event_loop()
