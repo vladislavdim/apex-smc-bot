@@ -2716,16 +2716,313 @@ def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg
 # ===== AI BRAIN =====
 
 def ask_groq(prompt, max_tokens=800):
+    """
+    Умный запрос к Groq:
+    - Retry при rate limit (до 3 попыток)
+    - Fallback на более лёгкую модель
+    - Сокращает промпт если он слишком большой
+    """
+    # Сокращаем промпт если больше 6000 символов — экономим токены
+    if len(prompt) > 6000:
+        prompt = prompt[:6000] + "\n[промпт сокращён]"
+
+    models = [
+        "llama-3.3-70b-versatile",   # основная
+        "llama-3.1-8b-instant",       # быстрая fallback
+        "mixtral-8x7b-32768",         # резерв
+    ]
+
+    for attempt in range(3):
+        model = models[min(attempt, len(models) - 1)]
+        try:
+            r = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                timeout=30,
+            )
+            return r.choices[0].message.content
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
+                wait = 10 * (attempt + 1)  # 10, 20, 30 сек
+                logging.warning(f"Groq rate limit (попытка {attempt+1}), жду {wait}с...")
+                time.sleep(wait)
+                continue
+            elif "model" in err_str and "not found" in err_str:
+                logging.warning(f"Модель {model} недоступна, пробую следующую")
+                continue
+            else:
+                logging.error(f"Groq error (attempt {attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(5)
+                    continue
+                return None
+
+    logging.error("Groq: все попытки исчерпаны")
+    return None
+
+# ===== APEX BRAIN v2 — АВТОНОМНОЕ САМООБУЧЕНИЕ =====
+# Бот постоянно растёт: читает рынок, запоминает паттерны, строит модель мира
+
+# Кэш для тяжёлых вызовов — не грузим Groq каждый раз
+_groq_cache = {}
+_groq_cache_time = {}
+GROQ_CACHE_TTL = 300  # 5 минут
+
+def ask_groq_cached(prompt, max_tokens=400, cache_key=None):
+    """ask_groq с кэшированием — одинаковые запросы не дублируются"""
+    key = cache_key or prompt[:80]
+    now = time.time()
+    if key in _groq_cache and now - _groq_cache_time.get(key, 0) < GROQ_CACHE_TTL:
+        return _groq_cache[key]
+    result = ask_groq(prompt, max_tokens)
+    if result:
+        _groq_cache[key] = result
+        _groq_cache_time[key] = now
+    return result
+
+
+def search_web_free(query, limit=5):
+    """
+    Поиск в интернете БЕЗ API ключей:
+    1. DuckDuckGo Instant Answer API
+    2. RSS из CoinTelegraph / CoinDesk по теме
+    3. Messari если про монету
+    Возвращает список найденных фактов
+    """
+    results = []
+    query_lower = query.lower()
+
+    # 1. DuckDuckGo
     try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query + " crypto", "format": "json", "no_html": 1, "skip_disambig": 1},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
         )
-        return r.choices[0].message.content
+        data = r.json()
+        if data.get("AbstractText"):
+            results.append(f"[DDG] {data['AbstractText'][:300]}")
+        for item in data.get("RelatedTopics", [])[:3]:
+            if isinstance(item, dict) and item.get("Text"):
+                results.append(f"[DDG] {item['Text'][:200]}")
     except Exception as e:
-        logging.error(f"Groq error: {e}")
+        logging.warning(f"DDG search: {e}")
+
+    # 2. RSS по ключевым словам
+    words = [w for w in query_lower.split() if len(w) > 3][:3]
+    news_sources = [
+        ("https://cointelegraph.com/rss", "CoinTelegraph"),
+        ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
+        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
+    ]
+    for url, name in news_sources[:2]:
+        try:
+            items = parse_rss(url, name, limit=8)
+            relevant = [i for i in items if any(w in i["title"].lower() for w in words)]
+            for item in relevant[:3]:
+                results.append(f"[{name} {item.get('date','')}] {item['title']}")
+        except:
+            pass
+
+    return results[:8]
+
+
+def learn_from_web(topic, save=True):
+    """
+    Автономный цикл обучения:
+    1. Ищет инфу по теме в интернете
+    2. AI извлекает факты и паттерны
+    3. Сохраняет в базу знаний
+    4. Возвращает вывод
+    """
+    try:
+        web_results = search_web_free(topic)
+        if not web_results:
+            return None
+
+        facts_text = "\n".join(web_results)
+        old_knowledge = get_knowledge(topic)
+
+        prompt = f"""Ты APEX — AI трейдер который учится каждый день.
+
+ТЕМА: {topic}
+НАЙДЕНО В ИНТЕРНЕТЕ:
+{facts_text}
+
+{f"УЖЕ ЗНАЮ ОБ ЭТОМ: {old_knowledge[:300]}" if old_knowledge else ""}
+
+Задача: Извлеки КОНКРЕТНЫЕ торговые факты. Верни JSON:
+{{
+  "key_facts": ["факт 1", "факт 2", "факт 3"],
+  "market_impact": "как это влияет на крипту прямо сейчас",
+  "trading_signal": "покупать/продавать/ждать и почему",
+  "new_vs_old": "что изменилось по сравнению с тем что знал раньше"
+}}
+
+Только JSON, без пояснений."""
+
+        response = ask_groq(prompt, max_tokens=400)
+        if not response:
+            return None
+
+        try:
+            clean = response.strip().replace("```json", "").replace("```", "")
+            start = clean.find("{")
+            end = clean.rfind("}") + 1
+            if start >= 0 and end > start:
+                data = json.loads(clean[start:end])
+
+                # Сохраняем в базу знаний
+                if save:
+                    summary = f"Ключевые факты: {'; '.join(data.get('key_facts', [])[:3])}. Влияние: {data.get('market_impact', '')}. Сигнал: {data.get('trading_signal', '')}"
+                    save_knowledge(topic, summary, "web-learning")
+
+                    # Если есть паттерн — сохраняем как правило
+                    signal = data.get("trading_signal", "").lower()
+                    if "покупать" in signal or "лонг" in signal:
+                        save_self_rule("market", f"По теме '{topic}': {data.get('market_impact', '')[:100]}", 0.55, "web-research")
+                    elif "продавать" in signal or "шорт" in signal:
+                        save_self_rule("avoid", f"По теме '{topic}': осторожно — {data.get('market_impact', '')[:80]}", 0.55, "web-research")
+
+                return data
+        except json.JSONDecodeError:
+            # Если не JSON — сохраняем как текст
+            if save and response:
+                save_knowledge(topic, response[:500], "web-learning-raw")
+            return response
+
+    except Exception as e:
+        logging.error(f"learn_from_web {topic}: {e}")
         return None
+
+
+# Темы для автономного изучения — бот сам выбирает по времени суток
+LEARN_TOPICS_MORNING = [
+    "bitcoin price prediction today",
+    "crypto market open analysis",
+    "BTC technical analysis",
+    "altcoin season indicators",
+]
+LEARN_TOPICS_EVENING = [
+    "crypto market summary today",
+    "DXY dollar index impact crypto",
+    "federal reserve interest rates crypto",
+    "ethereum network activity",
+]
+LEARN_TOPICS_ALWAYS = [
+    "solana ecosystem news",
+    "defi total value locked",
+    "bitcoin dominance trend",
+    "crypto fear greed index analysis",
+]
+
+
+async def autonomous_learning_cycle():
+    """
+    Главный цикл автономного обучения — запускается каждые 2 часа.
+    Бот сам выбирает что изучить, ищет в интернете, сохраняет знания.
+    """
+    try:
+        hour = datetime.now().hour
+        if 6 <= hour < 12:
+            topics = LEARN_TOPICS_MORNING
+        elif 18 <= hour < 24:
+            topics = LEARN_TOPICS_EVENING
+        else:
+            topics = LEARN_TOPICS_ALWAYS
+
+        # Изучаем 2 случайные темы
+        import random
+        chosen = random.sample(topics, min(2, len(topics)))
+
+        new_insights = []
+        for topic in chosen:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, learn_from_web, topic, True
+            )
+            if isinstance(result, dict) and result.get("market_impact"):
+                new_insights.append(f"📌 {topic}: {result['market_impact'][:100]}")
+            await asyncio.sleep(3)  # пауза между запросами
+
+        # Самоанализ — что бот узнал за последние 24 часа
+        conn = sqlite3.connect("brain.db")
+        recent_knowledge = conn.execute(
+            "SELECT topic, content FROM knowledge WHERE created_at > datetime('now', '-24 hours') ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+        conn.close()
+
+        if recent_knowledge:
+            # AI строит сводку из всего что узнал
+            knowledge_text = "\n".join([f"• {r[0]}: {r[1][:100]}" for r in recent_knowledge])
+            synthesis = await asyncio.get_event_loop().run_in_executor(
+                None, ask_groq,
+                f"""Ты APEX. Синтезируй что ты узнал за последние 24 часа и сформулируй торговый вывод.
+
+НОВЫЕ ЗНАНИЯ:
+{knowledge_text}
+
+Дай:
+1. Общая картина рынка (1 предложение)
+2. Лучшая возможность прямо сейчас (1 предложение)
+3. Главный риск (1 предложение)""",
+                300
+            )
+            if synthesis:
+                save_knowledge("daily_synthesis", synthesis, "self-synthesis")
+
+        logging.info(f"Автономное обучение: изучено {len(chosen)} тем, правил: {rule_count}")
+
+        if new_insights and ADMIN_ID:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🧠 <b>APEX учится</b>\n\n" + "\n".join(new_insights),
+                parse_mode="HTML"
+            )
+
+    except Exception as e:
+        logging.error(f"autonomous_learning_cycle: {e}")
+
+
+def build_market_worldview():
+    """
+    Строит текущее понимание рынка из всех накопленных знаний.
+    Используется в ask_ai для умных ответов.
+    """
+    try:
+        conn = sqlite3.connect("brain.db")
+        # Последние знания за 48 часов
+        recent = conn.execute(
+            "SELECT topic, content FROM knowledge WHERE created_at > datetime('now', '-48 hours') ORDER BY id DESC LIMIT 15"
+        ).fetchall()
+        # Топ правила
+        top_rules = conn.execute(
+            "SELECT rule FROM self_rules WHERE confidence >= 0.6 ORDER BY confidence DESC LIMIT 5"
+        ).fetchall()
+        # Модели монет
+        models = conn.execute(
+            "SELECT symbol, trend, behavior_notes FROM market_model ORDER BY last_updated DESC LIMIT 5"
+        ).fetchall()
+        conn.close()
+
+        parts = []
+        if recent:
+            facts = "\n".join([f"• {r[0]}: {r[1][:80]}" for r in recent[:8]])
+            parts.append(f"ЧТО Я УЗНАЛ ЗА 48Ч:\n{facts}")
+        if top_rules:
+            rules = "\n".join([f"• {r[0][:80]}" for r in top_rules])
+            parts.append(f"МОИ ПРАВИЛА:\n{rules}")
+        if models:
+            models_text = "\n".join([f"• {m[0]}: {m[1]} — {m[2][:60]}" for m in models])
+            parts.append(f"МОДЕЛИ МОНЕТ:\n{models_text}")
+
+        return "\n\n".join(parts)
+    except:
+        return ""
+
 
 # ===== СИСТЕМА 1: ГЛУБОКИЙ РЕСЁРЧ =====
 # Бот сам ищет инфу в интернете, читает статьи, строит выводы
@@ -3414,12 +3711,14 @@ def ask_ai(user_id, user_name, user_message):
 
     # Контекст самообучения — что бот узнал о рынке
     brain_context = get_brain_context()
+    # ✅ НОВОЕ: Полная картина мира — всё что бот узнал за 48 часов
+    worldview = build_market_worldview()
 
     user_context = ""
     if mem["name"] or mem["profile"]:
         user_context = f"ПОЛЬЗОВАТЕЛЬ:\nИмя: {mem['name'] or user_name} | Сообщений: {mem['messages']}\nПрофиль: {mem['profile'] or 'нет'}\nМонеты: {mem['coins'] or 'нет'}\nДепозит: ${mem['deposit']} | Риск: {mem['risk']}%"
 
-    prompt = f"""Ты APEX — дерзкий AI трейдер с доступом к живым данным рынка. Дата: {now}
+    prompt = f"""Ты APEX — дерзкий AI трейдер с реальным опытом и доступом к живым данным. Дата: {now}
 
 {user_context}
 
@@ -3429,7 +3728,7 @@ def ask_ai(user_id, user_name, user_message):
 {f"НОВОСТИ:{chr(10)}{recent_news[:400]}" if recent_news and not research_result else ""}
 {f"ЗНАНИЯ:{chr(10)}{knowledge[:300]}" if knowledge else ""}
 {f"ФУНДАМЕНТАЛ (Messari):{chr(10)}{messari_context}" if messari_context else ""}
-{f"МОЙ ОПЫТ (самообучение):{chr(10)}{brain_context[:500]}" if brain_context else ""}
+{f"МОЯ КАРТИНА МИРА (накопленный опыт):{chr(10)}{worldview[:600]}" if worldview else f"МОЙ ОПЫТ:{chr(10)}{brain_context[:400]}" if brain_context else ""}
 
 ИСТОРИЯ:
 {history_text}
@@ -3438,9 +3737,9 @@ def ask_ai(user_id, user_name, user_message):
 - Цены ВСЕГДА берёшь из блока "ЖИВЫЕ ЦЕНЫ" выше — они актуальны прямо сейчас
 - Если спрашивают про монету которой нет в блоке — честно скажи что нет данных
 - Никогда не придумывай цены из памяти
-- Говори дерзко, кратко, по делу, как опытный трейдер
-- Можешь анализировать рынок, уровни, тренд — но только на основе данных выше
-- Применяй свой опыт из "МОЙ ОПЫТ" при анализе
+- Говори дерзко, кратко, по делу — как опытный трейдер разговаривает с другом
+- Если спрашивают про сделки — используй данные из "МОЯ КАРТИНА МИРА"
+- Если нет конкретных данных — скажи честно что рынок неясен, не выдумывай
 
 {user_name}: {user_message}
 APEX:"""
@@ -4654,7 +4953,8 @@ async def handle_text(message: types.Message):
 
     save_chat_log(user_id, "user", text)
     thinking = await message.answer("⚡️")
-    reply = ask_ai(user_id, user_name, text)
+    # ✅ ФИКС: run_in_executor — ask_ai не блокирует event loop
+    reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai, user_id, user_name, text)
     try:
         await thinking.delete()
     except:
@@ -5050,15 +5350,19 @@ async def on_startup(app):
     else:
         logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
     scheduler.add_job(auto_scan_job, "interval", minutes=15)
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
     scheduler.add_job(auto_research, "interval", hours=2)
     scheduler.add_job(check_alerts, "interval", minutes=5)
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
     scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
+    # ✅ НОВОЕ: Автономное обучение — бот сам изучает рынок каждые 2 часа
+    scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
     scheduler.start()
     setup_error_capture()
+    # Первый цикл обучения — сразу при старте (через 30 сек)
+    asyncio.get_event_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
     logging.info("APEX запущен!")
 
 
@@ -5100,14 +5404,16 @@ def main():
             except Exception as e:
                 logging.warning(f"delete_webhook: {e}")
             await asyncio.sleep(2)
-            scheduler = AsyncIOScheduler()
+            scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=15)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", hours=4)
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
+            scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
             scheduler.start()
+            asyncio.get_event_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
