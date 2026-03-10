@@ -247,39 +247,37 @@ price_cache = {}
 last_price_update = 0
 
 def get_top_pairs(limit=50):
-    """Топ-N фьючерсных пар по объёму — авто-обновление каждый час"""
+    """Топ-N пар по объёму. Пробуем Futures, fallback на Spot."""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/ticker/24hr",
-            timeout=15
-        )
-        data = r.json()
 
-        # Защита от разных форматов ответа
-        if isinstance(data, dict):
-            data = [data]
-        if not isinstance(data, list) or len(data) == 0:
-            raise ValueError(f"Unexpected response: {str(data)[:100]}")
+    # Пробуем Futures
+    for url in [
+        f"{BINANCE_F}/fapi/v1/ticker/24hr",
+        f"{BINANCE}/api/v3/ticker/24hr",
+    ]:
+        try:
+            r = requests.get(url, timeout=15)
+            data = r.json()
+            if isinstance(data, dict):
+                data = [data]
+            if not isinstance(data, list):
+                continue
+            usdt = [t for t in data if isinstance(t, dict) and str(t.get("symbol","")).endswith("USDT")]
+            usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+            top = [t["symbol"] for t in usdt[:limit]]
+            if top:
+                pairs_cache = top
+                pairs_cache_time = time.time()
+                logging.info(f"Пары загружены ({url.split('/')[2]}): {len(top)} шт, топ: {top[:3]}")
+                return pairs_cache
+        except Exception as e:
+            logging.warning(f"get_top_pairs {url}: {e}")
+            continue
 
-        usdt = [t for t in data if isinstance(t, dict) and str(t.get("symbol", "")).endswith("USDT")]
-        usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        top = [t["symbol"] for t in usdt[:limit]]
-
-        if top:
-            pairs_cache = top
-            pairs_cache_time = time.time()
-            logging.info(f"Обновлено {len(pairs_cache)} пар: {top[:5]}...")
-        else:
-            logging.warning("get_top_pairs: пустой список после фильтрации")
-
-        return pairs_cache if pairs_cache else PAIRS
-
-    except Exception as e:
-        logging.error(f"get_top_pairs error: {e}")
-        return pairs_cache if pairs_cache else PAIRS
+    logging.warning("get_top_pairs: используем fallback список")
+    return pairs_cache if pairs_cache else PAIRS
 
 # Обратная совместимость
 PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
@@ -289,23 +287,31 @@ def get_live_prices():
     global price_cache, last_price_update
     if time.time() - last_price_update < 20 and price_cache:
         return price_cache
-    try:
-        # Берём всё одним запросом — быстрее
-        r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=15)
-        tickers = r.json()
-        market = {}
-        for t in tickers:
-            if t["symbol"].endswith("USDT"):
-                market[t["symbol"]] = {
-                    "price": float(t["lastPrice"]),
-                    "change": float(t["priceChangePercent"]),
-                    "volume": float(t.get("quoteVolume", 0))
-                }
-        price_cache = market
-        last_price_update = time.time()
-        return market
-    except:
-        return price_cache if price_cache else {}
+    for url in [
+        f"{BINANCE_F}/fapi/v1/ticker/24hr",
+        f"{BINANCE}/api/v3/ticker/24hr",
+    ]:
+        try:
+            r = requests.get(url, timeout=15)
+            data = r.json()
+            if isinstance(data, dict):
+                data = [data]
+            market = {}
+            for t in data:
+                if isinstance(t, dict) and str(t.get("symbol","")).endswith("USDT"):
+                    market[t["symbol"]] = {
+                        "price": float(t["lastPrice"]),
+                        "change": float(t["priceChangePercent"]),
+                        "volume": float(t.get("quoteVolume", 0))
+                    }
+            if market:
+                price_cache = market
+                last_price_update = time.time()
+                return price_cache
+        except Exception as e:
+            logging.warning(f"get_live_prices {url}: {e}")
+            continue
+    return price_cache if price_cache else {}
 
 # ===== МОНИТОРИНГ НАКОПЛЕНИЙ ПЕРЕД ПАМПОМ =====
 
@@ -454,28 +460,25 @@ def format_market():
     return "\n".join(lines)
 
 def get_candles(symbol, interval="1h", limit=150):
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=10
-        )
-        return [{"open": float(c[1]), "high": float(c[2]),
-                 "low": float(c[3]), "close": float(c[4]),
-                 "volume": float(c[5])} for c in r.json()]
-    except:
-        # Fallback to spot
+    """Свечи: сначала Futures, потом Spot"""
+    for url in [
+        f"{BINANCE_F}/fapi/v1/klines",
+        f"{BINANCE}/api/v3/klines",
+    ]:
         try:
-            r = requests.get(
-                f"{BINANCE}/api/v3/klines",
-                params={"symbol": symbol, "interval": interval, "limit": limit},
-                timeout=10
-            )
-            return [{"open": float(c[1]), "high": float(c[2]),
-                     "low": float(c[3]), "close": float(c[4]),
-                     "volume": float(c[5])} for c in r.json()]
-        except:
-            return []
+            r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                candles = [{"open": float(c[1]), "high": float(c[2]),
+                            "low": float(c[3]), "close": float(c[4]),
+                            "volume": float(c[5])} for c in data]
+                if candles:
+                    return candles
+        except Exception as e:
+            logging.warning(f"get_candles {symbol} {url.split('/')[2]}: {e}")
+            continue
+    logging.error(f"get_candles: нет данных для {symbol} {interval}")
+    return []
 
 def get_orderbook(symbol):
     try:
@@ -3281,7 +3284,7 @@ async def main():
     init_db()
     threading.Thread(target=run_server, daemon=True).start()
 
-    # Убиваем старые сессии ПЕРВЫМ ДЕЛОМ — до всего остального
+    # Убиваем старые сессии ПЕРВЫМ ДЕЛОМ
     for attempt in range(3):
         try:
             await bot.delete_webhook(drop_pending_updates=True)
@@ -3291,7 +3294,6 @@ async def main():
             logging.warning(f"delete_webhook попытка {attempt+1}: {e}")
             await asyncio.sleep(2)
 
-    # Ждём пока Telegram закроет старое соединение
     await asyncio.sleep(3)
 
     # Прогреваем кэш пар в фоне
