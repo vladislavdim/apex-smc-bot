@@ -177,7 +177,6 @@ def init_db():
         impact TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
-    # История обучения — что бот узнал и исправил (видна пользователю)
     c.execute("""CREATE TABLE IF NOT EXISTS learning_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_type TEXT,
@@ -326,19 +325,15 @@ def get_top_pairs(limit=100):
 
     # 1. Bybit
     try:
-        r = requests.get(BYBIT_TICKERS,
-            params={"category": "linear"},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"},
-            timeout=10)
-        if r.status_code != 200:
-            raise Exception(f"HTTP {r.status_code}")
-        data = r.json()
-        if data.get("retCode") != 0:
-            raise Exception(f"retCode={data.get('retCode')}")
-        tickers = data["result"]["list"]
-        tickers.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
-        bybit_top = [t["symbol"] for t in tickers if str(t.get("symbol","")).endswith("USDT")][:limit]
+        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"}, timeout=10)
+        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
+        jdata = r.json()
+        if jdata.get("retCode") != 0: raise Exception(f"retCode={jdata.get('retCode')}")
+        data = jdata["result"]["list"]
+        data.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+        bybit_top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
         if bybit_top:
+            # Объединяем: сначала форсированные, потом остальные по объёму
             combined = list(dict.fromkeys(FORCED + bybit_top))[:limit]
             pairs_cache = combined
             pairs_cache_time = time.time()
@@ -1861,106 +1856,74 @@ def backtest(symbol, timeframe="1h", periods=500):
 # ===== ЖИВОЙ АНАЛИЗ — ГДЕ МЫ СЕЙЧАС =====
 
 def live_position_analysis(symbol, timeframe="1h"):
-    """Реальная цена + структура рынка → что делать прямо сейчас"""
+    """Реальная цена + структура SMC → что делать прямо сейчас"""
     try:
         candles = get_candles(symbol, timeframe, 200)
         if len(candles) < 30:
             return None
-
         price_now  = candles[-1]["close"]
         price_open = candles[-1]["open"]
         candle_dir = "🟢" if price_now >= price_open else "🔴"
-
         highs, lows = find_swings(candles, lookback=5)
         classified  = classify_swings(highs, lows)
         events      = detect_events(candles, classified)
         trend       = events[0]["direction"] if events else "UNCLEAR"
-
         h_vals = sorted([h[1] for h in highs[-6:]], reverse=True) if highs else []
         l_vals = sorted([l[1] for l in lows[-6:]])                 if lows  else []
-
         nearest_res = min([h for h in h_vals if h > price_now * 1.002], default=None)
         nearest_sup = max([l for l in l_vals if l < price_now * 0.998], default=None)
-
-        ob_bull  = find_ob(candles, "BULLISH")
-        ob_bear  = find_ob(candles, "BEARISH")
-        fvg_bull = find_fvg(candles, "BULLISH")
-        fvg_bear = find_fvg(candles, "BEARISH")
-
+        ob_bull  = find_ob(candles, "BULLISH");  ob_bear  = find_ob(candles, "BEARISH")
+        fvg_bull = find_fvg(candles, "BULLISH"); fvg_bear = find_fvg(candles, "BEARISH")
         in_bull_ob  = ob_bull  and ob_bull["bottom"]  <= price_now <= ob_bull["top"]
         in_bear_ob  = ob_bear  and ob_bear["bottom"]  <= price_now <= ob_bear["top"]
         in_bull_fvg = fvg_bull and fvg_bull["bottom"] <= price_now <= fvg_bull["top"]
         in_bear_fvg = fvg_bear and fvg_bear["bottom"] <= price_now <= fvg_bear["top"]
-
-        last3     = candles[-3:]
-        bulls     = sum(1 for c in last3 if c["close"] > c["open"])
-        momentum  = "🚀 растём" if bulls >= 2 else "💥 падаем" if bulls == 0 else "😐 боковик"
-
-        vols      = [c["volume"] for c in candles[-20:]]
-        avg_vol   = sum(vols[:-1]) / max(len(vols)-1, 1)
+        last3 = candles[-3:]
+        bulls = sum(1 for c in last3 if c["close"] > c["open"])
+        momentum = "🚀 растём" if bulls >= 2 else "💥 падаем" if bulls == 0 else "😐 боковик"
+        vols = [c["volume"] for c in candles[-20:]]
+        avg_vol = sum(vols[:-1]) / max(len(vols)-1, 1)
         vol_ratio = candles[-1]["volume"] / avg_vol if avg_vol > 0 else 1
-        vol_tag   = "🔥 высокий" if vol_ratio > 1.5 else "📉 низкий" if vol_ratio < 0.6 else "➡️ средний"
-
+        vol_tag = "🔥 высокий" if vol_ratio > 1.5 else "📉 низкий" if vol_ratio < 0.6 else "➡️ средний"
         dist_res = ((nearest_res - price_now) / price_now * 100) if nearest_res else None
         dist_sup = ((price_now - nearest_sup) / price_now * 100) if nearest_sup else None
-
         if trend == "BULLISH":
-            if in_bull_ob or in_bull_fvg:
-                action, reason, risk = "✅ ВХОДИТЬ ЛОНГ",     "В зоне Bull OB/FVG — идеальная точка",     "низкий"
-            elif nearest_sup and dist_sup and dist_sup < 1.0:
-                action, reason, risk = "✅ ЛОНГ у поддержки", "Тренд ↑, цена у поддержки",                "низкий"
-            elif nearest_res and dist_res and dist_res < 0.5:
-                action, reason, risk = "⚠️ ЖДАТЬ пробоя",    "У сопротивления — жди пробой или отскок",  "высокий"
-            else:
-                action, reason, risk = "⏳ ЖДАТЬ",            "Тренд бычий, нет точки — жди поддержку",   "средний"
+            if in_bull_ob or in_bull_fvg:   action, reason, risk = "✅ ВХОДИТЬ ЛОНГ",    "В зоне Bull OB/FVG — идеальная точка", "низкий"
+            elif nearest_sup and dist_sup and dist_sup < 1.0: action, reason, risk = "✅ ЛОНГ у поддержки", "Тренд ↑, цена у поддержки", "низкий"
+            elif nearest_res and dist_res and dist_res < 0.5: action, reason, risk = "⚠️ ЖДАТЬ пробоя",   "У сопротивления — жди пробой", "высокий"
+            else: action, reason, risk = "⏳ ЖДАТЬ", "Тренд бычий, нет точки входа", "средний"
         elif trend == "BEARISH":
-            if in_bear_ob or in_bear_fvg:
-                action, reason, risk = "🔴 ВХОДИТЬ ШОРТ",     "В зоне Bear OB/FVG — точка на продажу",    "низкий"
-            elif nearest_res and dist_res and dist_res < 1.0:
-                action, reason, risk = "🔴 ШОРТ у сопр.",     "Тренд ↓, цена у сопротивления",            "низкий"
-            elif nearest_sup and dist_sup and dist_sup < 0.5:
-                action, reason, risk = "⚠️ ЖДАТЬ пробоя",    "У поддержки — жди пробой или отскок вверх", "высокий"
-            else:
-                action, reason, risk = "⏳ ЖДАТЬ",            "Тренд медвежий, нет точки — жди сопр.",     "средний"
+            if in_bear_ob or in_bear_fvg:   action, reason, risk = "🔴 ВХОДИТЬ ШОРТ",    "В зоне Bear OB/FVG — точка на продажу", "низкий"
+            elif nearest_res and dist_res and dist_res < 1.0: action, reason, risk = "🔴 ШОРТ у сопр.",   "Тренд ↓, цена у сопротивления", "низкий"
+            elif nearest_sup and dist_sup and dist_sup < 0.5: action, reason, risk = "⚠️ ЖДАТЬ пробоя",   "У поддержки — жди пробой", "высокий"
+            else: action, reason, risk = "⏳ ЖДАТЬ", "Тренд медвежий, нет точки", "средний"
         else:
             action, reason, risk = "😴 НЕТ СИГНАЛА", "Боковик или смена тренда", "высокий"
-
         def fmt(p):
             if p is None: return "—"
             return f"${p:,.4f}" if p < 1 else f"${p:,.3f}" if p < 10 else f"${p:,.2f}"
-
         lines = [
-            f"📍 <b>{symbol}</b> [{TF_LABELS.get(timeframe, timeframe)}] — СЕЙЧАС",
+            f"📍 <b>{symbol}</b> [{TF_LABELS.get(timeframe,timeframe)}] — СЕЙЧАС",
             f"{'━'*26}",
             f"{candle_dir} Цена: <code>{fmt(price_now)}</code>",
             f"⚡️ {momentum}  |  📊 Объём: {vol_tag} (×{vol_ratio:.1f})",
             f"",
-            f"📐 <b>Структура:</b>  {'🟢' if trend=='BULLISH' else '🔴' if trend=='BEARISH' else '⚪️'} <b>{trend}</b>",
+            f"📐 Структура:  {'🟢' if trend=='BULLISH' else '🔴' if trend=='BEARISH' else '⚪️'} <b>{trend}</b>",
         ]
-        if nearest_res:
-            lines.append(f"🔴 Сопротивление: <code>{fmt(nearest_res)}</code> (+{dist_res:.1f}%)")
-        if nearest_sup:
-            lines.append(f"🟢 Поддержка:     <code>{fmt(nearest_sup)}</code> (-{dist_sup:.1f}%)")
+        if nearest_res: lines.append(f"🔴 Сопротивление: <code>{fmt(nearest_res)}</code> (+{dist_res:.1f}%)")
+        if nearest_sup: lines.append(f"🟢 Поддержка:     <code>{fmt(nearest_sup)}</code> (-{dist_sup:.1f}%)")
         lines.append(f"\n<b>🗺 Зоны:</b>")
-        if ob_bull:
-            lines.append(f"🟦 Bull OB: <code>{fmt(ob_bull['bottom'])}–{fmt(ob_bull['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bull_ob else ""))
-        if ob_bear:
-            lines.append(f"🟥 Bear OB: <code>{fmt(ob_bear['bottom'])}–{fmt(ob_bear['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bear_ob else ""))
-        if fvg_bull:
-            lines.append(f"🔵 Bull FVG: <code>{fmt(fvg_bull['bottom'])}–{fmt(fvg_bull['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bull_fvg else ""))
-        if fvg_bear:
-            lines.append(f"🟠 Bear FVG: <code>{fmt(fvg_bear['bottom'])}–{fmt(fvg_bear['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bear_fvg else ""))
-
+        if ob_bull:  lines.append(f"🟦 Bull OB: <code>{fmt(ob_bull['bottom'])}–{fmt(ob_bull['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bull_ob else ""))
+        if ob_bear:  lines.append(f"🟥 Bear OB: <code>{fmt(ob_bear['bottom'])}–{fmt(ob_bear['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bear_ob else ""))
+        if fvg_bull: lines.append(f"🔵 Bull FVG: <code>{fmt(fvg_bull['bottom'])}–{fmt(fvg_bull['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bull_fvg else ""))
+        if fvg_bear: lines.append(f"🟠 Bear FVG: <code>{fmt(fvg_bear['bottom'])}–{fmt(fvg_bear['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bear_fvg else ""))
         sl_hint = ""
         if "ЛОНГ" in action and nearest_sup:
-            sl  = nearest_sup * 0.997
-            tp  = price_now + (price_now - sl) * 2
+            sl = nearest_sup * 0.997; tp = price_now + (price_now - sl) * 2
             sl_hint = f"\n🛡 SL: <code>{fmt(sl)}</code>  |  🎯 TP: <code>{fmt(tp)}</code>  (RR 1:2)"
         elif "ШОРТ" in action and nearest_res:
-            sl  = nearest_res * 1.003
-            tp  = price_now - (sl - price_now) * 2
+            sl = nearest_res * 1.003; tp = price_now - (sl - price_now) * 2
             sl_hint = f"\n🛡 SL: <code>{fmt(sl)}</code>  |  🎯 TP: <code>{fmt(tp)}</code>  (RR 1:2)"
-
         lines += [f"\n{'━'*26}", f"🎯 <b>{action}</b>", f"<i>{reason}</i>", f"⚠️ Риск: {risk}{sl_hint}"]
         return "\n".join(lines)
     except Exception as e:
@@ -2353,7 +2316,7 @@ def update_market_model(symbol, candles, direction, result=None):
 
 
 def log_brain_event(event_type, description, impact=""):
-    """Лог событий эволюции — пишем в brain_log И в learning_history"""
+    """Лог событий — пишем в brain_log и learning_history"""
     try:
         conn = sqlite3.connect("brain.db")
         conn.execute(
@@ -2365,7 +2328,6 @@ def log_brain_event(event_type, description, impact=""):
             "rule_strengthened":"💪 Правило укреплено",
             "rule_weakened":    "⚠️ Правило ослаблено",
             "error_analyzed":   "🔍 Ошибка разобрана",
-            "pattern_detected": "🔎 Найден паттерн",
             "web_learned":      "🌐 Узнал из интернета",
             "signal_win":       "✅ Сигнал выиграл",
             "signal_loss":      "❌ Сигнал проиграл",
@@ -2378,7 +2340,7 @@ def log_brain_event(event_type, description, impact=""):
         conn.execute(
             "INSERT INTO learning_history (event_type,title,description,after_value,impact_score,source) VALUES (?,?,?,?,?,?)",
             (event_type, titles.get(event_type, f"📎 {event_type}"),
-             description[:300], impact[:200], scores.get(event_type, 0.5), "auto")
+             description[:300], impact[:200], scores.get(event_type,0.5), "auto")
         )
         conn.commit()
         conn.close()
@@ -2873,8 +2835,8 @@ def ask_groq(prompt, max_tokens=800):
         prompt = prompt[:6000] + "\n[промпт сокращён]"
 
     models = [
-        "llama-3.1-8b-instant",       # основная — 500k TPD, быстрая, бесплатная
-        "llama-3.3-70b-versatile",    # fallback — умнее но 100k TPD
+        "llama-3.1-8b-instant",       # основная — 500k TPD/день, не исчерпывается
+        "llama-3.3-70b-versatile",    # fallback — умнее но только 100k TPD
         "mixtral-8x7b-32768",         # резерв
     ]
 
@@ -2929,164 +2891,233 @@ def ask_groq_cached(prompt, max_tokens=400, cache_key=None):
     return result
 
 
-# Флаг: если 70b исчерпан на сегодня — не пытаемся снова до следующего дня
-_groq_70b_exhausted_until = 0
-
-def ask_groq_smart(prompt, max_tokens=800):
+def fetch_url_text(url, timeout=8, max_chars=2000):
     """
-    Умный выбор модели:
-    - Для коротких промптов — всегда 8b (быстро, не жжёт TPD)
-    - Для длинного анализа — пробуем 70b, если лимит — 8b
-    Это позволяет боту работать весь день не исчерпывая квоту.
+    Читает страницу и возвращает чистый текст без HTML тегов.
+    Работает без внешних библиотек — только стандартный re.
     """
-    global _groq_70b_exhausted_until
-
-    # Если промпт < 1500 символов — 8b справится отлично
-    # Если 70b знаем что исчерпан сегодня — тоже 8b
-    if len(prompt) < 1500 or time.time() < _groq_70b_exhausted_until:
-        models_order = ["llama-3.1-8b-instant", "mixtral-8x7b-32768"]
-    else:
-        models_order = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
-
-    if len(prompt) > 6000:
-        prompt = prompt[:6000] + "\n[сокращено]"
-
-    for attempt, model in enumerate(models_order):
-        try:
-            r = groq_client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                timeout=30,
-            )
-            return r.choices[0].message.content
-        except Exception as e:
-            err = str(e).lower()
-            if "rate_limit" in err or "429" in err:
-                if "tokens per day" in err or "tpd" in err.lower():
-                    # Суточный лимит — не пробуем эту модель до конца дня
-                    if "70b" in model:
-                        _groq_70b_exhausted_until = time.time() + 3600  # 1 час
-                        logging.warning(f"Groq 70b TPD исчерпан, переключаюсь на 8b на 1 час")
-                    time.sleep(5)
-                else:
-                    wait = 15 * (attempt + 1)
-                    logging.warning(f"Groq rate limit ({model}), жду {wait}с...")
-                    time.sleep(wait)
-            else:
-                logging.error(f"Groq {model}: {e}")
-                time.sleep(3)
-    return None
+    import re
+    try:
+        r = requests.get(url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=timeout)
+        if r.status_code != 200:
+            return ""
+        html = r.text
+        # Убираем скрипты, стили, мета-теги
+        html = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>',  ' ', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<[^>]+>', ' ', html)
+        # Убираем лишние пробелы
+        text = re.sub(r'\s+', ' ', html).strip()
+        # Берём только первые max_chars символов (самое важное в начале)
+        return text[:max_chars]
+    except Exception as e:
+        logging.warning(f"fetch_url_text {url}: {e}")
+        return ""
 
 
 def search_web_free(query, limit=5):
     """
-    Поиск в интернете БЕЗ API ключей:
-    1. DuckDuckGo Instant Answer API
-    2. RSS из CoinTelegraph / CoinDesk по теме
-    3. Messari если про монету
-    Возвращает список найденных фактов
+    НАСТОЯЩИЙ поиск в интернете без API ключей:
+    1. CoinTelegraph / CoinDesk — читаем ПОЛНЫЙ ТЕКСТ статей (не только заголовки)
+    2. CryptoCompare News API — бесплатный, без ключа
+    3. Alternative.me Fear & Greed — реальный индекс страха
+    4. Messari free API — данные по монете
+    5. DuckDuckGo Instant Answer — энциклопедический контекст
     """
     results = []
     query_lower = query.lower()
+    words = [w for w in query_lower.split() if len(w) > 3][:4]
 
-    # 1. DuckDuckGo
+    # ── 1. CryptoCompare News API — бесплатный, даёт реальные новости с текстом ──
     try:
         r = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query + " crypto", "format": "json", "no_html": 1, "skip_disambig": 1},
+            "https://min-api.cryptocompare.com/data/v2/news/",
+            params={"lang": "EN", "sortOrder": "latest"},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=8
         )
+        if r.status_code == 200:
+            data = r.json()
+            news = data.get("Data", [])
+            # Ищем релевантные по ключевым словам
+            relevant = [n for n in news if any(w in (n.get("title","") + n.get("body","")).lower() for w in words)]
+            # Если нет релевантных — берём просто свежие
+            to_use = relevant[:3] if relevant else news[:3]
+            for n in to_use:
+                title = n.get("title", "")
+                body  = n.get("body", "")[:400]
+                src   = n.get("source_info", {}).get("name", "CryptoCompare")
+                results.append(f"[{src}] {title}\n{body}")
+    except Exception as e:
+        logging.warning(f"CryptoCompare news: {e}")
+
+    # ── 2. RSS с чтением ПОЛНОГО ТЕКСТА статей ──
+    rss_sources = [
+        ("https://cointelegraph.com/rss",                  "CoinTelegraph"),
+        ("https://www.coindesk.com/arc/outboundfeeds/rss/","CoinDesk"),
+        ("https://decrypt.co/feed",                        "Decrypt"),
+        ("https://cryptonews.com/news/feed/",              "CryptoNews"),
+    ]
+    fetched_count = 0
+    for feed_url, source_name in rss_sources:
+        if fetched_count >= 3:
+            break
+        try:
+            items = parse_rss(feed_url, source_name, limit=10)
+            # Фильтруем по теме если есть ключевые слова
+            if words:
+                items = [i for i in items if any(w in i["title"].lower() for w in words)] or items[:2]
+            else:
+                items = items[:2]
+
+            for item in items[:2]:
+                title = item["title"]
+                url   = item.get("url", "")
+                # Читаем полный текст статьи если есть URL
+                body = ""
+                if url:
+                    body = fetch_url_text(url, timeout=6, max_chars=800)
+                if body and len(body) > 100:
+                    results.append(f"[{source_name} FULL] {title}\n{body}")
+                else:
+                    results.append(f"[{source_name}] {title}")
+                fetched_count += 1
+        except Exception as e:
+            logging.warning(f"RSS fetch {source_name}: {e}")
+
+    # ── 3. Alternative.me Fear & Greed Index ──
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=3", timeout=5)
+        if r.status_code == 200:
+            fg = r.json().get("data", [])
+            if fg:
+                val   = fg[0].get("value", "?")
+                label = fg[0].get("value_classification", "?")
+                prev  = fg[1].get("value", "?") if len(fg) > 1 else "?"
+                results.append(f"[Fear&Greed] Сейчас: {val} ({label}), вчера: {prev}. " +
+                               ("Рынок жадный — возможна коррекция." if int(val) > 70 else
+                                "Рынок в страхе — возможный разворот вверх." if int(val) < 30 else
+                                "Нейтральный рынок."))
+    except:
+        pass
+
+    # ── 4. Messari free API для монет ──
+    coin_map = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","btc":"BTC","eth":"ETH","sol":"SOL",
+                "bnb":"BNB","xrp":"XRP","doge":"DOGE","avax":"AVAX","link":"LINK","ton":"TON"}
+    for word in words:
+        sym = coin_map.get(word)
+        if sym:
+            try:
+                r = requests.get(
+                    f"https://data.messari.io/api/v1/assets/{sym.lower()}/metrics",
+                    headers={"User-Agent": "Mozilla/5.0"}, timeout=6
+                )
+                if r.status_code == 200:
+                    d = r.json().get("data", {}).get("market_data", {})
+                    price = d.get("price_usd", 0)
+                    chg24 = d.get("percent_change_usd_last_24_hours", 0)
+                    chg7  = d.get("percent_change_usd_last_7_days", 0)
+                    vol   = d.get("volume_last_24_hours", 0)
+                    results.append(f"[Messari {sym}] Цена: ${price:.4f} | 24ч: {chg24:+.1f}% | 7д: {chg7:+.1f}% | Объём: ${vol:,.0f}")
+                    break
+            except:
+                pass
+
+    # ── 5. DuckDuckGo Instant Answer (энциклопедический контекст) ──
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query + " cryptocurrency 2025", "format": "json", "no_html": 1, "skip_disambig": 1},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6
+        )
         data = r.json()
         if data.get("AbstractText"):
-            results.append(f"[DDG] {data['AbstractText'][:300]}")
-        for item in data.get("RelatedTopics", [])[:3]:
-            if isinstance(item, dict) and item.get("Text"):
-                results.append(f"[DDG] {item['Text'][:200]}")
-    except Exception as e:
-        logging.warning(f"DDG search: {e}")
-
-    # 2. RSS по ключевым словам
-    words = [w for w in query_lower.split() if len(w) > 3][:3]
-    news_sources = [
-        ("https://cointelegraph.com/rss", "CoinTelegraph"),
-        ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
-    ]
-    for url, name in news_sources[:2]:
-        try:
-            items = parse_rss(url, name, limit=8)
-            relevant = [i for i in items if any(w in i["title"].lower() for w in words)]
-            for item in relevant[:3]:
-                results.append(f"[{name} {item.get('date','')}] {item['title']}")
-        except:
-            pass
+            results.append(f"[DDG] {data['AbstractText'][:400]}")
+    except:
+        pass
 
     return results[:8]
 
 
 def learn_from_web(topic, save=True):
     """
-    Автономный цикл обучения:
-    1. Ищет инфу по теме в интернете
-    2. AI извлекает факты и паттерны
-    3. Сохраняет в базу знаний
-    4. Возвращает вывод
+    Реальный цикл обучения:
+    1. CryptoCompare News API — полный текст новостей
+    2. Читает статьи по URL из RSS
+    3. Fear & Greed index
+    4. Messari данные по монете
+    5. AI извлекает торговые факты с confidence
     """
     try:
         web_results = search_web_free(topic)
         if not web_results:
             return None
 
-        facts_text = "\n".join(web_results)
+        total_chars = sum(len(r) for r in web_results)
+        facts_text = "\n\n".join(web_results)
         old_knowledge = get_knowledge(topic)
 
-        prompt = f"""Ты APEX — AI трейдер который учится каждый день.
+        prompt = f"""Ты APEX — AI трейдер. Прочитай данные и извлеки торговые знания.
 
 ТЕМА: {topic}
-НАЙДЕНО В ИНТЕРНЕТЕ:
-{facts_text}
+ИСТОЧНИКИ ({len(web_results)} шт, {total_chars} символов):
+{facts_text[:3000]}
 
-{f"УЖЕ ЗНАЮ ОБ ЭТОМ: {old_knowledge[:300]}" if old_knowledge else ""}
+{f"ЧТО УЖЕ ЗНАЛ: {old_knowledge[:200]}" if old_knowledge else "Изучаю впервые."}
 
-Задача: Извлеки КОНКРЕТНЫЕ торговые факты. Верни JSON:
+Извлеки КОНКРЕТНЫЕ факты. Верни JSON:
 {{
-  "key_facts": ["факт 1", "факт 2", "факт 3"],
-  "market_impact": "как это влияет на крипту прямо сейчас",
-  "trading_signal": "покупать/продавать/ждать и почему",
-  "new_vs_old": "что изменилось по сравнению с тем что знал раньше"
+  "key_facts": ["факт с цифрами/датой", "факт 2", "факт 3"],
+  "market_impact": "влияние на BTC/альты прямо сейчас (1-2 предл.)",
+  "trading_signal": "ЛОНГ/ШОРТ/ЖДАТЬ — конкретно и почему",
+  "timeframe": "сегодня/эта неделя/месяц",
+  "confidence": 0.0-1.0,
+  "new_vs_old": "что изменилось"
 }}
 
-Только JSON, без пояснений."""
+Только JSON."""
 
-        response = ask_groq(prompt, max_tokens=400)
+        response = ask_groq(prompt, max_tokens=500)
         if not response:
             return None
 
         try:
             clean = response.strip().replace("```json", "").replace("```", "")
             start = clean.find("{")
-            end = clean.rfind("}") + 1
+            end   = clean.rfind("}") + 1
             if start >= 0 and end > start:
                 data = json.loads(clean[start:end])
 
-                # Сохраняем в базу знаний
                 if save:
-                    summary = f"Ключевые факты: {'; '.join(data.get('key_facts', [])[:3])}. Влияние: {data.get('market_impact', '')}. Сигнал: {data.get('trading_signal', '')}"
+                    confidence = float(data.get("confidence", 0.5))
+                    summary = (
+                        f"[{topic}] "
+                        f"Факты: {'; '.join(data.get('key_facts', [])[:3])}. "
+                        f"Влияние: {data.get('market_impact', '')}. "
+                        f"Сигнал: {data.get('trading_signal', '')}. "
+                        f"Горизонт: {data.get('timeframe', '')}."
+                    )
                     save_knowledge(topic, summary, "web-learning")
-
-                    # Если есть паттерн — сохраняем как правило
+                    log_brain_event(
+                        "web_learned",
+                        f"Тема: {topic} ({len(web_results)} источников) — {data.get('market_impact', '')[:100]}",
+                        f"Сигнал: {data.get('trading_signal', '')[:80]}"
+                    )
                     signal = data.get("trading_signal", "").lower()
-                    if "покупать" in signal or "лонг" in signal:
-                        save_self_rule("market", f"По теме '{topic}': {data.get('market_impact', '')[:100]}", 0.55, "web-research")
-                    elif "продавать" in signal or "шорт" in signal:
-                        save_self_rule("avoid", f"По теме '{topic}': осторожно — {data.get('market_impact', '')[:80]}", 0.55, "web-research")
+                    if any(w in signal for w in ["лонг", "покупать", "buy"]):
+                        save_self_rule("market", f"[{topic}] {data.get('market_impact', '')[:100]}", min(0.7, confidence), "web-learning")
+                    elif any(w in signal for w in ["шорт", "продавать", "sell"]):
+                        save_self_rule("avoid",  f"[{topic}] осторожно: {data.get('market_impact', '')[:80]}", min(0.7, confidence), "web-learning")
 
                 return data
+
         except json.JSONDecodeError:
-            # Если не JSON — сохраняем как текст
             if save and response:
                 save_knowledge(topic, response[:500], "web-learning-raw")
+                log_brain_event("web_learned", f"Тема: {topic} (raw)", "")
             return response
 
     except Exception as e:
@@ -3715,12 +3746,8 @@ def get_multiple_prices_realtime():
     # Fallback цепочка если параллельный запрос не сработал
     # 1. Bybit — быстро, много монет, работает с Render
     try:
-        r = requests.get(BYBIT_TICKERS,
-            params={"category": "linear"},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"},
-            timeout=8)
-        if r.status_code != 200:
-            raise Exception(f"HTTP {r.status_code}")
+        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"}, timeout=8)
+        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
         data = r.json()
         if data.get("retCode") == 0:
             result = {}
@@ -3943,7 +3970,7 @@ def ask_ai(user_id, user_name, user_message):
 {user_name}: {user_message}
 APEX:"""
 
-    return ask_groq_smart(prompt, max_tokens=700)
+    return ask_groq(prompt, max_tokens=700)
 
 
 # ===== KEYBOARDS =====
@@ -3953,7 +3980,7 @@ def main_menu():
         [InlineKeyboardButton(text="🔍 Сканировать рынок", callback_data="menu_scan"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="⏱ Выбрать таймфрейм", callback_data="menu_tf"),
-         InlineKeyboardButton(text="🔬 Бектест + Где мы", callback_data="menu_backtest")],
+         InlineKeyboardButton(text="🔬 Бектест", callback_data="menu_backtest")],
         [InlineKeyboardButton(text="💰 Риск калькулятор", callback_data="menu_risk"),
          InlineKeyboardButton(text="📓 Дневник сделок", callback_data="menu_journal")],
         [InlineKeyboardButton(text="🔔 Алерты", callback_data="menu_alerts"),
@@ -3962,8 +3989,7 @@ def main_menu():
          InlineKeyboardButton(text="📦 Накопления", callback_data="menu_pump")],
         [InlineKeyboardButton(text="🏆 Удачные сделки", callback_data="menu_wins"),
          InlineKeyboardButton(text="🔍 Ошибки бота", callback_data="menu_errors")],
-        [InlineKeyboardButton(text="🧠 Мозг APEX", callback_data="menu_brain"),
-         InlineKeyboardButton(text="📚 Эволюция бота", callback_data="menu_evolution")],
+        [InlineKeyboardButton(text="🧠 Мозг APEX", callback_data="menu_brain")]
     ])
 
 def tf_keyboard():
@@ -4539,7 +4565,7 @@ async def handle_callback(callback: CallbackQuery):
         await callback.message.edit_text(
             "🔬 <b>Анализ монеты</b>\n\n"
             "• <b>Бектест</b> — историческая точность стратегии\n"
-            "• <b>Где мы сейчас</b> — живой анализ текущего момента",
+            "• <b>Где мы сейчас</b> — живой анализ: OB, FVG, уровни, что делать",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔬 Бектест (история)", callback_data="menu_bt_select")],
@@ -4560,19 +4586,18 @@ async def handle_callback(callback: CallbackQuery):
             parse_mode="HTML", reply_markup=live_tf_keyboard()
         )
 
-    elif data.startswith("live_") and "_" in data[5:]:
+    elif data.startswith("live_"):
         parts = data.split("_")
-        # live_15m / live_1h / live_4h  → user picks coin
-        # live_now_BTCUSDT_1h / live_refresh_BTCUSDT_1h → direct show
+        # live_15m / live_1h / live_4h — выбор таймфрейма, дальше просят монету
         if len(parts) == 2:
             tf = parts[1]
             user_states[user_id] = {"action": "live_analysis", "tf": tf}
             await callback.message.edit_text(
                 f"📍 Анализ на {TF_LABELS.get(tf, tf)} — напиши монету (BTC, SOL, ETHUSDT...):"
             )
+        # live_now_BTCUSDT_1h или live_refresh_BTCUSDT_1h — прямой показ
         elif len(parts) >= 4:
-            symbol = parts[2]
-            tf     = parts[3]
+            symbol = parts[2]; tf = parts[3]
             await callback.message.edit_text(f"📍 Обновляю {symbol} {TF_LABELS.get(tf,tf)}...")
             result = await asyncio.get_running_loop().run_in_executor(None, live_position_analysis, symbol, tf)
             if result:
@@ -4583,7 +4608,8 @@ async def handle_callback(callback: CallbackQuery):
                     ]))
             else:
                 await callback.message.edit_text(f"Нет данных по {symbol}",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]]))
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]]))
 
     elif data.startswith("bt_"):
         tf = data.replace("bt_", "")
@@ -4724,7 +4750,7 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "brain_learn_now":
-        await callback.message.edit_text("🧠 Запускаю самообучение (web + синтез)...")
+        await callback.message.edit_text("🧠 Запускаю обучение (читаю интернет + синтез)...")
         await self_research_loop()
         await autonomous_learning_cycle()
         conn = sqlite3.connect("brain.db")
@@ -4732,7 +4758,7 @@ async def handle_callback(callback: CallbackQuery):
         learn_events = conn.execute("SELECT COUNT(*) FROM learning_history").fetchone()[0]
         conn.close()
         await callback.message.edit_text(
-            f"✅ <b>Самообучение завершено</b>\n\n"
+            f"✅ <b>Обучение завершено</b>\n\n"
             f"📌 Правил усвоено: <b>{rule_count}</b>\n"
             f"📚 Событий в истории: <b>{learn_events}</b>\n\n"
             f"<i>Открой «Эволюция бота» чтобы увидеть что именно изменилось</i>",
@@ -4755,43 +4781,33 @@ async def handle_callback(callback: CallbackQuery):
             knowledge_cnt= conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
             conn.close()
         except:
-            history = []
-            total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
+            history = []; total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
 
         if not history:
-            evo_text = (
-                "📚 <b>Эволюция APEX</b>\n"
-                f"{'━'*26}\n\n"
-                "🆕 Бот только начинает учиться.\n\n"
-                "<i>Нажми «Запустить обучение» чтобы увидеть первые результаты</i>"
-            )
+            evo_text = ("📚 <b>Эволюция APEX</b>\n" + "━"*26 + "\n\n🆕 История пуста.\n\n<i>Нажми «Запустить обучение» чтобы бот начал читать интернет и накапливать знания</i>")
         else:
             lines_evo = [
-                "📚 <b>Эволюция APEX</b>",
-                f"{'━'*26}",
-                f"📊 Событий обучения: <b>{total_events}</b>",
-                f"📌 Правил: <b>{rules_total}</b>  |  💪 Сильных 70%+: <b>{rules_strong}</b>",
+                "📚 <b>Эволюция APEX</b>", "━"*26,
+                f"📊 Событий: <b>{total_events}</b>  |  📌 Правил: <b>{rules_total}</b>  |  💪 Сильных: <b>{rules_strong}</b>",
                 f"🔧 Исправлено ошибок: <b>{errors_fixed}</b>  |  📖 Знаний: <b>{knowledge_cnt}</b>",
-                f"{'━'*26}",
-                "<b>Последние события:</b>",
-                "",
+                "━"*26, "<b>Хронология:</b>", "",
             ]
             for title, desc, after, score, created in history[:15]:
                 ts  = (created or "")[:16]
                 bar = "█" * int((score or 0.5) * 5)
-                lines_evo.append(f"<b>{title}</b>  <code>{ts}</code>")
-                lines_evo.append(f"  {(desc or '')[:90]}")
-                if after:
-                    lines_evo.append(f"  → {after[:60]}")
-                lines_evo.append(f"  {bar} {int((score or 0.5)*100)}%")
-                lines_evo.append("")
+                lines_evo += [
+                    f"<b>{title}</b>  <code>{ts}</code>",
+                    f"  {(desc or '')[:90]}",
+                    *([ f"  → {after[:60]}" ] if after else []),
+                    f"  {bar} {int((score or 0.5)*100)}%",
+                    "",
+                ]
             evo_text = "\n".join(lines_evo)
 
         if len(evo_text) > 4000:
             evo_text = evo_text[:4000] + "\n\n<i>...показаны последние события</i>"
 
-        await callback.message.edit_text(
-            evo_text, parse_mode="HTML",
+        await callback.message.edit_text(evo_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🧠 Запустить обучение", callback_data="brain_learn_now")],
@@ -5258,7 +5274,7 @@ async def handle_text(message: types.Message):
                         [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
                     ]))
             else:
-                await message.answer(f"Нет данных по {symbol}. Попробуй другую монету.")
+                await message.answer(f"Нет данных по {symbol}. Попробуй: BTC, ETH, SOL, BNB")
             return
 
         if state.get("action") == "backtest":
@@ -5276,8 +5292,7 @@ async def handle_text(message: types.Message):
                     f"✅ Выигрыши: {result['wins']}\n"
                     f"❌ Проигрыши: {result['losses']}\n"
                     f"🎯 Win Rate: <b>{result['win_rate']}%</b>\n"
-                    f"Оценка: {grade}\n\n"
-                    f"<i>Хочешь узнать где мы сейчас? 👇</i>",
+                    f"Оценка: {grade}",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="📍 Где мы сейчас?", callback_data=f"live_now_{symbol}_{tf}")],
