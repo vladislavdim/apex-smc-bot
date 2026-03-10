@@ -798,6 +798,125 @@ def detect_events(candles, classified):
 
     return events
 
+def market_structure_analysis(symbol):
+    """
+    Исторический анализ монеты:
+    - Тренд по 200 свечам (1d)
+    - Где мы сейчас относительно 30/90-дневного диапазона
+    - Ключевые уровни поддержки/сопротивления
+    - Глобальный тренд: восходящий/нисходящий/боковик
+    """
+    try:
+        candles_1d = get_candles(symbol, "1d", 200)
+        candles_4h = get_candles(symbol, "4h", 100)
+
+        if len(candles_1d) < 30:
+            return None
+
+        closes = [c["close"] for c in candles_1d]
+        highs  = [c["high"]  for c in candles_1d]
+        lows   = [c["low"]   for c in candles_1d]
+
+        current = closes[-1]
+
+        # Диапазоны
+        high_30  = max(highs[-30:])
+        low_30   = min(lows[-30:])
+        high_90  = max(highs[-90:]) if len(highs) >= 90 else max(highs)
+        low_90   = min(lows[-90:])  if len(lows)  >= 90 else min(lows)
+        high_all = max(highs)
+        low_all  = min(lows)
+
+        # Позиция в диапазоне (0% = дно, 100% = вершина)
+        range_30 = high_30 - low_30
+        pos_30 = round((current - low_30) / range_30 * 100, 1) if range_30 > 0 else 50
+
+        range_90 = high_90 - low_90
+        pos_90 = round((current - low_90) / range_90 * 100, 1) if range_90 > 0 else 50
+
+        range_all = high_all - low_all
+        pos_all = round((current - low_all) / range_all * 100, 1) if range_all > 0 else 50
+
+        # Глобальный тренд — скользящие средние
+        ma50  = sum(closes[-50:]) / 50  if len(closes) >= 50  else sum(closes) / len(closes)
+        ma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else sum(closes) / len(closes)
+
+        if current > ma50 > ma200:
+            global_trend = "📈 ВОСХОДЯЩИЙ"
+            trend_short = "UP"
+        elif current < ma50 < ma200:
+            global_trend = "📉 НИСХОДЯЩИЙ"
+            trend_short = "DOWN"
+        elif current > ma200:
+            global_trend = "↗️ ВЫШЕ MA200 (бычья зона)"
+            trend_short = "ABOVE_MA200"
+        else:
+            global_trend = "↘️ НИЖЕ MA200 (медвежья зона)"
+            trend_short = "BELOW_MA200"
+
+        # Локальный тренд — последние 14 свечей 4h
+        if len(candles_4h) >= 14:
+            local_closes = [c["close"] for c in candles_4h[-14:]]
+            if local_closes[-1] > local_closes[0] * 1.02:
+                local_trend = "📈 локальный рост"
+            elif local_closes[-1] < local_closes[0] * 0.98:
+                local_trend = "📉 локальное падение"
+            else:
+                local_trend = "➡️ боковик"
+        else:
+            local_trend = "—"
+
+        # Ключевые уровни — пики и впадины на дневках
+        resistance_levels = sorted(set([round(h, 2) for h in highs[-60:] if h > current]), reverse=True)[:3]
+        support_levels    = sorted(set([round(l, 2) for l in lows[-60:]  if l < current]), reverse=False)[:3]
+
+        # Зона: перекуплен/перепродан/нейтрал
+        if pos_30 > 75:
+            zone = "🔴 у верхней границы 30д"
+        elif pos_30 < 25:
+            zone = "🟢 у нижней границы 30д"
+        else:
+            zone = "🟡 середина диапазона"
+
+        return {
+            "symbol": symbol,
+            "current": current,
+            "global_trend": global_trend,
+            "trend_short": trend_short,
+            "local_trend": local_trend,
+            "pos_30": pos_30,
+            "pos_90": pos_90,
+            "pos_all": pos_all,
+            "zone": zone,
+            "high_30": high_30,
+            "low_30": low_30,
+            "high_90": high_90,
+            "low_90": low_90,
+            "ma50": round(ma50, 4),
+            "ma200": round(ma200, 4),
+            "resistance": resistance_levels,
+            "support": support_levels,
+        }
+    except Exception as e:
+        logging.warning(f"market_structure_analysis {symbol}: {e}")
+        return None
+
+def format_market_structure(ms):
+    """Форматирует исторический анализ для Telegram"""
+    if not ms:
+        return ""
+    res = "  ".join([f"<code>{r}</code>" for r in ms["resistance"][:2]]) if ms["resistance"] else "—"
+    sup = "  ".join([f"<code>{s}</code>" for s in ms["support"][:2]])    if ms["support"]    else "—"
+    return (
+        f"\n📊 <b>Исторический контекст</b>\n"
+        f"Тренд: {ms['global_trend']} | {ms['local_trend']}\n"
+        f"Позиция: {ms['pos_30']}% от 30д диапазона — {ms['zone']}\n"
+        f"За 90 дней: {ms['pos_90']}% | За всё время: {ms['pos_all']}%\n"
+        f"MA50: <code>{ms['ma50']}</code> | MA200: <code>{ms['ma200']}</code>\n"
+        f"Сопротивление: {res}\n"
+        f"Поддержка: {sup}\n"
+    )
+
 def find_ob(candles, direction):
     for i in range(len(candles) - 2, max(0, len(candles) - 25), -1):
         c = candles[i]
@@ -1361,6 +1480,16 @@ def full_scan(symbol, timeframe="1h"):
         # ── 8. Предупреждение об экономических событиях ──
         econ_warn = f"\n⚠️ <b>Макро:</b> {econ}\n" if econ else ""
 
+        # ── 9. Исторический анализ ──
+        ms = market_structure_analysis(symbol)
+        ms_text = format_market_structure(ms) if ms else ""
+        trend_warning = ""
+        if ms:
+            if direction == "BULLISH" and ms["trend_short"] == "DOWN":
+                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
+            elif direction == "BEARISH" and ms["trend_short"] == "UP":
+                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
+
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
@@ -1382,6 +1511,8 @@ def full_scan(symbol, timeframe="1h"):
             f"{econ_warn}"
             f"❌ <b>Инвалидация:</b> {inv_text}\n\n"
             f"📋 <b>Confluence [{total_weight}/100]:</b>\n{conf_text}\n\n"
+            f"{ms_text}"
+            f"{trend_warning}"
             f"💬 <b>APEX думает:</b>\n<i>{signal_comment}</i>\n"
             f"{'━'*26}"
         )
@@ -1754,7 +1885,7 @@ def get_crypto_news(limit=15):
         ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
         ("https://cryptonews.com/news/feed/", "CryptoNews"),
         ("https://decrypt.co/feed", "Decrypt"),
-        ("https://www.reuters.com/reuters/businessNews", "Reuters"),
+        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
         ("https://investing.com/rss/news_301.rss", "Investing.com"),
         ("https://www.forexfactory.com/ff_calendar_thisweek.xml", "ForexFactory"),
     ]
@@ -4466,7 +4597,7 @@ async def auto_research():
             pass
 
 async def auto_scan_job():
-    """Каждые 30 мин: SMC сканирование топ-50 пар по всем таймфреймам"""
+    """Каждые 15 мин: SMC сканирование топ-100 пар — присылаем только МЕГА ТОП (3/3 ТФ)"""
     closed = check_pending_signals()
     for c in closed:
         if c["is_win"] and ADMIN_ID:
@@ -4482,69 +4613,48 @@ async def auto_scan_job():
             except:
                 pass
 
-    pairs = get_top_pairs(50)
+    # Обязательные монеты всегда в начале списка
+    MUST_HAVE = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                 "TONUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT", "AVAXUSDT",
+                 "LINKUSDT", "DOTUSDT", "NEARUSDT", "ARBUSDT", "INJUSDT"]
+
+    pairs = get_top_pairs(100)
+    # Добавляем обязательные в начало если их нет
+    for m in reversed(MUST_HAVE):
+        if m not in pairs:
+            pairs.insert(0, m)
+        else:
+            pairs.remove(m)
+            pairs.insert(0, m)
+
     mega_signals = []
-    top_signals = []
-    good_signals = []
+    sent_symbols = set()
 
     # Сканируем все пары по всем таймфреймам
     for symbol in pairs:
-        for tf in ["15m", "1h", "4h"]:
-            try:
-                sig_data = full_scan_raw(symbol, tf)
-                if sig_data:
-                    grade = sig_data["grade"]
-                    # Не дублируем один символ с одним направлением
-                    existing = [s for s in mega_signals + top_signals + good_signals
-                               if s["symbol"] == symbol and s["direction"] == sig_data["direction"]]
-                    if existing:
-                        # Оставляем лучший грейд
-                        continue
-                    if grade == "МЕГА ТОП":
-                        mega_signals.append(sig_data)
-                    elif grade == "ТОП СДЕЛКА":
-                        top_signals.append(sig_data)
-                    elif grade == "ХОРОШАЯ":
-                        good_signals.append(sig_data)
-                await asyncio.sleep(0.3)
-            except:
-                pass
+        if symbol in sent_symbols:
+            continue
+        try:
+            sig_data = full_scan_raw(symbol, "1h")
+            if sig_data and sig_data["grade"] == "МЕГА ТОП":
+                mega_signals.append(sig_data)
+                sent_symbols.add(symbol)
+            await asyncio.sleep(0.2)
+        except:
+            pass
 
-    total = len(mega_signals) + len(top_signals) + len(good_signals)
-    logging.info(f"Скан: {len(pairs)} пар × 3 ТФ | 🔥🔥🔥{len(mega_signals)} | 🔥🔥{len(top_signals)} | ✅{len(good_signals)}")
+    logging.info(f"Скан 15м: {len(pairs)} пар | 🔥🔥🔥 МЕГА ТОП: {len(mega_signals)}")
 
     if not ADMIN_ID:
         return
 
-    # Отправляем МЕГА ТОП сразу
+    # Присылаем только МЕГА ТОП
     for sd in mega_signals[:5]:
         try:
             await bot.send_message(ADMIN_ID, sd["text"], parse_mode="HTML")
             await asyncio.sleep(1)
         except:
             pass
-
-    # Отправляем ТОП СДЕЛКИ (до 3)
-    for sd in top_signals[:3]:
-        try:
-            await bot.send_message(ADMIN_ID, sd["text"], parse_mode="HTML")
-            await asyncio.sleep(1)
-        except:
-            pass
-
-    # Итоговая сводка если ничего не нашли
-    if not mega_signals and not top_signals:
-        if good_signals:
-            summary = "✅ " + ", ".join([f"{s['symbol']} {s['direction']}" for s in good_signals[:5]])
-        else:
-            summary = "Сигналов нет"
-        await bot.send_message(
-            ADMIN_ID,
-            f"📊 <b>Скан завершён</b>\n"
-            f"Пар: {len(pairs)} | Сигналов: {total}\n"
-            f"{summary}",
-            parse_mode="HTML"
-        )
 
 
 async def auto_accumulation_scan():
@@ -4636,6 +4746,18 @@ def full_scan_raw(symbol, timeframe="1h"):
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
+        # Исторический анализ
+        ms = market_structure_analysis(symbol)
+        ms_text = format_market_structure(ms) if ms else ""
+
+        # Предупреждение если торгуем против глобального тренда
+        trend_warning = ""
+        if ms:
+            if direction == "BULLISH" and ms["trend_short"] == "DOWN":
+                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
+            elif direction == "BEARISH" and ms["trend_short"] == "UP":
+                trend_warning = "⚠️ <b>Торговля против глобального тренда!</b>\n"
+
         text = (
             f"{'━'*26}\n"
             f"{mtf['grade_emoji']} <b>{mtf['grade']}</b> [{tf_label}]\n"
@@ -4651,6 +4773,8 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
             f"📋 <b>Confluence:</b>\n{conf_text}\n"
+            f"{ms_text}"
+            f"{trend_warning}"
             f"{'━'*26}"
         )
 
@@ -4726,35 +4850,18 @@ def github_push_patch(new_code, sha, commit_message):
 
 async def analyze_and_patch(error_text, error_source="runtime"):
     """
-    Главная функция авто-патча:
+    Авто-патч без разрешения:
     1. Читает код из GitHub
-    2. Отправляет Groq на анализ
-    3. Получает исправленный код
-    4. Отправляет в Telegram с кнопками ✅/❌
+    2. Groq анализирует ошибку
+    3. Применяет исправление сразу и пушит в GitHub
+    4. Никаких уведомлений в Telegram
     """
-    global patch_counter
-    if not ADMIN_ID:
-        return
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        await bot.send_message(
-            ADMIN_ID,
-            "⚠️ Авто-патч: GITHUB_TOKEN или GITHUB_REPO не заданы. Добавь переменные в Render.",
-            parse_mode="HTML"
-        )
         return
-
-    send_text = (
-        "🔧 <b>Обнаружена ошибка</b>\n\n"
-        + "<code>" + error_text[:400] + "</code>\n\n"
-        + "⏳ Читаю код из GitHub и анализирую..."
-    )
-    await bot.send_message(ADMIN_ID, send_text, parse_mode="HTML")
-
 
     # Читаем текущий код
     current_code, sha = github_get_file()
     if not current_code:
-        await bot.send_message(ADMIN_ID, "❌ Не удалось прочитать код из GitHub.")
         return
 
     # Groq анализирует ошибку и предлагает исправление
@@ -4776,7 +4883,6 @@ async def analyze_and_patch(error_text, error_source="runtime"):
 
     response = ask_groq(prompt, max_tokens=800)
     if not response:
-        await bot.send_message(ADMIN_ID, "❌ Groq не смог проанализировать ошибку.")
         return
 
     # Парсим ответ
@@ -4786,9 +4892,7 @@ async def analyze_and_patch(error_text, error_source="runtime"):
         end = clean.rfind("}") + 1
         patch_data = json.loads(clean[start:end])
     except Exception as e:
-        await bot.send_message(ADMIN_ID, "❌ Groq вернул некорректный JSON: " + str(e) + "\n\n" + str(response)[:300])
-
-        return
+        logging.warning(f"auto_patch: Groq вернул некорректный JSON: {e}")
         return
 
     search_text = patch_data.get("search", "")
@@ -4796,50 +4900,32 @@ async def analyze_and_patch(error_text, error_source="runtime"):
     description = patch_data.get("description", "нет описания")
     risk = patch_data.get("risk", "unknown")
 
-    if not search_text or search_text not in current_code:
-        await bot.send_message(
-            ADMIN_ID,
-            f"⚠️ <b>Groq предложил исправление, но не смог найти точный фрагмент в коде.</b>"
-            f"📝 Описание: {description}"
-            f"Возможно нужно исправить вручную.",
-            parse_mode="HTML"
-        )
+    # Пропускаем высокорискованные патчи
+    if risk == "high":
+        logging.warning(f"auto_patch: пропускаем high-risk патч: {description}")
         return
 
-    # Сохраняем патч в очередь
-    patch_counter += 1
-    patch_id = str(patch_counter)
+    if not search_text or search_text not in current_code:
+        logging.warning(f"auto_patch: фрагмент не найден в коде: {description}")
+        return
+
+    # Если search == replace — патч бесполезен, пропускаем
+    if search_text.strip() == replace_text.strip():
+        logging.warning(f"auto_patch: search == replace, пропускаем: {description}")
+        return
+
     new_code = current_code.replace(search_text, replace_text, 1)
 
-    pending_patches[patch_id] = {
-        "new_code": new_code,
-        "sha": sha,
-        "description": description,
-        "error": error_text[:200],
-        "risk": risk,
-        "search": search_text[:150],
-        "replace": replace_text[:150]
-    }
-
-    risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk, "⚪️")
-
-    await bot.send_message(
-        ADMIN_ID,
-        "🔧 <b>APEX хочет исправить код</b>\n" +
-        "━" * 24 + "\n\n" +
-        "📋 <b>Что исправить:</b>\n" + description + "\n\n" +
-        risk_emoji + " <b>Риск:</b> " + risk + "\n\n" +
-        "<b>Заменить:</b>\n<code>" + search_text[:200] + "</code>\n\n" +
-        "<b>На:</b>\n<code>" + replace_text[:200] + "</code>\n\n" +
-        "━" * 24 + "\nПрименить изменение и задеплоить?",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Применить и деплоить", callback_data=f"patch_apply_{patch_id}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"patch_cancel_{patch_id}")
-            ]
-        ])
+    # Применяем сразу без разрешения
+    success, result = github_push_patch(
+        new_code,
+        sha,
+        f"🤖 APEX auto-fix: {description[:60]}"
     )
+    if success:
+        logging.info(f"auto_patch: применён и задеплоен — {description}")
+    else:
+        logging.warning(f"auto_patch: не удалось запушить — {result}")
 
 async def apply_patch(patch_id):
     """Применяем патч — пушим в GitHub"""
@@ -4862,17 +4948,31 @@ last_error_time = {}
 error_cooldown = 300  # 5 минут между одинаковыми ошибками
 
 class ErrorCapture(logging.Handler):
-    """Перехватывает ERROR логи и запускает авто-патч"""
+    """Перехватывает ERROR логи и запускает авто-патч (только настоящие ошибки)"""
+    # Фильтр — эти сообщения НЕ патчим (это нормальные ситуации, не баги)
+    IGNORE_PATTERNS = [
+        "Нет свечей", "нет свечей", "no candles", "пропущен по правилу",
+        "get_top_pairs", "Bybit tickers", "CryptoCompare", "Yahoo Finance",
+        "CoinGecko", "Binance", "timeout", "ConnectionError", "ConnectTimeout",
+        "ReadTimeout", "HTTPError", "fallback", "warning"
+    ]
+
     def emit(self, record):
         if record.levelno >= logging.ERROR:
             error_text = self.format(record)
+            # Пропускаем сетевые ошибки и отсутствие данных — это не баги кода
+            for pattern in self.IGNORE_PATTERNS:
+                if pattern.lower() in error_text.lower():
+                    return
+            # Пропускаем если нет Traceback — значит это просто warning уровня ERROR
+            if "Traceback" not in error_text and "Exception" not in error_text:
+                return
             # Дедупликация — не спамим одной ошибкой
             error_key = error_text[:100]
             now = time.time()
             if now - last_error_time.get(error_key, 0) < error_cooldown:
                 return
             last_error_time[error_key] = now
-
             # Запускаем авто-патч асинхронно
             try:
                 loop = asyncio.get_event_loop()
@@ -4904,7 +5004,7 @@ async def on_startup(app):
         logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(auto_scan_job, "interval", minutes=30)
+    scheduler.add_job(auto_scan_job, "interval", minutes=15)
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
     scheduler.add_job(auto_research, "interval", hours=2)
     scheduler.add_job(check_alerts, "interval", minutes=5)
@@ -4954,7 +5054,7 @@ def main():
                 logging.warning(f"delete_webhook: {e}")
             await asyncio.sleep(2)
             scheduler = AsyncIOScheduler()
-            scheduler.add_job(auto_scan_job, "interval", minutes=30)
+            scheduler.add_job(auto_scan_job, "interval", minutes=15)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
