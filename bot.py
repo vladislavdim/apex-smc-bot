@@ -45,6 +45,9 @@ def run_server():
 # ===== DATABASE =====
 
 def init_db():
+    # Добавляем проверку на наличие свечей для ETHUSDT 1h
+    if not groq_client.get_candles(symbol='ETHUSDT', timeframe='1h'):
+        logging.error('Нет свечей для ETHUSDT 1h')
     conn = sqlite3.connect("brain.db")
     c = conn.cursor()
 
