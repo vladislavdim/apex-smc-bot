@@ -383,7 +383,7 @@ last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
 def get_top_pairs(limit=100):
-    """Топ-N пар по объёму: Bybit → Binance Futures → Binance Spot"""
+    """Топ-N пар по объёму: Binance Futures → Binance Spot (Bybit убран — 403 на Render)"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache
@@ -398,40 +398,47 @@ def get_top_pairs(limit=100):
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
     ]
 
-    # 1. Bybit
+    # 1. Binance Futures — основной источник
     try:
-        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"}, timeout=10)
-        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
-        jdata = r.json()
-        if jdata.get("retCode") != 0: raise Exception(f"retCode={jdata.get('retCode')}")
-        data = jdata["result"]["list"]
-        data.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
-        bybit_top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
-        if bybit_top:
-            # Объединяем: сначала форсированные, потом остальные по объёму
-            combined = list(dict.fromkeys(FORCED + bybit_top))[:limit]
-            pairs_cache = combined
-            pairs_cache_time = time.time()
-            logging.info(f"Пары Bybit: {len(combined)} шт, топ: {combined[:5]}")
-            return pairs_cache
-    except Exception as e:
-        logging.warning(f"Bybit tickers: {e}")
-
-    # 2. Binance Futures / Spot
-    for url in [f"{BINANCE_F}/fapi/v1/ticker/24hr", f"{BINANCE}/api/v3/ticker/24hr"]:
-        try:
-            r = requests.get(url, timeout=10)
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/ticker/24hr",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
             data = r.json()
             if isinstance(data, list):
-                data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+                data.sort(key=lambda x: float(x.get("quoteVolume", 0) or 0), reverse=True)
                 top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
                 if top:
                     combined = list(dict.fromkeys(FORCED + top))[:limit]
                     pairs_cache = combined
                     pairs_cache_time = time.time()
+                    logging.info(f"Пары Binance Futures: {len(combined)} шт, топ: {combined[:5]}")
                     return pairs_cache
-        except:
-            continue
+    except Exception as e:
+        logging.warning(f"Binance Futures tickers: {e}")
+
+    # 2. Binance Spot — fallback
+    try:
+        r = requests.get(
+            f"{BINANCE}/api/v3/ticker/24hr",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list):
+                data.sort(key=lambda x: float(x.get("quoteVolume", 0) or 0), reverse=True)
+                top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
+                if top:
+                    combined = list(dict.fromkeys(FORCED + top))[:limit]
+                    pairs_cache = combined
+                    pairs_cache_time = time.time()
+                    logging.info(f"Пары Binance Spot: {len(combined)} шт")
+                    return pairs_cache
+    except Exception as e:
+        logging.warning(f"Binance Spot tickers: {e}")
 
     logging.warning("get_top_pairs: используем fallback список")
     return pairs_cache if pairs_cache else FORCED
@@ -802,87 +809,94 @@ SYMBOL_ALIASES = {
 
 def get_candles(symbol, interval="1h", limit=200):
     """
-    Свечи: кэш → Binance API (авторизованный, для 1m/1w/1M) →
-           Bybit (основной) → Binance Futures → Binance Spot → CoinGecko → CryptoCompare
+    Свечи: кэш →
+      1. Binance Futures REST (без ключа, работает с Render) — PRIMARY для всех TF
+      2. Binance Spot REST   (без ключа) — fallback
+      3. Binance API клиент  (с ключом)  — если есть BINANCE_API_KEY
+      4. CryptoCompare       — дополнительный
+      5. CoinGecko           — последний резерв
+      Bybit убран — даёт HTTP 403 с серверов Render
     """
     global candle_cache
     cache_key = f"{symbol}_{interval}"
 
-    # Кэш (старший ТФ живёт дольше)
-    cache_ttl = 60 if interval in ("1m", "3m", "5m") else 300 if interval in ("15m", "30m", "1h") else 600
+    # Кэш (TTL зависит от TF)
+    cache_ttl = 60 if interval in ("1m", "3m", "5m") else 180 if interval in ("15m", "30m") else 300 if interval in ("1h", "2h") else 600
     if cache_key in candle_cache:
         cached, ts = candle_cache[cache_key]
         if time.time() - ts < cache_ttl and len(cached) >= 20:
             return cached
 
-    # 0. Binance API (авторизованный) — приоритет для скальп TF и старших TF
-    senior_tfs = {"1d", "3d", "1w", "1M"}
-    scalp_tfs = {"1m", "3m", "5m"}
-    if interval in senior_tfs or interval in scalp_tfs:
+    bi = BINANCE_INTERVALS.get(interval, interval)
+
+    # 1. Binance Futures REST — работает с Render без блокировок
+    try:
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/klines",
+            params={"symbol": symbol, "interval": bi, "limit": limit},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
+                candles = [{"open": float(c[1]), "high": float(c[2]),
+                            "low": float(c[3]), "close": float(c[4]),
+                            "volume": float(c[5])} for c in data]
+                if len(candles) >= 20:
+                    logging.info(f"Свечи Binance Futures: {symbol} {interval} {len(candles)}шт")
+                    candle_cache[cache_key] = (candles, time.time())
+                    return candles
+    except Exception as e:
+        logging.warning(f"Binance Futures {symbol} {interval}: {e}")
+
+    # 2. Binance Spot REST
+    try:
+        r = requests.get(
+            f"{BINANCE}/api/v3/klines",
+            params={"symbol": symbol, "interval": bi, "limit": limit},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
+                candles = [{"open": float(c[1]), "high": float(c[2]),
+                            "low": float(c[3]), "close": float(c[4]),
+                            "volume": float(c[5])} for c in data]
+                if len(candles) >= 20:
+                    logging.info(f"Свечи Binance Spot: {symbol} {interval} {len(candles)}шт")
+                    candle_cache[cache_key] = (candles, time.time())
+                    return candles
+    except Exception as e:
+        logging.warning(f"Binance Spot {symbol} {interval}: {e}")
+
+    # 3. Binance API клиент (авторизованный, если есть ключ)
+    try:
         candles = get_full_history_binance(symbol, interval, limit)
         if candles and len(candles) >= 20:
-            candle_cache[cache_key] = (candles, time.time())
-            return candles
-
-    # 1. Bybit — основной для средних TF
-    try:
-        bybit_int = BYBIT_INTERVALS.get(interval, "60")
-        r = requests.get(BYBIT_URL, params={
-            "category": "linear", "symbol": symbol,
-            "interval": bybit_int, "limit": limit
-        }, headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"}, timeout=10)
-        if r.status_code != 200:
-            raise Exception(f"HTTP {r.status_code}")
-        data = r.json()
-        if data.get("retCode") == 0:
-            raw = data["result"]["list"]
-            candles = [{"open": float(c[1]), "high": float(c[2]),
-                        "low": float(c[3]), "close": float(c[4]),
-                        "volume": float(c[5])} for c in reversed(raw)]
-            if len(candles) >= 20:
-                logging.info(f"Свечи Bybit: {symbol} {interval} {len(candles)}шт")
-                candle_cache[cache_key] = (candles, time.time())
-                return candles
-    except Exception as e:
-        logging.warning(f"Bybit klines {symbol} {interval}: {e}")
-
-    # 2. Binance Futures (REST без ключа)
-    try:
-        bi = BINANCE_INTERVALS.get(interval, interval)
-        r = requests.get(f"{BINANCE_F}/fapi/v1/klines", params={
-            "symbol": symbol, "interval": bi, "limit": limit
-        }, timeout=8)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
-            candles = [{"open": float(c[1]), "high": float(c[2]),
-                        "low": float(c[3]), "close": float(c[4]),
-                        "volume": float(c[5])} for c in data]
+            logging.info(f"Свечи Binance API: {symbol} {interval} {len(candles)}шт")
             candle_cache[cache_key] = (candles, time.time())
             return candles
     except Exception as e:
-        logging.warning(f"Binance Futures {symbol}: {e}")
+        logging.warning(f"Binance API client {symbol} {interval}: {e}")
 
-    # 3. Binance Spot (REST без ключа)
+    # 4. CryptoCompare
     try:
-        bi = BINANCE_INTERVALS.get(interval, interval)
-        r = requests.get(f"{BINANCE}/api/v3/klines", params={
-            "symbol": symbol, "interval": bi, "limit": limit
-        }, timeout=8)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
-            candles = [{"open": float(c[1]), "high": float(c[2]),
-                        "low": float(c[3]), "close": float(c[4]),
-                        "volume": float(c[5])} for c in data]
-            candle_cache[cache_key] = (candles, time.time())
-            return candles
+        cc_candles = get_cryptocompare_candles(symbol, interval, limit)
+        if cc_candles and len(cc_candles) >= 20:
+            logging.info(f"Свечи CryptoCompare: {symbol} {interval} {len(cc_candles)}шт")
+            candle_cache[cache_key] = (cc_candles, time.time())
+            return cc_candles
     except Exception as e:
-        logging.warning(f"Binance Spot {symbol}: {e}")
+        logging.warning(f"CryptoCompare {symbol} {interval}: {e}")
 
-    # 4. CoinGecko — последний резерв
+    # 5. CoinGecko — последний резерв
     cg_id = COINGECKO_IDS.get(symbol)
     if cg_id:
         try:
-            days_map = {"5m": 1, "15m": 1, "1h": 7, "4h": 30, "1d": 90}
+            days_map = {"1m": 1, "5m": 1, "15m": 1, "30m": 1,
+                        "1h": 7, "4h": 30, "1d": 90, "1w": 365, "1M": 365}
             days = days_map.get(interval, 7)
             r = requests.get(
                 f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc",
@@ -890,21 +904,18 @@ def get_candles(symbol, interval="1h", limit=200):
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=12
             )
-            data = r.json()
-            if isinstance(data, list) and len(data) > 5:
-                candles = [{"open": float(c[1]), "high": float(c[2]),
-                            "low": float(c[3]), "close": float(c[4]),
-                            "volume": 0.0} for c in data[-limit:]]
-                candle_cache[cache_key] = (candles, time.time())
-                return candles
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 5:
+                    candles = [{"open": float(c[1]), "high": float(c[2]),
+                                "low": float(c[3]), "close": float(c[4]),
+                                "volume": 0.0} for c in data[-limit:]]
+                    if len(candles) >= 20:
+                        logging.info(f"Свечи CoinGecko: {symbol} {interval} {len(candles)}шт")
+                        candle_cache[cache_key] = (candles, time.time())
+                        return candles
         except Exception as e:
-            logging.warning(f"CoinGecko {symbol}: {e}")
-
-    # 5. CryptoCompare — дополнительный источник свечей
-    cc_candles = get_cryptocompare_candles(symbol, interval, limit)
-    if cc_candles and len(cc_candles) >= 20:
-        candle_cache[cache_key] = (cc_candles, time.time())
-        return cc_candles
+            logging.warning(f"CoinGecko {symbol} {interval}: {e}")
 
     logging.warning(f"Нет свечей для {symbol} {interval}")
     return []
@@ -3896,30 +3907,49 @@ def get_messari_data(symbol):
 def get_all_prices_merged():
     """
     Объединяет данные со ВСЕХ источников.
-    Bybit — основной, остальные дополняют недостающие монеты.
+    Binance Futures — основной (Bybit убран — 403 на Render).
     """
-    # Параллельно запрашиваем несколько источников
     import concurrent.futures
     result = {}
 
-    def fetch_bybit():
+    def fetch_binance_futures():
         try:
-            r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=8)
-            data = r.json()
-            if data.get("retCode") == 0:
-                items = data["result"]["list"]
-                items.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+            r = requests.get(
+                f"{BINANCE_F}/fapi/v1/ticker/24hr",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            if r.status_code == 200:
                 out = {}
-                for t in items:
+                for t in r.json():
                     sym = t.get("symbol", "")
                     if sym.endswith("USDT") and t.get("lastPrice"):
                         out[sym] = {
                             "price": float(t["lastPrice"]),
-                            "change": round(float(t.get("price24hPcnt", 0)) * 100, 2),
-                            "source": "Bybit"
+                            "change": round(float(t.get("priceChangePercent", 0)), 2),
+                            "source": "Binance"
                         }
-                    if len(out) >= 50:
-                        break
+                return out
+        except:
+            return {}
+
+    def fetch_binance_spot():
+        try:
+            r = requests.get(
+                f"{BINANCE}/api/v3/ticker/24hr",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                out = {}
+                for t in r.json():
+                    sym = t.get("symbol", "")
+                    if sym.endswith("USDT") and t.get("lastPrice"):
+                        out[sym] = {
+                            "price": float(t["lastPrice"]),
+                            "change": round(float(t.get("priceChangePercent", 0)), 2),
+                            "source": "Binance Spot"
+                        }
                 return out
         except:
             return {}
@@ -3930,21 +3960,24 @@ def get_all_prices_merged():
     def fetch_yahoo():
         return get_yahoo_finance_prices()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        f_bybit = ex.submit(fetch_bybit)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        f_bf = ex.submit(fetch_binance_futures)
+        f_bs = ex.submit(fetch_binance_spot)
         f_cc = ex.submit(fetch_cryptocompare)
         f_yf = ex.submit(fetch_yahoo)
 
-        bybit_data = f_bybit.result()
+        bf_data = f_bf.result()
+        bs_data = f_bs.result()
         cc_data = f_cc.result()
         yf_data = f_yf.result()
 
-    # Bybit — приоритет
-    result.update(cc_data)   # сначала CC как база
-    result.update(yf_data)   # Yahoo поверх
-    result.update(bybit_data)  # Bybit всегда побеждает (самый точный)
+    # Binance Futures — приоритет (самый точный для фьючерсов)
+    result.update(cc_data)
+    result.update(yf_data)
+    result.update(bs_data)
+    result.update(bf_data)  # Binance Futures побеждает
 
-    logging.info(f"Merged prices: {len(result)} монет (Bybit:{len(bybit_data)} CC:{len(cc_data)} YF:{len(yf_data)})")
+    logging.info(f"Merged prices: {len(result)} монет (BF:{len(bf_data)} BS:{len(bs_data)} CC:{len(cc_data)} YF:{len(yf_data)})")
     return result
 
 
@@ -4044,36 +4077,7 @@ def get_multiple_prices_realtime():
     except Exception as e:
         logging.warning(f"get_prices Binance: {e}")
 
-    # ── 4. Bybit — прямо с биржи ──
-    try:
-        r = requests.get(
-            BYBIT_TICKERS,
-            params={"category": "linear"},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"},
-            timeout=8
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("retCode") == 0:
-                items = data["result"]["list"]
-                items.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
-                for t in items:
-                    sym = t.get("symbol", "")
-                    if sym.endswith("USDT") and t.get("lastPrice") and sym not in result:
-                        try:
-                            result[sym] = {
-                                "price": float(t["lastPrice"]),
-                                "change": round(float(t.get("price24hPcnt", 0)) * 100, 2),
-                                "volume": float(t.get("turnover24h", 0) or 0),
-                                "source": "Bybit"
-                            }
-                        except:
-                            pass
-                logging.info(f"Живые цены: +Bybit (итого {len(result)} монет)")
-    except Exception as e:
-        logging.warning(f"get_prices Bybit: {e}")
-
-    # ── 5. CryptoCompare — агрегирует Kraken/OKX/Coinbase/Huobi ──
+    # ── 4. CryptoCompare — агрегирует Kraken/OKX/Coinbase/Huobi ──
     if len(result) < 30:
         try:
             r = requests.get(
