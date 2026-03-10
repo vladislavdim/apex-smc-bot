@@ -1754,7 +1754,7 @@ def get_crypto_news(limit=15):
         ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
         ("https://cryptonews.com/news/feed/", "CryptoNews"),
         ("https://decrypt.co/feed", "Decrypt"),
-        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
+        ("https://www.reuters.com/reuters/businessNews", "Reuters"),
         ("https://investing.com/rss/news_301.rss", "Investing.com"),
         ("https://www.forexfactory.com/ff_calendar_thisweek.xml", "ForexFactory"),
     ]
