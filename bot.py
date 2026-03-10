@@ -88,7 +88,7 @@ def init_db():
         avg_hours_to_tp REAL DEFAULT 0,
         best_timeframe TEXT,
         worst_timeframe TEXT,
-        win_ratete REAL DEFAULT 0,
+        win_rate REAL DEFAULT 0,
         last_analysis TEXT)""")
 
     # Дневник сделок пользователя
@@ -177,13 +177,12 @@ def init_db():
         impact TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
-    # ===== ИСТОРИЯ ОБУЧЕНИЯ — что бот изучил и исправил =====
+    # История обучения — что бот узнал и исправил (видна пользователю)
     c.execute("""CREATE TABLE IF NOT EXISTS learning_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_type TEXT,
         title TEXT,
         description TEXT,
-        before_value TEXT,
         after_value TEXT,
         impact_score REAL DEFAULT 0.5,
         source TEXT,
@@ -274,7 +273,7 @@ def extract_and_save_profile(user_id, user_name, message, ai_response):
 Сообщение: {message}
 {{"profile": "1-2 предложения о стиле торговли", "coins": "монеты через запятую", "preferences": "таймфрейм, стиль, риск"}}"""
         r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200
         )
@@ -327,12 +326,19 @@ def get_top_pairs(limit=100):
 
     # 1. Bybit
     try:
-        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=10)
-        data = r.json()["result"]["list"]
-        data.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
-        bybit_top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
+        r = requests.get(BYBIT_TICKERS,
+            params={"category": "linear"},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"},
+            timeout=10)
+        if r.status_code != 200:
+            raise Exception(f"HTTP {r.status_code}")
+        data = r.json()
+        if data.get("retCode") != 0:
+            raise Exception(f"retCode={data.get('retCode')}")
+        tickers = data["result"]["list"]
+        tickers.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+        bybit_top = [t["symbol"] for t in tickers if str(t.get("symbol","")).endswith("USDT")][:limit]
         if bybit_top:
-            # Объединяем: сначала форсированные, потом остальные по объёму
             combined = list(dict.fromkeys(FORCED + bybit_top))[:limit]
             pairs_cache = combined
             pairs_cache_time = time.time()
@@ -740,7 +746,9 @@ def get_candles(symbol, interval="1h", limit=200):
         r = requests.get(BYBIT_URL, params={
             "category": "linear", "symbol": symbol,
             "interval": bybit_int, "limit": limit
-        }, timeout=10)
+        }, headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"}, timeout=10)
+        if r.status_code != 200:
+            raise Exception(f"HTTP {r.status_code}")
         data = r.json()
         if data.get("retCode") == 0:
             raw = data["result"]["list"]
@@ -1264,7 +1272,6 @@ def get_upcoming_events():
     high_impact = ["Federal Reserve", "Fed", "CPI", "NFP", "Non-Farm", "GDP",
                    "Interest Rate", "Inflation", "FOMC", "Powell", "SEC", "ECB"]
     try:
-        items = parse_rss("https://www.reuters.com/reuters/businessNews", "Reuters", limit=10)
         now = datetime.now()
         warnings = []
         for item in items:
@@ -1414,7 +1421,7 @@ async def realtime_pump_detector():
 
                     pump_alerted.add(symbol)
                     # Снимаем алерт через 30 мин
-                    asyncio.get_event_loop().call_later(1800, lambda s=symbol: pump_alerted.discard(s))
+                    asyncio.get_running_loop().call_later(1800, lambda s=symbol: pump_alerted.discard(s))
 
                     if ADMIN_ID:
                         await bot.send_message(
@@ -1854,12 +1861,7 @@ def backtest(symbol, timeframe="1h", periods=500):
 # ===== ЖИВОЙ АНАЛИЗ — ГДЕ МЫ СЕЙЧАС =====
 
 def live_position_analysis(symbol, timeframe="1h"):
-    """
-    Смотрит ТЕКУЩУЮ цену + структуру рынка и отвечает:
-    - Где мы на карте (OB, FVG, поддержка/сопротивление)
-    - Что делать прямо сейчас (ЛОНГ / ШОРТ / ЖДАТЬ)
-    - Ближайшие цели и стоп
-    """
+    """Реальная цена + структура рынка → что делать прямо сейчас"""
     try:
         candles = get_candles(symbol, timeframe, 200)
         if len(candles) < 30:
@@ -1867,86 +1869,61 @@ def live_position_analysis(symbol, timeframe="1h"):
 
         price_now  = candles[-1]["close"]
         price_open = candles[-1]["open"]
-
         candle_dir = "🟢" if price_now >= price_open else "🔴"
 
-        # SMC структура
         highs, lows = find_swings(candles, lookback=5)
-        classified   = classify_swings(highs, lows)
-        events       = detect_events(candles, classified)
-        trend        = events[0]["direction"] if events else "UNCLEAR"
+        classified  = classify_swings(highs, lows)
+        events      = detect_events(candles, classified)
+        trend       = events[0]["direction"] if events else "UNCLEAR"
 
-        recent_high_vals = sorted([h[1] for h in highs[-6:]], reverse=True) if highs else []
-        recent_low_vals  = sorted([l[1] for l in lows[-6:]])                 if lows  else []
+        h_vals = sorted([h[1] for h in highs[-6:]], reverse=True) if highs else []
+        l_vals = sorted([l[1] for l in lows[-6:]])                 if lows  else []
 
-        resistances = [h for h in recent_high_vals if h > price_now * 1.002]
-        supports    = [l for l in recent_low_vals   if l < price_now * 0.998]
-        nearest_res = min(resistances) if resistances else None
-        nearest_sup = max(supports)    if supports    else None
+        nearest_res = min([h for h in h_vals if h > price_now * 1.002], default=None)
+        nearest_sup = max([l for l in l_vals if l < price_now * 0.998], default=None)
 
         ob_bull  = find_ob(candles, "BULLISH")
         ob_bear  = find_ob(candles, "BEARISH")
         fvg_bull = find_fvg(candles, "BULLISH")
         fvg_bear = find_fvg(candles, "BEARISH")
 
-        in_bull_ob   = ob_bull  and ob_bull["bottom"]  <= price_now <= ob_bull["top"]
-        in_bear_ob   = ob_bear  and ob_bear["bottom"]  <= price_now <= ob_bear["top"]
-        in_bull_fvg  = fvg_bull and fvg_bull["bottom"] <= price_now <= fvg_bull["top"]
-        in_bear_fvg  = fvg_bear and fvg_bear["bottom"] <= price_now <= fvg_bear["top"]
+        in_bull_ob  = ob_bull  and ob_bull["bottom"]  <= price_now <= ob_bull["top"]
+        in_bear_ob  = ob_bear  and ob_bear["bottom"]  <= price_now <= ob_bear["top"]
+        in_bull_fvg = fvg_bull and fvg_bull["bottom"] <= price_now <= fvg_bull["top"]
+        in_bear_fvg = fvg_bear and fvg_bear["bottom"] <= price_now <= fvg_bear["top"]
 
-        # Моментум — последние 3 свечи
-        last3       = candles[-3:]
-        bulls       = sum(1 for c in last3 if c["close"] > c["open"])
-        momentum    = "🚀 растём" if bulls >= 2 else "💥 падаем" if bulls == 0 else "😐 боковик"
+        last3     = candles[-3:]
+        bulls     = sum(1 for c in last3 if c["close"] > c["open"])
+        momentum  = "🚀 растём" if bulls >= 2 else "💥 падаем" if bulls == 0 else "😐 боковик"
 
-        # Объём
-        vols        = [c["volume"] for c in candles[-20:]]
-        avg_vol     = sum(vols[:-1]) / max(len(vols) - 1, 1)
-        vol_ratio   = candles[-1]["volume"] / avg_vol if avg_vol > 0 else 1
-        vol_tag     = "🔥 высокий" if vol_ratio > 1.5 else "📉 низкий" if vol_ratio < 0.6 else "➡️ средний"
+        vols      = [c["volume"] for c in candles[-20:]]
+        avg_vol   = sum(vols[:-1]) / max(len(vols)-1, 1)
+        vol_ratio = candles[-1]["volume"] / avg_vol if avg_vol > 0 else 1
+        vol_tag   = "🔥 высокий" if vol_ratio > 1.5 else "📉 низкий" if vol_ratio < 0.6 else "➡️ средний"
 
         dist_res = ((nearest_res - price_now) / price_now * 100) if nearest_res else None
         dist_sup = ((price_now - nearest_sup) / price_now * 100) if nearest_sup else None
 
-        # ── Решение ──
         if trend == "BULLISH":
             if in_bull_ob or in_bull_fvg:
-                action = "✅ ВХОДИТЬ ЛОНГ"
-                reason = "Цена в зоне Bull OB/FVG — идеальная точка"
-                risk   = "низкий"
+                action, reason, risk = "✅ ВХОДИТЬ ЛОНГ",     "В зоне Bull OB/FVG — идеальная точка",     "низкий"
             elif nearest_sup and dist_sup and dist_sup < 1.0:
-                action = "✅ ЛОНГ у поддержки"
-                reason = "Тренд ↑, цена у поддержки — хорошая точка"
-                risk   = "низкий"
+                action, reason, risk = "✅ ЛОНГ у поддержки", "Тренд ↑, цена у поддержки",                "низкий"
             elif nearest_res and dist_res and dist_res < 0.5:
-                action = "⚠️ ЖДАТЬ пробоя"
-                reason = "Упираемся в сопротивление — жди пробой или отскок"
-                risk   = "высокий"
+                action, reason, risk = "⚠️ ЖДАТЬ пробоя",    "У сопротивления — жди пробой или отскок",  "высокий"
             else:
-                action = "⏳ ЖДАТЬ"
-                reason = "Тренд бычий, но нет точки — жди поддержку"
-                risk   = "средний"
+                action, reason, risk = "⏳ ЖДАТЬ",            "Тренд бычий, нет точки — жди поддержку",   "средний"
         elif trend == "BEARISH":
             if in_bear_ob or in_bear_fvg:
-                action = "🔴 ВХОДИТЬ ШОРТ"
-                reason = "Цена в зоне Bear OB/FVG — точка на продажу"
-                risk   = "низкий"
+                action, reason, risk = "🔴 ВХОДИТЬ ШОРТ",     "В зоне Bear OB/FVG — точка на продажу",    "низкий"
             elif nearest_res and dist_res and dist_res < 1.0:
-                action = "🔴 ШОРТ у сопротивления"
-                reason = "Тренд ↓, цена у сопротивления"
-                risk   = "низкий"
+                action, reason, risk = "🔴 ШОРТ у сопр.",     "Тренд ↓, цена у сопротивления",            "низкий"
             elif nearest_sup and dist_sup and dist_sup < 0.5:
-                action = "⚠️ ЖДАТЬ пробоя"
-                reason = "Упираемся в поддержку — жди пробой или отскок вверх"
-                risk   = "высокий"
+                action, reason, risk = "⚠️ ЖДАТЬ пробоя",    "У поддержки — жди пробой или отскок вверх", "высокий"
             else:
-                action = "⏳ ЖДАТЬ"
-                reason = "Тренд медвежий, но нет точки — жди сопротивление"
-                risk   = "средний"
+                action, reason, risk = "⏳ ЖДАТЬ",            "Тренд медвежий, нет точки — жди сопр.",     "средний"
         else:
-            action = "😴 НЕТ СИГНАЛА"
-            reason = "Структура неясна — боковик или смена тренда"
-            risk   = "высокий"
+            action, reason, risk = "😴 НЕТ СИГНАЛА", "Боковик или смена тренда", "высокий"
 
         def fmt(p):
             if p is None: return "—"
@@ -1956,16 +1933,14 @@ def live_position_analysis(symbol, timeframe="1h"):
             f"📍 <b>{symbol}</b> [{TF_LABELS.get(timeframe, timeframe)}] — СЕЙЧАС",
             f"{'━'*26}",
             f"{candle_dir} Цена: <code>{fmt(price_now)}</code>",
-            f"⚡️ Моментум: {momentum}  |  📊 Объём: {vol_tag} (×{vol_ratio:.1f})",
+            f"⚡️ {momentum}  |  📊 Объём: {vol_tag} (×{vol_ratio:.1f})",
             f"",
-            f"📐 <b>Структура:</b>",
-            f"{'🟢' if trend=='BULLISH' else '🔴' if trend=='BEARISH' else '⚪️'} Тренд: <b>{trend}</b>",
+            f"📐 <b>Структура:</b>  {'🟢' if trend=='BULLISH' else '🔴' if trend=='BEARISH' else '⚪️'} <b>{trend}</b>",
         ]
         if nearest_res:
-            lines.append(f"🔴 Сопротивление: <code>{fmt(nearest_res)}</code>  (+{dist_res:.1f}%)")
+            lines.append(f"🔴 Сопротивление: <code>{fmt(nearest_res)}</code> (+{dist_res:.1f}%)")
         if nearest_sup:
-            lines.append(f"🟢 Поддержка:     <code>{fmt(nearest_sup)}</code>  (-{dist_sup:.1f}%)")
-
+            lines.append(f"🟢 Поддержка:     <code>{fmt(nearest_sup)}</code> (-{dist_sup:.1f}%)")
         lines.append(f"\n<b>🗺 Зоны:</b>")
         if ob_bull:
             lines.append(f"🟦 Bull OB: <code>{fmt(ob_bull['bottom'])}–{fmt(ob_bull['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bull_ob else ""))
@@ -1976,26 +1951,18 @@ def live_position_analysis(symbol, timeframe="1h"):
         if fvg_bear:
             lines.append(f"🟠 Bear FVG: <code>{fmt(fvg_bear['bottom'])}–{fmt(fvg_bear['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bear_fvg else ""))
 
-        # SL/TP подсказки
         sl_hint = ""
-        tp_hint = ""
         if "ЛОНГ" in action and nearest_sup:
-            sl = nearest_sup * 0.997
-            tp = price_now + (price_now - sl) * 2
+            sl  = nearest_sup * 0.997
+            tp  = price_now + (price_now - sl) * 2
             sl_hint = f"\n🛡 SL: <code>{fmt(sl)}</code>  |  🎯 TP: <code>{fmt(tp)}</code>  (RR 1:2)"
         elif "ШОРТ" in action and nearest_res:
-            sl = nearest_res * 1.003
-            tp = price_now - (sl - price_now) * 2
+            sl  = nearest_res * 1.003
+            tp  = price_now - (sl - price_now) * 2
             sl_hint = f"\n🛡 SL: <code>{fmt(sl)}</code>  |  🎯 TP: <code>{fmt(tp)}</code>  (RR 1:2)"
 
-        lines += [
-            f"\n{'━'*26}",
-            f"🎯 <b>{action}</b>",
-            f"<i>{reason}</i>",
-            f"⚠️ Риск: {risk}{sl_hint}",
-        ]
+        lines += [f"\n{'━'*26}", f"🎯 <b>{action}</b>", f"<i>{reason}</i>", f"⚠️ Риск: {risk}{sl_hint}"]
         return "\n".join(lines)
-
     except Exception as e:
         logging.error(f"live_position_analysis {symbol}: {e}")
         return None
@@ -2133,7 +2100,6 @@ def get_crypto_news(limit=15):
         ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
         ("https://cryptonews.com/news/feed/", "CryptoNews"),
         ("https://decrypt.co/feed", "Decrypt"),
-        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
         ("https://investing.com/rss/news_301.rss", "Investing.com"),
         ("https://www.forexfactory.com/ff_calendar_thisweek.xml", "ForexFactory"),
     ]
@@ -2168,7 +2134,6 @@ def format_news(news_items):
 def get_market_impact_news():
     """Макро-новости которые влияют на рынок: ФРС, CPI, геополитика"""
     sources = [
-        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
         ("https://feeds.bloomberg.com/markets/news.rss", "Bloomberg"),
         ("https://investing.com/rss/news_301.rss", "Investing.com"),
         ("https://feeds.feedburner.com/streetinsider/crypto", "StreetInsider"),
@@ -2388,42 +2353,32 @@ def update_market_model(symbol, candles, direction, result=None):
 
 
 def log_brain_event(event_type, description, impact=""):
-    """Лог событий эволюции мозга — пишем в brain_log И в learning_history"""
+    """Лог событий эволюции — пишем в brain_log И в learning_history"""
     try:
         conn = sqlite3.connect("brain.db")
         conn.execute(
             "INSERT INTO brain_log VALUES (NULL,?,?,?,CURRENT_TIMESTAMP)",
             (event_type, description[:200], impact[:100])
         )
-
-        # Человекочитаемые заголовки для истории обучения
-        type_titles = {
-            "rule_added":         "📌 Новое правило",
-            "rule_strengthened":  "💪 Правило укреплено",
-            "rule_weakened":      "⚠️ Правило ослаблено",
-            "error_analyzed":     "🔍 Ошибка разобрана",
-            "pattern_detected":   "🔎 Найден паттерн",
-            "web_learned":        "🌐 Узнал из интернета",
-            "signal_win":         "✅ Сигнал выиграл",
-            "signal_loss":        "❌ Сигнал проиграл",
-            "self_synthesis":     "🧠 Синтез знаний",
-            "auto_patch":         "🔧 Авто-исправление",
+        titles = {
+            "rule_added":       "📌 Новое правило",
+            "rule_strengthened":"💪 Правило укреплено",
+            "rule_weakened":    "⚠️ Правило ослаблено",
+            "error_analyzed":   "🔍 Ошибка разобрана",
+            "pattern_detected": "🔎 Найден паттерн",
+            "web_learned":      "🌐 Узнал из интернета",
+            "signal_win":       "✅ Сигнал выиграл",
+            "signal_loss":      "❌ Сигнал проиграл",
+            "self_synthesis":   "🧠 Синтез знаний",
+            "auto_patch":       "🔧 Авто-исправление",
         }
-        title = type_titles.get(event_type, f"📎 {event_type}")
-
-        # Оценка важности события
-        impact_score_map = {
-            "rule_added": 0.7, "rule_strengthened": 0.6, "rule_weakened": 0.5,
-            "error_analyzed": 0.8, "signal_win": 0.6, "signal_loss": 0.7,
-            "web_learned": 0.5, "self_synthesis": 0.9, "auto_patch": 0.9,
-        }
-        score = impact_score_map.get(event_type, 0.5)
-
+        scores = {"rule_added":0.7,"rule_strengthened":0.6,"rule_weakened":0.5,
+                  "error_analyzed":0.8,"signal_win":0.6,"signal_loss":0.7,
+                  "web_learned":0.5,"self_synthesis":0.9,"auto_patch":0.9}
         conn.execute(
-            """INSERT INTO learning_history
-               (event_type, title, description, after_value, impact_score, source)
-               VALUES (?,?,?,?,?,?)""",
-            (event_type, title, description[:300], impact[:200], score, "auto")
+            "INSERT INTO learning_history (event_type,title,description,after_value,impact_score,source) VALUES (?,?,?,?,?,?)",
+            (event_type, titles.get(event_type, f"📎 {event_type}"),
+             description[:300], impact[:200], scores.get(event_type, 0.5), "auto")
         )
         conn.commit()
         conn.close()
@@ -2918,8 +2873,8 @@ def ask_groq(prompt, max_tokens=800):
         prompt = prompt[:6000] + "\n[промпт сокращён]"
 
     models = [
-        "llama-3.3-70b-versatile",   # основная
-        "llama-3.1-8b-instant",       # быстрая fallback
+        "llama-3.1-8b-instant",       # основная — 500k TPD, быстрая, бесплатная
+        "llama-3.3-70b-versatile",    # fallback — умнее но 100k TPD
         "mixtral-8x7b-32768",         # резерв
     ]
 
@@ -2974,6 +2929,56 @@ def ask_groq_cached(prompt, max_tokens=400, cache_key=None):
     return result
 
 
+# Флаг: если 70b исчерпан на сегодня — не пытаемся снова до следующего дня
+_groq_70b_exhausted_until = 0
+
+def ask_groq_smart(prompt, max_tokens=800):
+    """
+    Умный выбор модели:
+    - Для коротких промптов — всегда 8b (быстро, не жжёт TPD)
+    - Для длинного анализа — пробуем 70b, если лимит — 8b
+    Это позволяет боту работать весь день не исчерпывая квоту.
+    """
+    global _groq_70b_exhausted_until
+
+    # Если промпт < 1500 символов — 8b справится отлично
+    # Если 70b знаем что исчерпан сегодня — тоже 8b
+    if len(prompt) < 1500 or time.time() < _groq_70b_exhausted_until:
+        models_order = ["llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+    else:
+        models_order = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+
+    if len(prompt) > 6000:
+        prompt = prompt[:6000] + "\n[сокращено]"
+
+    for attempt, model in enumerate(models_order):
+        try:
+            r = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                timeout=30,
+            )
+            return r.choices[0].message.content
+        except Exception as e:
+            err = str(e).lower()
+            if "rate_limit" in err or "429" in err:
+                if "tokens per day" in err or "tpd" in err.lower():
+                    # Суточный лимит — не пробуем эту модель до конца дня
+                    if "70b" in model:
+                        _groq_70b_exhausted_until = time.time() + 3600  # 1 час
+                        logging.warning(f"Groq 70b TPD исчерпан, переключаюсь на 8b на 1 час")
+                    time.sleep(5)
+                else:
+                    wait = 15 * (attempt + 1)
+                    logging.warning(f"Groq rate limit ({model}), жду {wait}с...")
+                    time.sleep(wait)
+            else:
+                logging.error(f"Groq {model}: {e}")
+                time.sleep(3)
+    return None
+
+
 def search_web_free(query, limit=5):
     """
     Поиск в интернете БЕЗ API ключей:
@@ -3007,7 +3012,6 @@ def search_web_free(query, limit=5):
     news_sources = [
         ("https://cointelegraph.com/rss", "CoinTelegraph"),
         ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
-        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
     ]
     for url, name in news_sources[:2]:
         try:
@@ -3071,13 +3075,6 @@ def learn_from_web(topic, save=True):
                     summary = f"Ключевые факты: {'; '.join(data.get('key_facts', [])[:3])}. Влияние: {data.get('market_impact', '')}. Сигнал: {data.get('trading_signal', '')}"
                     save_knowledge(topic, summary, "web-learning")
 
-                    # Запись в историю обучения
-                    log_brain_event(
-                        "web_learned",
-                        f"Тема: {topic} — {data.get('market_impact', '')[:120]}",
-                        f"Сигнал: {data.get('trading_signal', '')[:80]}"
-                    )
-
                     # Если есть паттерн — сохраняем как правило
                     signal = data.get("trading_signal", "").lower()
                     if "покупать" in signal or "лонг" in signal:
@@ -3138,7 +3135,7 @@ async def autonomous_learning_cycle():
 
         new_insights = []
         for topic in chosen:
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None, learn_from_web, topic, True
             )
             if isinstance(result, dict) and result.get("market_impact"):
@@ -3156,7 +3153,7 @@ async def autonomous_learning_cycle():
         if recent_knowledge:
             # AI строит сводку из всего что узнал
             knowledge_text = "\n".join([f"• {r[0]}: {r[1][:100]}" for r in recent_knowledge])
-            synthesis = await asyncio.get_event_loop().run_in_executor(
+            synthesis = await asyncio.get_running_loop().run_in_executor(
                 None, ask_groq,
                 f"""Ты APEX. Синтезируй что ты узнал за последние 24 часа и сформулируй торговый вывод.
 
@@ -3718,7 +3715,12 @@ def get_multiple_prices_realtime():
     # Fallback цепочка если параллельный запрос не сработал
     # 1. Bybit — быстро, много монет, работает с Render
     try:
-        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=8)
+        r = requests.get(BYBIT_TICKERS,
+            params={"category": "linear"},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"},
+            timeout=8)
+        if r.status_code != 200:
+            raise Exception(f"HTTP {r.status_code}")
         data = r.json()
         if data.get("retCode") == 0:
             result = {}
@@ -3873,7 +3875,6 @@ def ask_ai(user_id, user_name, user_message):
         ("https://cointelegraph.com/rss", "CT"),
         ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
         ("https://decrypt.co/feed", "Decrypt"),
-        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
     ]:
         try:
             items = parse_rss(feed, name, limit=5)
@@ -3942,7 +3943,7 @@ def ask_ai(user_id, user_name, user_message):
 {user_name}: {user_message}
 APEX:"""
 
-    return ask_groq(prompt, max_tokens=700)
+    return ask_groq_smart(prompt, max_tokens=700)
 
 
 # ===== KEYBOARDS =====
@@ -4016,7 +4017,7 @@ def backtest_tf_keyboard():
         [InlineKeyboardButton(text="15 мин", callback_data="bt_15m"),
          InlineKeyboardButton(text="1 час", callback_data="bt_1h"),
          InlineKeyboardButton(text="4 часа", callback_data="bt_4h")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]
     ])
 
 def live_tf_keyboard():
@@ -4267,8 +4268,8 @@ async def cmd_stats(message: types.Message):
 async def cmd_news(message: types.Message):
     await message.answer("📰 Собираю свежие новости...")
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    crypto_news = await asyncio.get_event_loop().run_in_executor(None, get_crypto_news)
-    macro_news = await asyncio.get_event_loop().run_in_executor(None, get_market_impact_news)
+    crypto_news = await asyncio.get_running_loop().run_in_executor(None, get_crypto_news)
+    macro_news = await asyncio.get_running_loop().run_in_executor(None, get_market_impact_news)
     crypto_text = format_news(crypto_news[:5])
     macro_text = format_news(macro_news[:3])
     all_titles = "\n".join([item["title"] for item in (crypto_news + macro_news)[:10]])
@@ -4524,7 +4525,7 @@ async def handle_callback(callback: CallbackQuery):
             )
         else:
             # Диагностика — объясняем почему нет сигнала
-            diag = await asyncio.get_event_loop().run_in_executor(None, scan_diagnostics, symbol)
+            diag = await asyncio.get_running_loop().run_in_executor(None, scan_diagnostics, symbol)
             await callback.message.edit_text(
                 diag,
                 parse_mode="HTML",
@@ -4537,7 +4538,6 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "menu_backtest":
         await callback.message.edit_text(
             "🔬 <b>Анализ монеты</b>\n\n"
-            "Выбери режим:\n\n"
             "• <b>Бектест</b> — историческая точность стратегии\n"
             "• <b>Где мы сейчас</b> — живой анализ текущего момента",
             parse_mode="HTML",
@@ -4550,7 +4550,7 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data == "menu_bt_select":
         await callback.message.edit_text(
-            "🔬 <b>Бектест стратегии</b>\n\nВыбери таймфрейм:",
+            "🔬 <b>Бектест</b>\n\nВыбери таймфрейм:",
             parse_mode="HTML", reply_markup=backtest_tf_keyboard()
         )
 
@@ -4560,13 +4560,30 @@ async def handle_callback(callback: CallbackQuery):
             parse_mode="HTML", reply_markup=live_tf_keyboard()
         )
 
-    elif data.startswith("live_"):
-        tf = data.replace("live_", "")
-        user_states[user_id] = {"action": "live_analysis", "tf": tf}
-        await callback.message.edit_text(
-            f"📍 Анализ на {TF_LABELS.get(tf, tf)} — где мы сейчас?\n\n"
-            f"Напиши монету (например: BTC, SOL, ETHUSDT):"
-        )
+    elif data.startswith("live_") and "_" in data[5:]:
+        parts = data.split("_")
+        # live_15m / live_1h / live_4h  → user picks coin
+        # live_now_BTCUSDT_1h / live_refresh_BTCUSDT_1h → direct show
+        if len(parts) == 2:
+            tf = parts[1]
+            user_states[user_id] = {"action": "live_analysis", "tf": tf}
+            await callback.message.edit_text(
+                f"📍 Анализ на {TF_LABELS.get(tf, tf)} — напиши монету (BTC, SOL, ETHUSDT...):"
+            )
+        elif len(parts) >= 4:
+            symbol = parts[2]
+            tf     = parts[3]
+            await callback.message.edit_text(f"📍 Обновляю {symbol} {TF_LABELS.get(tf,tf)}...")
+            result = await asyncio.get_running_loop().run_in_executor(None, live_position_analysis, symbol, tf)
+            if result:
+                await callback.message.edit_text(result, parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"live_refresh_{symbol}_{tf}")],
+                        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+                    ]))
+            else:
+                await callback.message.edit_text(f"Нет данных по {symbol}",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]]))
 
     elif data.startswith("bt_"):
         tf = data.replace("bt_", "")
@@ -4655,102 +4672,6 @@ async def handle_callback(callback: CallbackQuery):
             ])
         )
 
-    elif data.startswith("live_now_") or data.startswith("live_refresh_"):
-        # live_now_BTCUSDT_1h  или  live_refresh_BTCUSDT_1h
-        parts = data.split("_")
-        # parts: ['live','now'/'refresh', 'BTCUSDT', '1h']
-        symbol = parts[2] if len(parts) > 2 else "BTCUSDT"
-        tf     = parts[3] if len(parts) > 3 else "1h"
-        await callback.message.edit_text(f"📍 Обновляю анализ {symbol}...")
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, live_position_analysis, symbol, tf
-        )
-        if result:
-            await callback.message.edit_text(
-                result, parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"live_refresh_{symbol}_{tf}")],
-                    [InlineKeyboardButton(text="🔬 Бектест", callback_data=f"live_now_{symbol}_{tf}")],
-                    [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-                ])
-            )
-        else:
-            await callback.message.edit_text(f"Нет данных по {symbol}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]]))
-
-    elif data == "menu_evolution":
-        # ===== ИСТОРИЯ ОБУЧЕНИЯ БОТА =====
-        try:
-            conn = sqlite3.connect("brain.db")
-            # Последние 20 событий обучения
-            history = conn.execute(
-                """SELECT title, description, after_value, impact_score, created_at
-                   FROM learning_history
-                   ORDER BY id DESC LIMIT 20"""
-            ).fetchall()
-            total_events = conn.execute("SELECT COUNT(*) FROM learning_history").fetchone()[0]
-            rules_total  = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
-            rules_strong = conn.execute("SELECT COUNT(*) FROM self_rules WHERE confidence >= 0.7").fetchone()[0]
-            errors_fixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone()[0]
-            knowledge_cnt= conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
-            conn.close()
-        except Exception as e:
-            history = []
-            total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
-
-        if not history:
-            evo_text = (
-                "📚 <b>Эволюция APEX</b>\n"
-                f"{'━'*26}\n\n"
-                "🆕 Бот только начинает учиться.\n"
-                "История обучения появится после первых сигналов и сессий самообучения.\n\n"
-                "<i>Запусти обучение через 🧠 Мозг APEX → Запустить обучение сейчас</i>"
-            )
-        else:
-            # Иконки по типу события
-            icon_map = {
-                "📌 Новое правило":       "📌",
-                "💪 Правило укреплено":   "💪",
-                "⚠️ Правило ослаблено":   "⚠️",
-                "🔍 Ошибка разобрана":    "🔍",
-                "🌐 Узнал из интернета":  "🌐",
-                "✅ Сигнал выиграл":      "✅",
-                "❌ Сигнал проиграл":     "❌",
-                "🧠 Синтез знаний":       "🧠",
-                "🔧 Авто-исправление":    "🔧",
-            }
-            lines_evo = [
-                f"📚 <b>Эволюция APEX</b>",
-                f"{'━'*26}",
-                f"📊 Всего событий обучения: <b>{total_events}</b>",
-                f"📌 Правил усвоено: <b>{rules_total}</b>  |  💪 Сильных (70%+): <b>{rules_strong}</b>",
-                f"🔧 Ошибок исправлено: <b>{errors_fixed}</b>  |  📖 Знаний: <b>{knowledge_cnt}</b>",
-                f"{'━'*26}",
-                f"<b>Последние события:</b>",
-                "",
-            ]
-            for h in history[:15]:
-                title, desc, after, score, created = h
-                ts = created[:16] if created else ""
-                bar = "█" * int((score or 0.5) * 5)
-                lines_evo.append(f"<b>{title}</b>  <code>{ts}</code>")
-                lines_evo.append(f"  {desc[:90]}" + (f"\n  → {after[:60]}" if after else ""))
-                lines_evo.append(f"  Важность: {bar} {int((score or 0.5)*100)}%")
-                lines_evo.append("")
-            evo_text = "\n".join(lines_evo)
-
-        # Telegram лимит 4096 символов
-        if len(evo_text) > 4000:
-            evo_text = evo_text[:4000] + "\n...\n<i>(показаны последние события)</i>"
-
-        await callback.message.edit_text(
-            evo_text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_evolution")],
-                [InlineKeyboardButton(text="🧠 Запустить обучение", callback_data="brain_learn_now")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
-            ])
-        )
-
     elif data == "menu_brain":
         try:
             conn = sqlite3.connect("brain.db")
@@ -4803,8 +4724,7 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "brain_learn_now":
-        await callback.message.edit_text("🧠 Запускаю самообучение (web research + синтез)...")
-        # Запускаем ОБА цикла — старый self_research и новый автономный
+        await callback.message.edit_text("🧠 Запускаю самообучение (web + синтез)...")
         await self_research_loop()
         await autonomous_learning_cycle()
         conn = sqlite3.connect("brain.db")
@@ -4818,9 +4738,64 @@ async def handle_callback(callback: CallbackQuery):
             f"<i>Открой «Эволюция бота» чтобы увидеть что именно изменилось</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📚 Смотреть историю обучения", callback_data="menu_evolution")],
+                [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🧠 Мозг APEX", callback_data="menu_brain")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+    elif data == "menu_evolution":
+        try:
+            conn = sqlite3.connect("brain.db")
+            history      = conn.execute("SELECT title, description, after_value, impact_score, created_at FROM learning_history ORDER BY id DESC LIMIT 20").fetchall()
+            total_events = conn.execute("SELECT COUNT(*) FROM learning_history").fetchone()[0]
+            rules_total  = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+            rules_strong = conn.execute("SELECT COUNT(*) FROM self_rules WHERE confidence >= 0.7").fetchone()[0]
+            errors_fixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone()[0]
+            knowledge_cnt= conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+            conn.close()
+        except:
+            history = []
+            total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
+
+        if not history:
+            evo_text = (
+                "📚 <b>Эволюция APEX</b>\n"
+                f"{'━'*26}\n\n"
+                "🆕 Бот только начинает учиться.\n\n"
+                "<i>Нажми «Запустить обучение» чтобы увидеть первые результаты</i>"
+            )
+        else:
+            lines_evo = [
+                "📚 <b>Эволюция APEX</b>",
+                f"{'━'*26}",
+                f"📊 Событий обучения: <b>{total_events}</b>",
+                f"📌 Правил: <b>{rules_total}</b>  |  💪 Сильных 70%+: <b>{rules_strong}</b>",
+                f"🔧 Исправлено ошибок: <b>{errors_fixed}</b>  |  📖 Знаний: <b>{knowledge_cnt}</b>",
+                f"{'━'*26}",
+                "<b>Последние события:</b>",
+                "",
+            ]
+            for title, desc, after, score, created in history[:15]:
+                ts  = (created or "")[:16]
+                bar = "█" * int((score or 0.5) * 5)
+                lines_evo.append(f"<b>{title}</b>  <code>{ts}</code>")
+                lines_evo.append(f"  {(desc or '')[:90]}")
+                if after:
+                    lines_evo.append(f"  → {after[:60]}")
+                lines_evo.append(f"  {bar} {int((score or 0.5)*100)}%")
+                lines_evo.append("")
+            evo_text = "\n".join(lines_evo)
+
+        if len(evo_text) > 4000:
+            evo_text = evo_text[:4000] + "\n\n<i>...показаны последние события</i>"
+
+        await callback.message.edit_text(
+            evo_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_evolution")],
+                [InlineKeyboardButton(text="🧠 Запустить обучение", callback_data="brain_learn_now")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
             ])
         )
 
@@ -4945,9 +4920,9 @@ async def handle_callback(callback: CallbackQuery):
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
         # Крипто новости
-        crypto_news = await asyncio.get_event_loop().run_in_executor(None, get_crypto_news)
+        crypto_news = await asyncio.get_running_loop().run_in_executor(None, get_crypto_news)
         # Макро новости
-        macro_news = await asyncio.get_event_loop().run_in_executor(None, get_market_impact_news)
+        macro_news = await asyncio.get_running_loop().run_in_executor(None, get_market_impact_news)
 
         crypto_text = format_news(crypto_news[:6])
         macro_text = format_news(macro_news[:4])
@@ -4986,11 +4961,11 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data == "menu_pump":
         await callback.message.edit_text("📦 Сканирую топ-50 на накопление перед пампом...\n⏳ ~30 секунд")
-        pairs = await asyncio.get_event_loop().run_in_executor(None, get_top_pairs, 50)
+        pairs = await asyncio.get_running_loop().run_in_executor(None, get_top_pairs, 50)
         found = []
         for symbol in pairs:
             try:
-                acc = await asyncio.get_event_loop().run_in_executor(None, detect_accumulation, symbol)
+                acc = await asyncio.get_running_loop().run_in_executor(None, detect_accumulation, symbol)
                 if acc and acc["score"] >= 50:
                     found.append(acc)
             except:
@@ -5047,7 +5022,7 @@ async def cmd_pump(message: types.Message):
     if len(args) == 2:
         symbol = args[1].upper().replace("USDT","") + "USDT"
         await message.answer(f"📦 Анализирую накопление {symbol}...")
-        acc = await asyncio.get_event_loop().run_in_executor(None, detect_accumulation, symbol)
+        acc = await asyncio.get_running_loop().run_in_executor(None, detect_accumulation, symbol)
         if acc:
             await message.answer(format_accumulation(acc), parse_mode="HTML")
         else:
@@ -5076,7 +5051,7 @@ async def cmd_think(message: types.Message):
     args = message.text.split(maxsplit=1)
     topic = args[1].strip() if len(args) > 1 else "bitcoin market analysis"
     await message.answer(f"🧠 Думаю над темой: <b>{topic}</b>...\n⏳ Ищу в интернете, анализирую...", parse_mode="HTML")
-    result = await asyncio.get_event_loop().run_in_executor(None, deep_research, topic)
+    result = await asyncio.get_running_loop().run_in_executor(None, deep_research, topic)
     if result:
         await message.answer(
             f"🧠 <b>Глубокий анализ: {topic}</b>\n\n{result}",
@@ -5265,7 +5240,7 @@ async def handle_text(message: types.Message):
     if not text:
         return
 
-    # Проверяем состояние (ожидаем ввод монеты для бектеста / live)
+    # Проверяем состояние (ожидаем ввод монеты)
     if user_id in user_states:
         state = user_states.pop(user_id)
 
@@ -5273,36 +5248,26 @@ async def handle_text(message: types.Message):
             symbol = text.upper().replace("USDT", "") + "USDT"
             tf = state.get("tf", "1h")
             thinking = await message.answer(f"📍 Анализирую {symbol} {TF_LABELS.get(tf, tf)}...")
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, live_position_analysis, symbol, tf
-            )
-            try:
-                await thinking.delete()
-            except:
-                pass
+            result = await asyncio.get_running_loop().run_in_executor(None, live_position_analysis, symbol, tf)
+            try: await thinking.delete()
+            except: pass
             if result:
                 await message.answer(result, parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"live_refresh_{symbol}_{tf}")],
-                        [InlineKeyboardButton(text="🔬 Бектест этой монеты", callback_data=f"bt_{tf}")],
                         [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-                    ])
-                )
-                # Запоминаем монету для быстрого обновления
-                user_states[user_id] = {"last_live_symbol": symbol, "last_live_tf": tf}
+                    ]))
             else:
-                await message.answer(f"Не удалось получить данные по {symbol}. Попробуй другую монету.")
+                await message.answer(f"Нет данных по {symbol}. Попробуй другую монету.")
             return
 
         if state.get("action") == "backtest":
             symbol = text.upper().replace("USDT", "") + "USDT"
             tf = state.get("tf", "1h")
             thinking = await message.answer(f"🔬 Запускаю бектест {symbol} {TF_LABELS.get(tf, tf)}...")
-            result = await asyncio.get_event_loop().run_in_executor(None, backtest, symbol, tf)
-            try:
-                await thinking.delete()
-            except:
-                pass
+            result = await asyncio.get_running_loop().run_in_executor(None, backtest, symbol, tf)
+            try: await thinking.delete()
+            except: pass
             if result:
                 grade = "🔥 Отличная" if result["win_rate"] >= 60 else "✅ Рабочая" if result["win_rate"] >= 50 else "⚠️ Слабая"
                 await message.answer(
@@ -5312,7 +5277,7 @@ async def handle_text(message: types.Message):
                     f"❌ Проигрыши: {result['losses']}\n"
                     f"🎯 Win Rate: <b>{result['win_rate']}%</b>\n"
                     f"Оценка: {grade}\n\n"
-                    f"<i>Хочешь узнать где мы сейчас? Нажми ниже 👇</i>",
+                    f"<i>Хочешь узнать где мы сейчас? 👇</i>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="📍 Где мы сейчас?", callback_data=f"live_now_{symbol}_{tf}")],
@@ -5326,7 +5291,7 @@ async def handle_text(message: types.Message):
     save_chat_log(user_id, "user", text)
     thinking = await message.answer("⚡️")
     # ✅ ФИКС: run_in_executor — ask_ai не блокирует event loop
-    reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai, user_id, user_name, text)
+    reply = await asyncio.get_running_loop().run_in_executor(None, ask_ai, user_id, user_name, text)
     try:
         await thinking.delete()
     except:
@@ -5694,7 +5659,7 @@ class ErrorCapture(logging.Handler):
 
             # Запускаем авто-патч асинхронно
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 if loop.is_running():
                     loop.create_task(analyze_and_patch(error_text, "runtime"))
             except:
@@ -5734,7 +5699,7 @@ async def on_startup(app):
     scheduler.start()
     setup_error_capture()
     # Первый цикл обучения — сразу при старте (через 30 сек)
-    asyncio.get_event_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
+    asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
     logging.info("APEX запущен!")
 
 
@@ -5785,7 +5750,7 @@ def main():
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
             scheduler.start()
-            asyncio.get_event_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
+            asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
