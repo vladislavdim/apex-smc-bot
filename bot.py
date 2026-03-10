@@ -420,7 +420,9 @@ def get_live_prices():
 
     # 4. Kraken как последний fallback
     try:
-        pairs_kraken = {"XBTUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
+        pairs_kraken = {"XBTUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT",
+                        "XRPUSD": "XRPUSDT", "DOGEUSD": "DOGEUSDT", "AVAXUSD": "AVAXUSDT",
+                        "LINKUSD": "LINKUSDT", "BNBUSD": "BNBUSDT"}
         market = {}
         r = requests.get(
             "https://api.kraken.com/0/public/Ticker",
@@ -1951,7 +1953,7 @@ def update_market_model(symbol, candles, direction, result=None):
         if existing:
             conn.execute(
                 """UPDATE market_model SET trend=?, key_levels=?, behavior_notes=?,
-                   best_setup=COALESCE(NULLIF(?,'''), best_setup),
+                   best_setup=COALESCE(NULLIF(?, ''), best_setup),
                    avoid_conditions=COALESCE(NULLIF(?,''), avoid_conditions),
                    last_updated=CURRENT_TIMESTAMP WHERE symbol=?""",
                 (trend, key_levels, behavior, best_setup, avoid, symbol)
@@ -4265,14 +4267,13 @@ async def on_startup(app):
     scheduler.add_job(auto_research, "interval", hours=2)
     scheduler.add_job(check_alerts, "interval", minutes=5)
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
-    scheduler.add_job(realtime_pump_detector, "interval", minutes=5)
+    scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
     scheduler.start()
     logging.info("APEX запущен!")
 
 
 async def on_shutdown(app):
-    await bot.delete_webhook()
-    logging.info("Webhook удалён")
+    logging.info("APEX остановлен")
 
 
 def main():
@@ -4315,7 +4316,7 @@ def main():
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", hours=4)
-            scheduler.add_job(realtime_pump_detector, "interval", minutes=5)
+            scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.start()
             logging.info("APEX запущен в polling режиме")
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
