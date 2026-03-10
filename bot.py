@@ -2726,7 +2726,81 @@ def get_price_realtime(symbol="BTCUSDT"):
 
 
 def get_multiple_prices_realtime():
-    """Цены всех монет одним запросом через CoinGecko"""
+    """
+    Живые цены: Bybit (основной) → Binance Futures → Binance Spot → CoinGecko
+    Возвращает топ-20 монет с ценой и изменением за 24ч
+    """
+    # 1. Bybit — быстро, много монет, работает с Render
+    try:
+        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, timeout=8)
+        data = r.json()
+        if data.get("retCode") == 0:
+            result = {}
+            items = data["result"]["list"]
+            # Сортируем по объёму
+            items.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+            for t in items:
+                sym = t.get("symbol", "")
+                if sym.endswith("USDT") and t.get("lastPrice"):
+                    try:
+                        price = float(t["lastPrice"])
+                        change = float(t.get("price24hPcnt", 0)) * 100
+                        result[sym] = {"price": price, "change": round(change, 2)}
+                    except:
+                        pass
+                if len(result) >= 30:
+                    break
+            if result:
+                logging.info(f"Живые цены: Bybit ({len(result)} монет)")
+                return result
+    except Exception as e:
+        logging.warning(f"get_multiple_prices_realtime Bybit: {e}")
+
+    # 2. Binance Futures
+    try:
+        r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=8)
+        data = r.json()
+        if isinstance(data, list):
+            result = {}
+            data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+            for t in data:
+                sym = t.get("symbol", "")
+                if sym.endswith("USDT"):
+                    result[sym] = {
+                        "price": float(t["lastPrice"]),
+                        "change": round(float(t["priceChangePercent"]), 2)
+                    }
+                if len(result) >= 30:
+                    break
+            if result:
+                logging.info(f"Живые цены: Binance Futures ({len(result)} монет)")
+                return result
+    except Exception as e:
+        logging.warning(f"get_multiple_prices_realtime Binance: {e}")
+
+    # 3. Binance Spot
+    try:
+        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=8)
+        data = r.json()
+        if isinstance(data, list):
+            result = {}
+            data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+            for t in data:
+                sym = t.get("symbol", "")
+                if sym.endswith("USDT"):
+                    result[sym] = {
+                        "price": float(t["lastPrice"]),
+                        "change": round(float(t["priceChangePercent"]), 2)
+                    }
+                if len(result) >= 30:
+                    break
+            if result:
+                logging.info(f"Живые цены: Binance Spot ({len(result)} монет)")
+                return result
+    except Exception as e:
+        logging.warning(f"get_multiple_prices_realtime Binance Spot: {e}")
+
+    # 4. CoinGecko — последний резерв
     try:
         ids = ",".join(set(COINGECKO_IDS.values()))
         r = requests.get(
@@ -2745,9 +2819,11 @@ def get_multiple_prices_realtime():
                     "price": values["usd"],
                     "change": round(values.get("usd_24h_change", 0), 2)
                 }
+        if result:
+            logging.info(f"Живые цены: CoinGecko ({len(result)} монет)")
         return result
     except Exception as e:
-        logging.warning(f"get_multiple_prices_realtime: {e}")
+        logging.warning(f"get_multiple_prices_realtime CoinGecko: {e}")
         return {}
 
 
@@ -2764,49 +2840,68 @@ def ask_ai(user_id, user_name, user_message):
     msg_lower = user_message.lower()
 
     needs_price = any(kw in msg_lower for kw in [
-        "цена", "курс", "сколько", "почём", "стоит", "биткоин", "btc",
-        "eth", "sol", "рынок", "памп", "дамп", "упал", "вырос", "сейчас"
+        "цена", "курс", "сколько", "почём", "стоит", "биткоин", "btc", "бтк", "бткс",
+        "eth", "эфир", "sol", "соль", "рынок", "памп", "дамп", "упал", "вырос", "сейчас",
+        "bnb", "xrp", "рипл", "dogeусdt", "doge", "avax", "link", "цены", "монет",
+        "торгуется", "котировки", "стоимость", "baidu", "ton", "near", "sui", "apt",
+        "крипта", "альты", "альткоины", "покупать", "продавать", "лонг", "шорт"
     ])
     needs_research = any(kw in msg_lower for kw in [
         "почему", "что случилось", "прогноз", "анализ", "расскажи",
-        "новости", "что думаешь", "объясни", "загугли", "найди"
+        "новости", "что думаешь", "объясни", "загугли", "найди", "поищи",
+        "что происходит", "тренд", "перспективы", "будет"
     ])
 
-    # Живые цены — берём прямо сейчас через CoinGecko
+    # Живые цены — ВСЕГДА тянем для любого сообщения (не только price-запросов)
     live_prices_text = ""
-    if needs_price or len(user_message) < 40:
-        prices = get_multiple_prices_realtime()
-        if not prices:
-            cached = get_live_prices()
-            prices = {k: {"price": v["price"], "change": v["change"]} for k, v in list(cached.items())[:10]}
+    prices = get_multiple_prices_realtime()
+    if not prices:
+        cached = get_live_prices()
+        prices = {k: {"price": v["price"], "change": v["change"]} for k, v in list(cached.items())[:20]}
 
-        if prices:
-            lines = []
-            for sym, d in list(prices.items())[:12]:
-                p = d["price"]
-                ps = f"${p:,.2f}" if p >= 100 else f"${p:,.4f}" if p >= 1 else f"${p:.6f}"
-                emoji = "🟢" if d["change"] >= 0 else "🔴"
-                lines.append(f"{emoji} {sym.replace('USDT','')}: {ps} ({d['change']:+.2f}%)")
-            live_prices_text = "ЖИВЫЕ ЦЕНЫ (прямо сейчас, CoinGecko):\n" + "\n".join(lines)
-        else:
-            live_prices_text = "ЦЕНЫ: недоступны — не называй цены из своей памяти"
+    if prices:
+        # Приоритетные монеты показываем первыми
+        priority = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "TONUSDT", "ARBUSDT"]
+        ordered = [(s, prices[s]) for s in priority if s in prices]
+        others = [(s, d) for s, d in prices.items() if s not in priority]
+        all_prices = ordered + others
 
-    # Поиск в интернете
+        lines = []
+        for sym, d in all_prices[:20]:
+            p = d["price"]
+            ps = f"${p:,.2f}" if p >= 100 else f"${p:,.4f}" if p >= 1 else f"${p:.6f}"
+            emoji = "🟢" if d["change"] >= 0 else "🔴"
+            lines.append(f"{emoji} {sym.replace('USDT','')}: {ps} ({d['change']:+.2f}%)")
+        source = "Bybit/Binance"
+        live_prices_text = f"ЖИВЫЕ ЦЕНЫ ({source}, {datetime.now().strftime('%H:%M')}):\n" + "\n".join(lines)
+    else:
+        live_prices_text = "ЦЕНЫ: все источники недоступны — не называй цены из памяти"
+
+    # Поиск в интернете — всегда ищем свежие новости
     research_result = ""
-    if needs_research or needs_price:
-        search_words = [w for w in msg_lower.split() if len(w) > 3][:3]
-        news_items = []
-        for feed in ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]:
-            try:
-                items = parse_rss(feed, "", limit=8)
-                news_items.extend(items)
-            except:
-                pass
+    search_words = [w for w in msg_lower.split() if len(w) > 3 and w not in
+                    ("что", "как", "это", "для", "бро", "можешь", "хочу", "нужно")][:4]
+    news_items = []
+    for feed, name in [
+        ("https://cointelegraph.com/rss", "CT"),
+        ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
+        ("https://decrypt.co/feed", "Decrypt"),
+        ("https://feeds.reuters.com/reuters/businessNews", "Reuters"),
+    ]:
+        try:
+            items = parse_rss(feed, name, limit=5)
+            news_items.extend(items)
+        except:
+            pass
+    if search_words:
         relevant = [i for i in news_items if any(w in i["title"].lower() for w in search_words)]
-        if relevant:
-            research_result = "НАШЁЛ В ИНТЕРНЕТЕ:\n" + "\n".join([f"[{i['date']}] {i['title']}" for i in relevant[:4]])
-        elif news_items:
-            research_result = "ПОСЛЕДНИЕ НОВОСТИ:\n" + "\n".join([f"[{i['date']}] {i['title']}" for i in news_items[:3]])
+    else:
+        relevant = []
+    if relevant:
+        research_result = "НАШЁЛ В ИНТЕРНЕТЕ:\n" + "\n".join([f"[{i['date']}] {i['title']} — {i['source']}" for i in relevant[:5]])
+    elif news_items:
+        research_result = "ПОСЛЕДНИЕ НОВОСТИ:\n" + "\n".join([f"[{i['date']}] {i['title']} — {i['source']}" for i in news_items[:4]])
 
     knowledge = get_knowledge(user_message[:50])
     recent_news = get_recent_news()
@@ -2818,7 +2913,7 @@ def ask_ai(user_id, user_name, user_message):
     if mem["name"] or mem["profile"]:
         user_context = f"ПОЛЬЗОВАТЕЛЬ:\nИмя: {mem['name'] or user_name} | Сообщений: {mem['messages']}\nПрофиль: {mem['profile'] or 'нет'}\nМонеты: {mem['coins'] or 'нет'}\nДепозит: ${mem['deposit']} | Риск: {mem['risk']}%"
 
-    prompt = f"""Ты APEX — дерзкий AI трейдер. Дата: {now}
+    prompt = f"""Ты APEX — дерзкий AI трейдер с доступом к живым данным рынка. Дата: {now}
 
 {user_context}
 
@@ -2832,12 +2927,13 @@ def ask_ai(user_id, user_name, user_message):
 ИСТОРИЯ:
 {history_text}
 
-КРИТИЧЕСКИЕ ПРАВИЛА:
-- Используй ТОЛЬКО цены из блока "ЖИВЫЕ ЦЕНЫ" выше
-- Если цены недоступны — так и скажи честно, не придумывай
-- Никогда не называй цены из своей памяти как актуальные
-- Говори дерзко, кратко, по делу
-- Применяй свой опыт из раздела "МОЙ ОПЫТ" при анализе
+ПРАВИЛА:
+- Цены ВСЕГДА берёшь из блока "ЖИВЫЕ ЦЕНЫ" выше — они актуальны прямо сейчас
+- Если спрашивают про монету которой нет в блоке — честно скажи что нет данных
+- Никогда не придумывай цены из памяти
+- Говори дерзко, кратко, по делу, как опытный трейдер
+- Можешь анализировать рынок, уровни, тренд — но только на основе данных выше
+- Применяй свой опыт из "МОЙ ОПЫТ" при анализе
 
 {user_name}: {user_message}
 APEX:"""
