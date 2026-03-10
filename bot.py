@@ -287,15 +287,12 @@ def get_live_prices():
     global price_cache, last_price_update
     if time.time() - last_price_update < 20 and price_cache:
         return price_cache
-    for url in [
-        f"{BINANCE_F}/fapi/v1/ticker/24hr",
-        f"{BINANCE}/api/v3/ticker/24hr",
-    ]:
-        try:
-            r = requests.get(url, timeout=15)
-            data = r.json()
-            if isinstance(data, dict):
-                data = [data]
+
+    # 1. Binance Futures
+    try:
+        r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=10)
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0:
             market = {}
             for t in data:
                 if isinstance(t, dict) and str(t.get("symbol","")).endswith("USDT"):
@@ -307,10 +304,91 @@ def get_live_prices():
             if market:
                 price_cache = market
                 last_price_update = time.time()
+                logging.info(f"Цены: Binance Futures ({len(market)} пар)")
                 return price_cache
-        except Exception as e:
-            logging.warning(f"get_live_prices {url}: {e}")
-            continue
+    except Exception as e:
+        logging.warning(f"Binance Futures prices: {e}")
+
+    # 2. Binance Spot
+    try:
+        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0:
+            market = {}
+            for t in data:
+                if isinstance(t, dict) and str(t.get("symbol","")).endswith("USDT"):
+                    market[t["symbol"]] = {
+                        "price": float(t["lastPrice"]),
+                        "change": float(t["priceChangePercent"]),
+                        "volume": float(t.get("quoteVolume", 0))
+                    }
+            if market:
+                price_cache = market
+                last_price_update = time.time()
+                logging.info(f"Цены: Binance Spot ({len(market)} пар)")
+                return price_cache
+    except Exception as e:
+        logging.warning(f"Binance Spot prices: {e}")
+
+    # 3. CoinGecko (бесплатный, без ключа)
+    try:
+        ids = "bitcoin,ethereum,solana,binancecoin,ripple,dogecoin,avalanche-2,chainlink,toncoin"
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": ids, "vs_currencies": "usd", "include_24hr_change": "true", "include_24hr_vol": "true"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        data = r.json()
+        symbol_map = {
+            "bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT",
+            "binancecoin": "BNBUSDT", "ripple": "XRPUSDT", "dogecoin": "DOGEUSDT",
+            "avalanche-2": "AVAXUSDT", "chainlink": "LINKUSDT", "toncoin": "TONUSDT"
+        }
+        market = {}
+        for cg_id, symbol in symbol_map.items():
+            if cg_id in data:
+                d = data[cg_id]
+                market[symbol] = {
+                    "price": float(d.get("usd", 0)),
+                    "change": float(d.get("usd_24h_change", 0)),
+                    "volume": float(d.get("usd_24h_vol", 0))
+                }
+        if market:
+            price_cache = market
+            last_price_update = time.time()
+            logging.info(f"Цены: CoinGecko ({len(market)} монет)")
+            return price_cache
+    except Exception as e:
+        logging.warning(f"CoinGecko prices: {e}")
+
+    # 4. Kraken как последний fallback
+    try:
+        pairs_kraken = {"XBTUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
+        market = {}
+        r = requests.get(
+            "https://api.kraken.com/0/public/Ticker",
+            params={"pair": ",".join(pairs_kraken.keys())},
+            timeout=10
+        )
+        data = r.json().get("result", {})
+        for kraken_pair, our_symbol in pairs_kraken.items():
+            if kraken_pair in data:
+                d = data[kraken_pair]
+                market[our_symbol] = {
+                    "price": float(d["c"][0]),
+                    "change": 0,
+                    "volume": float(d["v"][1])
+                }
+        if market:
+            price_cache = market
+            last_price_update = time.time()
+            logging.info(f"Цены: Kraken ({len(market)} монет)")
+            return price_cache
+    except Exception as e:
+        logging.warning(f"Kraken prices: {e}")
+
+    logging.error("Все источники цен недоступны")
     return price_cache if price_cache else {}
 
 # ===== МОНИТОРИНГ НАКОПЛЕНИЙ ПЕРЕД ПАМПОМ =====
@@ -459,25 +537,76 @@ def format_market():
         lines.append(f"{emoji} {pair.replace('USDT','')}: {ps} ({d['change']:+.2f}%)")
     return "\n".join(lines)
 
+COINGECKO_IDS = {
+    "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
+    "BNBUSDT": "binancecoin", "XRPUSDT": "ripple", "DOGEUSDT": "dogecoin",
+    "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink", "TONUSDT": "toncoin",
+    "ARBUSDT": "arbitrum", "SUIUSDT": "sui", "NEARUSDT": "near",
+    "INJUSDT": "injective-protocol", "APTUSDT": "aptos",
+}
+
 def get_candles(symbol, interval="1h", limit=150):
-    """Свечи: сначала Futures, потом Spot"""
-    for url in [
-        f"{BINANCE_F}/fapi/v1/klines",
-        f"{BINANCE}/api/v3/klines",
-    ]:
+    """Свечи: Futures → Spot → CoinGecko OHLC"""
+    # 1. Binance Futures
+    try:
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10
+        )
+        data = r.json()
+        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
+            return [{"open": float(c[1]), "high": float(c[2]),
+                     "low": float(c[3]), "close": float(c[4]),
+                     "volume": float(c[5])} for c in data]
+    except Exception as e:
+        logging.warning(f"Futures klines {symbol}: {e}")
+
+    # 2. Binance Spot
+    try:
+        r = requests.get(
+            f"{BINANCE}/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10
+        )
+        data = r.json()
+        if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
+            return [{"open": float(c[1]), "high": float(c[2]),
+                     "low": float(c[3]), "close": float(c[4]),
+                     "volume": float(c[5])} for c in data]
+    except Exception as e:
+        logging.warning(f"Spot klines {symbol}: {e}")
+
+    # 3. CoinGecko OHLC
+    cg_id = COINGECKO_IDS.get(symbol)
+    if cg_id:
         try:
-            r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
+            # days зависит от interval
+            days_map = {"5m": 1, "15m": 1, "1h": 7, "4h": 30, "1d": 90}
+            days = days_map.get(interval, 7)
+            r = requests.get(
+                f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc",
+                params={"vs_currency": "usd", "days": days},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=12
+            )
             data = r.json()
-            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-                candles = [{"open": float(c[1]), "high": float(c[2]),
-                            "low": float(c[3]), "close": float(c[4]),
-                            "volume": float(c[5])} for c in data]
+            if isinstance(data, list) and len(data) > 5:
+                candles = []
+                for c in data[-limit:]:
+                    # CoinGecko: [timestamp, open, high, low, close]
+                    candles.append({
+                        "open": float(c[1]), "high": float(c[2]),
+                        "low": float(c[3]), "close": float(c[4]),
+                        "volume": 0.0
+                    })
                 if candles:
+                    logging.info(f"Свечи CoinGecko: {symbol} {len(candles)} шт")
                     return candles
         except Exception as e:
-            logging.warning(f"get_candles {symbol} {url.split('/')[2]}: {e}")
-            continue
-    logging.error(f"get_candles: нет данных для {symbol} {interval}")
+            logging.warning(f"CoinGecko OHLC {symbol}: {e}")
+
+    logging.error(f"Нет свечей для {symbol} {interval}")
     return []
 
 def get_orderbook(symbol):
