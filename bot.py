@@ -14,10 +14,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-GROQ_KEY = os.environ.get("GROQ_API_KEY")
-TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
+TOKEN = os.environ.get(“TELEGRAM_TOKEN”)
+ADMIN_ID = int(os.environ.get(“ADMIN_ID”, “0”))
+GROQ_KEY = os.environ.get(“GROQ_API_KEY”)
+TAVILY_KEY = os.environ.get(“TAVILY_API_KEY”, “”)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
