@@ -3735,114 +3735,175 @@ def get_all_prices_merged():
 
 def get_multiple_prices_realtime():
     """
-    Живые цены со ВСЕХ источников параллельно:
-    Bybit + CryptoCompare + Yahoo Finance → merge → Binance → CoinGecko fallback
+    Агрегатор цен со всех бирж.
+    Источники: CoinGecko(600+ бирж) + CoinPaprika + CryptoCompare + Binance + Bybit
+    Возвращает до 250 монет.
     """
-    # Пробуем получить с всех источников параллельно
-    try:
-        merged = get_all_prices_merged()
-        if len(merged) >= 10:
-            return merged
-    except Exception as e:
-        logging.warning(f"get_all_prices_merged failed: {e}")
+    result = {}
 
-    # Fallback цепочка если параллельный запрос не сработал
-    # 1. Bybit — быстро, много монет, работает с Render
+    # ── 1. CoinGecko Markets — агрегирует 600+ бирж, топ-250 по объёму ──
     try:
-        r = requests.get(BYBIT_TICKERS, params={"category": "linear"}, headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"}, timeout=8)
-        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
-        data = r.json()
-        if data.get("retCode") == 0:
-            result = {}
-            items = data["result"]["list"]
-            # Сортируем по объёму
-            items.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
-            for t in items:
-                sym = t.get("symbol", "")
-                if sym.endswith("USDT") and t.get("lastPrice"):
-                    try:
-                        price = float(t["lastPrice"])
-                        change = float(t.get("price24hPcnt", 0)) * 100
-                        result[sym] = {"price": price, "change": round(change, 2)}
-                    except:
-                        pass
-                if len(result) >= 30:
-                    break
-            if result:
-                logging.info(f"Живые цены: Bybit ({len(result)} монет)")
-                return result
+        for page in [1, 2]:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency": "usd",
+                    "order": "volume_desc",
+                    "per_page": 125,
+                    "page": page,
+                    "price_change_percentage": "24h",
+                    "sparkline": "false"
+                },
+                headers={"User-Agent": "Mozilla/5.0 (compatible; APEX/1.0)"},
+                timeout=12
+            )
+            if r.status_code == 200:
+                for coin in r.json():
+                    sym = coin.get("symbol", "").upper() + "USDT"
+                    price = coin.get("current_price")
+                    change = coin.get("price_change_percentage_24h") or 0
+                    if price and price > 0:
+                        result[sym] = {
+                            "price": float(price),
+                            "change": round(float(change), 2),
+                            "volume": coin.get("total_volume") or 0,
+                            "source": "CoinGecko"
+                        }
+            elif r.status_code == 429:
+                break  # Rate limit — останавливаемся
+        if len(result) >= 20:
+            logging.info(f"Живые цены: CoinGecko ({len(result)} монет, 600+ бирж)")
     except Exception as e:
-        logging.warning(f"get_multiple_prices_realtime Bybit: {e}")
+        logging.warning(f"get_prices CoinGecko: {e}")
 
-    # 2. Binance Futures
+    # ── 2. CoinPaprika — независимый агрегатор, топ-500 ──
+    if len(result) < 50:
+        try:
+            r = requests.get(
+                "https://api.coinpaprika.com/v1/tickers",
+                params={"quotes": "USD", "limit": 200},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=12
+            )
+            if r.status_code == 200:
+                for coin in r.json():
+                    sym = coin.get("symbol", "").upper() + "USDT"
+                    quotes = coin.get("quotes", {}).get("USD", {})
+                    price = quotes.get("price")
+                    change = quotes.get("percent_change_24h") or 0
+                    if price and price > 0 and sym not in result:
+                        result[sym] = {
+                            "price": float(price),
+                            "change": round(float(change), 2),
+                            "volume": quotes.get("volume_24h") or 0,
+                            "source": "CoinPaprika"
+                        }
+            logging.info(f"Живые цены: +CoinPaprika (итого {len(result)} монет)")
+        except Exception as e:
+            logging.warning(f"get_prices CoinPaprika: {e}")
+
+    # ── 3. Binance Futures — прямо с биржи, все USDT пары ──
     try:
         r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=8)
-        data = r.json()
-        if isinstance(data, list):
-            result = {}
-            data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-            for t in data:
-                sym = t.get("symbol", "")
-                if sym.endswith("USDT"):
-                    result[sym] = {
-                        "price": float(t["lastPrice"]),
-                        "change": round(float(t["priceChangePercent"]), 2)
-                    }
-                if len(result) >= 30:
-                    break
-            if result:
-                logging.info(f"Живые цены: Binance Futures ({len(result)} монет)")
-                return result
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list):
+                data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+                added = 0
+                for t in data:
+                    sym = t.get("symbol", "")
+                    if sym.endswith("USDT"):
+                        price = float(t["lastPrice"])
+                        if price > 0:
+                            if sym not in result:
+                                result[sym] = {
+                                    "price": price,
+                                    "change": round(float(t["priceChangePercent"]), 2),
+                                    "volume": float(t.get("quoteVolume", 0)),
+                                    "source": "Binance"
+                                }
+                            added += 1
+                    if added >= 200:
+                        break
+                logging.info(f"Живые цены: +Binance (итого {len(result)} монет)")
     except Exception as e:
-        logging.warning(f"get_multiple_prices_realtime Binance: {e}")
+        logging.warning(f"get_prices Binance: {e}")
 
-    # 3. Binance Spot
+    # ── 4. Bybit — прямо с биржи ──
     try:
-        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=8)
-        data = r.json()
-        if isinstance(data, list):
-            result = {}
-            data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-            for t in data:
-                sym = t.get("symbol", "")
-                if sym.endswith("USDT"):
-                    result[sym] = {
-                        "price": float(t["lastPrice"]),
-                        "change": round(float(t["priceChangePercent"]), 2)
-                    }
-                if len(result) >= 30:
-                    break
-            if result:
-                logging.info(f"Живые цены: Binance Spot ({len(result)} монет)")
-                return result
-    except Exception as e:
-        logging.warning(f"get_multiple_prices_realtime Binance Spot: {e}")
-
-    # 4. CoinGecko — последний резерв
-    try:
-        ids = ",".join(set(COINGECKO_IDS.values()))
         r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": ids, "vs_currencies": "usd", "include_24hr_change": "true"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
+            BYBIT_TICKERS,
+            params={"category": "linear"},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; APEX-bot/1.0)"},
+            timeout=8
         )
-        data = r.json()
-        result = {}
-        reverse_map = {v: k for k, v in COINGECKO_IDS.items()}
-        for cg_id, values in data.items():
-            symbol = reverse_map.get(cg_id)
-            if symbol and "usd" in values:
-                result[symbol] = {
-                    "price": values["usd"],
-                    "change": round(values.get("usd_24h_change", 0), 2)
-                }
-        if result:
-            logging.info(f"Живые цены: CoinGecko ({len(result)} монет)")
-        return result
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("retCode") == 0:
+                items = data["result"]["list"]
+                items.sort(key=lambda x: float(x.get("turnover24h", 0) or 0), reverse=True)
+                for t in items:
+                    sym = t.get("symbol", "")
+                    if sym.endswith("USDT") and t.get("lastPrice") and sym not in result:
+                        try:
+                            result[sym] = {
+                                "price": float(t["lastPrice"]),
+                                "change": round(float(t.get("price24hPcnt", 0)) * 100, 2),
+                                "volume": float(t.get("turnover24h", 0) or 0),
+                                "source": "Bybit"
+                            }
+                        except:
+                            pass
+                logging.info(f"Живые цены: +Bybit (итого {len(result)} монет)")
     except Exception as e:
-        logging.warning(f"get_multiple_prices_realtime CoinGecko: {e}")
-        return {}
+        logging.warning(f"get_prices Bybit: {e}")
+
+    # ── 5. CryptoCompare — агрегирует Kraken/OKX/Coinbase/Huobi ──
+    if len(result) < 30:
+        try:
+            r = requests.get(
+                "https://min-api.cryptocompare.com/data/top/totalvolfull",
+                params={"limit": 50, "tsym": "USD"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                data = r.json()
+                for item in data.get("Data", []):
+                    coin = item.get("CoinInfo", {})
+                    raw = item.get("RAW", {}).get("USD", {})
+                    sym = coin.get("Name", "").upper() + "USDT"
+                    price = raw.get("PRICE")
+                    change = raw.get("CHANGEPCT24HOUR") or 0
+                    if price and price > 0 and sym not in result:
+                        result[sym] = {
+                            "price": float(price),
+                            "change": round(float(change), 2),
+                            "volume": raw.get("TOTALVOLUME24HTO") or 0,
+                            "source": "CryptoCompare"
+                        }
+            logging.info(f"Живые цены: +CryptoCompare (итого {len(result)} монет)")
+        except Exception as e:
+            logging.warning(f"get_prices CryptoCompare: {e}")
+
+    logging.info(f"Итого агрегировано: {len(result)} монет со всех бирж")
+    return result
+
+
+def get_all_market_pairs():
+    """
+    Возвращает список всех торговых пар для глубокого сканирования.
+    Берёт из кэша get_multiple_prices_realtime.
+    """
+    prices = get_multiple_prices_realtime()
+    # Сортируем по объёму
+    sorted_pairs = sorted(
+        prices.items(),
+        key=lambda x: x[1].get("volume", 0),
+        reverse=True
+    )
+    return [sym for sym, _ in sorted_pairs]
+
 
 
 def ask_ai(user_id, user_name, user_message):
@@ -3856,6 +3917,25 @@ def ask_ai(user_id, user_name, user_message):
         history_text += f"{role_label}: {row[1]}\n"
 
     msg_lower = user_message.lower()
+
+    # ── Триггер глубокого скана всего рынка ──
+    deep_scan_triggers = [
+        "есть сделки", "какие сделки", "что торговать", "что покупать",
+        "что брать", "что входить", "найди сделки", "найди сигналы",
+        "есть сигналы", "какие сигналы", "сканируй рынок", "просканируй",
+        "лучшие монеты", "что памп", "что иксанет", "что даст иксы",
+        "какие монеты", "где входить", "есть ли сделки"
+    ]
+    if any(t in msg_lower for t in deep_scan_triggers):
+        try:
+            loop = asyncio.get_event_loop()
+            signals, accumulations = loop.run_until_complete(deep_market_scan(limit=150))
+            total = 150
+            result_text = format_deep_scan_result(signals, accumulations, total)
+            return result_text
+        except Exception as e:
+            logging.error(f"deep_market_scan in ask_ai: {e}")
+            # Продолжаем как обычный запрос если скан упал
 
     needs_price = any(kw in msg_lower for kw in [
         "цена", "курс", "сколько", "почём", "стоит", "биткоин", "btc", "бтк", "бткс",
@@ -3886,12 +3966,12 @@ def ask_ai(user_id, user_name, user_message):
         all_prices = ordered + others
 
         lines = []
-        for sym, d in all_prices[:20]:
+        for sym, d in all_prices[:30]:
             p = d["price"]
             ps = f"${p:,.2f}" if p >= 100 else f"${p:,.4f}" if p >= 1 else f"${p:.6f}"
             emoji = "🟢" if d["change"] >= 0 else "🔴"
             lines.append(f"{emoji} {sym.replace('USDT','')}: {ps} ({d['change']:+.2f}%)")
-        source = "Bybit/Binance"
+        source = f"{len(prices)} монет со всех бирж"
         live_prices_text = f"ЖИВЫЕ ЦЕНЫ ({source}, {datetime.now().strftime('%H:%M')}):\n" + "\n".join(lines)
     else:
         live_prices_text = "ЦЕНЫ: все источники недоступны — не называй цены из памяти"
@@ -5337,6 +5417,102 @@ async def auto_research():
             await asyncio.sleep(15)
         except:
             pass
+
+async def deep_market_scan(limit=200):
+    """
+    Глубокий скан всего рынка по запросу пользователя.
+    Проверяет 200 монет со всех бирж, ищет сигналы + накопления.
+    Возвращает отсортированный список сигналов.
+    """
+    all_pairs = get_all_market_pairs()
+    scan_pairs = all_pairs[:limit]
+
+    signals = []
+    accumulations = []
+
+    # Сканируем батчами по 10 монет параллельно
+    async def scan_one(symbol):
+        try:
+            loop = asyncio.get_running_loop()
+            # Сигнал SMC
+            sig = await loop.run_in_executor(None, full_scan_raw, symbol, "1h")
+            if sig and sig.get("grade") in ("🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
+                signals.append(sig)
+            # Накопление
+            acc = await loop.run_in_executor(None, detect_accumulation, symbol)
+            if acc and acc.get("score", 0) >= 60:
+                accumulations.append({
+                    "symbol": symbol,
+                    "score": acc["score"],
+                    "signal": acc.get("signal", ""),
+                    "price": acc.get("price", 0)
+                })
+        except:
+            pass
+
+    # Батчи по 10
+    for i in range(0, min(len(scan_pairs), limit), 10):
+        batch = scan_pairs[i:i+10]
+        await asyncio.gather(*[scan_one(sym) for sym in batch])
+        await asyncio.sleep(0.5)  # Не перегружаем API
+
+    # Сортируем по приоритету
+    grade_order = {"🔥🔥🔥 МЕГА ТОП": 0, "🔥🔥 ТОП СДЕЛКА": 1, "✅ ХОРОШАЯ": 2}
+    signals.sort(key=lambda x: grade_order.get(x.get("grade", ""), 3))
+    accumulations.sort(key=lambda x: x["score"], reverse=True)
+
+    return signals, accumulations
+
+
+def format_deep_scan_result(signals, accumulations, total_scanned):
+    """Форматирует результат глубокого скана для Telegram"""
+    if not signals and not accumulations:
+        return (
+            f"🔍 <b>Глубокий скан завершён</b>\n"
+            f"Проверено монет: {total_scanned}\n\n"
+            f"😴 Рынок спокоен — нет чётких сетапов\n"
+            f"Попробуй позже или смени таймфрейм"
+        )
+
+    parts = [f"🔍 <b>Глубокий скан</b> | {total_scanned} монет со всех бирж\n{'━'*24}\n"]
+
+    # Сигналы SMC
+    if signals:
+        parts.append(f"\n📡 <b>Найдено сигналов: {len(signals)}</b>\n")
+        for s in signals[:5]:  # Топ-5
+            sym = s.get("symbol", "")
+            direction = s.get("direction", "")
+            entry = s.get("entry", 0)
+            tp1 = s.get("tp1", 0)
+            tp2 = s.get("tp2", 0)
+            tp3 = s.get("tp3", 0)
+            sl = s.get("sl", 0)
+            grade = s.get("grade", "")
+            emoji = "🟢" if "BULL" in direction else "🔴"
+
+            parts.append(
+                f"\n{grade}\n"
+                f"{emoji} <b>{sym}</b> — {direction}\n"
+                f"💰 Вход: <code>{entry:.4f}</code>\n"
+                f"🛑 Стоп: <code>{sl:.4f}</code>\n"
+                f"🎯 TP1: <code>{tp1:.4f}</code>\n"
+                f"🎯 TP2: <code>{tp2:.4f}</code>\n"
+                f"🎯 TP3: <code>{tp3:.4f}</code>\n"
+            )
+
+    # Накопления (потенциальные памп кандидаты)
+    if accumulations:
+        parts.append(f"\n📦 <b>Накопление (Wyckoff) — {len(accumulations)} монет:</b>\n")
+        for a in accumulations[:5]:
+            score = a["score"]
+            fire = "🔥🔥🔥" if score >= 80 else "🔥🔥" if score >= 70 else "🔥"
+            parts.append(
+                f"{fire} <b>{a['symbol']}</b> — скор {score}/100\n"
+                f"   {a['signal']}\n"
+            )
+
+    return "".join(parts)
+
 
 async def auto_scan_job():
     """Каждые 15 мин: SMC сканирование топ-100 пар — присылаем только МЕГА ТОП (3/3 ТФ)"""
