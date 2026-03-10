@@ -5001,22 +5001,31 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data == "menu_brain":
         try:
+            # Данные из основной БД
             conn = sqlite3.connect("brain.db")
             rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
             top_rules = conn.execute(
-                "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 7"
+                "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 5"
             ).fetchall()
             obs_count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
             model_count = conn.execute("SELECT COUNT(*) FROM market_model").fetchone()[0]
-            brain_events = conn.execute(
-                "SELECT event_type, description FROM brain_log ORDER BY id DESC LIMIT 5"
-            ).fetchall()
             avoid_count = conn.execute("SELECT COUNT(*) FROM self_rules WHERE category='avoid'").fetchone()[0]
             conn.close()
-        except:
+
+            # Данные из brain_builder
+            brain = get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}
+            knowledge_count = brain.get("knowledge_count", 0)
+            pattern_count = brain.get("pattern_count", 0)
+            coin_count = brain.get("coin_count", 0)
+            macro_summary = brain.get("macro_summary", "")[:200]
+            macro_time = brain.get("macro_time", "")
+            # Объединяем правила из обеих БД
+            bb_rules = brain.get("top_rules", "")
+        except Exception as e:
             rule_count = obs_count = model_count = avoid_count = 0
+            knowledge_count = pattern_count = coin_count = 0
             top_rules = []
-            brain_events = []
+            macro_summary = bb_rules = macro_time = ""
 
         cat_emoji = {
             "entry": "🎯", "exit": "🏁", "filter": "🔍",
@@ -5024,52 +5033,86 @@ async def handle_callback(callback: CallbackQuery):
             "best_setup": "🌟", "market": "📊"
         }
         rules_text = "\n".join([
-            f"{cat_emoji.get(r[0], '📌')} [{r[0]}] {r[1][:70]} — {r[2]:.0%}"
+            f"{cat_emoji.get(r[0], '📌')} {r[1][:65]} — {r[2]:.0%}"
             for r in top_rules
-        ]) or "Пока нет правил"
+        ]) or bb_rules or "Пока нет правил"
 
-        events_text = "\n".join([
-            f"• {e[0]}: {e[1][:60]}" for e in brain_events
-        ]) or "Нет событий"
+        macro_block = (
+            f"\n📊 <b>Последний макро анализ</b> ({macro_time}):\n"
+            f"<i>{macro_summary}</i>\n"
+        ) if macro_summary else ""
 
         await callback.message.edit_text(
             f"🧠 <b>Мозг APEX</b>\n"
             f"{'━'*24}\n\n"
-            f"📌 Активных правил: <b>{rule_count}</b>\n"
+            f"📌 Торговых правил: <b>{rule_count}</b>\n"
             f"⛔️ Антипаттернов: <b>{avoid_count}</b>\n"
             f"👁 Наблюдений: <b>{obs_count}</b>\n"
-            f"🗂 Моделей монет: <b>{model_count}</b>\n\n"
-            f"<b>Топ правила:</b>\n{rules_text}\n\n"
-            f"<b>Последние события:</b>\n{events_text}\n\n"
-            f"<i>Мозг учится автоматически — после каждой сделки и каждые 4 часа</i>",
+            f"🗂 Моделей монет: <b>{model_count}</b>\n"
+            f"📚 Знаний (Groq): <b>{knowledge_count}</b>\n"
+            f"📈 SMC паттернов: <b>{pattern_count}</b>\n"
+            f"🪙 Правил по монетам: <b>{coin_count}</b>\n\n"
+            f"<b>Топ правила:</b>\n{rules_text}\n"
+            f"{macro_block}\n"
+            f"<i>Groq обучает мозг каждый час: SMC, макро, новости, история сделок</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Запустить обучение сейчас", callback_data="brain_learn_now")],
+                [InlineKeyboardButton(text="⚡️ Обучить сейчас", callback_data="brain_learn_now"),
+                 InlineKeyboardButton(text="🌍 Макро анализ", callback_data="brain_macro")],
                 [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
         )
 
+    elif data == "brain_macro":
+        await callback.message.edit_text("🌍 Запрашиваю макро анализ...")
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: __import__('brain_builder').learn_macro_trends())
+            brain = get_brain_summary()
+            macro = brain.get("macro_summary", "Нет данных")[:500]
+            macro_time = brain.get("macro_time", "")
+            await callback.message.edit_text(
+                f"🌍 <b>Макро анализ</b> ({macro_time})\n{'━'*24}\n\n{macro}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+                ])
+            )
+        except Exception as e:
+            await callback.message.edit_text(
+                f"❌ Ошибка макро анализа: {e}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+                ])
+            )
+
     elif data == "brain_learn_now":
-        await callback.message.edit_text("🧠 Запускаю обучение (читаю интернет + синтез)...")
-        await self_research_loop()
+        await callback.message.edit_text(
+            "🧠 Запускаю полное обучение...\n"
+            "⏳ Groq анализирует: макро + новости + SMC + история сделок\n"
+            "Займёт ~30 секунд"
+        )
+        await run_brain_builder_async()
         await autonomous_learning_cycle()
+        brain = get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}
         conn = sqlite3.connect("brain.db")
-        rule_count   = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
-        learn_events = conn.execute("SELECT COUNT(*) FROM learning_history").fetchone()[0]
+        rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
         conn.close()
         await callback.message.edit_text(
             f"✅ <b>Обучение завершено</b>\n\n"
-            f"📌 Правил усвоено: <b>{rule_count}</b>\n"
-            f"📚 Событий в истории: <b>{learn_events}</b>\n\n"
-            f"<i>Открой «Эволюция бота» чтобы увидеть что именно изменилось</i>",
+            f"📌 Торговых правил: <b>{rule_count}</b>\n"
+            f"📚 Знаний Groq: <b>{brain.get('knowledge_count', 0)}</b>\n"
+            f"🪙 Правил по монетам: <b>{brain.get('coin_count', 0)}</b>\n"
+            f"📈 SMC паттернов: <b>{brain.get('pattern_count', 0)}</b>\n\n"
+            f"<i>База сохранена в GitHub — знания не пропадут при рестарте</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
-                [InlineKeyboardButton(text="🧠 Мозг APEX", callback_data="menu_brain")],
+                [InlineKeyboardButton(text="🧠 Открыть мозг", callback_data="menu_brain")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
         )
+
 
     elif data == "menu_evolution":
         try:
@@ -6262,6 +6305,54 @@ async def backup_db_to_github():
         logging.warning(f"backup_db_to_github: {e}")
 
 
+# ===== BRAIN BUILDER ИНТЕГРАЦИЯ =====
+try:
+    from brain_builder import (
+        run_brain_builder, get_brain_summary,
+        init_brain_db, DB_PATH as BRAIN_DB_PATH
+    )
+    BRAIN_BUILDER_AVAILABLE = True
+    logging.info("brain_builder.py подключён ✅")
+except ImportError:
+    BRAIN_BUILDER_AVAILABLE = False
+    logging.warning("brain_builder.py не найден — мозг работает в базовом режиме")
+
+    def run_brain_builder(full=False):
+        return {}
+
+    def get_brain_summary():
+        return {}
+
+
+async def run_brain_builder_async():
+    """Быстрый цикл brain builder (каждый час)"""
+    try:
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, run_brain_builder, False)
+        if stats:
+            logging.info(f"🧠 Brain Builder (быстрый): знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)}")
+        # Бэкап БД в GitHub после обучения
+        await backup_db_to_github()
+    except Exception as e:
+        logging.error(f"run_brain_builder_async: {e}")
+
+
+async def run_brain_builder_full_async():
+    """Полный цикл brain builder (раз в сутки в 3:00)"""
+    try:
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, run_brain_builder, True)
+        if stats:
+            logging.info(
+                f"🧠 Brain Builder (полный): "
+                f"знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)} "
+                f"паттернов={stats.get('patterns',0)} монет={stats.get('coins',0)}"
+            )
+        await backup_db_to_github()
+    except Exception as e:
+        logging.error(f"run_brain_builder_full_async: {e}")
+
+
 async def on_startup(app):
     init_db()
     await restore_db_from_github()
@@ -6281,12 +6372,14 @@ async def on_startup(app):
     scheduler.add_job(check_alerts, "interval", minutes=5)
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
     scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
-    # ✅ НОВОЕ: Автономное обучение — бот сам изучает рынок каждые 2 часа
     scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
+    # Brain Builder — каждый час быстрый цикл, раз в сутки полный
+    scheduler.add_job(run_brain_builder_async, "interval", hours=1)
+    scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
     scheduler.start()
     setup_error_capture()
-    # Первый цикл обучения — сразу при старте (через 30 сек)
-    asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
+    # Первый цикл обучения — через 60 сек после старта
+    asyncio.get_running_loop().call_later(60, lambda: asyncio.create_task(run_brain_builder_async()))
     logging.info("APEX запущен!")
 
 
