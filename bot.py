@@ -382,7 +382,7 @@ last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
 def get_top_pairs(limit=100):
-    """Топ-N пар по объёму: CryptoCompare → Binance Futures → Binance Spot → FORCED fallback"""
+    """Топ-N пар по объёму: Binance Futures → Binance Spot (Bybit убран — 403 на Render)"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache
@@ -397,7 +397,7 @@ def get_top_pairs(limit=100):
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
     ]
 
-    # 0. CryptoCompare — стабильно работает с Render, бесплатно без ключа
+    # 0. CryptoCompare — работает с Render без блокировок
     try:
         r = requests.get(
             "https://min-api.cryptocompare.com/data/top/mktcapfull",
@@ -406,12 +406,9 @@ def get_top_pairs(limit=100):
             timeout=10
         )
         if r.status_code == 200:
-            data = r.json().get("Data", [])
-            cc_pairs = []
-            for item in data:
-                sym = item.get("CoinInfo", {}).get("Name", "")
-                if sym and f"{sym}USDT" not in ["USDTUSDT"]:
-                    cc_pairs.append(f"{sym}USDT")
+            items = r.json().get("Data", [])
+            cc_pairs = [i["CoinInfo"]["Name"] + "USDT" for i in items
+                        if i.get("CoinInfo", {}).get("Name") and i["CoinInfo"]["Name"] != "USDT"]
             if len(cc_pairs) >= 10:
                 combined = list(dict.fromkeys(FORCED + cc_pairs))[:limit]
                 pairs_cache = combined
@@ -852,13 +849,13 @@ def get_candles(symbol, interval="1h", limit=200):
 
     bi = BINANCE_INTERVALS.get(interval, interval)
 
-    # 0. CryptoCompare — стабильно работает с любого IP, покрывает все ТФ включая 1m/5m
+    # 0. CryptoCompare — стабильно с любого IP, покрывает все ТФ включая 1m/5m
     try:
-        cc_candles = get_cryptocompare_candles(symbol, interval, limit)
-        if cc_candles and len(cc_candles) >= 20:
-            logging.info(f"Свечи CryptoCompare: {symbol} {interval} {len(cc_candles)}шт")
-            candle_cache[cache_key] = (cc_candles, time.time())
-            return cc_candles
+        cc = get_cryptocompare_candles(symbol, interval, limit)
+        if cc and len(cc) >= 20:
+            logging.info(f"Свечи CryptoCompare: {symbol} {interval} {len(cc)}шт")
+            candle_cache[cache_key] = (cc, time.time())
+            return cc
     except Exception as e:
         logging.warning(f"CryptoCompare candles {symbol} {interval}: {e}")
 
@@ -1693,65 +1690,7 @@ def analyze_trade_type(symbol, trade_type="swing"):
         return None
 
 
-def scan_for_trade_type(trade_type="swing", limit=30):
-    """
-    Быстрый скан топ-30 монет и возвращает только те где ЕСТЬ сигнал.
-    Используется когда юзер нажимает Скальп/Свинг/Долгосрок.
-    Возвращает список dict: {symbol, direction, grade, entry, sl, tp1}
-    """
-    try:
-        pairs = get_top_pairs(limit)
-        found = []
-
-        # Определяем главный ТФ для каждой категории
-        main_tfs = {"scalp": "15m", "swing": "1h", "long": "1d"}
-        main_tf = main_tfs.get(trade_type, "1h")
-        tfs = TF_CATEGORIES.get(trade_type, ["1h"])
-
-        for symbol in pairs:
-            try:
-                results = {}
-                for tf in tfs[:2]:  # Берём 2 ТФ для скорости
-                    d = smc_on_tf(symbol, tf)
-                    results[tf] = d
-
-                bullish = [tf for tf, d in results.items() if d == "BULLISH"]
-                bearish = [tf for tf, d in results.items() if d == "BEARISH"]
-
-                if not bullish and not bearish:
-                    continue
-                if len(bullish) == len(bearish):
-                    continue
-
-                direction = "BULLISH" if len(bullish) > len(bearish) else "BEARISH"
-                match_count = max(len(bullish), len(bearish))
-                total = min(len(tfs), 2)
-
-                if match_count == total and total >= 2:
-                    grade = "🔥🔥 ТОП"
-                elif match_count >= 1:
-                    grade = "✅ ЕСТЬ"
-                else:
-                    continue
-
-                found.append({
-                    "symbol": symbol,
-                    "direction": direction,
-                    "grade": grade,
-                    "trade_type": trade_type,
-                })
-            except:
-                continue
-
-        # Сортируем: ТОП сначала
-        found.sort(key=lambda x: 0 if "ТОП" in x["grade"] else 1)
-        return found[:15]
-
-    except Exception as e:
-        logging.error(f"scan_for_trade_type {trade_type}: {e}")
-        return []
-
-
+def full_scan(symbol, timeframe="1h"):
     """Полный SMC анализ с мультитаймфреймом + все новые фильтры"""
     try:
         # ── 0. Рыночный режим — в боковике сигналов нет ──
@@ -1986,13 +1925,6 @@ def check_pending_signals():
             if symbol not in prices:
                 continue
             current = prices[symbol]["price"]
-            # Не закрываем по TP если цены только от Kraken (4 монеты) — ненадёжно
-            price_source_count = len(prices)
-            if price_source_count < 10 and result in ("tp1","tp2","tp3") if False else False:
-                continue  # placeholder
-            # Защита от случайных закрытий: TP должен быть > 0.5% от текущей цены
-            if current <= 0:
-                continue
             created = datetime.fromisoformat(created_at)
             hours_elapsed = (datetime.now() - created).total_seconds() / 3600
 
@@ -2016,11 +1948,6 @@ def check_pending_signals():
                     result, hit_tp = "tp1", 1
                 elif current >= sl:
                     result = "sl"
-
-            # Если цен мало (< 10 монет) — не закрываем по TP, только по SL и expire
-            if price_source_count < 10 and result in ("tp1", "tp2", "tp3"):
-                result = None
-                hit_tp = None
 
             if not result and hours_elapsed > 72:
                 result = "expired"
@@ -4349,49 +4276,38 @@ def ask_ai(user_id, user_name, user_message):
     if mem["name"] or mem["profile"]:
         user_context = f"ПОЛЬЗОВАТЕЛЬ:\nИмя: {mem['name'] or user_name} | Сообщений: {mem['messages']}\nПрофиль: {mem['profile'] or 'нет'}\nМонеты: {mem['coins'] or 'нет'}\nДепозит: ${mem['deposit']} | Риск: {mem['risk']}%"
 
-    # Определяем тип вопроса чтобы правильно сформулировать задачу
-    q = user_message.lower().strip()
-    is_list_question  = any(w in q for w in ["список", "какие монеты", "какие пары", "мониторинг", "отслеживаешь", "по каким", "какие данные"])
-    is_trade_question = any(w in q for w in ["сделка", "сигнал", "вход", "выход", "лонг", "шорт", "купить", "продать", "tp", "sl", "стоп"])
-    is_price_question = any(w in q for w in ["цена", "курс", "сколько стоит", "почём"])
+    # Определяем тип вопроса для точного routing
+    q = user_message.lower()
+    is_list_q  = any(w in q for w in ["список", "какие монеты", "по каким", "мониторинг", "отслеживаешь", "какие пары", "видишь монеты"])
+    is_deal_q  = any(w in q for w in ["сделк", "сигнал", "вход", "выход", "лонг", "шорт", "купить", "продать", "tp", "стоп"])
+    is_price_q = any(w in q for w in ["цена", "курс", "сколько стоит", "почём", "стоимость"])
 
-    # Инструкция под тип вопроса
-    if is_list_question:
-        task_instruction = """ЗАДАЧА: Пользователь спрашивает СПИСОК — какие монеты/пары ты видишь/мониторишь.
-Ответь КОНКРЕТНЫМ СПИСКОМ монет из блока ЖИВЫЕ ЦЕНЫ выше. Просто перечисли их. Ничего лишнего."""
-    elif is_trade_question:
-        task_instruction = """ЗАДАЧА: Вопрос про сделку/сигнал.
-Отвечай ТОЛЬКО по существу — конкретные уровни, конкретное мнение. Не уходи на другие монеты."""
-    elif is_price_question:
-        task_instruction = """ЗАДАЧА: Вопрос про цену.
-Дай цену из блока ЖИВЫЕ ЦЕНЫ. Только факты, без лишних советов если не просили."""
-    else:
-        task_instruction = """ЗАДАЧА: Ответь ТОЧНО на то что спросили. Не меняй тему. Не давай сигналы если не просили."""
-
-    prompt = f"""Ты APEX — AI трейдер. Дата: {now}
+    prompt = f"""Ты APEX — AI трейдер с доступом к живым данным. Дата: {now}
 
 {user_context}
 
 {live_prices_text}
 
 {f"РЕСЁРЧ:{chr(10)}{research_result}" if research_result else ""}
-{f"НОВОСТИ:{chr(10)}{recent_news[:300]}" if recent_news and not research_result else ""}
-{f"ФУНДАМЕНТАЛ:{chr(10)}{messari_context}" if messari_context else ""}
-{f"МОЙ ОПЫТ:{chr(10)}{worldview[:400]}" if worldview else f"МОЙ ОПЫТ:{chr(10)}{brain_context[:300]}" if brain_context else ""}
+{f"НОВОСТИ:{chr(10)}{recent_news[:400]}" if recent_news and not research_result else ""}
+{f"ЗНАНИЯ:{chr(10)}{knowledge[:300]}" if knowledge else ""}
+{f"ФУНДАМЕНТАЛ (Messari):{chr(10)}{messari_context}" if messari_context else ""}
+{f"МОЯ КАРТИНА МИРА (накопленный опыт):{chr(10)}{worldview[:600]}" if worldview else f"МОЙ ОПЫТ:{chr(10)}{brain_context[:400]}" if brain_context else ""}
 
-ИСТОРИЯ ДИАЛОГА (последние сообщения):
+ИСТОРИЯ:
 {history_text}
 
-{task_instruction}
+ЗАДАЧА ЭТОГО ОТВЕТА: {"список монет" if is_list_q else "сигнал/сделка" if is_deal_q else "цена/данные" if is_price_q else "точный ответ на вопрос"}
 
 ЖЁСТКИЕ ПРАВИЛА:
-1. Отвечай ТОЛЬКО на вопрос который задан — не переключайся на другие темы
-2. Если спросили список монет — дай список, не давай сигналы
+1. Отвечай ТОЛЬКО на то что спросили — не меняй тему
+2. Если спросили "какие монеты мониторишь" — дай список из ЖИВЫЕ ЦЕНЫ, без сигналов
 3. Если спросили про конкретную монету — говори только про неё
 4. Цены ТОЛЬКО из блока ЖИВЫЕ ЦЕНЫ — никогда не выдумывай
-5. Не называй себя "босс", не используй пафосные обращения
-6. Пиши кратко — 2-4 предложения если не просят подробно
-7. Если не знаешь — честно скажи "нет данных", не придумывай
+5. Не давай сигналы если не просили — это разные вещи
+6. Пиши кратко: 2-4 предложения если не просят подробно
+7. Не начинай с "Привет", "Конечно", "Отличный вопрос" — сразу по делу
+8. Если нет данных — скажи "нет данных", не выдумывай
 
 {user_name}: {user_message}
 APEX:"""
@@ -4403,12 +4319,9 @@ APEX:"""
 
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Сканировать рынок", callback_data="menu_scan"),
+        [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
-        [InlineKeyboardButton(text="⚡️ Скальп", callback_data="menu_trade_scalp"),
-         InlineKeyboardButton(text="🔄 Свинг", callback_data="menu_trade_swing"),
-         InlineKeyboardButton(text="📈 Долгосрок", callback_data="menu_trade_long")],
-        [InlineKeyboardButton(text="⏱ Выбрать таймфрейм", callback_data="menu_tf"),
+        [InlineKeyboardButton(text="🔍 Сканировать рынок", callback_data="menu_scan"),
          InlineKeyboardButton(text="📓 Дневник сделок", callback_data="menu_journal")],
         [InlineKeyboardButton(text="🔔 Алерты", callback_data="menu_alerts"),
          InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats")],
@@ -5445,67 +5358,45 @@ async def handle_callback(callback: CallbackQuery):
             ])
         )
 
-    elif data.startswith("menu_trade_") and not data.startswith("menu_trade_refresh_"):
-        trade_type = data.replace("menu_trade_", "")
-        type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
-        type_desc   = {
-            "scalp": "15м–1ч | вход/выход быстро",
-            "swing": "1ч–4ч  | несколько часов",
-            "long":  "1д–1нед | дни и недели",
-        }
-        label = type_labels.get(trade_type, trade_type)
-        desc  = type_desc.get(trade_type, "")
-
+    elif data in ("menu_find_deals", "menu_find_deals_refresh"):
         await callback.message.edit_text(
-            f"{label}\n<i>{desc}</i>\n\n⏳ Сканирую рынок, ищу активные сетапы...",
+            "🎯 <b>Ищу сделки...</b>\n\n"
+            "⏳ Сканирую топ-40 пар по SMC: OB, FVG, мультитаймфрейм\n"
+            "<i>~20-30 секунд</i>",
             parse_mode="HTML"
         )
-
-        signals = await asyncio.get_running_loop().run_in_executor(
-            None, scan_for_trade_type, trade_type, 30
-        )
+        signals = await asyncio.get_running_loop().run_in_executor(None, scan_all_for_deals, 40)
 
         if not signals:
             await callback.message.edit_text(
-                f"{label}\n\n😴 Сейчас нет чётких сигналов.\n"
-                f"Рынок в боковике или сетапы ещё не сформированы.\n\n"
-                f"<i>Обычно сигналы появляются после важных уровней или новостей</i>",
+                "🎯 <b>Сделок нет</b>\n\n"
+                "😴 Прошёлся по топ-40 монетам — чётких сетапов не нашёл.\n"
+                "Рынок в боковике или сигналы ещё не сформировались.\n\n"
+                "<i>Обычно сигналы появляются после пробоя уровней или выхода новостей</i>",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}")],
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
+                    [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="menu_find_deals_refresh")],
+                    [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
                 ])
             )
             return
 
-        # Показываем список монет где есть сигнал
-        top = [s for s in signals if "ТОП" in s["grade"]]
-        ok  = [s for s in signals if "ЕСТЬ" in s["grade"]]
+        grade_icons = {"🔥🔥🔥 МЕГА ТОП": "🔥🔥🔥", "🔥🔥 ТОП СДЕЛКА": "🔥🔥", "✅ ХОРОШАЯ": "✅"}
+        lines = [f"🎯 <b>Найдено сделок: {len(signals)}</b>", "━"*24, ""]
+        for s in signals:
+            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+            icon  = grade_icons.get(s["grade"], "✅")
+            lines.append(f"{icon} {emoji} <b>{s['symbol'].replace('USDT','')}</b> — {s['direction']}")
+        lines += ["", "<i>Выбери монету для полного сигнала 👇</i>"]
 
-        lines = [f"{label} — найдено сигналов: <b>{len(signals)}</b>", ""]
-        if top:
-            lines.append("🔥 <b>Сильные сетапы:</b>")
-            for s in top[:5]:
-                emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
-                lines.append(f"  {emoji} {s['symbol'].replace('USDT','')} — {s['direction']}")
-        if ok:
-            lines.append("\n✅ <b>Есть сигнал:</b>")
-            for s in ok[:8]:
-                emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
-                lines.append(f"  {emoji} {s['symbol'].replace('USDT','')}")
-
-        lines.append("\n<i>Выбери монету для полного анализа 👇</i>")
-
-        # Кнопки — только монеты с сигналами
         buttons = []
         row = []
         for s in signals[:12]:
             emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
-            grade_icon = "🔥" if "ТОП" in s["grade"] else ""
-            btn_text = f"{grade_icon}{emoji} {s['symbol'].replace('USDT','')}"
+            fire  = "🔥" if "ТОП" in s["grade"] else ""
             row.append(InlineKeyboardButton(
-                text=btn_text,
-                callback_data=f"trade_{trade_type}_{s['symbol']}"
+                text=f"{fire}{emoji} {s['symbol'].replace('USDT','')}",
+                callback_data=f"deal_open_{s['symbol']}"
             ))
             if len(row) == 3:
                 buttons.append(row)
@@ -5513,96 +5404,63 @@ async def handle_callback(callback: CallbackQuery):
         if row:
             buttons.append(row)
         buttons.append([
-            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}"),
-            InlineKeyboardButton(text="🔙 Назад",    callback_data="menu_back"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_find_deals_refresh"),
+            InlineKeyboardButton(text="🔙 Меню",     callback_data="menu_back"),
         ])
-
         await callback.message.edit_text(
             "\n".join(lines),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
 
-    elif data.startswith("menu_trade_refresh_"):
-        trade_type = data.replace("menu_trade_refresh_", "")
-        # Переотправляем как обычный menu_trade_ запрос
-        await callback.message.edit_text("🔄 Обновляю...", parse_mode="HTML")
-        signals = await asyncio.get_running_loop().run_in_executor(
-            None, scan_for_trade_type, trade_type, 30
-        )
-        type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
-        label = type_labels.get(trade_type, trade_type)
-
-        if not signals:
-            await callback.message.edit_text(
-                f"{label}\n\n😴 Сигналов нет — рынок в боковике.\n<i>Попробуй позже</i>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}")],
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
-                ])
-            )
-            return
-
-        buttons = []
-        row = []
-        for s in signals[:12]:
-            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
-            grade_icon = "🔥" if "ТОП" in s["grade"] else ""
-            btn_text = f"{grade_icon}{emoji} {s['symbol'].replace('USDT','')}"
-            row.append(InlineKeyboardButton(text=btn_text, callback_data=f"trade_{trade_type}_{s['symbol']}"))
-            if len(row) == 3:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-        buttons.append([
-            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}"),
-            InlineKeyboardButton(text="🔙 Назад",    callback_data="menu_back"),
-        ])
-        await callback.message.edit_text(
-            f"{label} — найдено: <b>{len(signals)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
-
-    elif data.startswith("trade_scalp_") or data.startswith("trade_swing_") or data.startswith("trade_long_"):
-        parts = data.split("_", 2)
-        trade_type = parts[1]
-        symbol = parts[2]
-        type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
-        await callback.message.edit_text(f"🔍 Полный анализ {symbol} [{type_labels.get(trade_type, trade_type)}]...")
-        result = await asyncio.get_running_loop().run_in_executor(
-            None, analyze_trade_type, symbol, trade_type
-        )
+    elif data.startswith("deal_open_"):
+        symbol = data.replace("deal_open_", "")
+        await callback.message.edit_text(f"📊 Загружаю сигнал по <b>{symbol}</b>...", parse_mode="HTML")
+        result = await asyncio.get_running_loop().run_in_executor(None, full_scan_raw, symbol, "1h")
         if result:
-            # Добавляем риск-менеджмент если есть депозит
             mem = get_user_memory(user_id)
             risk_block = ""
             if mem["deposit"] > 0:
-                rc = calc_risk(mem["deposit"], mem["risk"], result["entry"], result["sl"])
-                if rc:
-                    risk_block = (
-                        f"\n💰 <b>Риск-менеджмент:</b>\n"
-                        f"Размер позиции: <b>{rc['position_size']:.2f}</b> USDT\n"
-                        f"Риск в $: <b>${rc['risk_amount']:.2f}</b> ({mem['risk']}%)\n"
-                    )
+                try:
+                    rc = calc_risk(mem["deposit"], mem["risk"], result.get("entry", 0), result.get("sl", 0))
+                    if rc:
+                        risk_block = (
+                            f"\n💰 <b>Риск-менеджмент:</b>\n"
+                            f"Размер позиции: <b>{rc['position_size']:.2f}</b> USDT\n"
+                            f"Риск в $: <b>${rc['risk_amount']:.2f}</b> ({mem['risk']}%)\n"
+                        )
+                except:
+                    pass
             await callback.message.edit_text(
                 result["text"] + risk_block,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],
-                    [InlineKeyboardButton(text="🔙 К сигналам", callback_data=f"menu_trade_{trade_type}")],
+                    [InlineKeyboardButton(text="🔄 Обновить сигнал", callback_data=data)],
+                    [InlineKeyboardButton(text="🔙 К списку сделок", callback_data="menu_find_deals")],
                 ])
             )
         else:
             await callback.message.edit_text(
-                f"😴 {symbol} — нет сигнала для {type_labels.get(trade_type, trade_type)}.\n"
-                f"Попробуй другую монету.",
+                f"😴 <b>{symbol}</b> — сигнал пропал.\n<i>Рынок изменился пока ты смотрел список</i>",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 К сигналам", callback_data=f"menu_trade_{trade_type}")]
+                    [InlineKeyboardButton(text="🔙 К списку сделок", callback_data="menu_find_deals")],
                 ])
             )
+
+    elif data.startswith("menu_trade_") or data.startswith("trade_scalp_") or data.startswith("trade_swing_") or data.startswith("trade_long_"):
+        # Старые хендлеры — редиректим на новый
+        await callback.message.edit_text("🔄", parse_mode="HTML")
+        await asyncio.sleep(0.1)
+        # Имитируем нажатие menu_find_deals
+        signals = await asyncio.get_running_loop().run_in_executor(None, scan_all_for_deals, 40)
+        await callback.message.edit_text(
+            f"🎯 Найдено сделок: {len(signals)}" if signals else "😴 Сигналов нет",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals")],
+                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ])
+        )
 
     elif data == "menu_pump":
         await callback.message.edit_text("📦 Сканирую топ-50 на накопление перед пампом...\n⏳ ~30 секунд")
@@ -6206,6 +6064,35 @@ async def auto_accumulation_scan():
     logging.info(f"Накопление скан: {len(pairs)} пар | найдено: {len(found)}")
 
 
+def scan_all_for_deals(limit=40):
+    """
+    Сканирует топ пары и возвращает ВСЕ найденные сигналы.
+    Используется кнопкой "🎯 Найти сделки".
+    Возвращает список: [{symbol, direction, grade, grade_emoji, entry, sl, tp1, tp2, tp3, text}]
+    """
+    import concurrent.futures
+    pairs = get_top_pairs(limit)
+    found = []
+
+    def scan_one(symbol):
+        try:
+            return full_scan_raw(symbol, "1h")
+        except:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(scan_one, pairs))
+
+    for r in results:
+        if r and r.get("grade") in ("🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
+            found.append(r)
+
+    # Сортируем: лучшие первыми
+    grade_order = {"🔥🔥🔥 МЕГА ТОП": 0, "🔥🔥 ТОП СДЕЛКА": 1, "✅ ХОРОШАЯ": 2}
+    found.sort(key=lambda x: grade_order.get(x.get("grade",""), 3))
+    return found
+
+
 def full_scan_raw(symbol, timeframe="1h"):
     """Возвращает dict с текстом и grade для фильтрации"""
     try:
@@ -6631,7 +6518,7 @@ def main():
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
     if WEBHOOK_URL:
-        # Webhook режим — ручная реализация, работает с любой версией aiogram 3.x
+        # Webhook — ручная реализация, работает с любой версией aiogram 3.x
         app = web.Application()
 
         async def health(request):
@@ -6640,7 +6527,6 @@ def main():
         app.router.add_get("/health", health)
 
         async def handle_webhook(request):
-            """Принимаем update от Telegram и передаём в диспетчер"""
             try:
                 import json as _json
                 data = await request.read()
@@ -6651,7 +6537,6 @@ def main():
             return web.Response(text="OK")
 
         app.router.add_post("/webhook", handle_webhook)
-
         app.on_startup.append(on_startup)
         app.on_shutdown.append(on_shutdown)
 
