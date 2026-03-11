@@ -500,3 +500,361 @@ def get_all_stats_text() -> str:
 
 # Инициализация при импорте
 init_learning()
+
+
+# ═══════════════════════════════════════════════════════════════
+# НОВЫЕ МОДУЛИ ОБУЧЕНИЯ v4
+# ═══════════════════════════════════════════════════════════════
+
+def _init_new_tables():
+    """Дополнительные таблицы для новых модулей"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS pattern_history (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol     TEXT, timeframe TEXT, direction TEXT,
+        regime     TEXT, confluence INTEGER, hour_utc INTEGER, weekday INTEGER,
+        result     TEXT, rr REAL DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS btc_correlation (
+        symbol      TEXT PRIMARY KEY,
+        corr_coef   REAL DEFAULT 0,
+        beta        REAL DEFAULT 1.0,
+        samples     INTEGER DEFAULT 0,
+        last_updated TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS streak_log (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts         TEXT DEFAULT CURRENT_TIMESTAMP,
+        result     TEXT,
+        streak_win INTEGER DEFAULT 0,
+        streak_loss INTEGER DEFAULT 0,
+        action_taken TEXT DEFAULT ''
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS grade_accuracy (
+        grade      TEXT PRIMARY KEY,
+        total      INTEGER DEFAULT 0,
+        wins       INTEGER DEFAULT 0,
+        win_rate   REAL DEFAULT 0,
+        avg_rr     REAL DEFAULT 0,
+        last_updated TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS news_impact (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol     TEXT, had_news INTEGER DEFAULT 0,
+        result     TEXT, rr REAL DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS knowledge_gaps (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        query      TEXT, source TEXT DEFAULT '',
+        answer     TEXT DEFAULT '', resolved INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.commit()
+    conn.close()
+
+
+# ── Паттерн-матчер ─────────────────────────────────────────────
+
+def find_similar_patterns(symbol: str, direction: str, timeframe: str,
+                           regime: str, confluence: int, hour_utc: int = -1) -> dict:
+    """
+    Ищет в истории похожие условия входа и возвращает историческую точность.
+    Используется в full_scan как дополнительный фильтр.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Ищем сигналы с похожими условиями (гибкий матч)
+        rows = conn.execute("""
+            SELECT result, rr FROM pattern_history
+            WHERE symbol=? AND direction=? AND timeframe=?
+            AND ABS(confluence - ?) <= 10
+            AND result != 'PENDING'
+            ORDER BY id DESC LIMIT 30
+        """, (symbol, direction, timeframe, confluence)).fetchall()
+
+        # Если мало данных — ищем по направлению + режиму без привязки к монете
+        if len(rows) < 5:
+            rows = conn.execute("""
+                SELECT result, rr FROM pattern_history
+                WHERE direction=? AND regime=? AND timeframe=?
+                AND ABS(confluence - ?) <= 15
+                AND result != 'PENDING'
+                ORDER BY id DESC LIMIT 50
+            """, (direction, regime, timeframe, confluence)).fetchall()
+        conn.close()
+
+        if not rows:
+            return {"found": False, "samples": 0}
+
+        total = len(rows)
+        wins  = sum(1 for r in rows if r[0].startswith("tp"))
+        wr    = wins / total * 100
+        avg_rr = sum(r[1] for r in rows if r[1]) / total
+
+        return {
+            "found": True,
+            "samples": total,
+            "win_rate": round(wr, 1),
+            "avg_rr": round(avg_rr, 2),
+            "verdict": "✅ Исторически хорошо" if wr >= 55 else "⚠️ Слабая история" if wr < 40 else "➡️ Средне"
+        }
+    except Exception as e:
+        logging.debug(f"find_similar_patterns: {e}")
+        return {"found": False, "samples": 0}
+
+
+def save_pattern(symbol, direction, timeframe, regime, confluence,
+                 result, rr=0.0, hour_utc=-1):
+    """Сохраняем паттерн входа для будущего матчинга"""
+    try:
+        weekday = datetime.now().weekday()
+        if hour_utc < 0:
+            hour_utc = datetime.now().hour
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""INSERT INTO pattern_history
+            (symbol,direction,timeframe,regime,confluence,hour_utc,weekday,result,rr)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (symbol, direction, timeframe, regime, confluence, hour_utc, weekday, result, rr))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.debug(f"save_pattern: {e}")
+
+
+# ── Decay правил — устаревшие правила слабеют ──────────────────
+
+def decay_old_rules():
+    """
+    Запускается раз в день.
+    Правила которые не подтверждались 14+ дней — теряют уверенность.
+    Если confidence < 0.2 — деактивируем.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cutoff = (datetime.now() - timedelta(days=14)).isoformat()
+
+        # Ослабляем старые правила
+        conn.execute("""
+            UPDATE auto_rules
+            SET confidence = MAX(0.1, confidence - 0.1)
+            WHERE last_check < ? AND active = 1
+        """, (cutoff,))
+
+        # Деактивируем совсем слабые
+        conn.execute("""
+            UPDATE auto_rules SET active = 0
+            WHERE confidence < 0.2 AND active = 1
+        """)
+
+        # То же для error_patterns
+        conn.execute("""
+            UPDATE error_patterns SET active = 0
+            WHERE last_seen < ? AND sl_count < 3
+        """, (cutoff,))
+
+        deactivated = conn.execute(
+            "SELECT changes()"
+        ).fetchone()[0]
+
+        conn.commit()
+        conn.close()
+        if deactivated > 0:
+            logging.info(f"[Learning] Decay: деактивировано {deactivated} устаревших правил")
+    except Exception as e:
+        logging.error(f"decay_old_rules: {e}")
+
+
+# ── Корреляция с BTC ───────────────────────────────────────────
+
+def update_btc_correlation(symbol: str, symbol_change: float, btc_change: float):
+    """
+    Обновляем корреляцию монеты с BTC.
+    Вызывается из авто-скана каждые 15 мин.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        ex = conn.execute(
+            "SELECT corr_coef, beta, samples FROM btc_correlation WHERE symbol=?", (symbol,)
+        ).fetchone()
+
+        if ex:
+            # Скользящее среднее корреляции
+            n = ex[2] + 1
+            # Простое обновление beta (отношение движений)
+            new_beta = ex[1] * (n-1)/n + (symbol_change / btc_change if btc_change != 0 else 1) / n
+            conn.execute("""UPDATE btc_correlation SET beta=?, samples=?, last_updated=?
+                WHERE symbol=?""", (round(new_beta, 3), n, datetime.now().isoformat(), symbol))
+        else:
+            beta = symbol_change / btc_change if btc_change != 0 else 1.0
+            conn.execute("INSERT INTO btc_correlation VALUES (?,?,?,?,?)",
+                (symbol, 0.8, round(beta, 3), 1, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.debug(f"update_btc_correlation: {e}")
+
+
+def get_btc_correlation(symbol: str) -> dict:
+    """Возвращает корреляцию монеты с BTC"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT corr_coef, beta, samples FROM btc_correlation WHERE symbol=?", (symbol,)
+        ).fetchone()
+        conn.close()
+        if row and row[2] >= 5:
+            beta = row[1]
+            return {
+                "beta": beta,
+                "samples": row[2],
+                "high_corr": abs(beta) > 1.2,
+                "desc": f"Beta {beta:.2f} к BTC ({row[2]} замеров)"
+            }
+    except: pass
+    return {"beta": 1.0, "samples": 0, "high_corr": False, "desc": "нет данных"}
+
+
+# ── Streak tracker ─────────────────────────────────────────────
+
+_current_win_streak  = 0
+_current_loss_streak = 0
+
+def update_streak(result: str) -> dict:
+    """
+    Трекер серий побед/поражений.
+    3 SL подряд → повышаем минимальный confluence на следующие сигналы.
+    """
+    global _current_win_streak, _current_loss_streak
+
+    is_win = result.startswith("tp")
+    if is_win:
+        _current_win_streak  += 1
+        _current_loss_streak  = 0
+    else:
+        _current_loss_streak += 1
+        _current_win_streak   = 0
+
+    action = ""
+    if _current_loss_streak >= 3:
+        action = f"⚠️ {_current_loss_streak} SL подряд — минимальный confluence повышен до 35"
+        logging.warning(f"[Streak] {_current_loss_streak} потерь подряд — ужесточаю фильтры")
+    elif _current_win_streak >= 5:
+        action = f"🔥 {_current_win_streak} побед подряд"
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT INTO streak_log (result,streak_win,streak_loss,action_taken) VALUES (?,?,?,?)",
+            (result, _current_win_streak, _current_loss_streak, action))
+        conn.commit()
+        conn.close()
+    except: pass
+
+    return {
+        "win_streak":  _current_win_streak,
+        "loss_streak": _current_loss_streak,
+        "action": action,
+        "extra_filter": _current_loss_streak >= 3  # Сигнал для full_scan: ужесточить фильтр
+    }
+
+
+def get_streak_min_confluence() -> int:
+    """Возвращает повышенный порог если серия потерь"""
+    if _current_loss_streak >= 5:
+        return 35
+    elif _current_loss_streak >= 3:
+        return 28
+    return 18  # Базовый порог
+
+
+# ── Grade точность ─────────────────────────────────────────────
+
+def update_grade_accuracy(grade: str, result: str, rr: float):
+    """Обновляем точность каждого грейда отдельно"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        ex = conn.execute(
+            "SELECT total, wins, avg_rr FROM grade_accuracy WHERE grade=?", (grade,)
+        ).fetchone()
+        is_win = 1 if result.startswith("tp") else 0
+        if ex:
+            total = ex[0] + 1
+            wins  = ex[1] + is_win
+            avg_rr = (ex[2] * ex[0] + rr) / total
+            conn.execute("""UPDATE grade_accuracy SET total=?,wins=?,win_rate=?,avg_rr=?,last_updated=?
+                WHERE grade=?""", (total, wins, wins/total*100, avg_rr, datetime.now().isoformat(), grade))
+        else:
+            conn.execute("INSERT INTO grade_accuracy VALUES (?,?,?,?,?,?)",
+                (grade, 1, is_win, is_win*100.0, rr, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.debug(f"update_grade_accuracy: {e}")
+
+
+def get_grade_accuracy_text() -> str:
+    """Текст для Мозг APEX — точность каждого грейда"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT grade, total, win_rate, avg_rr FROM grade_accuracy ORDER BY win_rate DESC"
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return "Нет данных по грейдам"
+        lines = ["📊 <b>Точность по грейдам:</b>"]
+        for grade, total, wr, avg_rr in rows:
+            bar = "█" * int(wr/10) + "░" * (10-int(wr/10))
+            lines.append(f"{grade}: [{bar}] {wr:.0f}% | {total} сигн | RR:{avg_rr:.1f}")
+        return "\n".join(lines)
+    except:
+        return ""
+
+
+# ── Auto-Discovery: самостоятельный поиск обходов ──────────────
+
+def log_knowledge_gap(query: str, context: str = ""):
+    """
+    Записываем что бот не смог найти/ответить.
+    Позже brain_builder заполняет эти пробелы.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Не дублируем одинаковые запросы
+        ex = conn.execute(
+            "SELECT id FROM knowledge_gaps WHERE query=? AND resolved=0", (query,)
+        ).fetchone()
+        if not ex:
+            conn.execute("INSERT INTO knowledge_gaps (query,source) VALUES (?,?)", (query, context))
+            conn.commit()
+        conn.close()
+    except: pass
+
+
+def get_unresolved_gaps(limit: int = 10) -> list:
+    """Возвращает незакрытые пробелы в знаниях"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT id, query, source FROM knowledge_gaps WHERE resolved=0 ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def resolve_gap(gap_id: int, answer: str):
+    """Помечаем пробел как закрытый с ответом"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE knowledge_gaps SET resolved=1, answer=? WHERE id=?", (answer, gap_id))
+        conn.commit()
+        conn.close()
+    except: pass
+
+
+# Инициализируем новые таблицы
+_init_new_tables()
