@@ -129,6 +129,121 @@ def search_crypto_news(query: str) -> list:
     return results
 
 
+# ─── RSS фиды — работают стабильно с Render ──────────────────
+
+# Топ источники: новости, анализ, Smart Money трейдеры
+RSS_SOURCES = {
+    # === НОВОСТИ ===
+    "CoinTelegraph":     "https://cointelegraph.com/rss",
+    "CoinDesk":          "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "Decrypt":           "https://decrypt.co/feed",
+    "TheBlock":          "https://www.theblock.co/rss.xml",
+    "CryptoSlate":       "https://cryptoslate.com/feed/",
+    "BeInCrypto":        "https://beincrypto.com/feed/",
+    "Bitcoinist":        "https://bitcoinist.com/feed/",
+    "NewsBTC":           "https://www.newsbtc.com/feed/",
+    "CryptoNews":        "https://cryptonews.com/news/feed/",
+    "AMBCrypto":         "https://ambcrypto.com/feed/",
+
+    # === АНАЛИТИКА И ИССЛЕДОВАНИЯ ===
+    "Glassnode_blog":    "https://insights.glassnode.com/rss/",       # On-chain аналитика
+    "Messari":           "https://messari.io/rss/news.xml",            # Фундаментал
+    "IntoTheBlock":      "https://blog.intotheblock.com/rss/",         # On-chain
+    "CryptoQuant_blog":  "https://cryptoquant.com/community/blog/rss", # Данные бирж
+    "DeFiLlama_news":    "https://defillama.com/news/rss",             # DeFi данные
+
+    # === ТРЕЙДИНГ И SMC ===
+    "TradingView_ideas": "https://www.tradingview.com/feed/",           # Идеи трейдеров
+    "CoinMarketCap_news":"https://coinmarketcap.com/headlines/news/feed/",
+    "CryptoCompare":     "https://www.cryptocompare.com/api/data/newsfeeds/?feeds=cryptocompare",
+
+    # === МАКРО / ТРАДФИ ===
+    "Investopedia_crypto":"https://www.investopedia.com/cryptocurrency-news-5114163",
+    "Reuters_crypto":    "https://feeds.reuters.com/reuters/businessNews",
+}
+
+# Конкретные темы для изучения из источников топ трейдеров
+TRADER_KNOWLEDGE_URLS = {
+    # Smart Money Concepts
+    "ICT_concepts":      "https://www.tradingview.com/scripts/smartmoneyconcepts/",
+    "SMC_guide":         "https://www.babypips.com/learn/forex/smart-money-concepts",
+    "OB_guide":          "https://www.investopedia.com/terms/o/order-block.asp",
+    "FVG_guide":         "https://www.investopedia.com/fair-value-gap-8414362",
+    "liquidity_guide":   "https://www.babypips.com/learn/forex/liquidity-in-forex",
+
+    # Стратегии топ крипто трейдеров (публичные блоги/гиды)
+    "altcoin_season":    "https://www.coingecko.com/en/methodology",
+    "wyckoff_method":    "https://school.stockcharts.com/doku.php?id=market_analysis:the_wyckoff_method",
+    "volume_profile":    "https://www.tradingview.com/support/solutions/43000502009/",
+    "funding_rates":     "https://www.binance.com/en/blog/futures/what-are-funding-rates-421499824684900420",
+    "open_interest":     "https://academy.binance.com/en/articles/what-is-open-interest",
+}
+
+
+def fetch_rss(source_name: str, url: str, limit: int = 5) -> list:
+    """Парсим RSS фид и возвращаем последние записи"""
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code != 200:
+            return []
+        text = r.text
+
+        # Извлекаем заголовки и описания из XML
+        titles = re.findall(r'<title><!\[CDATA\[(.+?)\]\]></title>|<title>(.+?)</title>', text)
+        descs = re.findall(r'<description><!\[CDATA\[(.+?)\]\]></description>|<description>(.+?)</description>', text)
+
+        items = []
+        for i, (t1, t2) in enumerate(titles[:limit+2]):
+            title = (t1 or t2).strip()
+            if not title or title == source_name:  # пропускаем заголовок канала
+                continue
+            desc = ""
+            if i < len(descs):
+                d1, d2 = descs[i]
+                desc = re.sub(r'<[^>]+>', ' ', (d1 or d2)).strip()[:300]
+            items.append({"source": source_name, "title": title, "text": desc})
+            if len(items) >= limit:
+                break
+        return items
+    except Exception as e:
+        logging.debug(f"RSS {source_name}: {e}")
+        return []
+
+
+def get_rss_batch(categories: list = None, limit_per_source: int = 3) -> list:
+    """
+    Получаем данные из нескольких RSS источников параллельно.
+    categories: ['news', 'analysis', 'trading'] или None = все
+    """
+    import concurrent.futures
+
+    # Выбираем источники по категории
+    sources_to_use = dict(list(RSS_SOURCES.items())[:8])  # топ-8 по умолчанию
+
+    all_items = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(fetch_rss, name, url, limit_per_source): name
+            for name, url in sources_to_use.items()
+        }
+        for future in concurrent.futures.as_completed(futures, timeout=20):
+            try:
+                items = future.result()
+                all_items.extend(items)
+            except Exception:
+                pass
+
+    return all_items
+
+
+def get_trader_knowledge(topic_key: str) -> str:
+    """Получаем знания по конкретной теме из баз трейдеров"""
+    url = TRADER_KNOWLEDGE_URLS.get(topic_key, "")
+    if not url:
+        return ""
+    return _fetch_url(url, timeout=12)
+
+
 # ═══════════════════════════════════════════════════════════════
 # GROQ РЕШАЕТ ЧТО ИЗУЧАТЬ
 # ═══════════════════════════════════════════════════════════════
@@ -217,29 +332,62 @@ def groq_decide_learning_agenda():
 def groq_research_topic(topic: str, query: str) -> dict:
     """
     Groq ищет информацию по теме и извлекает полезные знания.
+    Приоритет: RSS фиды → DuckDuckGo → крипто-сайты
     """
     try:
         logging.info(f"[WebLearner] Исследую тему: {topic}")
 
-        # Сначала ищем в DuckDuckGo
-        urls = search_duckduckgo(query + " trading strategy crypto")
         texts = []
 
-        for url in urls[:2]:
-            text = _fetch_url(url)
-            if text and len(text) > 300:
-                texts.append({"url": url, "text": text[:1500]})
-            time.sleep(0.5)
+        # 1. Сначала RSS — работает стабильно с Render
+        rss_items = get_rss_batch(limit_per_source=3)
+        # Фильтруем по релевантности к теме
+        query_words = set(query.lower().split())
+        relevant_rss = []
+        for item in rss_items:
+            item_text = (item["title"] + " " + item.get("text", "")).lower()
+            matches = sum(1 for w in query_words if w in item_text and len(w) > 3)
+            if matches >= 1:
+                relevant_rss.append(item)
 
-        # Если ничего не нашли — пробуем крипто-источники
+        if relevant_rss:
+            combined_rss = "\n\n".join([
+                f"[{i['source']}] {i['title']}\n{i.get('text','')}"
+                for i in relevant_rss[:5]
+            ])
+            texts.append({"url": "rss_feeds", "text": combined_rss[:2000]})
+            logging.info(f"[WebLearner] RSS: {len(relevant_rss)} релевантных статей для '{topic}'")
+
+        # 2. DuckDuckGo как дополнение
+        if len(texts) < 2:
+            try:
+                urls = search_duckduckgo(query + " trading strategy crypto")
+                for url in urls[:2]:
+                    text = _fetch_url(url)
+                    if text and len(text) > 300:
+                        texts.append({"url": url, "text": text[:1500]})
+                    time.sleep(0.5)
+            except Exception:
+                pass
+
+        # 3. Крипто-сайты как последний резерв
         if not texts:
             texts = search_crypto_news(query)
+
+        # 4. Базы знаний трейдеров — для SMC/технических тем
+        if not texts or topic.lower() in ("smc", "order block", "fvg", "liquidity", "wyckoff"):
+            for key in TRADER_KNOWLEDGE_URLS:
+                if any(w in key for w in query.lower().split()):
+                    knowledge = get_trader_knowledge(key)
+                    if knowledge:
+                        texts.append({"url": TRADER_KNOWLEDGE_URLS[key], "text": knowledge[:1500]})
+                        break
 
         if not texts:
             logging.warning(f"[WebLearner] Нет данных для темы: {topic}")
             return {}
 
-        combined = "\n\n---\n\n".join([f"URL: {t['url']}\n{t['text']}" for t in texts])
+        combined = "\n\n---\n\n".join([f"Источник: {t['url']}\n{t['text']}" for t in texts[:3]])
 
         prompt = f"""Ты — AI трейдинг-аналитик APEX. Изучи найденные материалы и извлеки полезные знания.
 
@@ -361,6 +509,65 @@ def run_web_learning_cycle():
     except Exception as e:
         logging.error(f"run_web_learning_cycle: {e}")
         return []
+
+
+def get_daily_market_digest() -> str:
+    """
+    Ежедневный дайджест из всех RSS источников.
+    Groq анализирует топ новости и выдаёт торговые выводы.
+    """
+    try:
+        logging.info("[WebLearner] 📰 Собираю дайджест рынка...")
+
+        # Берём из всех источников
+        all_items = get_rss_batch(limit_per_source=4)
+        if not all_items:
+            return ""
+
+        # Топ-15 заголовков для Groq
+        headlines = "\n".join([
+            f"[{i['source']}] {i['title']}"
+            for i in all_items[:15]
+        ])
+
+        prompt = f"""Ты — AI трейдер APEX. Проанализируй свежие новости крипторынка и дай торговые выводы.
+
+СВЕЖИЕ НОВОСТИ:
+{headlines}
+
+Ответь в JSON:
+{{
+  "market_sentiment": "BULLISH|BEARISH|NEUTRAL",
+  "key_events": ["событие 1", "событие 2", "событие 3"],
+  "trading_implications": "что это значит для трейдера (2-3 предложения)",
+  "coins_mentioned": ["BTC", "ETH", ...],
+  "risk_level": "LOW|MEDIUM|HIGH",
+  "action": "что делать прямо сейчас"
+}}"""
+
+        response = _groq(prompt, max_tokens=500)
+        if not response:
+            return ""
+
+        clean = re.sub(r'```json|```', '', response).strip()
+        data = json.loads(clean)
+
+        # Сохраняем в web_knowledge
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
+            VALUES (?,?,?,?,?)""",
+            ("daily_digest", "market_news",
+             f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
+             "rss_feeds", 0.9))
+        conn.commit()
+        conn.close()
+
+        logging.info(f"[WebLearner] 📰 Дайджест: {data.get('market_sentiment')} | Риск: {data.get('risk_level')}")
+        return data.get("trading_implications", "")
+
+    except Exception as e:
+        logging.error(f"get_daily_market_digest: {e}")
+        return ""
 
 
 def get_web_knowledge_summary() -> str:
