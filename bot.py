@@ -52,7 +52,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         symbol TEXT, direction TEXT, signal_type TEXT,
         entry REAL, tp1 REAL, tp2 REAL, tp3 REAL, sl REAL,
-        timeframe TEXT, estimated_hours INTEGER, grade TEXT,
+        timeframe TEXT, estimated_hours INTEGER DEFAULT 0, grade TEXT,
         result TEXT DEFAULT 'pending',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         closed_at TEXT)""")
