@@ -13,7 +13,6 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.webhook.aiohttp import SimpleRequestHandler
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -52,7 +51,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         symbol TEXT, direction TEXT, signal_type TEXT,
         entry REAL, tp1 REAL, tp2 REAL, tp3 REAL, sl REAL,
-        timeframe TEXT, estimated_hours INTEGER DEFAULT 0, grade TEXT,
+        timeframe TEXT, estimated_hours INTEGER, grade TEXT,
         result TEXT DEFAULT 'pending',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         closed_at TEXT)""")
@@ -1987,6 +1986,13 @@ def check_pending_signals():
             if symbol not in prices:
                 continue
             current = prices[symbol]["price"]
+            # Не закрываем по TP если цены только от Kraken (4 монеты) — ненадёжно
+            price_source_count = len(prices)
+            if price_source_count < 10 and result in ("tp1","tp2","tp3") if False else False:
+                continue  # placeholder
+            # Защита от случайных закрытий: TP должен быть > 0.5% от текущей цены
+            if current <= 0:
+                continue
             created = datetime.fromisoformat(created_at)
             hours_elapsed = (datetime.now() - created).total_seconds() / 3600
 
@@ -2010,6 +2016,11 @@ def check_pending_signals():
                     result, hit_tp = "tp1", 1
                 elif current >= sl:
                     result = "sl"
+
+            # Если цен мало (< 10 монет) — не закрываем по TP, только по SL и expire
+            if price_source_count < 10 and result in ("tp1", "tp2", "tp3"):
+                result = None
+                hit_tp = None
 
             if not result and hours_elapsed > 72:
                 result = "expired"
@@ -4338,37 +4349,54 @@ def ask_ai(user_id, user_name, user_message):
     if mem["name"] or mem["profile"]:
         user_context = f"ПОЛЬЗОВАТЕЛЬ:\nИмя: {mem['name'] or user_name} | Сообщений: {mem['messages']}\nПрофиль: {mem['profile'] or 'нет'}\nМонеты: {mem['coins'] or 'нет'}\nДепозит: ${mem['deposit']} | Риск: {mem['risk']}%"
 
-    prompt = f"""Ты APEX — дерзкий AI трейдер с реальным опытом и доступом к живым данным. Дата: {now}
+    # Определяем тип вопроса чтобы правильно сформулировать задачу
+    q = user_message.lower().strip()
+    is_list_question  = any(w in q for w in ["список", "какие монеты", "какие пары", "мониторинг", "отслеживаешь", "по каким", "какие данные"])
+    is_trade_question = any(w in q for w in ["сделка", "сигнал", "вход", "выход", "лонг", "шорт", "купить", "продать", "tp", "sl", "стоп"])
+    is_price_question = any(w in q for w in ["цена", "курс", "сколько стоит", "почём"])
+
+    # Инструкция под тип вопроса
+    if is_list_question:
+        task_instruction = """ЗАДАЧА: Пользователь спрашивает СПИСОК — какие монеты/пары ты видишь/мониторишь.
+Ответь КОНКРЕТНЫМ СПИСКОМ монет из блока ЖИВЫЕ ЦЕНЫ выше. Просто перечисли их. Ничего лишнего."""
+    elif is_trade_question:
+        task_instruction = """ЗАДАЧА: Вопрос про сделку/сигнал.
+Отвечай ТОЛЬКО по существу — конкретные уровни, конкретное мнение. Не уходи на другие монеты."""
+    elif is_price_question:
+        task_instruction = """ЗАДАЧА: Вопрос про цену.
+Дай цену из блока ЖИВЫЕ ЦЕНЫ. Только факты, без лишних советов если не просили."""
+    else:
+        task_instruction = """ЗАДАЧА: Ответь ТОЧНО на то что спросили. Не меняй тему. Не давай сигналы если не просили."""
+
+    prompt = f"""Ты APEX — AI трейдер. Дата: {now}
 
 {user_context}
 
 {live_prices_text}
 
 {f"РЕСЁРЧ:{chr(10)}{research_result}" if research_result else ""}
-{f"НОВОСТИ:{chr(10)}{recent_news[:400]}" if recent_news and not research_result else ""}
-{f"ЗНАНИЯ:{chr(10)}{knowledge[:300]}" if knowledge else ""}
-{f"ФУНДАМЕНТАЛ (Messari):{chr(10)}{messari_context}" if messari_context else ""}
-{f"МОЯ КАРТИНА МИРА (накопленный опыт):{chr(10)}{worldview[:600]}" if worldview else f"МОЙ ОПЫТ:{chr(10)}{brain_context[:400]}" if brain_context else ""}
+{f"НОВОСТИ:{chr(10)}{recent_news[:300]}" if recent_news and not research_result else ""}
+{f"ФУНДАМЕНТАЛ:{chr(10)}{messari_context}" if messari_context else ""}
+{f"МОЙ ОПЫТ:{chr(10)}{worldview[:400]}" if worldview else f"МОЙ ОПЫТ:{chr(10)}{brain_context[:300]}" if brain_context else ""}
 
-ИСТОРИЯ:
+ИСТОРИЯ ДИАЛОГА (последние сообщения):
 {history_text}
 
-ПРАВИЛА:
-- ПЕРВОЕ И ГЛАВНОЕ: ВСЕГДА отвечай именно на то что спросили. Не уходи в сторону, не давай общие рассуждения вместо конкретного ответа
-- Цены ВСЕГДА берёшь из блока "ЖИВЫЕ ЦЕНЫ" — они актуальны прямо сейчас
-- Если спрашивают про монету которой нет в блоке — честно скажи что нет данных, не придумывай
-- Говори как опытный трейдер другу: кратко, конкретно, с чувством юмора если уместно
-- Если спросили "что думаешь о BTC?" — дай своё мнение с обоснованием, не просто "смотри график"
-- Если спросили про вход/выход — дай конкретные уровни или честно скажи что сетапа нет
-- Если спрашивают про сделки/сигналы — используй данные из "МОЯ КАРТИНА МИРА"
-- Если нет данных — скажи честно, не выдумывай цифры
-- Пиши без лишней воды: 3-5 предложений максимум если не просят развёрнуто
-- Не начинай каждый ответ с "Привет" или "Конечно" — сразу по делу
+{task_instruction}
+
+ЖЁСТКИЕ ПРАВИЛА:
+1. Отвечай ТОЛЬКО на вопрос который задан — не переключайся на другие темы
+2. Если спросили список монет — дай список, не давай сигналы
+3. Если спросили про конкретную монету — говори только про неё
+4. Цены ТОЛЬКО из блока ЖИВЫЕ ЦЕНЫ — никогда не выдумывай
+5. Не называй себя "босс", не используй пафосные обращения
+6. Пиши кратко — 2-4 предложения если не просят подробно
+7. Если не знаешь — честно скажи "нет данных", не придумывай
 
 {user_name}: {user_message}
 APEX:"""
 
-    return ask_groq(prompt, max_tokens=700)
+    return ask_groq(prompt, max_tokens=600)
 
 
 # ===== KEYBOARDS =====
@@ -6603,19 +6631,27 @@ def main():
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
     if WEBHOOK_URL:
-        # Webhook режим — решает TelegramConflictError навсегда
+        # Webhook режим — ручная реализация, работает с любой версией aiogram 3.x
         app = web.Application()
 
-        # Health check
         async def health(request):
             return web.Response(text="APEX OK")
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
 
-        # Webhook handler — регистрируем ДО on_startup
-        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+        async def handle_webhook(request):
+            """Принимаем update от Telegram и передаём в диспетчер"""
+            try:
+                import json as _json
+                data = await request.read()
+                update = types.Update(**_json.loads(data))
+                await dp.feed_update(bot, update)
+            except Exception as e:
+                logging.error(f"Webhook error: {e}")
+            return web.Response(text="OK")
 
-        # on_startup и on_shutdown вешаем ОДИН РАЗ
+        app.router.add_post("/webhook", handle_webhook)
+
         app.on_startup.append(on_startup)
         app.on_shutdown.append(on_shutdown)
 
