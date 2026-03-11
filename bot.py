@@ -126,6 +126,7 @@ try:
         get_web_knowledge_summary as _web_knowledge_summary,
         groq_decide_learning_agenda as _web_groq_agenda,
         init_web_learner_db as _web_init_db,
+        groq_self_improve as _web_self_improve,
     )
     _WEB_LEARNER_OK = True
     logging.info("web_learner.py загружен успешно")
@@ -136,6 +137,7 @@ except ImportError as e:
     _web_knowledge_summary = lambda: "WebLearner недоступен"
     _web_groq_agenda = lambda: []
     _web_init_db = lambda: None
+    _web_self_improve = lambda: []
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
@@ -867,6 +869,32 @@ def format_accumulation(acc):
         f"💡 <i>Войти можно при пробое диапазона с объёмом</i>\n"
         f"{'━'*26}"
     )
+
+def smart_price_fmt(p) -> str:
+    """Умное форматирование цены — правильное кол-во знаков для любой монеты"""
+    if p is None or p == 0:
+        return "нет данных"
+    if p >= 10000:   return f"{p:,.2f}"
+    if p >= 1000:    return f"{p:,.2f}"
+    if p >= 100:     return f"{p:,.3f}"
+    if p >= 10:      return f"{p:,.4f}"
+    if p >= 1:       return f"{p:,.4f}"
+    if p >= 0.1:     return f"{p:.5f}"
+    if p >= 0.01:    return f"{p:.6f}"
+    if p >= 0.001:   return f"{p:.7f}"
+    if p >= 0.0001:  return f"{p:.8f}"
+    return f"{p:.10f}"
+
+def smart_round(p, direction_multiplier=1.0) -> float:
+    """Умное округление — сохраняет значимые цифры"""
+    if not p or p == 0:
+        return p
+    if p >= 10:    return round(p, 3)
+    if p >= 1:     return round(p, 4)
+    if p >= 0.1:   return round(p, 5)
+    if p >= 0.01:  return round(p, 6)
+    if p >= 0.001: return round(p, 7)
+    return round(p, 10)
 
 def format_market():
     market = get_live_prices()
@@ -2166,20 +2194,33 @@ def full_scan(symbol, timeframe="1h"):
         if total_weight < min_weight:
             return None
 
-        # ── 4. Уровни входа ──
+        # ── 4. Уровни входа — с проверкой цены ──
+        # Если цена из свечей = 0, пробуем взять из живых цен
+        if not price or price == 0:
+            live = get_live_prices()
+            price = live.get(symbol, {}).get("price", 0)
+        if not price or price == 0:
+            logging.warning(f"full_scan {symbol}: цена = 0, пропускаем")
+            return None
+
         risk = price * 0.015
         if direction == "BULLISH":
             entry = ob["top"] if ob else price
-            sl = round(entry - risk, 4)
-            tp1 = round(entry + risk * 2, 4)
-            tp2 = round(entry + risk * 3, 4)
-            tp3 = round(entry + risk * 5, 4)
+            sl = smart_round(entry - risk)
+            tp1 = smart_round(entry + risk * 2)
+            tp2 = smart_round(entry + risk * 3)
+            tp3 = smart_round(entry + risk * 5)
         else:
             entry = ob["bottom"] if ob else price
-            sl = round(entry + risk, 4)
-            tp1 = round(entry - risk * 2, 4)
-            tp2 = round(entry - risk * 3, 4)
-            tp3 = round(entry - risk * 5, 4)
+            sl = smart_round(entry + risk)
+            tp1 = smart_round(entry - risk * 2)
+            tp2 = smart_round(entry - risk * 3)
+            tp3 = smart_round(entry - risk * 5)
+
+        # Ещё раз проверяем — если entry=0, сигнал невалидный
+        if not entry or entry == 0:
+            logging.warning(f"full_scan {symbol}: entry = 0 после расчёта, пропускаем")
+            return None
 
         # ── 5. Время отработки ──
         est_hours, confidence_str, win_rate = get_estimated_time(symbol, timeframe)
@@ -2208,7 +2249,7 @@ def full_scan(symbol, timeframe="1h"):
 
         # ── 7. Уровень инвалидации (когда сигнал отменяется) ──
         invalidation = sl  # Если цена закроется за стопом — сигнал недействителен
-        inv_text = f"Сигнал отменяется если цена закроется {'ниже' if direction == 'BULLISH' else 'выше'} <code>{invalidation:.4f}</code>"
+        inv_text = f"Сигнал отменяется если цена закроется {'ниже' if direction == 'BULLISH' else 'выше'} <code>{smart_price_fmt(invalidation)}</code>"
 
         # ── 8. Предупреждение об экономических событиях ──
         econ_warn = f"\n⚠️ <b>Макро:</b> {econ}\n" if econ else ""
@@ -2227,11 +2268,11 @@ def full_scan(symbol, timeframe="1h"):
             f"{'━'*26}\n\n"
             f"📐 <b>Таймфреймы:</b>\n{mtf['tf_status']}\n"
             f"{mtf['stars']}\n\n"
-            f"💰 <b>Вход:</b> <code>{entry:.4f}</code>\n"
-            f"🛑 <b>Стоп:</b> <code>{sl:.4f}</code>\n"
-            f"🎯 <b>TP1:</b> <code>{tp1:.4f}</code> (+2R)\n"
-            f"🎯 <b>TP2:</b> <code>{tp2:.4f}</code> (+3R)\n"
-            f"🎯 <b>TP3:</b> <code>{tp3:.4f}</code> (+5R)\n\n"
+            f"💰 <b>Вход:</b> <code>{smart_price_fmt(entry)}</code>\n"
+            f"🛑 <b>Стоп:</b> <code>{smart_price_fmt(sl)}</code>\n"
+            f"🎯 <b>TP1:</b> <code>{smart_price_fmt(tp1)}</code> (+2R)\n"
+            f"🎯 <b>TP2:</b> <code>{smart_price_fmt(tp2)}</code> (+3R)\n"
+            f"🎯 <b>TP3:</b> <code>{smart_price_fmt(tp3)}</code> (+5R)\n\n"
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence_str}\n"
             f"🧠 <b>Режим рынка:</b> {regime['mode']} ({regime['direction']})\n"
@@ -4957,8 +4998,6 @@ def main_menu():
         [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🔍 Сканировать рынок", callback_data="menu_scan"),
-         InlineKeyboardButton(text="📓 Дневник сделок", callback_data="menu_journal")],
-        [InlineKeyboardButton(text="🔔 Алерты", callback_data="menu_alerts"),
          InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats")],
         [InlineKeyboardButton(text="📰 Новости", callback_data="menu_news"),
          InlineKeyboardButton(text="📦 Накопления", callback_data="menu_pump")],
@@ -5417,7 +5456,6 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data == "menu_market":
         await callback.message.edit_text("📊 Собираю данные рынка...")
-        market = format_market()
         fg = get_fear_greed()
         dxy = get_dxy_signal()
         regime_btc = get_market_regime("BTCUSDT")
@@ -5442,16 +5480,60 @@ async def handle_callback(callback: CallbackQuery):
         if econ:
             sentiment_block += f"\n⚠️ <b>Макро:</b> {econ}\n"
 
+        # Тепловая карта накоплений топ-монет
+        accum_block = ""
+        try:
+            top_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "TONUSDT", "AVAXUSDT", "LINKUSDT"]
+            accum_lines = []
+            for sym in top_syms:
+                acc = detect_accumulation(sym)
+                if acc and acc.get("score", 0) >= 50:
+                    score = acc["score"]
+                    bar_len = min(10, score // 10)
+                    bar = "█" * bar_len + "░" * (10 - bar_len)
+                    phase = acc.get("phase", "")
+                    emoji = "🔥" if score >= 70 else "🟡"
+                    accum_lines.append(f"{emoji} <b>{sym.replace('USDT','')}</b> [{bar}] {score}/100 {phase}")
+            if accum_lines:
+                accum_block = "\n🗺 <b>Тепловая карта накоплений:</b>\n" + "\n".join(accum_lines[:5]) + "\n"
+        except Exception as _e:
+            logging.debug(f"accum heatmap: {_e}")
+
+        # Крупная ликвидность — зоны перед пампом
+        liq_block = ""
+        try:
+            liq_lines = []
+            for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
+                candles = get_candles(sym, "4h", 100)
+                if candles and len(candles) > 20:
+                    highs = [c["high"] for c in candles[-50:]]
+                    lows = [c["low"] for c in candles[-50:]]
+                    vols = [c.get("volume", 0) for c in candles[-50:]]
+                    avg_vol = sum(vols) / len(vols) if vols else 0
+                    # Свечи с аномальным объёмом — кит
+                    whale_candles = [(c, v) for c, v in zip(candles[-10:], vols[-10:]) if avg_vol > 0 and v > avg_vol * 2]
+                    if whale_candles:
+                        last_whale = whale_candles[-1]
+                        direction_whale = "🟢 Накопление" if last_whale[0]["close"] > last_whale[0]["open"] else "🔴 Сброс"
+                        liq_lines.append(f"🐋 <b>{sym.replace('USDT','')}</b>: {direction_whale} (объём ×{last_whale[1]/avg_vol:.1f})")
+            if liq_lines:
+                liq_block = "\n🐋 <b>Крупная ликвидность (4h):</b>\n" + "\n".join(liq_lines) + "\n"
+        except Exception as _e:
+            logging.debug(f"liq block: {_e}")
+
+        # Groq анализ рынка с учётом накоплений
         comment = ask_groq(
-            f"2 предложения по рынку для трейдера:\n{market[:300]}\nF&G:{fg}\nDXY:{dxy}",
-            max_tokens=120
+            f"3 предложения по рынку для трейдера. F&G:{fg}, DXY:{dxy}, BTC режим:{regime_btc}. "
+            f"Учти накопления и ликвидность. Дай конкретный совет — что делать сейчас.",
+            max_tokens=150
         )
 
         await callback.message.edit_text(
             f"📊 <b>Рынок сейчас</b>\n{'━'*24}\n\n"
-            f"{sentiment_block}\n"
-            f"<b>Цены:</b>\n{market}\n\n"
-            f"💬 {comment or ''}",
+            f"{sentiment_block}"
+            f"{accum_block}"
+            f"{liq_block}"
+            f"\n💬 <i>{comment or ''}</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_market"),
@@ -5741,15 +5823,27 @@ async def handle_callback(callback: CallbackQuery):
             "timing": "⏱", "risk": "💰", "avoid": "⛔️",
             "best_setup": "🌟", "market": "📊"
         }
-        rules_text = "\n".join([
-            f"{cat_emoji.get(r[0], '📌')} {r[1][:65]} — {r[2]:.0%}"
-            for r in top_rules
-        ]) or bb_rules or "Пока нет правил"
 
         macro_block = (
             f"\n📊 <b>Последний макро анализ</b> ({macro_time}):\n"
             f"<i>{macro_summary}</i>\n"
         ) if macro_summary else ""
+
+        # Последние изученные знания
+        recent_knowledge = ""
+        try:
+            conn2 = sqlite3.connect("brain.db")
+            recent = conn2.execute("""
+                SELECT topic, content FROM knowledge
+                ORDER BY created_at DESC LIMIT 3
+            """).fetchall()
+            conn2.close()
+            if recent:
+                recent_knowledge = "\n\n📖 <b>Последние знания:</b>\n"
+                for topic, content in recent:
+                    recent_knowledge += f"• <b>{topic}</b>: {str(content)[:80]}...\n"
+        except Exception:
+            pass
 
         await callback.message.edit_text(
             f"🧠 <b>Мозг APEX</b>\n"
@@ -5760,21 +5854,18 @@ async def handle_callback(callback: CallbackQuery):
             f"🗂 Моделей монет: <b>{model_count}</b>\n"
             f"📚 Знаний (Groq): <b>{knowledge_count}</b>\n"
             f"📈 SMC паттернов: <b>{pattern_count}</b>\n"
-            f"🪙 Правил по монетам: <b>{coin_count}</b>\n\n"
-            f"<b>Топ правила:</b>\n{rules_text}\n"
-            f"{macro_block}\n"
-            f"<i>Groq обучает мозг каждый час: SMC, макро, новости, история сделок</i>",
+            f"🪙 Правил по монетам: <b>{coin_count}</b>\n"
+            f"{macro_block}"
+            f"{recent_knowledge}\n"
+            f"<i>🔄 Groq обучается каждый час: SMC, макро, новости, сделки, веб-поиск</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚡️ Обучить сейчас", callback_data="brain_learn_now"),
                  InlineKeyboardButton(text="🌍 Макро анализ", callback_data="brain_macro")],
-                [InlineKeyboardButton(text="📡 Источники данных", callback_data="brain_sources"),
-                 InlineKeyboardButton(text="📊 Самоанализ", callback_data="brain_self_analysis")],
-                [InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy")],
+                [InlineKeyboardButton(text="📊 Самоанализ", callback_data="brain_self_analysis"),
+                 InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy")],
                 [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status"),
-                 InlineKeyboardButton(text="🔬 Самодиагностика", callback_data="brain_self_diagnose")],
-                [InlineKeyboardButton(text="📋 Анализ сделок", callback_data="brain_trade_analysis"),
-                 InlineKeyboardButton(text="📈 Стратегия", callback_data="brain_strategy")],
+                 InlineKeyboardButton(text="📋 Анализ сделок", callback_data="brain_trade_analysis")],
                 [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis"),
                  InlineKeyboardButton(text="📊 Анализ логов", callback_data="brain_logs")],
                 [InlineKeyboardButton(text="🌐 Веб-знания", callback_data="brain_web_knowledge"),
@@ -7658,9 +7749,17 @@ async def on_startup(app):
                 logging.info(f"[WebLearner] Изучено тем: {len(results)}")
             await backup_db_to_github()
     scheduler.add_job(_run_web_learner, "interval", hours=4, jitter=900)
-    # Первый запуск агенды через 5 минут после старта
     scheduler.add_job(_run_web_learner, "date",
         run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
+
+    # Groq самоулучшение — каждые 8 часов анализирует результаты и добавляет правила
+    async def _run_self_improve():
+        if _WEB_LEARNER_OK:
+            loop = asyncio.get_running_loop()
+            improvements = await loop.run_in_executor(None, _web_self_improve)
+            if improvements:
+                logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
+    scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
 
     scheduler.start()
     setup_error_capture()
