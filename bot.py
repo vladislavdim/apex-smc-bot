@@ -87,7 +87,7 @@ def init_db():
         avg_hours_to_tp REAL DEFAULT 0,
         best_timeframe TEXT,
         worst_timeframe TEXT,
-        win_ratetio DECIMAL(10,2)te REAL DEFAULT 0,
+        win_rate REAL DEFAULT 0,
         last_analysis TEXT)""")
 
     # Дневник сделок пользователя
@@ -4199,29 +4199,34 @@ def ask_ai(user_id, user_name, user_message):
         "что происходит", "тренд", "перспективы", "будет"
     ])
 
-    # Живые цены — ВСЕГДА тянем для любого сообщения (не только price-запросов)
+    # Живые цены — ВСЕГДА берём полный агрегатор (199+ монет)
     live_prices_text = ""
     prices = get_multiple_prices_realtime()
     if not prices:
-        cached = get_live_prices()
-        prices = {k: {"price": v["price"], "change": v["change"]} for k, v in list(cached.items())[:20]}
+        prices = get_live_prices()
 
     if prices:
         # Приоритетные монеты показываем первыми
         priority = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-                    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "TONUSDT", "ARBUSDT"]
+                    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "TONUSDT", "ARBUSDT",
+                    "NEARUSDT", "INJUSDT", "SUIUSDT", "APTUSDT", "OPUSDT",
+                    "ADAUSDT", "DOTUSDT", "ATOMUSDT", "LTCUSDT", "XLMUSDT"]
         ordered = [(s, prices[s]) for s in priority if s in prices]
         others = [(s, d) for s, d in prices.items() if s not in priority]
         all_prices = ordered + others
 
         lines = []
-        for sym, d in all_prices[:30]:
+        for sym, d in all_prices[:50]:  # Показываем 50 монет в промпте
             p = d["price"]
             ps = f"${p:,.2f}" if p >= 100 else f"${p:,.4f}" if p >= 1 else f"${p:.6f}"
             emoji = "🟢" if d["change"] >= 0 else "🔴"
             lines.append(f"{emoji} {sym.replace('USDT','')}: {ps} ({d['change']:+.2f}%)")
-        source = f"{len(prices)} монет со всех бирж"
-        live_prices_text = f"ЖИВЫЕ ЦЕНЫ ({source}, {datetime.now().strftime('%H:%M')}):\n" + "\n".join(lines)
+        total = len(prices)
+        live_prices_text = (
+            f"ЖИВЫЕ ЦЕНЫ — {total} монет (CoinGecko+CoinPaprika+CryptoCompare), {datetime.now().strftime('%H:%M')}:\n"
+            + "\n".join(lines)
+            + f"\n...и ещё {max(0, total-50)} монет в базе"
+        )
     else:
         live_prices_text = "ЦЕНЫ: все источники недоступны — не называй цены из памяти"
 
@@ -4278,11 +4283,20 @@ def ask_ai(user_id, user_name, user_message):
 
     # Определяем тип вопроса для точного routing
     q = user_message.lower()
-    is_list_q  = any(w in q for w in ["список", "какие монеты", "по каким", "мониторинг", "отслеживаешь", "какие пары", "видишь монеты"])
+    is_list_q  = any(w in q for w in ["список", "какие монеты", "по каким", "мониторинг", "отслеживаешь", "какие пары", "видишь монеты", "доступ", "какие данные"])
     is_deal_q  = any(w in q for w in ["сделк", "сигнал", "вход", "выход", "лонг", "шорт", "купить", "продать", "tp", "стоп"])
     is_price_q = any(w in q for w in ["цена", "курс", "сколько стоит", "почём", "стоимость"])
 
+    # Считаем реальное количество монет в ценах
+    prices_count = len(prices) if prices else 0
+
     prompt = f"""Ты APEX — AI трейдер с доступом к живым данным. Дата: {now}
+
+ВАЖНО О МОИХ ВОЗМОЖНОСТЯХ:
+- Цены в реальном времени: {prices_count} монет (CoinGecko + CoinPaprika + CryptoCompare)
+- Свечи/графики: CryptoCompare API (любая монета из топ-200, все таймфреймы 1m–1d)
+- SMC анализ: Order Block, FVG, структура свингов, мультитаймфрейм 15m/1h/4h
+- Если монеты нет в блоке ЖИВЫЕ ЦЕНЫ — честно скажи что нет данных по ней
 
 {user_context}
 
@@ -4297,7 +4311,7 @@ def ask_ai(user_id, user_name, user_message):
 ИСТОРИЯ:
 {history_text}
 
-ЗАДАЧА ЭТОГО ОТВЕТА: {"список монет" if is_list_q else "сигнал/сделка" if is_deal_q else "цена/данные" if is_price_q else "точный ответ на вопрос"}
+ЗАДАЧА: {"Дай список монет из блока ЖИВЫЕ ЦЕНЫ — сколько их и какие" if is_list_q else "Дай конкретный сигнал/уровни" if is_deal_q else "Дай цену из блока ЖИВЫЕ ЦЕНЫ" if is_price_q else "Ответь точно на вопрос"}
 
 ЖЁСТКИЕ ПРАВИЛА:
 1. Отвечай ТОЛЬКО на то что спросили — не меняй тему
