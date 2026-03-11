@@ -13,7 +13,7 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiogram.worst_hours_to_tp TEXTebhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
