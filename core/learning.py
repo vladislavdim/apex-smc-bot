@@ -119,10 +119,64 @@ def init_learning():
     conn.commit()
     conn.close()
 
+    # Загружаем базу SMC/Smart Money знаний при первом запуске
+    _seed_smc_knowledge()
 
-# ═══════════════════════════════════════════════════════════════
-# СОХРАНЕНИЕ И ОБНОВЛЕНИЕ СИГНАЛОВ
-# ═══════════════════════════════════════════════════════════════
+
+def _seed_smc_knowledge():
+    """Вшиваем базовые знания по SMC/Smart Money при инициализации"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM self_rules WHERE source='smc_seed'"
+        ).fetchone()[0]
+        if existing >= 20:
+            conn.close()
+            return
+
+        smc_rules = [
+            ("prefer", "Входить только в Order Block с высоким объёмом — это зоны где Smart Money разворачивали рынок", 0.85, "smc_seed"),
+            ("prefer", "Лучший OB — последняя медвежья свеча перед импульсным ростом (BULLISH) или бычья перед падением (BEARISH)", 0.85, "smc_seed"),
+            ("avoid", "Не входить в OB если он уже был протестирован 3+ раза — зона ослаблена", 0.80, "smc_seed"),
+            ("prefer", "OB + FVG в одной зоне = двойной confluence, вероятность отработки выше на 30%", 0.88, "smc_seed"),
+            ("prefer", "FVG (Fair Value Gap) — имбаланс где цена вернётся за ликвидностью. Чем больше гэп — тем сильнее магнит", 0.82, "smc_seed"),
+            ("timing", "Цена заполняет FVG в 70-80% случаев. Вход при касании нижней границы FVG в восходящем тренде", 0.80, "smc_seed"),
+            ("avoid", "Не входить если FVG образовался против старшего тренда (4h/1d)", 0.78, "smc_seed"),
+            ("prefer", "BOS (Break of Structure) — подтверждение смены тренда. Входить только после BOS", 0.85, "smc_seed"),
+            ("prefer", "CHoCH (Change of Character) — сигнал разворота. Ждать ретест после CHoCH для входа", 0.82, "smc_seed"),
+            ("avoid", "Не входить против BOS — это торговля против Smart Money", 0.88, "smc_seed"),
+            ("prefer", "Sweep ликвидности (ложный пробой) перед разворотом — сильный сигнал. Входить после sweep", 0.87, "smc_seed"),
+            ("prefer", "Equal Highs/Lows — зоны ликвидности. Smart Money снимают их перед разворотом", 0.83, "smc_seed"),
+            ("timing", "После sweep ликвидности входить когда цена вернулась за уровень — лучшее R:R", 0.85, "smc_seed"),
+            ("prefer", "Покупать в Discount zone (ниже 50% диапазона), продавать в Premium zone (выше 50%)", 0.82, "smc_seed"),
+            ("avoid", "Не покупать в Premium zone (выше 75% диапазона) — Smart Money продают здесь", 0.80, "smc_seed"),
+            ("prefer", "Топ-даун анализ: 1d определяет тренд, 4h — зону входа, 1h — точный вход. Все ТФ должны совпадать", 0.90, "smc_seed"),
+            ("avoid", "Не входить если 4h и 1d противоречат — только потеря депозита", 0.88, "smc_seed"),
+            ("prefer", "Лучшие входы: 15m сетап в направлении 4h тренда на зоне 1h OB", 0.85, "smc_seed"),
+            ("prefer", "Аномальный объём (2x+ от среднего) на бычьей свече в зоне OB = кит накапливает позицию", 0.85, "smc_seed"),
+            ("avoid", "Аномальный объём на нисходящей свече у сопротивления = кит сбрасывает. Не покупать", 0.83, "smc_seed"),
+            ("prefer", "CVD растёт при боковом движении = скрытое накопление, готовься к пампу", 0.82, "smc_seed"),
+            ("risk", "Стоп всегда за OB — если цена закрылась за OB, идея недействительна", 0.90, "smc_seed"),
+            ("risk", "Минимальный R:R = 1:2. Не входить в сделку с R:R меньше 1:2", 0.92, "smc_seed"),
+            ("risk", "Максимум 2% депозита на сделку. При серии потерь снижать до 1%", 0.92, "smc_seed"),
+            ("timing", "Лучшее время входа: открытие Лондона (8-10 UTC) и Нью-Йорка (14-16 UTC)", 0.80, "smc_seed"),
+            ("avoid", "Не торговать перед крупными новостями (CPI, NFP, решение ФРС) — манипуляция гарантирована", 0.88, "smc_seed"),
+            ("prefer", "F&G < 20 (Extreme Fear) = зона накопления Smart Money. Лучшее время для покупок", 0.83, "smc_seed"),
+            ("avoid", "F&G > 80 (Extreme Greed) = зона распределения. Smart Money продают. Не покупать", 0.85, "smc_seed"),
+            ("prefer", "DXY падает = доллар слабеет = крипта растёт. Бычий сигнал для рынка", 0.80, "smc_seed"),
+            ("avoid", "DXY растёт = давление на крипту. Торговать только шорты или сидеть в кэше", 0.80, "smc_seed"),
+        ]
+
+        for rule_type, rule_text, confidence, source in smc_rules:
+            conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at)
+                VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                (rule_type, rule_text, confidence, source))
+
+        conn.commit()
+        conn.close()
+        logging.info(f"[Learning] SMC база знаний загружена: {len(smc_rules)} правил")
+    except Exception as e:
+        logging.error(f"_seed_smc_knowledge: {e}")
 
 def save_signal(symbol, direction, grade, entry, sl, tp1, tp2, tp3,
                 timeframe="1h", confluence=0, regime="UNKNOWN", source=""):
