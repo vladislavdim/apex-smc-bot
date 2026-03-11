@@ -186,6 +186,10 @@ def close_signal(signal_id: int, result: str, hit_tp: int = 0):
         conn.close()
         logging.info(f"[Learning] Сигнал {signal_id} закрыт: {symbol} {result} R={rr:.1f}")
 
+        # Groq автоматически анализирует каждую закрытую сделку
+        import threading
+        threading.Thread(target=analyze_closed_trade, args=(signal_id,), daemon=True).start()
+
     except Exception as e:
         logging.error(f"close_signal: {e}")
 
