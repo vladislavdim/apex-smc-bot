@@ -33,6 +33,7 @@ try:
         full_smc_analysis, detect_liquidity_sweep, find_imbalance_zones,
         get_premium_discount, detect_divergence, get_market_profile,
         find_ob_fvg_chain, check_volume_on_structure,
+        calculate_cvd, detect_whale_candles, get_volume_profile,
     )
     _SMC_ENGINE_OK = True
     logging.info("smc_engine.py загружен успешно")
@@ -49,6 +50,9 @@ except ImportError as e:
     get_market_profile = lambda c: {}
     find_ob_fvg_chain = lambda c, d: None
     check_volume_on_structure = lambda c, i: {"valid": True, "signal": "UNKNOWN"}
+    calculate_cvd = lambda c: {"cvd": 0, "trend": "NEUTRAL", "divergence": None, "signal": "NEUTRAL", "buy_pressure_pct": 50}
+    detect_whale_candles = lambda c: {"found": False, "spike": 0, "type": "NONE", "strength": 0}
+    get_volume_profile = lambda c: {"poc": 0, "high_volume_zones": [], "current_zone": "UNKNOWN"}
 
 try:
     from learning import (
@@ -72,6 +76,15 @@ try:
         log_knowledge_gap as _learn_gap,
         get_unresolved_gaps as _learn_get_gaps,
         resolve_gap as _learn_resolve_gap,
+        analyze_closed_trade as _learn_analyze_trade,
+        groq_build_strategy as _learn_build_strategy,
+        get_current_strategy as _learn_get_strategy,
+        groq_self_diagnosis as _learn_self_diag,
+        get_latest_diagnosis as _learn_latest_diag,
+        get_latest_trade_analysis as _learn_trade_analysis,
+        get_groq_trade_insight as _learn_trade_insight,
+        groq_whale_context as _learn_whale_ctx,
+        groq_news_impact as _learn_news_impact,
     )
     _LEARNING_OK = True
     logging.info("learning.py загружен успешно")
@@ -96,6 +109,15 @@ except ImportError as e:
     _learn_gap = lambda *a: None
     _learn_get_gaps = lambda: []
     _learn_resolve_gap = lambda *a: None
+    _learn_analyze_trade = lambda *a: None
+    _learn_build_strategy = lambda: ""
+    _learn_get_strategy = lambda: "Стратегия не сформирована"
+    _learn_self_diag = lambda: ""
+    _learn_latest_diag = lambda: "Самодиагностика недоступна"
+    _learn_trade_analysis = lambda n=5: "Нет анализов"
+    _learn_trade_insight = lambda *a, **k: ""
+    _learn_whale_ctx = lambda *a: ""
+    _learn_news_impact = lambda *a: ""
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
@@ -2053,6 +2075,46 @@ def full_scan(symbol, timeframe="1h"):
             except Exception as _e:
                 logging.debug(f"new_smc_confluence {symbol}: {_e}")
 
+        # ── CVD + Whale Detection ────────────────────────────────
+        whale_desc = ""
+        news_impact_text = ""
+        try:
+            cvd = calculate_cvd(candles)
+            if cvd["signal"] == direction[:4] or cvd["signal"] == direction:
+                confluence.append(f"✅ CVD {cvd['trend']} — давление {'покупателей' if direction=='BULLISH' else 'продавцов'} подтверждает (+7)")
+                total_weight += 7
+            elif cvd["divergence"]:
+                if (cvd["divergence"] == "BEARISH_DIV" and direction == "BULLISH") or                    (cvd["divergence"] == "BULLISH_DIV" and direction == "BEARISH"):
+                    confluence.append(f"⚠️ CVD дивергенция — цена и объём расходятся (-5)")
+                    total_weight -= 5
+
+            whale = detect_whale_candles(candles)
+            if whale["found"]:
+                if whale["signal"] == direction[:4] or whale["signal"] == direction:
+                    sw = 10 if whale["strength"] >= 7 else 6
+                    confluence.append(f"✅ {whale['description']} (+{sw})")
+                    total_weight += sw
+                    # Groq контекст для кита
+                    if _LEARNING_OK and whale["spike"] >= 2.5:
+                        whale_desc = _learn_whale_ctx(symbol, whale["spike"], direction)
+                else:
+                    confluence.append(f"⚠️ {whale['description']} — против сигнала")
+                    total_weight -= 4
+
+            vp = get_volume_profile(candles)
+            if vp["poc"] > 0:
+                poc_dist = abs(price - vp["poc"]) / price * 100
+                if poc_dist < 1.0:
+                    confluence.append(f"📍 Цена у POC {vp['poc']:.4f} — зона реакции")
+                elif vp["current_zone"] == "ABOVE_POC" and direction == "BULLISH":
+                    confluence.append(f"✅ Выше POC {vp['poc']:.4f} — бычья структура объёма (+4)")
+                    total_weight += 4
+                elif vp["current_zone"] == "BELOW_POC" and direction == "BEARISH":
+                    confluence.append(f"✅ Ниже POC {vp['poc']:.4f} — медвежья структура объёма (+4)")
+                    total_weight += 4
+        except Exception as _e:
+            logging.debug(f"cvd_whale {symbol}: {_e}")
+
         # Паттерн-матчер — историческая точность при похожих условиях
         if _LEARNING_OK:
             try:
@@ -2107,6 +2169,17 @@ def full_scan(symbol, timeframe="1h"):
             symbol, direction, mtf, total_weight, regime, fg, funding, ob, fvg, brain_ctx
         )
 
+        # ── 6.5 Groq инсайт — почему эта сделка интересна (async) ──
+        groq_insight = ""
+        if _LEARNING_OK and total_weight >= 40:
+            try:
+                groq_insight = _learn_trade_insight(
+                    symbol, direction, mtf.get("grade","?"),
+                    total_weight, regime.get("mode","UNKNOWN"), timeframe
+                )
+            except Exception:
+                pass
+
         # ── 7. Уровень инвалидации (когда сигнал отменяется) ──
         invalidation = sl  # Если цена закроется за стопом — сигнал недействителен
         inv_text = f"Сигнал отменяется если цена закроется {'ниже' if direction == 'BULLISH' else 'выше'} <code>{invalidation:.4f}</code>"
@@ -2141,7 +2214,9 @@ def full_scan(symbol, timeframe="1h"):
             f"📋 <b>Confluence [{total_weight}/100]:</b>\n{conf_text}\n"
             f"{hist_text}\n"
             f"💬 <b>APEX думает:</b>\n<i>{signal_comment}</i>\n"
-            f"{'━'*26}"
+            + (f"\n🤖 <b>Groq:</b> <i>{groq_insight}</i>\n" if groq_insight else "")
+            + (f"\n🐋 <b>Киты:</b> <i>{whale_desc}</i>\n" if whale_desc else "")
+            + f"{'━'*26}"
         )
     except Exception as e:
         logging.error(f"Scan error {symbol}: {e}")
@@ -2250,6 +2325,12 @@ def check_pending_signals():
                     asyncio.create_task(deep_error_analysis(
                         sig_id, symbol, direction, entry, sl, result, hours_elapsed, timeframe
                     ))
+
+                # Groq анализирует каждую закрытую сделку и создаёт правило
+                if _LEARNING_OK:
+                    asyncio.get_event_loop().run_in_executor(
+                        None, _learn_analyze_trade, sig_id
+                    )
 
                 closed.append({
                     "signal_id": sig_id,
@@ -5602,6 +5683,9 @@ async def handle_callback(callback: CallbackQuery):
                 [InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy")],
                 [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status"),
                  InlineKeyboardButton(text="🔬 Самодиагностика", callback_data="brain_self_diagnose")],
+                [InlineKeyboardButton(text="📋 Анализ сделок", callback_data="brain_trade_analysis"),
+                 InlineKeyboardButton(text="📈 Стратегия", callback_data="brain_strategy")],
+                [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis")],
                 [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
@@ -5746,6 +5830,112 @@ async def handle_callback(callback: CallbackQuery):
             result_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_trade_analysis":
+        await callback.message.edit_text("📋 Загружаю анализ сделок от Groq...")
+        try:
+            if _LEARNING_OK:
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(None, _learn_trade_analysis, 7)
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Анализов пока нет — нужно закрыть несколько сделок",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_strategy":
+        await callback.message.edit_text("📈 Загружаю стратегию...")
+        try:
+            if _LEARNING_OK:
+                loop = asyncio.get_running_loop()
+                # Сначала показываем текущую, потом обновляем
+                text = await loop.run_in_executor(None, _learn_get_strategy)
+                if "не сформирована" in text:
+                    text = await loop.run_in_executor(None, _learn_build_strategy)
+                    if not text:
+                        text = "Недостаточно данных (нужно минимум 10 закрытых сделок)"
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Стратегия пока не сформирована",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить стратегию", callback_data="brain_strategy_refresh")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_strategy_refresh":
+        await callback.message.edit_text("⏳ Groq анализирует паттерны и формулирует стратегию...")
+        try:
+            if _LEARNING_OK:
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(None, _learn_build_strategy)
+                if not text:
+                    text = "Недостаточно данных (нужно минимум 10 закрытых сделок)"
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Не удалось сформировать стратегию",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_diagnosis":
+        await callback.message.edit_text("🔍 Groq анализирует ошибки и паттерны потерь...")
+        try:
+            if _LEARNING_OK:
+                loop = asyncio.get_running_loop()
+                # Пробуем получить последний или запустить новый
+                text = await loop.run_in_executor(None, _learn_latest_diag)
+                if "не запускалась" in text:
+                    text = await loop.run_in_executor(None, _learn_self_diag)
+                    if not text:
+                        text = "Недостаточно потерь для анализа (нужно минимум 3)"
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Диагноз недоступен",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Запустить диагноз", callback_data="brain_diagnosis_run")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_diagnosis_run":
+        await callback.message.edit_text("⏳ Groq проводит глубокий самоанализ ошибок...")
+        try:
+            if _LEARNING_OK:
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(None, _learn_self_diag)
+                if not text:
+                    text = "Недостаточно потерь для анализа (нужно минимум 3 sl)"
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Не удалось запустить диагноз",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
             ])
         )
@@ -7174,6 +7364,22 @@ async def on_startup(app):
             import asyncio as _a
             await _a.get_event_loop().run_in_executor(None, _learn_decay)
     scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
+
+    # Groq стратегия — обновляется раз в день в 5:00
+    async def _run_strategy_update():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_build_strategy)
+            logging.info("[Scheduler] Стратегия Groq обновлена")
+    scheduler.add_job(_run_strategy_update, "cron", hour=5, minute=0)
+
+    # Groq самодиагностика ошибок — каждые 12 часов
+    async def _run_groq_diagnosis():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_self_diag)
+            logging.info("[Scheduler] Groq самодиагностика завершена")
+    scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
     # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
     scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
