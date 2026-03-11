@@ -14,7 +14,11 @@ APEX Learning v3 — Самообразование, память ошибок, 
 import sqlite3, time, logging, json
 from datetime import datetime, timedelta
 
-DB_PATH = "brain.db"
+import os as _os
+DB_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "brain.db")
+# Если файл в корне рядом с bot.py — используем текущую директорию
+if not _os.path.exists(_os.path.dirname(DB_PATH)):
+    DB_PATH = "brain.db"
 
 # ═══════════════════════════════════════════════════════════════
 # ИНИЦИАЛИЗАЦИЯ
