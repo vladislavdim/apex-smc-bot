@@ -13,7 +13,7 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.utils.webhook import SimpleRequestHandler
+from aiogram.webhook.aiohttp import SimpleRequestHandler
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -383,7 +383,7 @@ last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
 def get_top_pairs(limit=100):
-    """Топ-N пар по объёму: Binance Futures → Binance Spot (Bybit убран — 403 на Render)"""
+    """Топ-N пар по объёму: CryptoCompare → Binance Futures → Binance Spot → FORCED fallback"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache
@@ -397,6 +397,30 @@ def get_top_pairs(limit=100):
         "UNIUSDT", "PEPEUSDT", "SHIBUSDT", "TRXUSDT", "XLMUSDT",
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
     ]
+
+    # 0. CryptoCompare — стабильно работает с Render, бесплатно без ключа
+    try:
+        r = requests.get(
+            "https://min-api.cryptocompare.com/data/top/mktcapfull",
+            params={"limit": limit, "tsym": "USD"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json().get("Data", [])
+            cc_pairs = []
+            for item in data:
+                sym = item.get("CoinInfo", {}).get("Name", "")
+                if sym and f"{sym}USDT" not in ["USDTUSDT"]:
+                    cc_pairs.append(f"{sym}USDT")
+            if len(cc_pairs) >= 10:
+                combined = list(dict.fromkeys(FORCED + cc_pairs))[:limit]
+                pairs_cache = combined
+                pairs_cache_time = time.time()
+                logging.info(f"Пары CryptoCompare: {len(combined)} шт")
+                return pairs_cache
+    except Exception as e:
+        logging.warning(f"CryptoCompare top pairs: {e}")
 
     # 1. Binance Futures — основной источник
     try:
@@ -829,7 +853,17 @@ def get_candles(symbol, interval="1h", limit=200):
 
     bi = BINANCE_INTERVALS.get(interval, interval)
 
-    # 1. Binance Futures REST — работает с Render без блокировок
+    # 0. CryptoCompare — стабильно работает с любого IP, покрывает все ТФ включая 1m/5m
+    try:
+        cc_candles = get_cryptocompare_candles(symbol, interval, limit)
+        if cc_candles and len(cc_candles) >= 20:
+            logging.info(f"Свечи CryptoCompare: {symbol} {interval} {len(cc_candles)}шт")
+            candle_cache[cache_key] = (cc_candles, time.time())
+            return cc_candles
+    except Exception as e:
+        logging.warning(f"CryptoCompare candles {symbol} {interval}: {e}")
+
+    # 1. Binance Futures REST — fallback
     try:
         r = requests.get(
             f"{BINANCE_F}/fapi/v1/klines",
