@@ -16,6 +16,43 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# ── Внешние модули APEX ──────────────────────────────────────
+try:
+    from smc_engine import (
+        get_candles_smart, multi_tf_analysis as _smc_multi_tf,
+        find_swings as _smc_find_swings, classify_swings as _smc_classify_swings,
+        detect_events as _smc_detect_events, find_ob as _smc_find_ob,
+        find_fvg as _smc_find_fvg, get_source_stats, get_barrier_summary,
+    )
+    _SMC_ENGINE_OK = True
+except ImportError as e:
+    _SMC_ENGINE_OK = False
+    get_source_stats = lambda: "smc_engine.py не загружен"
+    get_barrier_summary = lambda: ""
+
+try:
+    from learning import (
+        save_signal as _learn_save_signal,
+        close_signal as _learn_close_signal,
+        get_min_confluence as _learn_min_confluence,
+        should_skip_symbol as _learn_should_skip,
+        get_signal_context as _learn_signal_ctx,
+        get_best_entry_hours as _learn_best_hours,
+        run_self_analysis as _learn_self_analysis,
+        get_self_analysis_text as _learn_self_analysis_text,
+        get_all_stats_text as _learn_all_stats,
+    )
+    _LEARNING_OK = True
+except ImportError as e:
+    _LEARNING_OK = False
+    _learn_min_confluence = lambda s: 2
+    _learn_should_skip = lambda s, d: (False, "")
+    _learn_signal_ctx = lambda s: ""
+    _learn_best_hours = lambda: []
+    _learn_self_analysis = lambda: None
+    _learn_self_analysis_text = lambda: ""
+    _learn_all_stats = lambda: ""
+
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
@@ -1176,93 +1213,63 @@ def find_fvg(candles, direction):
     return None
 
 def smc_on_tf(symbol, interval):
-    """SMC анализ на одном таймфрейме — возвращает направление или None"""
+    """SMC анализ на одном ТФ — умный обход барьеров через smc_engine"""
+    if _SMC_ENGINE_OK:
+        from smc_engine import smc_tf
+        r = smc_tf(symbol, interval)
+        return r["direction"]
+    # Fallback на старый код
     candles = get_candles(symbol, interval, 150)
     if len(candles) < 20:
         return None
     highs, lows = find_swings(candles)
     classified = classify_swings(highs, lows)
     events = detect_events(candles, classified)
-    if not events:
-        return None
-    return events[0]["direction"]  # BULLISH / BEARISH
+    return events[0]["direction"] if events else None
 
 # ===== МУЛЬТИТАЙМФРЕЙМНЫЙ АНАЛИЗ =====
 
 def multi_tf_analysis(symbol, timeframes=None):
     """
-    Анализ по нескольким таймфреймам.
-    Возвращает направление, список совпадений и GRADE сигнала.
+    Умный мультитаймфрейм анализ.
+    Если smc_engine загружен — использует умный обход барьеров (8 источников).
+    Если нет — fallback на старый код.
     """
+    if _SMC_ENGINE_OK:
+        return _smc_multi_tf(symbol, timeframes)
+
+    # ── Старый код как fallback ──────────────────────────────
     if timeframes is None:
         timeframes = ["15m", "1h", "4h"]
-
     results = {}
     for tf in timeframes:
-        direction = smc_on_tf(symbol, tf)
-        results[tf] = direction
-
+        results[tf] = smc_on_tf(symbol, tf)
     bullish = [tf for tf, d in results.items() if d == "BULLISH"]
     bearish = [tf for tf, d in results.items() if d == "BEARISH"]
-
     total = len(timeframes)
-    if len(bullish) == total:
-        direction = "BULLISH"
-        matched = bullish
-    elif len(bearish) == total:
-        direction = "BEARISH"
-        matched = bearish
-    elif len(bullish) > len(bearish):
-        direction = "BULLISH"
-        matched = bullish
+    if len(bullish) > len(bearish):
+        direction, matched = "BULLISH", bullish
     elif len(bearish) > len(bullish):
-        direction = "BEARISH"
-        matched = bearish
+        direction, matched = "BEARISH", bearish
     else:
-        return None  # Нет ясности
-
-    match_count = len(matched)
-
-    # GRADE системы
-    if match_count == total and total >= 3:
-        grade = "МЕГА ТОП"
-        grade_emoji = "🔥🔥🔥"
-        stars = "⭐⭐⭐⭐⭐"
-    elif match_count >= 3:
-        grade = "ТОП СДЕЛКА"
-        grade_emoji = "🔥🔥"
-        stars = "⭐⭐⭐⭐"
-    elif match_count == 2:
-        grade = "ХОРОШАЯ"
-        grade_emoji = "✅"
-        stars = "⭐⭐⭐"
+        return None
+    mc = len(matched)
+    if mc == total and total >= 3:
+        grade, ge, stars = "МЕГА ТОП", "🔥🔥🔥", "⭐⭐⭐⭐⭐"
+    elif mc >= 3:
+        grade, ge, stars = "ТОП СДЕЛКА", "🔥🔥", "⭐⭐⭐⭐"
+    elif mc == 2:
+        grade, ge, stars = "ХОРОШАЯ", "✅", "⭐⭐⭐"
     else:
-        grade = "СЛАБАЯ"
-        grade_emoji = "⚠️"
-        stars = "⭐⭐"
-
+        grade, ge, stars = "СЛАБАЯ", "⚠️", "⭐⭐"
     tf_status = ""
     for tf in timeframes:
         d = results.get(tf)
-        if d == "BULLISH":
-            icon = "🟢"
-        elif d == "BEARISH":
-            icon = "🔴"
-        else:
-            icon = "⚪️"
+        icon = "🟢" if d == "BULLISH" else "🔴" if d == "BEARISH" else "⚪️"
         tf_status += f"{icon} {TF_LABELS.get(tf, tf)}: {d or 'нет сигнала'}\n"
-
-    return {
-        "direction": direction,
-        "matched": matched,
-        "match_count": match_count,
-        "total": total,
-        "grade": grade,
-        "grade_emoji": grade_emoji,
-        "stars": stars,
-        "tf_status": tf_status,
-        "results": results
-    }
+    return {"direction": direction, "matched": matched, "match_count": mc,
+            "total": total, "grade": grade, "grade_emoji": ge, "stars": stars,
+            "tf_status": tf_status, "results": results}
 
 # ===== FEAR & GREED INDEX =====
 
@@ -5176,8 +5183,65 @@ async def handle_callback(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚡️ Обучить сейчас", callback_data="brain_learn_now"),
                  InlineKeyboardButton(text="🌍 Макро анализ", callback_data="brain_macro")],
+                [InlineKeyboardButton(text="📡 Источники данных", callback_data="brain_sources"),
+                 InlineKeyboardButton(text="📊 Самоанализ", callback_data="brain_self_analysis")],
                 [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+    elif data == "brain_sources":
+        # Статистика надёжности источников свечей
+        await callback.message.edit_text("📡 Загружаю статистику источников...")
+        try:
+            stats_text = get_source_stats()
+            barrier_text = get_barrier_summary()
+            full_text = stats_text
+            if barrier_text:
+                full_text += f"\n\n{barrier_text}"
+        except Exception as e:
+            full_text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            full_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_self_analysis":
+        # Последний самоанализ точности
+        await callback.message.edit_text("📊 Загружаю самоанализ...")
+        try:
+            analysis_text = _learn_self_analysis_text() if _LEARNING_OK else "learning.py не загружен"
+            stats_text = _learn_all_stats() if _LEARNING_OK else ""
+            full = analysis_text
+            if stats_text:
+                full += "\n\n" + stats_text
+        except Exception as e:
+            full = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            full or "Данных пока нет", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Запустить анализ", callback_data="brain_run_analysis")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_run_analysis":
+        await callback.message.edit_text("🧠 Запускаю самоанализ...")
+        try:
+            if _LEARNING_OK:
+                import asyncio as _a
+                await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
+                text = _learn_self_analysis_text()
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Нет данных", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brain_self_analysis")]
             ])
         )
 
@@ -6578,6 +6642,12 @@ async def on_startup(app):
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
     scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
     scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
+    # Самоанализ точности + обновление авто-правил
+    async def _run_self_analysis():
+        if _LEARNING_OK:
+            import asyncio as _a
+            await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
+    scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
     # Brain Builder — каждый час быстрый цикл, раз в сутки полный
     scheduler.add_job(run_brain_builder_async, "interval", hours=1)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
