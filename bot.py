@@ -39,7 +39,7 @@ try:
     logging.info("smc_engine.py загружен успешно")
 except ImportError as e:
     _SMC_ENGINE_OK = False
-    logging.warning(f"smc_engine.py не найден: {e} — ищем в: {sys.path[:3]}")
+    logging.warning(f"smc_engine.py не найден: {e} — ищем в: {_sys.path[:3]}")
     get_source_stats = lambda: "smc_engine.py не загружен — положи файл рядом с bot.py"
     get_barrier_summary = lambda: ""
     full_smc_analysis = lambda s, i="1h": {}
