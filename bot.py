@@ -23,12 +23,23 @@ try:
         find_swings as _smc_find_swings, classify_swings as _smc_classify_swings,
         detect_events as _smc_detect_events, find_ob as _smc_find_ob,
         find_fvg as _smc_find_fvg, get_source_stats, get_barrier_summary,
+        full_smc_analysis, detect_liquidity_sweep, find_imbalance_zones,
+        get_premium_discount, detect_divergence, get_market_profile,
+        find_ob_fvg_chain, check_volume_on_structure,
     )
     _SMC_ENGINE_OK = True
 except ImportError as e:
     _SMC_ENGINE_OK = False
     get_source_stats = lambda: "smc_engine.py не загружен"
     get_barrier_summary = lambda: ""
+    full_smc_analysis = lambda s, i="1h": {}
+    detect_liquidity_sweep = lambda c, h, l: None
+    find_imbalance_zones = lambda c: []
+    get_premium_discount = lambda c: {"zone": "UNKNOWN", "pct": 50}
+    detect_divergence = lambda c, d: None
+    get_market_profile = lambda c: {}
+    find_ob_fvg_chain = lambda c, d: None
+    check_volume_on_structure = lambda c, i: {"valid": True, "signal": "UNKNOWN"}
 
 try:
     from learning import (
@@ -41,6 +52,17 @@ try:
         run_self_analysis as _learn_self_analysis,
         get_self_analysis_text as _learn_self_analysis_text,
         get_all_stats_text as _learn_all_stats,
+        find_similar_patterns as _learn_patterns,
+        save_pattern as _learn_save_pattern,
+        decay_old_rules as _learn_decay,
+        get_btc_correlation as _learn_btc_corr,
+        update_streak as _learn_streak,
+        get_streak_min_confluence as _learn_streak_threshold,
+        update_grade_accuracy as _learn_grade_acc,
+        get_grade_accuracy_text as _learn_grade_text,
+        log_knowledge_gap as _learn_gap,
+        get_unresolved_gaps as _learn_get_gaps,
+        resolve_gap as _learn_resolve_gap,
     )
     _LEARNING_OK = True
 except ImportError as e:
@@ -52,6 +74,17 @@ except ImportError as e:
     _learn_self_analysis = lambda: None
     _learn_self_analysis_text = lambda: ""
     _learn_all_stats = lambda: ""
+    _learn_patterns = lambda *a, **k: {"found": False, "samples": 0}
+    _learn_save_pattern = lambda *a, **k: None
+    _learn_decay = lambda: None
+    _learn_btc_corr = lambda s: {"beta": 1.0, "samples": 0, "desc": ""}
+    _learn_streak = lambda r: {"win_streak": 0, "loss_streak": 0, "extra_filter": False}
+    _learn_streak_threshold = lambda: 18
+    _learn_grade_acc = lambda *a: None
+    _learn_grade_text = lambda: ""
+    _learn_gap = lambda *a: None
+    _learn_get_gaps = lambda: []
+    _learn_resolve_gap = lambda *a: None
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
@@ -1812,8 +1845,73 @@ def full_scan(symbol, timeframe="1h"):
             confluence.append(f"✅ Рынок в тренде ({regime['direction']})")
             total_weight += 5
 
-        # Минимальный порог
-        if total_weight < 25:
+        # ── Новые SMC факторы ──────────────────────────────────
+        if _SMC_ENGINE_OK:
+            try:
+                highs_l, lows_l = find_swings(candles)
+
+                # Liquidity Sweep — сильный сигнал разворота
+                sweep = detect_liquidity_sweep(candles, highs_l, lows_l)
+                if sweep and sweep["direction"] == direction:
+                    sw = 12 if sweep["strength"] == "HIGH" else 7
+                    confluence.append(f"✅ Liquidity Sweep {sweep['type']} (вес {sw})")
+                    total_weight += sw
+
+                # OB→FVG→OB цепочка — тройное подтверждение
+                chain = find_ob_fvg_chain(candles, direction)
+                if chain:
+                    confluence.append(f"✅ OB→FVG→OB цепочка — тройной confluence (+15)")
+                    total_weight += 15
+
+                # Divergence — расхождение RSI с ценой
+                diverge = detect_divergence(candles, direction)
+                if diverge and diverge["strength"] == "STRONG":
+                    confluence.append(f"✅ {diverge['type']} RSI:{diverge['rsi_current']} (+8)")
+                    total_weight += 8
+                elif diverge:
+                    confluence.append(f"➡️ {diverge['type']} слабая")
+                    total_weight += 4
+
+                # Premium/Discount zone
+                pd = get_premium_discount(candles)
+                if pd["bias"] == direction[:4] or                    (direction == "BULLISH" and pd["zone"] == "DISCOUNT") or                    (direction == "BEARISH" and pd["zone"] == "PREMIUM"):
+                    confluence.append(f"✅ {pd['zone']} зона ({pd['pct']:.0f}%) — правильная сторона (+6)")
+                    total_weight += 6
+                elif pd["zone"] in ("PREMIUM", "DISCOUNT"):
+                    confluence.append(f"⚠️ {pd['zone']} зона ({pd['pct']:.0f}%) — против тренда")
+
+                # Imbalance zones как цели
+                imb = find_imbalance_zones(candles)
+                if imb:
+                    nearest = min(imb, key=lambda z: abs(z["top"] - price))
+                    confluence.append(f"📍 Имбаланс {nearest['type']}: {nearest['bottom']:.4f}–{nearest['top']:.4f}")
+            except Exception as _e:
+                logging.debug(f"new_smc_confluence {symbol}: {_e}")
+
+        # Паттерн-матчер — историческая точность при похожих условиях
+        if _LEARNING_OK:
+            try:
+                pat = _learn_patterns(symbol, direction, timeframe,
+                                      regime.get("mode","UNKNOWN"), total_weight)
+                if pat["found"] and pat["samples"] >= 5:
+                    if pat["win_rate"] >= 60:
+                        confluence.append(f"✅ История: {pat['win_rate']:.0f}% WR ({pat['samples']} случаев)")
+                        total_weight += 5
+                    elif pat["win_rate"] < 35:
+                        confluence.append(f"⚠️ История: {pat['win_rate']:.0f}% WR — слабая статистика")
+                        total_weight -= 5
+
+                # Streak: если серия потерь — повышаем порог
+                streak_threshold = _learn_streak_threshold()
+            except Exception as _e:
+                logging.debug(f"learning confluence {symbol}: {_e}")
+                streak_threshold = 18
+        else:
+            streak_threshold = 18
+
+        # Минимальный порог — учитывает серию потерь
+        min_weight = max(streak_threshold, 18 if mtf["match_count"] >= 3 else 22)
+        if total_weight < min_weight:
             return None
 
         # ── 4. Уровни входа ──
@@ -4337,6 +4435,9 @@ def ask_ai(user_id, user_name, user_message):
                     # Нет сигнала — объясняем почему
                     price_data = prices.get(found_symbol)
                     price_str = f"${price_data['price']:,.4f}" if price_data else "нет данных"
+                    # Auto-Discovery: логируем что анализ не получился
+                    if _LEARNING_OK:
+                        _learn_gap(f"no_signal:{found_symbol}", "full_scan returned None")
                     return (
                         f"📊 <b>{found_symbol}</b> | {price_str}\n\n"
                         f"😴 Чёткого SMC сетапа нет прямо сейчас.\n"
@@ -5204,6 +5305,7 @@ async def handle_callback(callback: CallbackQuery):
                  InlineKeyboardButton(text="🌍 Макро анализ", callback_data="brain_macro")],
                 [InlineKeyboardButton(text="📡 Источники данных", callback_data="brain_sources"),
                  InlineKeyboardButton(text="📊 Самоанализ", callback_data="brain_self_analysis")],
+                [InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy")],
                 [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
@@ -5242,6 +5344,19 @@ async def handle_callback(callback: CallbackQuery):
             full or "Данных пока нет", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Запустить анализ", callback_data="brain_run_analysis")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_grade_accuracy":
+        try:
+            grade_text = _learn_grade_text() if _LEARNING_OK else "learning.py не загружен"
+        except Exception as e:
+            grade_text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            grade_text or "Данных пока нет — нужно больше закрытых сигналов",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
             ])
         )
@@ -6064,21 +6179,30 @@ async def deep_market_scan(limit=200):
     async def scan_one(symbol):
         try:
             loop = asyncio.get_running_loop()
-            # Сигнал SMC
-            sig = await loop.run_in_executor(None, full_scan_raw, symbol, "1h")
-            if sig and sig.get("grade") in ("🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
+            # Таймаут 8 сек на монету — не зависаем
+            sig = await asyncio.wait_for(
+                loop.run_in_executor(None, full_scan_raw, symbol, "1h"),
+                timeout=8.0
+            )
+            if sig and sig.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА", "ХОРОШАЯ",
+                                             "🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
                 signals.append(sig)
-            # Накопление
-            acc = await loop.run_in_executor(None, detect_accumulation, symbol)
-            if acc and acc.get("score", 0) >= 60:
+            # Накопление — отдельный таймаут
+            acc = await asyncio.wait_for(
+                loop.run_in_executor(None, detect_accumulation, symbol),
+                timeout=6.0
+            )
+            if acc and acc.get("score", 0) >= 55:  # снижен порог с 60 до 55
                 accumulations.append({
                     "symbol": symbol,
                     "score": acc["score"],
                     "signal": acc.get("signal", ""),
                     "price": acc.get("price", 0)
                 })
-        except:
-            pass
+        except asyncio.TimeoutError:
+            logging.debug(f"deep_scan timeout: {symbol}")
+        except Exception as e:
+            logging.debug(f"deep_scan error {symbol}: {e}")
 
     # Батчи по 10
     for i in range(0, min(len(scan_pairs), limit), 10):
@@ -6168,7 +6292,7 @@ async def auto_scan_job():
     for symbol in pairs:
         try:
             sig_data = full_scan_raw(symbol, "1h")
-            if sig_data and sig_data["grade"] == "МЕГА ТОП":
+            if sig_data and sig_data.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА"):
                 # Не дублируем символ
                 existing = [s for s in mega_signals if s["symbol"] == symbol]
                 if not existing:
@@ -6667,6 +6791,13 @@ async def on_startup(app):
             import asyncio as _a
             await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
     scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
+
+    # Decay правил — раз в сутки ослабляем устаревшие правила
+    async def _run_decay():
+        if _LEARNING_OK:
+            import asyncio as _a
+            await _a.get_event_loop().run_in_executor(None, _learn_decay)
+    scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
     # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
     scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
