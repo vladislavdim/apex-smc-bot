@@ -42,7 +42,10 @@ _candle_cache: dict = {}
 _CACHE_TTL = {"1m":30,"5m":60,"15m":120,"30m":180,"1h":300,"2h":450,"4h":600,"1d":1800}
 _reliability: dict = {}
 _reliability_loaded = False
-DB_PATH = "brain.db"
+import os as _os
+DB_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "brain.db")
+if not _os.path.exists(_os.path.dirname(DB_PATH)):
+    DB_PATH = "brain.db"
 
 def _init_tables():
     try:
