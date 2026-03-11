@@ -139,6 +139,42 @@ except ImportError as e:
     _web_init_db = lambda: None
     _web_self_improve = lambda: []
 
+# Groq Extensions — изолированный плагин, который Groq может свободно менять
+try:
+    from groq_extensions import (
+        run_all_filters as _ext_run_filters,
+        run_confluence_boosters as _ext_run_boosters,
+        analyze_session_timing as _ext_session,
+        get_extensions_summary as _ext_summary,
+    )
+    _EXT_OK = True
+    logging.info("groq_extensions.py загружен успешно")
+except ImportError as e:
+    _EXT_OK = False
+    logging.warning(f"groq_extensions.py не найден: {e}")
+    _ext_run_filters = lambda *a, **kw: (True, "")
+    _ext_run_boosters = lambda *a: (0, [])
+    _ext_session = lambda: {}
+    _ext_summary = lambda: {}
+
+# Autopilot — автономный самообучающийся мозг
+try:
+    from apex_autopilot import (
+        run_autopilot_cycle as _autopilot_fast,
+        run_deep_autopilot as _autopilot_deep,
+        on_trade_closed as _autopilot_on_close,
+        get_autopilot_status as _autopilot_status,
+    )
+    _AUTOPILOT_OK = True
+    logging.info("apex_autopilot.py загружен успешно")
+except ImportError as e:
+    _AUTOPILOT_OK = False
+    logging.warning(f"apex_autopilot.py не найден: {e}")
+    _autopilot_fast   = lambda: None
+    _autopilot_deep   = lambda: None
+    _autopilot_on_close = lambda *a, **kw: None
+    _autopilot_status = lambda: "Автопилот недоступен"
+
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
@@ -2189,10 +2225,34 @@ def full_scan(symbol, timeframe="1h"):
         else:
             streak_threshold = 18
 
+        # ── Extension бустеры confluence ──
+        if _EXT_OK:
+            try:
+                ext_bonus, ext_descs = _ext_run_boosters(candles, direction)
+                if ext_bonus > 0:
+                    total_weight += ext_bonus
+                    confluence.extend(ext_descs)
+            except Exception as _e:
+                logging.debug(f"ext boosters: {_e}")
+
         # Минимальный порог — учитывает серию потерь
         min_weight = max(streak_threshold, 18 if mtf["match_count"] >= 3 else 22)
         if total_weight < min_weight:
             return None
+
+        # ── Extension фильтры сигналов ──
+        if _EXT_OK:
+            try:
+                passed, block_reason = _ext_run_filters(
+                    symbol, direction, price, total_weight,
+                    regime.get("mode", "") if isinstance(regime, dict) else str(regime),
+                    fg
+                )
+                if not passed:
+                    logging.info(f"full_scan {symbol}: заблокирован extension фильтром — {block_reason}")
+                    return None
+            except Exception as _e:
+                logging.debug(f"ext filters: {_e}")
 
         # ── 4. Уровни входа — с проверкой цены ──
         # Если цена из свечей = 0, пробуем взять из живых цен
@@ -2406,6 +2466,18 @@ def check_pending_signals():
                     else:
                         # Нет learning_id — анализируем напрямую через поиск по символу
                         threading.Thread(target=_learn_analyze_by_symbol, args=(symbol, direction, entry, result, hours_elapsed, timeframe), daemon=True).start()
+
+                # Автопилот — глубокий разбор + автофикс при потере
+                if _AUTOPILOT_OK:
+                    l_id_for_ap = learning_id[0] if learning_id and learning_id[0] else 0
+                    _autopilot_on_close(
+                        signal_id=l_id_for_ap,
+                        symbol=symbol,
+                        direction=direction,
+                        result=result,
+                        hours_open=hours_elapsed,
+                        confluence=confluence or 0
+                    )
 
                 # Рефлексия по КАЖДОМУ сигналу
                 asyncio.create_task(signal_reflection(
@@ -5266,6 +5338,160 @@ async def cmd_journal(message: types.Message):
                 "Пример: /journal ETH SHORT 3200 3050 win взял на OB"
             )
 
+@dp.message(Command("improve"))
+async def cmd_improve(message: types.Message):
+    """
+    /improve <запрос> — Groq пишет улучшение в groq_extensions.py и деплоит.
+    Только для ADMIN_ID.
+    """
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        await message.answer("⛔️ Только для администратора.")
+        return
+
+    text = message.text.replace("/improve", "").strip()
+    if not text:
+        await message.answer(
+            "✏️ <b>Команда улучшения APEX</b>\n\n"
+            "Напиши что изменить:\n"
+            "<code>/improve добавь фильтр — не торговать XRP при объёме ниже среднего</code>\n"
+            "<code>/improve убери фильтр мемкоинов</code>\n"
+            "<code>/improve повысь порог confluence до 60 в боковике</code>\n\n"
+            "Groq напишет код, протестирует и задеплоит автоматически.",
+            parse_mode="HTML"
+        )
+        return
+
+    await message.answer(f"🧠 <b>Groq анализирует запрос...</b>\n\n<i>{text}</i>", parse_mode="HTML")
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _groq_write_extension, text, message)
+
+    if result.get("success"):
+        await message.answer(
+            f"✅ <b>Улучшение применено!</b>\n\n"
+            f"📝 <b>Что сделано:</b> {result['description']}\n"
+            f"🔧 <b>Изменено:</b> {result['what_changed']}\n"
+            f"🚀 Деплой на Render через ~2 минуты",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"❌ <b>Ошибка:</b> {result.get('error', 'неизвестно')}\n\n"
+            f"Попробуй переформулировать запрос.",
+            parse_mode="HTML"
+        )
+
+
+def _groq_write_extension(user_request: str, message=None) -> dict:
+    """
+    Groq читает groq_extensions.py → понимает структуру →
+    пишет изменение → проверяет синтаксис → пушит на GitHub.
+    """
+    try:
+        import base64, ast
+
+        # 1. Читаем текущий groq_extensions.py из GitHub
+        if not GITHUB_TOKEN or not GITHUB_REPO:
+            return {"success": False, "error": "GitHub не настроен"}
+
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/groq_extensions.py",
+            headers={"Authorization": f"token {GITHUB_TOKEN}",
+                     "Accept": "application/vnd.github.v3+json"},
+            timeout=15
+        )
+        if r.status_code != 200:
+            return {"success": False, "error": f"GitHub read error: {r.status_code}"}
+
+        data = r.json()
+        current_code = base64.b64decode(data["content"]).decode("utf-8")
+        sha = data["sha"]
+
+        # 2. Groq анализирует запрос и пишет изменение
+        prompt = f"""Ты — AI разработчик торгового бота APEX. Тебе нужно изменить файл groq_extensions.py.
+
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ: {user_request}
+
+ТЕКУЩИЙ КОД groq_extensions.py:
+```python
+{current_code[:4000]}
+```
+
+ПРАВИЛА:
+1. Верни ТОЛЬКО полный обновлённый Python файл — без markdown, без объяснений
+2. Сохрани всю существующую структуру и функции
+3. Добавь запись в GROQ_CHANGELOG с датой {datetime.now().strftime('%Y-%m-%d')}, version увеличь на 0.0.1, author="Groq"
+4. Если добавляешь новый фильтр — добавь его функцию И добавь в список ACTIVE_FILTERS
+5. Если добавляешь новый буст — добавь функцию И в CONFLUENCE_BOOSTERS
+6. Если удаляешь — убери из списка (функцию можно оставить закомментированной)
+7. Код должен быть рабочим Python 3.11
+8. description_of_change: первая строка комментария = краткое описание что сделал
+
+ВАЖНО: верни только Python код, начиная с первой строки файла."""
+
+        new_code = ask_groq(prompt, max_tokens=3000)
+        if not new_code:
+            return {"success": False, "error": "Groq не ответил"}
+
+        # Убираем markdown если Groq добавил
+        new_code = new_code.strip()
+        if new_code.startswith("```python"):
+            new_code = new_code[9:]
+        if new_code.startswith("```"):
+            new_code = new_code[3:]
+        if new_code.endswith("```"):
+            new_code = new_code[:-3]
+        new_code = new_code.strip()
+
+        # 3. Проверяем синтаксис — если сломан, не деплоим
+        try:
+            ast.parse(new_code)
+        except SyntaxError as se:
+            return {"success": False, "error": f"Синтаксическая ошибка в коде Groq: {se}"}
+
+        # 4. Извлекаем описание из changelog
+        description = user_request[:80]
+        what_changed = "groq_extensions.py"
+        try:
+            # Ищем последнюю запись changelog в новом коде
+            for line in new_code.split("\n"):
+                if '"changes":' in line and "Groq" not in line.split('"changes":')[0]:
+                    description = line.split('"changes":')[1].strip().strip('"').strip("'").rstrip('",')
+                    break
+        except Exception:
+            pass
+
+        # 5. Пушим на GitHub
+        encoded = base64.b64encode(new_code.encode("utf-8")).decode("utf-8")
+        r2 = requests.put(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/groq_extensions.py",
+            headers={"Authorization": f"token {GITHUB_TOKEN}",
+                     "Accept": "application/vnd.github.v3+json"},
+            json={
+                "message": f"🧠 Groq extension: {user_request[:60]}",
+                "content": encoded,
+                "sha": sha
+            },
+            timeout=20
+        )
+
+        if r2.status_code in (200, 201):
+            logging.info(f"[Extensions] ✅ Groq задеплоил изменение: {user_request[:60]}")
+            return {
+                "success": True,
+                "description": description,
+                "what_changed": what_changed,
+                "commit": r2.json().get("commit", {}).get("sha", "")[:7]
+            }
+        else:
+            return {"success": False, "error": f"GitHub push error: {r2.status_code}"}
+
+    except Exception as e:
+        logging.error(f"_groq_write_extension: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     user_id = message.from_user.id
@@ -5870,6 +6096,8 @@ async def handle_callback(callback: CallbackQuery):
                  InlineKeyboardButton(text="📊 Анализ логов", callback_data="brain_logs")],
                 [InlineKeyboardButton(text="🌐 Веб-знания", callback_data="brain_web_knowledge"),
                  InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
+                [InlineKeyboardButton(text="🤖 Автопилот", callback_data="brain_autopilot"),
+                 InlineKeyboardButton(text="🔌 Плагин Groq", callback_data="brain_extensions")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
         )
@@ -6143,6 +6371,59 @@ async def handle_callback(callback: CallbackQuery):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔍 Изучить сейчас", callback_data="brain_web_learn_now")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_autopilot":
+        await callback.message.edit_text("🤖 Загружаю статус автопилота...")
+        try:
+            status = _autopilot_status() if _AUTOPILOT_OK else "❌ apex_autopilot.py не загружен"
+        except Exception as e:
+            status = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            status,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_extensions":
+        await callback.message.edit_text("🔌 Загружаю плагин...")
+        try:
+            if _EXT_OK:
+                s = _ext_summary()
+                session = _ext_session()
+                changelog_text = ""
+                for ch in reversed(s.get("changelog", [])):
+                    changelog_text += f"\n• <b>v{ch.get('version','?')}</b> [{ch.get('date','?')}] — {ch.get('changes','?')[:80]}"
+
+                text = (
+                    f"🔌 <b>Плагин Groq Extensions</b>\n"
+                    f"{'━'*24}\n\n"
+                    f"📦 Версия: <b>{s.get('version','?')}</b>\n"
+                    f"🔧 Фильтров активно: <b>{s.get('filters', 0)}</b>\n"
+                    f"⚡️ Бустеров confluence: <b>{s.get('boosters', 0)}</b>\n"
+                    f"✏️ Последнее изменение: <b>{s.get('last_change','—')}</b>\n"
+                    f"👤 Автор: <b>{s.get('last_author','—')}</b>\n\n"
+                    f"📋 <b>История изменений:</b>{changelog_text or ' нет'}\n\n"
+                    f"⏰ Сейчас: <b>{session.get('session','?')}</b> {session.get('note','')}\n\n"
+                    f"<i>Используй /improve &lt;запрос&gt; чтобы Groq внёс изменение</i>\n"
+                    f"<i>Пример: /improve не торговать SHIB в выходные</i>"
+                )
+            else:
+                text = (
+                    "🔌 <b>Плагин Groq Extensions</b>\n\n"
+                    "❌ groq_extensions.py не найден в репо.\n\n"
+                    "Загрузи файл groq_extensions.py в корень репозитория."
+                )
+        except Exception as e:
+            text = f"Ошибка: {e}"
+
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
             ])
         )
@@ -7760,6 +8041,20 @@ async def on_startup(app):
             if improvements:
                 logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
     scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
+
+    # Автопилот — быстрый цикл каждые 15 минут
+    async def _run_autopilot_fast():
+        if _AUTOPILOT_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _autopilot_fast)
+    scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
+
+    # Автопилот — глубокий цикл каждые 4 часа
+    async def _run_autopilot_deep():
+        if _AUTOPILOT_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _autopilot_deep)
+    scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600)
 
     scheduler.start()
     setup_error_capture()
