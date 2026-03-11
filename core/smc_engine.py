@@ -1,74 +1,442 @@
-import requests
-import pandas as pd
-import numpy as np
+"""
+APEX SMC Engine v3 — Умный обход барьеров + самообучение источников
+"""
+import requests, sqlite3, time, logging, json
+from datetime import datetime
 
-BYBIT_URL = "https://api.bybit.com/v5/market/kline"
+BINANCE_INTERVALS = {
+    "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
+    "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"1w"
+}
+CC_INTERVALS = {
+    "1m":("histominute",1),"3m":("histominute",3),"5m":("histominute",5),
+    "15m":("histominute",15),"30m":("histominute",30),
+    "1h":("histohour",1),"2h":("histohour",2),"4h":("histohour",4),
+    "1d":("histoday",1),
+}
+KRAKEN_INTERVALS = {"1m":1,"5m":5,"15m":15,"30m":30,"1h":60,"4h":240,"1d":1440}
+BINANCE_F = "https://fapi.binance.com"
+BINANCE_S = "https://api.binance.com"
 
-def get_klines(symbol: str, interval: str = "60", limit: int = 200) -> pd.DataFrame:
-    params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(BYBIT_URL, params=params, timeout=10)
-    data = r.json()["result"]["list"]
-    df = pd.DataFrame(data, columns=["time","open","high","low","close","volume","turnover"])
-    df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
-    df = df.iloc[::-1].reset_index(drop=True)
-    return df
+COINGECKO_IDS = {
+    "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
+    "BNBUSDT":"binancecoin","XRPUSDT":"ripple","DOGEUSDT":"dogecoin",
+    "AVAXUSDT":"avalanche-2","LINKUSDT":"chainlink","TONUSDT":"toncoin",
+    "ARBUSDT":"arbitrum","SUIUSDT":"sui","NEARUSDT":"near",
+    "INJUSDT":"injective-protocol","APTUSDT":"aptos",
+    "DOTUSDT":"polkadot","ADAUSDT":"cardano","MATICUSDT":"matic-network",
+    "LTCUSDT":"litecoin","ATOMUSDT":"cosmos","UNIUSDT":"uniswap",
+    "XLMUSDT":"stellar","TRXUSDT":"tron","HBARUSDT":"hedera-hashgraph",
+    "OPUSDT":"optimism","WIFUSDT":"dogwifcoin","PEPEUSDT":"pepe",
+    "SHIBUSDT":"shiba-inu","BONKUSDT":"bonk","FETUSDT":"fetch-ai",
+}
 
-def find_swings(df: pd.DataFrame, lookback: int = 5):
+KRAKEN_SYMBOLS = {
+    "BTCUSDT":"XBTUSD","ETHUSDT":"ETHUSD","SOLUSDT":"SOLUSD",
+    "XRPUSDT":"XRPUSD","DOGEUSDT":"DOGEUSD","AVAXUSDT":"AVAXUSD",
+    "LINKUSDT":"LINKUSD","ADAUSDT":"ADAUSD","DOTUSDT":"DOTUSD",
+    "LTCUSDT":"LTCUSD","ATOMUSDT":"ATOMUSD","BNBUSDT":"BNBUSD",
+}
+
+_candle_cache: dict = {}
+_CACHE_TTL = {"1m":30,"5m":60,"15m":120,"30m":180,"1h":300,"2h":450,"4h":600,"1d":1800}
+_reliability: dict = {}
+_reliability_loaded = False
+DB_PATH = "brain.db"
+
+def _init_tables():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""CREATE TABLE IF NOT EXISTS source_reliability (
+            source TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0,
+            avg_candles REAL DEFAULT 0, last_ok TEXT, last_fail TEXT, notes TEXT DEFAULT '')""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS barrier_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT CURRENT_TIMESTAMP,
+            symbol TEXT, interval TEXT, source TEXT, success INTEGER,
+            candles INTEGER DEFAULT 0, error TEXT DEFAULT '')""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS source_knowledge (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT CURRENT_TIMESTAMP,
+            fact TEXT, context TEXT)""")
+        conn.commit(); conn.close()
+    except Exception as e:
+        logging.debug(f"_init_tables: {e}")
+
+def _load_reliability():
+    global _reliability, _reliability_loaded
+    if _reliability_loaded: return
+    _init_tables()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("SELECT source, ok, fail FROM source_reliability").fetchall()
+        conn.close()
+        for src, ok, fail in rows:
+            total = ok + fail
+            _reliability[src] = ok / total if total > 0 else 0.5
+    except: pass
+    _reliability_loaded = True
+
+def _record(source, symbol, interval, success, candles=0, error=""):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        now = datetime.now().isoformat()
+        ex = conn.execute("SELECT ok,fail,avg_candles FROM source_reliability WHERE source=?", (source,)).fetchone()
+        if ex:
+            ok = ex[0]+(1 if success else 0); fail = ex[1]+(0 if success else 1)
+            avg = (ex[2]*ex[0]+candles)/ok if (success and ok>0) else ex[2]
+            conn.execute("""UPDATE source_reliability SET ok=?,fail=?,avg_candles=?,
+                last_ok=CASE WHEN ? THEN ? ELSE last_ok END,
+                last_fail=CASE WHEN ? THEN ? ELSE last_fail END WHERE source=?""",
+                (ok,fail,avg,success,now,not success,now,source))
+        else:
+            conn.execute("INSERT INTO source_reliability VALUES (?,?,?,?,?,?,?)",
+                (source,1 if success else 0,0 if success else 1,
+                 float(candles) if success else 0.0,
+                 now if success else None, None if success else now, ""))
+        conn.execute("INSERT INTO barrier_log (symbol,interval,source,success,candles,error) VALUES (?,?,?,?,?,?)",
+            (symbol,interval,source,1 if success else 0,candles,error[:120]))
+        conn.commit(); conn.close()
+        cur = _reliability.get(source, 0.5)
+        _reliability[source] = min(1.0,cur+0.04) if success else max(0.0,cur-0.08)
+    except Exception as e:
+        logging.debug(f"_record: {e}")
+
+def _learn_fact(fact, context=""):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT INTO source_knowledge (fact,context) VALUES (?,?)", (fact,context))
+        conn.commit(); conn.close()
+    except: pass
+
+def _ordered_sources(symbol):
+    _load_reliability()
+    defaults = {
+        "cryptocompare":0.80, "binance_futures":0.75, "binance_spot":0.70,
+        "mexc":0.60, "kraken":0.58, "gate_io":0.55, "coingecko":0.50, "synthetic":0.10
+    }
+    scores = {src: _reliability.get(src, defaults.get(src,0.5)) for src in defaults}
+    return sorted(scores, key=lambda s: scores[s], reverse=True)
+
+# ─── Фетчеры ─────────────────────────────────────────────────────────────────
+
+def _fetch_cryptocompare(symbol, interval, limit):
+    base = symbol.replace("USDT","").replace("BUSD","")
+    ep, agg = CC_INTERVALS.get(interval, ("histohour",1))
+    r = requests.get(f"https://min-api.cryptocompare.com/data/{ep}",
+        params={"fsym":base,"tsym":"USD","limit":limit,"aggregate":agg},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    data = r.json().get("Data",[])
+    if not data: raise ValueError("Empty CC")
+    return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),
+             "close":float(c["close"]),"volume":float(c.get("volumeto",0))} for c in data if c.get("close")]
+
+def _fetch_binance_futures(symbol, interval, limit):
+    bi = BINANCE_INTERVALS.get(interval,"1h")
+    r = requests.get(f"{BINANCE_F}/fapi/v1/klines",
+        params={"symbol":symbol,"interval":bi,"limit":limit},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}")
+    data = r.json()
+    if not isinstance(data,list) or not data: raise ValueError("Empty BF")
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4]),"volume":float(c[5])} for c in data]
+
+def _fetch_binance_spot(symbol, interval, limit):
+    bi = BINANCE_INTERVALS.get(interval,"1h")
+    r = requests.get(f"{BINANCE_S}/api/v3/klines",
+        params={"symbol":symbol,"interval":bi,"limit":limit},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}")
+    data = r.json()
+    if not isinstance(data,list) or not data: raise ValueError("Empty BS")
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4]),"volume":float(c[5])} for c in data]
+
+def _fetch_mexc(symbol, interval, limit):
+    mi_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d"}
+    r = requests.get("https://api.mexc.com/api/v3/klines",
+        params={"symbol":symbol,"interval":mi_map.get(interval,"1h"),"limit":limit},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    if r.status_code != 200: raise ValueError(f"MEXC HTTP {r.status_code}")
+    data = r.json()
+    if not isinstance(data,list) or not data: raise ValueError("Empty MEXC")
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4]),"volume":float(c[5])} for c in data]
+
+def _fetch_kraken(symbol, interval, limit):
+    ksym = KRAKEN_SYMBOLS.get(symbol)
+    if not ksym: raise ValueError(f"No Kraken pair for {symbol}")
+    ki = KRAKEN_INTERVALS.get(interval, 60)
+    r = requests.get("https://api.kraken.com/0/public/OHLC",
+        params={"pair":ksym,"interval":ki},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    data = r.json()
+    if data.get("error"): raise ValueError(str(data["error"]))
+    result_key = [k for k in data["result"] if k != "last"][0]
+    rows = data["result"][result_key]
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),
+             "close":float(c[4]),"volume":float(c[6])} for c in rows[-limit:]]
+
+def _fetch_gate(symbol, interval, limit):
+    gi_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d"}
+    gate_sym = symbol if "_" in symbol else symbol.replace("USDT","_USDT")
+    r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+        params={"contract":gate_sym,"interval":gi_map.get(interval,"1h"),"limit":limit},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    if r.status_code != 200: raise ValueError(f"Gate HTTP {r.status_code}")
+    data = r.json()
+    if not isinstance(data,list) or not data: raise ValueError("Empty Gate")
+    return [{"open":float(c.get("o",0)),"high":float(c.get("h",0)),
+             "low":float(c.get("l",0)),"close":float(c.get("c",0)),"volume":float(c.get("v",0))} for c in data]
+
+def _fetch_coingecko(symbol, interval, limit):
+    cg_id = COINGECKO_IDS.get(symbol)
+    if not cg_id: raise ValueError(f"No CG ID for {symbol}")
+    days_map = {"1m":1,"5m":1,"15m":1,"30m":1,"1h":7,"4h":30,"1d":90}
+    r = requests.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc",
+        params={"vs_currency":"usd","days":days_map.get(interval,7)},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=12)
+    if r.status_code == 429: raise ValueError("CG rate limit")
+    if r.status_code != 200: raise ValueError(f"CG HTTP {r.status_code}")
+    data = r.json()
+    if not isinstance(data,list) or len(data)<5: raise ValueError("CG: not enough data")
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4]),"volume":0.0} for c in data[-limit:]]
+
+def _fetch_synthetic(symbol, interval, limit):
+    """Последний резерв: строим свечи из market_chart (тики → группировка)"""
+    cg_id = COINGECKO_IDS.get(symbol, "bitcoin")
+    days_map = {"1m":1,"5m":1,"15m":1,"30m":1,"1h":7,"4h":14,"1d":30}
+    r = requests.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart",
+        params={"vs_currency":"usd","days":days_map.get(interval,7)},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=14)
+    if r.status_code != 200: raise ValueError(f"Synth HTTP {r.status_code}")
+    pts = r.json().get("prices",[])
+    if len(pts) < 10: raise ValueError("Synth: too few points")
+    mins_map = {"1m":1,"5m":5,"15m":15,"30m":30,"1h":60,"4h":240,"1d":1440}
+    ms_per = mins_map.get(interval,60) * 60 * 1000
+    candles = []
+    i = 0
+    while i < len(pts) and len(candles) < limit:
+        ts0 = pts[i][0]
+        grp = [p[1] for p in pts if ts0 <= p[0] < ts0+ms_per]
+        if grp:
+            candles.append({"open":grp[0],"high":max(grp),"low":min(grp),
+                            "close":grp[-1],"volume":0.0,"_synthetic":True})
+        nxt = ts0 + ms_per
+        while i < len(pts) and pts[i][0] < nxt: i += 1
+    logging.info(f"[SMC] Синтетик {symbol}/{interval}: {len(candles)}св")
+    return candles[-limit:]
+
+_FETCHERS = {
+    "cryptocompare":_fetch_cryptocompare, "binance_futures":_fetch_binance_futures,
+    "binance_spot":_fetch_binance_spot, "mexc":_fetch_mexc,
+    "kraken":_fetch_kraken, "gate_io":_fetch_gate,
+    "coingecko":_fetch_coingecko, "synthetic":_fetch_synthetic,
+}
+
+# ═══════════════════════════════════════════════════════════════
+# ГЛАВНАЯ ФУНКЦИЯ — умный обход барьеров
+# ═══════════════════════════════════════════════════════════════
+
+def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> dict:
+    ck = f"{symbol}_{interval}"
+    ttl = _CACHE_TTL.get(interval, 300)
+    if ck in _candle_cache:
+        cached, ts = _candle_cache[ck]
+        if time.time() - ts < ttl: return cached
+
+    sources = _ordered_sources(symbol)
+    attempts = 0
+    all_errors = []
+
+    for src in sources:
+        fn = _FETCHERS.get(src)
+        if not fn: continue
+        attempts += 1
+        try:
+            candles = fn(symbol, interval, limit)
+            if candles and len(candles) >= 15:
+                _record(src, symbol, interval, True, len(candles))
+                is_synth = src == "synthetic" or any(c.get("_synthetic") for c in candles[:1])
+                quality = ("high"   if src in ("cryptocompare","binance_futures","binance_spot") else
+                           "medium" if src in ("mexc","kraken","gate_io") else "low")
+                res = {"candles":candles,"source":src,"attempts":attempts,
+                       "quality":quality,"is_synthetic":is_synth,"error":"",
+                       "symbol":symbol,"interval":interval}
+                _candle_cache[ck] = (res, time.time())
+                if attempts > 1:
+                    _learn_fact(f"{symbol}/{interval}: нашли через {src} (попыток:{attempts})", "|".join(all_errors))
+                    logging.info(f"[SMC] ✅ {symbol} {interval} → {src} ({attempts} попыток)")
+                return res
+            else:
+                err = f"{src}:{len(candles) if candles else 0}св"
+                _record(src, symbol, interval, False, 0, err); all_errors.append(err)
+        except Exception as e:
+            err = f"{src}:{str(e)[:60]}"
+            _record(src, symbol, interval, False, 0, err); all_errors.append(err)
+            logging.debug(f"[SMC] Барьер {src} {symbol}: {e}")
+
+    _learn_fact(f"ПРОВАЛ {symbol}/{interval} ({attempts} ист.)", "|".join(all_errors[-3:]))
+    logging.warning(f"[SMC] ❌ {symbol} {interval} — нет данных ({attempts} попыток)")
+    return {"candles":[],"source":"none","attempts":attempts,"quality":"none",
+            "is_synthetic":False,"error":"|".join(all_errors[-3:]),
+            "symbol":symbol,"interval":interval}
+
+# ═══════════════════════════════════════════════════════════════
+# SMC АНАЛИЗ — pandas-free
+# ═══════════════════════════════════════════════════════════════
+
+def find_swings(candles: list, lookback: int = 5):
     highs, lows = [], []
-    for i in range(lookback, len(df) - lookback):
-        if df["high"][i] == df["high"][i-lookback:i+lookback+1].max():
-            highs.append((i, df["high"][i]))
-        if df["low"][i] == df["low"][i-lookback:i+lookback+1].min():
-            lows.append((i, df["low"][i]))
+    n = len(candles)
+    for i in range(lookback, n-lookback):
+        w = candles[i-lookback:i+lookback+1]
+        if candles[i]["high"] == max(c["high"] for c in w): highs.append((i,candles[i]["high"]))
+        if candles[i]["low"]  == min(c["low"]  for c in w): lows.append((i,candles[i]["low"]))
     return highs, lows
 
-def detect_bos_choch(df: pd.DataFrame, highs: list, lows: list):
-    signals = []
-    if len(highs) < 2 or len(lows) < 2:
-        return signals
-    last_close = df["close"].iloc[-1]
-    last_high = highs[-1][1]
-    last_low = lows[-1][1]
-    prev_high = highs[-2][1]
-    prev_low = lows[-2][1]
-    if last_close > last_high and last_high > prev_high:
-        signals.append({"type": "BOS", "direction": "BULLISH", "level": last_high})
-    if last_close < last_low and last_low < prev_low:
-        signals.append({"type": "BOS", "direction": "BEARISH", "level": last_low})
-    if last_close > last_high and last_high < prev_high:
-        signals.append({"type": "CHoCH", "direction": "BULLISH", "level": last_high})
-    if last_close < last_low and last_low > prev_low:
-        signals.append({"type": "CHoCH", "direction": "BEARISH", "level": last_low})
-    return signals
+def classify_swings(highs, lows):
+    result = []
+    for i,(idx,price) in enumerate(highs):
+        result.append({"idx":idx,"price":price,"kind":"HH" if i==0 or price>highs[i-1][1] else "LH"})
+    for i,(idx,price) in enumerate(lows):
+        result.append({"idx":idx,"price":price,"kind":"HL" if i==0 or price>lows[i-1][1] else "LL"})
+    return sorted(result, key=lambda x: x["idx"])
 
-def find_order_blocks(df: pd.DataFrame, direction: str):
-    obs = []
-    for i in range(1, len(df) - 1):
-        if direction == "BULLISH":
-            if df["close"][i] < df["open"][i] and df["close"][i+1] > df["open"][i+1]:
-                obs.append({"top": df["open"][i], "bottom": df["close"][i], "index": i})
-        else:
-            if df["close"][i] > df["open"][i] and df["close"][i+1] < df["open"][i+1]:
-                obs.append({"top": df["close"][i], "bottom": df["open"][i], "index": i})
-    return obs[-3:] if obs else []
+def detect_events(candles: list, classified: list) -> list:
+    if not classified or not candles: return []
+    highs = [s for s in classified if s["kind"] in ("HH","LH")]
+    lows  = [s for s in classified if s["kind"] in ("HL","LL")]
+    last  = candles[-1]["close"]
+    events = []
+    if highs and last > highs[-1]["price"]:
+        events.append({"type":"CHoCH" if highs[-1]["kind"]=="LH" else "BOS","direction":"BULLISH","level":highs[-1]["price"]})
+    if lows and last < lows[-1]["price"]:
+        events.append({"type":"CHoCH" if lows[-1]["kind"]=="HL" else "BOS","direction":"BEARISH","level":lows[-1]["price"]})
+    if not events:
+        hh = sum(1 for s in classified if s["kind"]=="HH")
+        ll = sum(1 for s in classified if s["kind"]=="LL")
+        if hh > ll:   events.append({"type":"TREND","direction":"BULLISH","level":0})
+        elif ll > hh: events.append({"type":"TREND","direction":"BEARISH","level":0})
+    return events
 
-def find_fvg(df: pd.DataFrame):
-    fvgs = []
-    for i in range(1, len(df) - 1):
-        bull_fvg = df["low"][i+1] > df["high"][i-1]
-        bear_fvg = df["high"][i+1] < df["low"][i-1]
-        if bull_fvg:
-            fvgs.append({"type": "BULL", "top": df["low"][i+1], "bottom": df["high"][i-1]})
-        if bear_fvg:
-            fvgs.append({"type": "BEAR", "top": df["low"][i-1], "bottom": df["high"][i+1]})
-    return fvgs[-5:] if fvgs else []
+def find_ob(candles: list, direction: str):
+    for i in range(len(candles)-2, max(0,len(candles)-30), -1):
+        c = candles[i]
+        if direction=="BULLISH" and c["close"]<c["open"]:
+            return {"top":max(c["open"],c["close"]),"bottom":min(c["open"],c["close"])}
+        if direction=="BEARISH" and c["close"]>c["open"]:
+            return {"top":max(c["open"],c["close"]),"bottom":min(c["open"],c["close"])}
+    return None
 
-def analyze(symbol: str, interval: str = "60"):
-    df = get_klines(symbol, interval)
-    highs, lows = find_swings(df)
-    signals = detect_bos_choch(df, highs, lows)
-    result = {"symbol": symbol, "interval": interval, "price": df["close"].iloc[-1],
-              "signals": signals, "order_blocks": [], "fvg": find_fvg(df)}
-    for s in signals:
-        result["order_blocks"] = find_order_blocks(df, s["direction"])
-    return result
+def find_fvg(candles: list, direction: str):
+    for i in range(len(candles)-3, max(1,len(candles)-25), -1):
+        if direction=="BULLISH" and candles[i+1]["low"]>candles[i-1]["high"]:
+            return {"top":candles[i+1]["low"],"bottom":candles[i-1]["high"]}
+        if direction=="BEARISH" and candles[i+1]["high"]<candles[i-1]["low"]:
+            return {"top":candles[i-1]["low"],"bottom":candles[i+1]["high"]}
+    return None
+
+def smc_tf(symbol: str, interval: str) -> dict:
+    res = get_candles_smart(symbol, interval, 150)
+    candles = res["candles"]
+    if len(candles) < 20:
+        return {"direction":None,"source":res["source"],"quality":res["quality"],
+                "error":res.get("error",""),"candles":[]}
+    highs, lows = find_swings(candles)
+    classified = classify_swings(highs, lows)
+    events = detect_events(candles, classified)
+    direction = events[0]["direction"] if events else None
+    return {"direction":direction,"source":res["source"],"quality":res["quality"],
+            "is_synthetic":res["is_synthetic"],"candles":candles,"candles_count":len(candles)}
+
+def multi_tf_analysis(symbol: str, timeframes: list = None) -> dict | None:
+    if timeframes is None: timeframes = ["15m","1h","4h"]
+    TF_LABELS = {"1m":"1мин","5m":"5мин","15m":"15мин","30m":"30мин",
+                 "1h":"1час","2h":"2ч","4h":"4ч","1d":"1д"}
+    Q_ICON = {"high":"🟢","medium":"🟡","low":"🟠","none":"⚫"}
+
+    tf_results = {tf: smc_tf(symbol, tf) for tf in timeframes}
+    available  = [tf for tf,r in tf_results.items() if r["direction"] is not None]
+
+    if not available:
+        # Fallback на более широкие ТФ
+        for tf in ["1h","4h","1d"]:
+            if tf not in timeframes:
+                r = smc_tf(symbol, tf)
+                if r["direction"]:
+                    tf_results[tf] = r; available.append(tf); timeframes = timeframes+[tf]
+        if not available: return None
+
+    bullish = [tf for tf in available if tf_results[tf]["direction"]=="BULLISH"]
+    bearish = [tf for tf in available if tf_results[tf]["direction"]=="BEARISH"]
+
+    if len(bullish) > len(bearish):
+        direction, matched = "BULLISH", bullish
+    elif len(bearish) > len(bullish):
+        direction, matched = "BEARISH", bearish
+    else:
+        for tf in ["1d","4h","2h","1h","30m","15m"]:
+            if tf in available:
+                direction = tf_results[tf]["direction"]; matched = [tf]; break
+        else: return None
+
+    mc = len(matched); total = len(available)
+    q_s = {"high":3,"medium":2,"low":1,"none":0}
+    avg_q = sum(q_s.get(tf_results[tf]["quality"],0) for tf in matched) / mc
+
+    if mc==total and total>=3 and avg_q>=2:
+        grade,ge,stars = "МЕГА ТОП","🔥🔥🔥","⭐⭐⭐⭐⭐"
+    elif mc>=3 or (mc==2 and avg_q>=2.5):
+        grade,ge,stars = "ТОП СДЕЛКА","🔥🔥","⭐⭐⭐⭐"
+    elif mc==2:
+        grade,ge,stars = "ХОРОШАЯ","✅","⭐⭐⭐"
+    else:
+        grade,ge,stars = "СЛАБАЯ","⚠️","⭐⭐"
+
+    tf_status = ""
+    for tf in timeframes:
+        r = tf_results[tf]; d = r["direction"]
+        qi = Q_ICON.get(r["quality"],"⚫")
+        src_s = r["source"][:8] if r["source"] != "none" else "нет"
+        arrow = "🟢" if d=="BULLISH" else "🔴" if d=="BEARISH" else "⚪"
+        synth = "[синт]" if r.get("is_synthetic") else ""
+        tf_status += f"{arrow} {TF_LABELS.get(tf,tf)}: {d or 'нет'} {qi}{src_s}{synth}\n"
+
+    return {"direction":direction,"matched":matched,"match_count":mc,"total":total,
+            "grade":grade,"grade_emoji":ge,"stars":stars,"tf_status":tf_status,
+            "available_tfs":available}
+
+# ─── Диагностика ──────────────────────────────────────────────
+
+def get_source_stats() -> str:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("SELECT source,ok,fail,avg_candles,last_ok FROM source_reliability ORDER BY ok DESC").fetchall()
+        barriers = conn.execute("SELECT ts,symbol,source,error FROM barrier_log WHERE success=0 ORDER BY id DESC LIMIT 5").fetchall()
+        facts    = conn.execute("SELECT COUNT(*) FROM source_knowledge").fetchone()[0]
+        conn.close()
+        if not rows: return "📡 Статистики ещё нет — запусти несколько сканов"
+        lines = [f"📡 <b>Надёжность источников</b> | Фактов в мозге: {facts}\n"]
+        for src,ok,fail,avg_c,last in rows:
+            total = ok+fail
+            pct = round(ok/total*100) if total>0 else 0
+            bar = "█"*(pct//10)+"░"*(10-pct//10)
+            lines.append(f"<code>{src:<18}</code> [{bar}] {pct}% ({ok}/{total}) ~{avg_c:.0f}св")
+        if barriers:
+            lines.append("\n⛔ <b>Последние барьеры:</b>")
+            for ts,sym,src,err in barriers:
+                lines.append(f"<code>{ts[11:16]} {sym} {src}: {err[:50]}</code>")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+def get_barrier_summary() -> str:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        total  = conn.execute("SELECT COUNT(*) FROM barrier_log").fetchone()[0]
+        fails  = conn.execute("SELECT COUNT(*) FROM barrier_log WHERE success=0").fetchone()[0]
+        facts  = conn.execute("SELECT COUNT(*) FROM source_knowledge").fetchone()[0]
+        conn.close()
+        rate = round((total-fails)/total*100) if total>0 else 0
+        return f"🧱 Барьеров: {fails} | Обходов: {total-fails} ({rate}%) | Фактов: {facts}"
+    except: return ""
+
+_init_tables()
+_load_reliability()
