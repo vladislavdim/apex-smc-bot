@@ -440,3 +440,413 @@ def get_barrier_summary() -> str:
 
 _init_tables()
 _load_reliability()
+
+
+# ═══════════════════════════════════════════════════════════════
+# НОВЫЕ SMC МОДУЛИ v4
+# ═══════════════════════════════════════════════════════════════
+
+def detect_liquidity_sweep(candles: list, highs: list, lows: list) -> dict | None:
+    """
+    Liquidity Sweep — цена сметает ликвидность над/под свингами и разворачивается.
+    Один из сильнейших SMC сигналов — часто предшествует резкому движению.
+    """
+    if len(candles) < 10 or not highs or not lows:
+        return None
+    last = candles[-1]
+    prev = candles[-2] if len(candles) > 2 else candles[-1]
+
+    # Бычий sweep: цена пробила лоу свинга (взяла ликвидность снизу) и закрылась выше
+    if lows:
+        last_low_price = lows[-1][1]
+        if prev["low"] < last_low_price and last["close"] > last_low_price:
+            wick = prev["low"]
+            recovery = (last["close"] - wick) / (last["high"] - wick + 0.00001)
+            if recovery > 0.5:  # Сильный отскок — не просто случайность
+                return {
+                    "type": "BULLISH_SWEEP",
+                    "direction": "BULLISH",
+                    "swept_level": last_low_price,
+                    "wick_low": wick,
+                    "recovery": round(recovery, 2),
+                    "strength": "HIGH" if recovery > 0.75 else "MEDIUM"
+                }
+
+    # Медвежий sweep: пробила хай свинга и закрылась ниже
+    if highs:
+        last_high_price = highs[-1][1]
+        if prev["high"] > last_high_price and last["close"] < last_high_price:
+            wick = prev["high"]
+            recovery = (wick - last["close"]) / (wick - last["low"] + 0.00001)
+            if recovery > 0.5:
+                return {
+                    "type": "BEARISH_SWEEP",
+                    "direction": "BEARISH",
+                    "swept_level": last_high_price,
+                    "wick_high": wick,
+                    "recovery": round(recovery, 2),
+                    "strength": "HIGH" if recovery > 0.75 else "MEDIUM"
+                }
+    return None
+
+
+def find_imbalance_zones(candles: list) -> list:
+    """
+    Imbalance Zones — зоны где цена двигалась слишком быстро (gap между свечами).
+    Шире чем FVG: включает любые зоны неэффективного движения.
+    Цена ВСЕГДА возвращается их заполнить — используем как магниты.
+    """
+    zones = []
+    for i in range(1, len(candles) - 1):
+        c_prev = candles[i - 1]
+        c_curr = candles[i]
+        c_next = candles[i + 1]
+
+        # Бычий имбаланс: между хаем предыдущей и лоем следующей — пустота
+        if c_next["low"] > c_prev["high"]:
+            gap = c_next["low"] - c_prev["high"]
+            gap_pct = gap / c_prev["high"] * 100
+            if gap_pct > 0.1:  # Минимум 0.1% разрыв
+                zones.append({
+                    "type": "BULL_IMBALANCE",
+                    "top": c_next["low"],
+                    "bottom": c_prev["high"],
+                    "gap_pct": round(gap_pct, 3),
+                    "idx": i,
+                    "filled": False
+                })
+
+        # Медвежий имбаланс
+        if c_next["high"] < c_prev["low"]:
+            gap = c_prev["low"] - c_next["high"]
+            gap_pct = gap / c_prev["low"] * 100
+            if gap_pct > 0.1:
+                zones.append({
+                    "type": "BEAR_IMBALANCE",
+                    "top": c_prev["low"],
+                    "bottom": c_next["high"],
+                    "gap_pct": round(gap_pct, 3),
+                    "idx": i,
+                    "filled": False
+                })
+
+    # Помечаем заполненные зоны (цена уже вернулась)
+    current_price = candles[-1]["close"]
+    for z in zones:
+        if z["type"] == "BULL_IMBALANCE" and current_price <= z["top"]:
+            z["filled"] = True
+        elif z["type"] == "BEAR_IMBALANCE" and current_price >= z["bottom"]:
+            z["filled"] = True
+
+    # Возвращаем только незаполненные — они и есть магниты
+    unfilled = [z for z in zones if not z["filled"]]
+    return unfilled[-5:] if unfilled else []
+
+
+def get_premium_discount(candles: list) -> dict:
+    """
+    Premium/Discount Zones — определяем где цена сейчас в диапазоне.
+    Equilibrium (50%) = нейтраль.
+    Выше 75% = Premium (дорого, лучше шортить/не покупать).
+    Ниже 25% = Discount (дёшево, лучше покупать).
+    """
+    if len(candles) < 20:
+        return {"zone": "UNKNOWN", "pct": 50, "bias": "NEUTRAL"}
+
+    # Берём последние 50 свечей для диапазона
+    recent = candles[-50:]
+    high = max(c["high"] for c in recent)
+    low  = min(c["low"]  for c in recent)
+    price = candles[-1]["close"]
+
+    if high == low:
+        return {"zone": "EQUILIBRIUM", "pct": 50, "bias": "NEUTRAL"}
+
+    pct = (price - low) / (high - low) * 100
+
+    if pct >= 75:
+        zone, bias = "PREMIUM", "BEARISH"      # Дорого — лучше шортить
+    elif pct >= 55:
+        zone, bias = "UPPER_EQ", "NEUTRAL"     # Немного выше середины
+    elif pct >= 45:
+        zone, bias = "EQUILIBRIUM", "NEUTRAL"  # Середина диапазона
+    elif pct >= 25:
+        zone, bias = "LOWER_EQ", "NEUTRAL"     # Немного ниже середины
+    else:
+        zone, bias = "DISCOUNT", "BULLISH"     # Дёшево — лучше покупать
+
+    return {
+        "zone": zone,
+        "pct": round(pct, 1),
+        "bias": bias,
+        "range_high": high,
+        "range_low": low
+    }
+
+
+def find_ob_fvg_chain(candles: list, direction: str) -> dict | None:
+    """
+    OB → FVG → OB цепочка — самый сильный SMC сетап.
+    Когда Order Block подтверждён FVG который подтверждён следующим OB — 
+    вероятность отработки значительно выше одиночного OB.
+    """
+    obs = []
+    fvgs = []
+
+    for i in range(1, len(candles) - 1):
+        c = candles[i]
+        # Собираем все OB
+        if direction == "BULLISH" and c["close"] < c["open"]:
+            if i + 1 < len(candles) and candles[i+1]["close"] > candles[i+1]["open"]:
+                obs.append({"idx": i, "top": max(c["open"], c["close"]),
+                            "bottom": min(c["open"], c["close"])})
+        elif direction == "BEARISH" and c["close"] > c["open"]:
+            if i + 1 < len(candles) and candles[i+1]["close"] < candles[i+1]["open"]:
+                obs.append({"idx": i, "top": max(c["open"], c["close"]),
+                            "bottom": min(c["open"], c["close"])})
+
+        # Собираем все FVG
+        if i + 1 < len(candles) - 1:
+            if direction == "BULLISH" and candles[i+1]["low"] > candles[i-1]["high"]:
+                fvgs.append({"idx": i, "top": candles[i+1]["low"],
+                             "bottom": candles[i-1]["high"]})
+            elif direction == "BEARISH" and candles[i+1]["high"] < candles[i-1]["low"]:
+                fvgs.append({"idx": i, "top": candles[i-1]["low"],
+                             "bottom": candles[i+1]["high"]})
+
+    if len(obs) < 2 or not fvgs:
+        return None
+
+    # Ищем цепочку: OB1 → FVG → OB2 (в хронологическом порядке)
+    for ob1 in obs[:-1]:
+        for fvg in fvgs:
+            if fvg["idx"] > ob1["idx"]:
+                for ob2 in obs:
+                    if ob2["idx"] > fvg["idx"]:
+                        return {
+                            "found": True,
+                            "ob1": ob1,
+                            "fvg": fvg,
+                            "ob2": ob2,
+                            "strength": "TRIPLE_CONFLUENCE",
+                            "entry_zone_top": ob2["top"],
+                            "entry_zone_bottom": ob2["bottom"]
+                        }
+    return None
+
+
+def check_volume_on_structure(candles: list, structure_idx: int) -> dict:
+    """
+    Объём на структуре — сравниваем объём на BOS/CHoCH с средним.
+    Пробой с высоким объёмом = настоящий.
+    Пробой с низким объёмом = ложный, ловушка.
+    """
+    if len(candles) < 20 or structure_idx >= len(candles):
+        return {"valid": True, "ratio": 1.0, "signal": "UNKNOWN"}
+
+    # Средний объём за последние 20 свечей до пробоя
+    lookback = candles[max(0, structure_idx-20):structure_idx]
+    if not lookback:
+        return {"valid": True, "ratio": 1.0, "signal": "UNKNOWN"}
+
+    avg_vol = sum(c.get("volume", 0) for c in lookback) / len(lookback)
+    break_vol = candles[structure_idx].get("volume", 0)
+
+    if avg_vol == 0:
+        return {"valid": True, "ratio": 1.0, "signal": "NO_VOLUME_DATA"}
+
+    ratio = break_vol / avg_vol
+
+    if ratio >= 1.5:
+        signal = "STRONG_BREAK"     # Объём подтверждает пробой
+        valid = True
+    elif ratio >= 0.8:
+        signal = "NORMAL_BREAK"
+        valid = True
+    else:
+        signal = "WEAK_BREAK"       # Подозрительно — возможно ложный
+        valid = False
+
+    return {"valid": valid, "ratio": round(ratio, 2), "signal": signal}
+
+
+def detect_divergence(candles: list, direction: str) -> dict | None:
+    """
+    Divergence — расхождение между ценой и RSI/объёмом.
+    Бычья дивергенция: цена делает новый лоу, RSI — нет → разворот вверх.
+    Медвежья дивергенция: цена делает новый хай, RSI — нет → разворот вниз.
+    """
+    if len(candles) < 20:
+        return None
+
+    # Считаем RSI без pandas
+    def calc_rsi(closes, period=14):
+        if len(closes) < period + 1:
+            return None
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            diff = closes[i] - closes[i-1]
+            gains.append(max(0, diff))
+            losses.append(max(0, -diff))
+        if len(gains) < period:
+            return None
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    closes = [c["close"] for c in candles]
+    rsi_current = calc_rsi(closes)
+    rsi_prev = calc_rsi(closes[:-5])  # RSI 5 свечей назад
+
+    if rsi_current is None or rsi_prev is None:
+        return None
+
+    price_current = closes[-1]
+    price_prev = closes[-6]
+
+    # Бычья дивергенция: цена ниже, RSI выше
+    if direction == "BULLISH":
+        if price_current < price_prev and rsi_current > rsi_prev:
+            strength = "STRONG" if rsi_current - rsi_prev > 5 else "WEAK"
+            return {
+                "type": "BULLISH_DIVERGENCE",
+                "rsi_current": round(rsi_current, 1),
+                "rsi_prev": round(rsi_prev, 1),
+                "rsi_diff": round(rsi_current - rsi_prev, 1),
+                "strength": strength
+            }
+
+    # Медвежья дивергенция: цена выше, RSI ниже
+    elif direction == "BEARISH":
+        if price_current > price_prev and rsi_current < rsi_prev:
+            strength = "STRONG" if rsi_prev - rsi_current > 5 else "WEAK"
+            return {
+                "type": "BEARISH_DIVERGENCE",
+                "rsi_current": round(rsi_current, 1),
+                "rsi_prev": round(rsi_prev, 1),
+                "rsi_diff": round(rsi_prev - rsi_current, 1),
+                "strength": strength
+            }
+
+    return None
+
+
+def get_market_profile(candles: list) -> dict:
+    """
+    Market Profile — где цена проводила больше всего времени.
+    Point of Control (POC) = уровень с максимальным объёмом/временем.
+    Цена часто возвращается к POC.
+    """
+    if len(candles) < 10:
+        return {}
+
+    # Делим диапазон на 20 уровней и считаем время/объём на каждом
+    high = max(c["high"] for c in candles)
+    low  = min(c["low"]  for c in candles)
+    if high == low:
+        return {}
+
+    levels = 20
+    step = (high - low) / levels
+    profile = {}
+
+    for c in candles:
+        # Определяем в каких уровнях находилась эта свеча
+        for i in range(levels):
+            level_low  = low + i * step
+            level_high = low + (i + 1) * step
+            # Перекрытие свечи с уровнем
+            overlap = min(c["high"], level_high) - max(c["low"], level_low)
+            if overlap > 0:
+                level_key = round(level_low + step / 2, 4)
+                vol = c.get("volume", 1)
+                profile[level_key] = profile.get(level_key, 0) + vol + overlap
+
+    if not profile:
+        return {}
+
+    poc = max(profile, key=profile.get)
+    sorted_levels = sorted(profile.items(), key=lambda x: x[1], reverse=True)
+
+    # Value Area (70% объёма вокруг POC)
+    total_vol = sum(profile.values())
+    va_vol = 0
+    va_levels = []
+    for lvl, vol in sorted_levels:
+        va_vol += vol
+        va_levels.append(lvl)
+        if va_vol >= total_vol * 0.7:
+            break
+
+    va_high = max(va_levels) if va_levels else poc
+    va_low  = min(va_levels) if va_levels else poc
+
+    current_price = candles[-1]["close"]
+    distance_to_poc = abs(current_price - poc) / poc * 100
+
+    return {
+        "poc": poc,
+        "va_high": va_high,
+        "va_low": va_low,
+        "distance_to_poc_pct": round(distance_to_poc, 2),
+        "price_above_poc": current_price > poc
+    }
+
+
+def full_smc_analysis(symbol: str, interval: str = "1h") -> dict:
+    """
+    Полный SMC анализ с всеми новыми модулями.
+    Возвращает словарь со всеми найденными структурами.
+    Используется в full_scan для обогащения сигнала.
+    """
+    result = get_candles_smart(symbol, interval, 200)
+    candles = result["candles"]
+    if len(candles) < 20:
+        return {"error": "no data", "source": result["source"]}
+
+    highs, lows = find_swings(candles)
+    classified = classify_swings(highs, lows)
+    events = detect_events(candles, classified)
+    direction = events[0]["direction"] if events else None
+
+    ob  = find_ob(candles, direction) if direction else None
+    fvg = find_fvg(candles, direction) if direction else None
+
+    # Новые модули
+    sweep    = detect_liquidity_sweep(candles, highs, lows)
+    imb      = find_imbalance_zones(candles)
+    pd_zone  = get_premium_discount(candles)
+    chain    = find_ob_fvg_chain(candles, direction) if direction else None
+    diverge  = detect_divergence(candles, direction) if direction else None
+    profile  = get_market_profile(candles)
+
+    # Объём на последнем структурном пробое
+    vol_check = {"valid": True, "signal": "UNKNOWN"}
+    if events and events[0].get("level", 0) > 0:
+        # Ищем свечу пробоя
+        break_price = events[0]["level"]
+        for idx in range(len(candles)-1, max(0, len(candles)-15), -1):
+            if abs(candles[idx]["close"] - break_price) / break_price < 0.005:
+                vol_check = check_volume_on_structure(candles, idx)
+                break
+
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "source": result["source"],
+        "quality": result["quality"],
+        "direction": direction,
+        "ob": ob,
+        "fvg": fvg,
+        "liquidity_sweep": sweep,
+        "imbalance_zones": imb,
+        "premium_discount": pd_zone,
+        "ob_fvg_chain": chain,
+        "divergence": diverge,
+        "market_profile": profile,
+        "volume_check": vol_check,
+        "candles_count": len(candles),
+    }
