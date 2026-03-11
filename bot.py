@@ -17,6 +17,13 @@ from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ── Внешние модули APEX ──────────────────────────────────────
+import sys as _sys, os as _os_path
+# Добавляем папку core/ в путь поиска модулей — файлы могут лежать там
+_BASE_DIR = _os_path.path.dirname(_os_path.path.abspath(__file__))
+for _p in [_os_path.path.join(_BASE_DIR, "core"), _BASE_DIR]:
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 try:
     from smc_engine import (
         get_candles_smart, multi_tf_analysis as _smc_multi_tf,
@@ -28,9 +35,11 @@ try:
         find_ob_fvg_chain, check_volume_on_structure,
     )
     _SMC_ENGINE_OK = True
+    logging.info("smc_engine.py загружен успешно")
 except ImportError as e:
     _SMC_ENGINE_OK = False
-    get_source_stats = lambda: "smc_engine.py не загружен"
+    logging.warning(f"smc_engine.py не найден: {e} — ищем в: {sys.path[:3]}")
+    get_source_stats = lambda: "smc_engine.py не загружен — положи файл рядом с bot.py"
     get_barrier_summary = lambda: ""
     full_smc_analysis = lambda s, i="1h": {}
     detect_liquidity_sweep = lambda c, h, l: None
@@ -65,8 +74,10 @@ try:
         resolve_gap as _learn_resolve_gap,
     )
     _LEARNING_OK = True
+    logging.info("learning.py загружен успешно")
 except ImportError as e:
     _LEARNING_OK = False
+    logging.warning(f"learning.py не найден: {e}")
     _learn_min_confluence = lambda s: 2
     _learn_should_skip = lambda s, d: (False, "")
     _learn_signal_ctx = lambda s: ""
@@ -1366,12 +1377,16 @@ def find_fvg(candles, direction):
     return None
 
 def smc_on_tf(symbol, interval):
-    """SMC анализ на одном ТФ — умный обход барьеров через smc_engine"""
+    """SMC анализ на одном ТФ — если smc_engine загружен использует его, иначе fallback"""
     if _SMC_ENGINE_OK:
-        from smc_engine import smc_tf
-        r = smc_tf(symbol, interval)
-        return r["direction"]
-    # Fallback на старый код
+        try:
+            from smc_engine import smc_tf
+            r = smc_tf(symbol, interval)
+            if r and r.get("direction"):
+                return r["direction"]
+        except Exception:
+            pass
+    # Fallback — используем bot.py get_candles (Binance/CryptoCompare)
     candles = get_candles(symbol, interval, 150)
     if len(candles) < 20:
         return None
@@ -1862,8 +1877,11 @@ def full_scan(symbol, timeframe="1h"):
         avoid_rules = get_self_rules("avoid")
         # Если есть сильное правило избегать эту монету — пропускаем
         for rule_row in avoid_rules:
-            rule_text = rule_row[0] if len(rule_row) == 1 else rule_row[1]
-            conf = rule_row[1] if len(rule_row) >= 2 else 0.5
+            try:
+                rule_text = str(rule_row[0] if len(rule_row) == 1 else rule_row[1] or "")
+                conf = float(rule_row[1] if len(rule_row) >= 2 else 0.5)
+            except Exception:
+                continue
             if symbol in rule_text and conf >= 0.75:
                 logging.info(f"full_scan {symbol}: пропущен по правилу самообучения")
                 return None
@@ -5590,14 +5608,27 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "brain_sources":
-        # Статистика надёжности источников свечей
         await callback.message.edit_text("📡 Загружаю статистику источников...")
         try:
-            stats_text = get_source_stats()
-            barrier_text = get_barrier_summary()
-            full_text = stats_text
-            if barrier_text:
-                full_text += f"\n\n{barrier_text}"
+            if _SMC_ENGINE_OK:
+                stats_text = get_source_stats()
+                barrier_text = get_barrier_summary()
+                full_text = stats_text + (f"\n\n{barrier_text}" if barrier_text else "")
+            else:
+                full_text = (
+                    "📡 <b>Статус источников данных</b>\n\n"
+                    "<b>Свечи (приоритет):</b>\n"
+                    "1️⃣ CryptoCompare — ✅ основной\n"
+                    "2️⃣ Binance Futures REST — ✅ fallback\n"
+                    "3️⃣ Binance Spot REST — ✅ fallback\n"
+                    "4️⃣ Binance API (авторизованный) — ✅\n"
+                    "5️⃣ TwelveData — ✅ (если есть ключ)\n"
+                    "6️⃣ CoinGecko — ✅ последний резерв\n\n"
+                    "<b>Цены:</b> Binance Futures + Spot + CryptoCompare + Yahoo Finance\n"
+                    "<b>Пары:</b> Binance Futures топ-100 → Spot fallback\n"
+                    "<b>Новости:</b> CoinTelegraph, CoinDesk, Decrypt, Reuters RSS\n\n"
+                    "<i>ℹ️ smc_engine.py не в корне — используется встроенный SMC движок бота.</i>"
+                )
         except Exception as e:
             full_text = f"Ошибка: {e}"
         await callback.message.edit_text(
@@ -5611,11 +5642,31 @@ async def handle_callback(callback: CallbackQuery):
         # Последний самоанализ точности
         await callback.message.edit_text("📊 Загружаю самоанализ...")
         try:
-            analysis_text = _learn_self_analysis_text() if _LEARNING_OK else "learning.py не загружен"
-            stats_text = _learn_all_stats() if _LEARNING_OK else ""
-            full = analysis_text
-            if stats_text:
-                full += "\n\n" + stats_text
+            if _LEARNING_OK:
+                analysis_text = _learn_self_analysis_text()
+                stats_text = _learn_all_stats()
+                full = analysis_text
+                if stats_text:
+                    full += "\n\n" + stats_text
+            else:
+                # learning.py нет — показываем статистику из brain.db напрямую
+                try:
+                    conn = sqlite3.connect("brain.db")
+                    total_sig = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+                    wins = conn.execute("SELECT COUNT(*) FROM signals WHERE result='win'").fetchone()[0]
+                    losses = conn.execute("SELECT COUNT(*) FROM signals WHERE result='loss'").fetchone()[0]
+                    pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+                    conn.close()
+                    wr = round(wins/(wins+losses)*100) if (wins+losses) > 0 else 0
+                    full = (
+                        f"📊 <b>Статистика сигналов</b>\n\n"
+                        f"Всего сигналов: {total_sig}\n"
+                        f"✅ Победы: {wins} | ❌ Потери: {losses} | ⏳ Открыты: {pending}\n"
+                        f"Win Rate: {wr}%\n\n"
+                        f"<i>Для расширенного самоанализа добавь learning.py в корень репо.</i>"
+                    )
+                except Exception as db_e:
+                    full = f"Нет данных: {db_e}"
         except Exception as e:
             full = f"Ошибка: {e}"
         await callback.message.edit_text(
