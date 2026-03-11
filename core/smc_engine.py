@@ -853,3 +853,201 @@ def full_smc_analysis(symbol: str, interval: str = "1h") -> dict:
         "volume_check": vol_check,
         "candles_count": len(candles),
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# CVD — CUMULATIVE VOLUME DELTA (давление покупателей vs продавцов)
+# ═══════════════════════════════════════════════════════════════
+
+def calculate_cvd(candles: list) -> dict:
+    """
+    CVD = накопленная разница между объёмом покупок и продаж.
+    Аппроксимация: если свеча зелёная — объём идёт в buy delta, красная — sell delta.
+    Дополнительно считаем по upper/lower wick для точности.
+    """
+    if len(candles) < 10:
+        return {"cvd": 0, "trend": "NEUTRAL", "divergence": None, "signal": "NEUTRAL"}
+
+    deltas = []
+    for c in candles:
+        o, h, l, cl, v = c["open"], c["high"], c["low"], c["close"], c.get("volume", 0)
+        if v == 0:
+            deltas.append(0)
+            continue
+        # Оценка buy/sell давления через Body + Wicks
+        body = abs(cl - o)
+        total_range = h - l if h > l else 0.0001
+        if cl >= o:  # бычья свеча
+            # buy pressure пропорционально телу + нижней тени
+            lower_wick = o - l
+            buy_ratio = (body + lower_wick) / total_range / 2 + 0.5
+        else:  # медвежья
+            upper_wick = h - o
+            buy_ratio = (h - cl) / total_range / 2  # меньше 0.5
+        buy_vol = v * buy_ratio
+        sell_vol = v * (1 - buy_ratio)
+        deltas.append(buy_vol - sell_vol)
+
+    # Накопленный CVD
+    cvd_values = []
+    acc = 0
+    for d in deltas:
+        acc += d
+        cvd_values.append(acc)
+
+    current_cvd = cvd_values[-1]
+    prev_cvd = cvd_values[-10] if len(cvd_values) >= 10 else cvd_values[0]
+
+    # Тренд CVD
+    cvd_trend = "GROWING" if current_cvd > prev_cvd * 1.05 else \
+                "FALLING" if current_cvd < prev_cvd * 0.95 else "FLAT"
+
+    # Дивергенция CVD vs цена
+    price_now = candles[-1]["close"]
+    price_prev = candles[-10]["close"] if len(candles) >= 10 else candles[0]["close"]
+    price_up = price_now > price_prev * 1.005
+    cvd_up = current_cvd > prev_cvd
+
+    divergence = None
+    if price_up and not cvd_up:
+        divergence = "BEARISH_DIV"  # цена растёт, давление покупок падает — слабость
+    elif not price_up and cvd_up:
+        divergence = "BULLISH_DIV"  # цена падает, давление покупок растёт — сила
+
+    # Итоговый сигнал
+    signal = "BULLISH" if cvd_trend == "GROWING" and not divergence == "BEARISH_DIV" else \
+             "BEARISH" if cvd_trend == "FALLING" and not divergence == "BULLISH_DIV" else "NEUTRAL"
+
+    return {
+        "cvd": round(current_cvd, 2),
+        "cvd_prev": round(prev_cvd, 2),
+        "trend": cvd_trend,
+        "divergence": divergence,
+        "signal": signal,
+        "buy_pressure_pct": round(
+            sum(d for d in deltas[-20:] if d > 0) /
+            (sum(abs(d) for d in deltas[-20:]) or 1) * 100, 1
+        )
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# WHALE DETECTION — обнаружение аномальных объёмов китов
+# ═══════════════════════════════════════════════════════════════
+
+def detect_whale_candles(candles: list, lookback: int = 50) -> dict:
+    """
+    Находит свечи с аномальным объёмом (потенциальные следы китов).
+    Аномалия = объём > avg * threshold.
+    Определяет: кит накапливает (тихо, с малым движением цены)
+    или сбрасывает (агрессивно, с большим движением).
+    """
+    if len(candles) < 20:
+        return {"found": False, "spike": 0, "type": "NONE", "strength": 0}
+
+    window = candles[-lookback:] if len(candles) >= lookback else candles
+    volumes = [c.get("volume", 0) for c in window]
+    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+
+    # Последние 3 свечи на аномалии
+    recent = candles[-5:]
+    max_spike = 0
+    whale_candle = None
+
+    for c in recent:
+        v = c.get("volume", 0)
+        if avg_vol > 0:
+            spike = v / avg_vol
+            if spike > max_spike:
+                max_spike = spike
+                whale_candle = c
+
+    if max_spike < 1.8 or not whale_candle:
+        return {"found": False, "spike": round(max_spike, 2), "type": "NONE", "strength": 0}
+
+    # Тип активности кита
+    o, h, l, cl = whale_candle["open"], whale_candle["high"], whale_candle["low"], whale_candle["close"]
+    body = abs(cl - o)
+    total_range = (h - l) if h > l else 0.0001
+    body_ratio = body / total_range  # маленькое тело = аккумуляция/дистрибуция
+
+    if body_ratio < 0.3:
+        # Маленькое тело при огромном объёме = поглощение (кит аккумулирует)
+        whale_type = "ACCUMULATION"
+    elif cl > o:
+        # Большая бычья свеча с объёмом = агрессивная покупка
+        whale_type = "AGGRESSIVE_BUY"
+    else:
+        # Большая медвежья свеча с объёмом = агрессивная продажа / сброс
+        whale_type = "AGGRESSIVE_SELL"
+
+    # Сила сигнала (1-10)
+    strength = min(10, int(max_spike * 2))
+
+    # Направление вывода
+    signal = "BULLISH" if whale_type in ("ACCUMULATION", "AGGRESSIVE_BUY") else "BEARISH"
+
+    return {
+        "found": True,
+        "spike": round(max_spike, 2),
+        "type": whale_type,
+        "signal": signal,
+        "strength": strength,
+        "body_ratio": round(body_ratio, 2),
+        "avg_volume": round(avg_vol, 0),
+        "description": (
+            f"🐋 Кит {'накапливает' if whale_type == 'ACCUMULATION' else 'агрессивно покупает' if whale_type == 'AGGRESSIVE_BUY' else 'сбрасывает'} "
+            f"(объём x{max_spike:.1f} от среднего, сила {strength}/10)"
+        )
+    }
+
+
+def get_volume_profile(candles: list, bins: int = 10) -> dict:
+    """
+    Упрощённый Volume Profile — где сосредоточен максимальный объём (POC).
+    Возвращает зоны высокого объёма для определения поддержек/сопротивлений.
+    """
+    if len(candles) < 20:
+        return {"poc": 0, "high_volume_zones": [], "current_zone": "UNKNOWN"}
+
+    # Диапазон цен
+    prices = [c["close"] for c in candles]
+    low_price = min(c["low"] for c in candles)
+    high_price = max(c["high"] for c in candles)
+    if high_price <= low_price:
+        return {"poc": 0, "high_volume_zones": [], "current_zone": "UNKNOWN"}
+
+    # Распределяем объём по ценовым бинам
+    bin_size = (high_price - low_price) / bins
+    volume_bins = [0.0] * bins
+
+    for c in candles:
+        avg_price = (c["high"] + c["low"]) / 2
+        vol = c.get("volume", 0)
+        bin_idx = int((avg_price - low_price) / bin_size)
+        bin_idx = max(0, min(bins - 1, bin_idx))
+        volume_bins[bin_idx] += vol
+
+    # POC — ценовой уровень с максимальным объёмом
+    poc_bin = volume_bins.index(max(volume_bins))
+    poc_price = low_price + (poc_bin + 0.5) * bin_size
+
+    # High Volume Zones (топ 3 бина)
+    sorted_bins = sorted(enumerate(volume_bins), key=lambda x: x[1], reverse=True)
+    hvz = []
+    for idx, vol in sorted_bins[:3]:
+        zone_low = low_price + idx * bin_size
+        zone_high = zone_low + bin_size
+        hvz.append({"low": round(zone_low, 6), "high": round(zone_high, 6), "volume": round(vol, 0)})
+
+    # Где сейчас цена относительно POC
+    current = candles[-1]["close"]
+    current_zone = "ABOVE_POC" if current > poc_price * 1.005 else \
+                   "BELOW_POC" if current < poc_price * 0.995 else "AT_POC"
+
+    return {
+        "poc": round(poc_price, 6),
+        "high_volume_zones": hvz,
+        "current_zone": current_zone,
+        "current_price": round(current, 6)
+    }
