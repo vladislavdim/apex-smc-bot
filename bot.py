@@ -90,6 +90,35 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
+TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+MOBULA_KEY     = os.environ.get("MOBULA_API_KEY", "")
+COINALYZE_KEY  = os.environ.get("COINALYZE_API_KEY", "")
+LUNARCRUSH_KEY = os.environ.get("LUNARCRUSH_API_KEY", "")
+
+_API_STATUS = {
+    "twelvedata":  bool(os.environ.get("TWELVEDATA_API_KEY", "")),
+    "mobula":      bool(os.environ.get("MOBULA_API_KEY", "")),
+    "coinalyze":   bool(os.environ.get("COINALYZE_API_KEY", "")),
+    "lunarcrush":  bool(os.environ.get("LUNARCRUSH_API_KEY", "")),
+    "tavily":      bool(os.environ.get("TAVILY_API_KEY", "")),
+    "groq":        bool(os.environ.get("GROQ_API_KEY", "")),
+    "binance":     bool(os.environ.get("BINANCE_API_KEY", "")),
+}
+
+def get_api_status_text():
+    labels = {
+        "groq": "Groq AI (мозг)", "twelvedata": "TwelveData (свечи)",
+        "mobula": "Mobula (DEX)", "coinalyze": "Coinalyze (OI/ликв)",
+        "lunarcrush": "LunarCrush (соцсети)", "tavily": "Tavily (веб поиск)",
+        "binance": "Binance (авторизован)",
+    }
+    lines = ["<b>Статус API:</b>"]
+    for k, v in labels.items():
+        lines.append(("OK " if _API_STATUS.get(k) else "NO ") + v)
+    missing = [v for k, v in labels.items() if not _API_STATUS.get(k)]
+    if missing:
+        lines.append("Без ключей: " + ", ".join(missing))
+    return "\n".join(lines)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -991,6 +1020,17 @@ def get_candles(symbol, interval="1h", limit=200):
     except Exception as e:
         logging.warning(f"CryptoCompare {symbol} {interval}: {e}")
 
+    # 4.5 TwelveData — если есть ключ
+    if TWELVEDATA_KEY:
+        try:
+            td = get_twelvedata_candles(symbol, interval, limit)
+            if td and len(td) >= 20:
+                logging.info(f"TwelveData: {symbol} {interval} {len(td)}св")
+                candle_cache[cache_key] = (td, time.time())
+                return td
+        except Exception as e:
+            logging.debug(f"TwelveData candles {symbol}: {e}")
+
     # 5. CoinGecko — последний резерв
     cg_id = COINGECKO_IDS.get(symbol)
     if cg_id:
@@ -1030,6 +1070,86 @@ def get_orderbook(symbol):
         return {"bids": bids, "asks": asks, "bias": "BUY" if bids > asks else "SELL"}
     except:
         return None
+
+
+def get_twelvedata_candles(symbol, interval="1h", limit=200):
+    if not TWELVEDATA_KEY:
+        return []
+    try:
+        td_map = {"1m":"1min","5m":"5min","15m":"15min","30m":"30min","1h":"1h","4h":"4h","1d":"1day"}
+        base = symbol.replace("USDT","").replace("BUSD","")
+        r = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": base+"/USD","interval": td_map.get(interval,"1h"),
+                    "outputsize": limit,"apikey": TWELVEDATA_KEY},
+            headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        data = r.json()
+        if data.get("status") == "error" or "values" not in data:
+            return []
+        return [{"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),
+                 "close":float(v["close"]),"volume":float(v.get("volume",0))}
+                for v in reversed(data["values"])]
+    except Exception as e:
+        logging.debug(f"TwelveData {symbol}: {e}")
+        return []
+
+
+def get_mobula_price(symbol):
+    if not MOBULA_KEY:
+        return {}
+    try:
+        base = symbol.replace("USDT","").replace("BUSD","")
+        r = requests.get("https://api.mobula.io/api/1/market/data",
+            params={"asset": base},
+            headers={"Authorization": MOBULA_KEY,"User-Agent":"Mozilla/5.0"}, timeout=8)
+        if r.status_code != 200:
+            return {}
+        d = r.json().get("data", {})
+        return {"price":d.get("price",0),"volume_24h":d.get("volume",0),
+                "change_24h":d.get("price_change_24h",0),"source":"mobula"}
+    except Exception as e:
+        logging.debug(f"Mobula {symbol}: {e}")
+        return {}
+
+
+def get_coinalyze_data(symbol):
+    if not COINALYZE_KEY:
+        return {}
+    try:
+        base = symbol.replace("USDT","")
+        r = requests.get("https://api.coinalyze.net/v1/open-interest",
+            params={"symbols": base+"USDT_PERP.A","api_key": COINALYZE_KEY},
+            headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
+        if r.status_code != 200 or not r.json():
+            return {}
+        d = r.json()[0] if isinstance(r.json(), list) else {}
+        return {"open_interest":d.get("open_interest_usd",0),
+                "oi_change_24h":d.get("open_interest_usd_change_24h_percent",0),
+                "source":"coinalyze"}
+    except Exception as e:
+        logging.debug(f"Coinalyze {symbol}: {e}")
+        return {}
+
+
+def get_lunarcrush_data(symbol):
+    if not LUNARCRUSH_KEY:
+        return {}
+    try:
+        base = symbol.replace("USDT","").replace("BUSD","").lower()
+        r = requests.get(f"https://lunarcrush.com/api4/public/coins/{base}/v1",
+            headers={"Authorization":"Bearer "+LUNARCRUSH_KEY,"User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        if r.status_code != 200:
+            return {}
+        d = r.json().get("data", {})
+        gs = d.get("galaxy_score", 0)
+        sent = d.get("sentiment", 50)
+        return {"galaxy_score":gs,"sentiment":sent,"alt_rank":d.get("alt_rank",999),
+                "signal":"BULLISH" if gs>60 and sent>60 else "BEARISH" if gs<30 else "NEUTRAL",
+                "source":"lunarcrush"}
+    except Exception as e:
+        logging.debug(f"LunarCrush {symbol}: {e}")
+        return {}
 
 
 def get_historical_context(symbol, timeframe="1d"):
@@ -1839,6 +1959,33 @@ def full_scan(symbol, timeframe="1h"):
                 total_weight += 5
             elif direction == "BULLISH" and dxy["signal"] == "STRONG":
                 confluence.append(f"⚠️ DXY растёт — риск для лонгов")
+
+        # Coinalyze — OI и ликвидации
+        ca = get_coinalyze_data(symbol)
+        if ca:
+            oi_chg = ca.get("oi_change_24h", 0)
+            if oi_chg > 5 and direction == "BULLISH":
+                confluence.append(f"OI +{oi_chg:.1f}% — лонги добавляют")
+                total_weight += 7
+            elif oi_chg > 5 and direction == "BEARISH":
+                confluence.append(f"OI +{oi_chg:.1f}% — шортисты добавляют")
+                total_weight += 7
+            elif oi_chg < -5:
+                confluence.append(f"OI {oi_chg:.1f}% — позиции закрываются")
+
+        # LunarCrush — социальный sentiment
+        lc = get_lunarcrush_data(symbol)
+        if lc:
+            gs = lc.get("galaxy_score", 0)
+            sig = lc.get("signal", "")
+            if sig == "BULLISH" and direction == "BULLISH":
+                confluence.append(f"LunarCrush Galaxy {gs} — бычий сентимент (+6)")
+                total_weight += 6
+            elif sig == "BEARISH" and direction == "BEARISH":
+                confluence.append(f"LunarCrush Galaxy {gs} — медвежий сентимент (+6)")
+                total_weight += 6
+            elif sig == "BEARISH" and direction == "BULLISH":
+                confluence.append(f"LunarCrush: соцсети негативные ({gs})")
 
         # Режим рынка
         if regime["mode"] == "TRENDING":
@@ -3524,6 +3671,135 @@ LEARN_TOPICS_ALWAYS = [
     "bitcoin dominance trend",
     "crypto fear greed index analysis",
 ]
+
+
+def self_diagnose_and_grow():
+    """
+    Groq анализирует что боту не хватает и дописывает мозг самостоятельно.
+    Запускается каждые 6 часов. Результат: новые правила + знания в brain.db.
+    """
+    try:
+        conn = sqlite3.connect("brain.db")
+        # Собираем контекст: ошибки источников
+        try:
+            src_errors = conn.execute(
+                "SELECT source, error FROM barrier_log WHERE success=0 ORDER BY id DESC LIMIT 8"
+            ).fetchall()
+            errors_txt = " | ".join([f"{s}:{e[:40]}" for s,e in src_errors]) or "нет"
+        except:
+            errors_txt = "нет"
+        # Статистика правил
+        rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+        obs_count  = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+        # Последние SL — что шло не так
+        try:
+            sl_rows = conn.execute(
+                "SELECT symbol, timeframe FROM signals WHERE result='sl' ORDER BY id DESC LIMIT 5"
+            ).fetchall()
+            sl_txt = " ".join([f"{r[0]}/{r[1]}" for r in sl_rows]) or "нет"
+        except:
+            sl_txt = "нет"
+        conn.close()
+
+        # Статус API
+        available_apis = [k for k,v in _API_STATUS.items() if v]
+        missing_apis   = [k for k,v in _API_STATUS.items() if not v]
+
+        prompt = (
+            "Ты APEX — SMC торговый бот на Python. Проанализируй свои возможности и найди пробелы."
+            f" Доступные API: {', '.join(available_apis)}."
+            f" Недоступные API: {', '.join(missing_apis)}."
+            f" Ошибки источников свечей: {errors_txt}."
+            f" Последние SL сигналы: {sl_txt}."
+            f" Правил в мозге: {rule_count}. Наблюдений: {obs_count}."
+            " Ответь JSON без markdown:"
+            ' {"gaps":["чего не хватает для лучшего анализа"],'
+            '"free_apis":["бесплатные API которые стоит добавить с URL"],'
+            '"rules":["конкретные торговые правила для улучшения точности"],'
+            '"priority":"самое важное улучшение прямо сейчас"}'
+        )
+
+        response = ask_groq(prompt, max_tokens=500)
+        if not response:
+            return
+
+        import json as _j
+        try:
+            clean = response.strip().replace("```json","").replace("```","")
+            analysis = _j.loads(clean)
+        except:
+            save_knowledge("self_diagnosis_raw", response[:500], "self-groq")
+            logging.info("[SelfGrow] Сохранён сырой анализ")
+            return
+
+        conn2 = sqlite3.connect("brain.db")
+        saved = 0
+
+        # Сохраняем пробелы как знания
+        for gap in analysis.get("gaps", [])[:5]:
+            save_knowledge("gap", gap[:200], "self-diagnosis")
+
+        # Бесплатные API которые стоит добавить — записываем в мозг
+        for api in analysis.get("free_apis", [])[:3]:
+            save_knowledge("suggested_api", api[:200], "self-diagnosis")
+            logging.info(f"[SelfGrow] Предложен API: {api[:80]}")
+
+        # Торговые правила — добавляем в self_rules
+        for rule in analysis.get("rules", [])[:5]:
+            try:
+                ex = conn2.execute("SELECT id FROM self_rules WHERE rule=?", (rule[:200],)).fetchone()
+                if not ex:
+                    conn2.execute(
+                        "INSERT INTO self_rules (category,rule,confidence,source) VALUES (?,?,?,?)",
+                        ("self_improve", rule[:200], 0.65, "self-diagnosis")
+                    )
+                    saved += 1
+            except: pass
+
+        # Приоритет
+        priority = analysis.get("priority", "")
+        if priority:
+            save_knowledge("priority_action", priority[:300], "self-diagnosis")
+
+        conn2.commit()
+        conn2.close()
+        logging.info(f"[SelfGrow] Самодиагностика: +{saved} правил. Приоритет: {priority[:60]}")
+
+        # Уведомление если нашли новые бесплатные API
+        free_apis = analysis.get("free_apis", [])
+        if free_apis and ADMIN_ID:
+            import asyncio as _a
+            try:
+                loop = _a.get_event_loop()
+                msg = "🔬 <b>APEX нашёл новые источники данных:</b>\n" + "\n".join([f"• {a[:100]}" for a in free_apis[:3]])
+                loop.call_soon_threadsafe(
+                    loop.create_task,
+                    bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+                )
+            except: pass
+
+    except Exception as e:
+        logging.error(f"self_diagnose_and_grow: {e}")
+
+
+def auto_fill_knowledge_gaps():
+    """Закрывает пробелы в знаниях через Groq"""
+    try:
+        if not _LEARNING_OK:
+            return
+        gaps = _learn_get_gaps(limit=5)
+        if not gaps:
+            return
+        for gap_id, query, context in gaps:
+            answer = ask_groq(
+                f"Ты торговый бот APEX. Ответь кратко: {query}. Контекст: {context}. Практический ответ для трейдинга.",
+                max_tokens=150
+            ) or ""
+            if answer:
+                _learn_resolve_gap(gap_id, answer)
+                save_knowledge("gap_resolved", answer[:300], "auto-research")
+    except Exception as e:
+        logging.debug(f"auto_fill_knowledge_gaps: {e}")
 
 
 async def autonomous_learning_cycle():
@@ -5306,6 +5582,8 @@ async def handle_callback(callback: CallbackQuery):
                 [InlineKeyboardButton(text="📡 Источники данных", callback_data="brain_sources"),
                  InlineKeyboardButton(text="📊 Самоанализ", callback_data="brain_self_analysis")],
                 [InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy")],
+                [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status"),
+                 InlineKeyboardButton(text="🔬 Самодиагностика", callback_data="brain_self_diagnose")],
                 [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
@@ -5376,6 +5654,48 @@ async def handle_callback(callback: CallbackQuery):
             text or "Нет данных", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brain_self_analysis")]
+            ])
+        )
+
+    elif data == "brain_api_status":
+        await callback.message.edit_text(
+            get_api_status_text(), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_self_diagnose":
+        await callback.message.edit_text("🔬 Запускаю самодиагностику...")
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self_diagnose_and_grow)
+            await loop.run_in_executor(None, auto_fill_knowledge_gaps)
+            conn = sqlite3.connect("brain.db")
+            priority_row = conn.execute(
+                "SELECT content FROM knowledge WHERE topic='priority_action' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            new_rules = conn.execute(
+                "SELECT COUNT(*) FROM self_rules WHERE category='self_improve'"
+            ).fetchone()[0]
+            suggested = conn.execute(
+                "SELECT COUNT(*) FROM knowledge WHERE topic='suggested_api'"
+            ).fetchone()[0]
+            conn.close()
+            priority_txt = priority_row[0][:200] if priority_row else "нет"
+            result_text = (
+                "<b>Самодиагностика завершена</b>\n\n"
+                f"Правил самоулучшения: {new_rules}\n"
+                f"Предложено новых API: {suggested}\n\n"
+                f"<b>Приоритет:</b> <i>{priority_txt}</i>"
+            )
+        except Exception as e:
+            result_text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            result_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
             ])
         )
 
@@ -6785,6 +7105,11 @@ async def on_startup(app):
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
     scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
     scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
+    async def _self_diagnose_job():
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self_diagnose_and_grow)
+        await loop.run_in_executor(None, auto_fill_knowledge_gaps)
+    scheduler.add_job(_self_diagnose_job, "interval", hours=6, jitter=1200)
     # Самоанализ точности + обновление авто-правил
     async def _run_self_analysis():
         if _LEARNING_OK:
@@ -6807,6 +7132,13 @@ async def on_startup(app):
     asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))  # 5 мин после старта
     logging.info("APEX запущен!")
 
+
+async def on_startup_diagnose(app):
+    """Первая самодиагностика через 8 мин после старта"""
+    await asyncio.sleep(480)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, self_diagnose_and_grow)
+    logging.info("[SelfGrow] Стартовая диагностика завершена")
 
 async def on_shutdown(app):
     logging.info("APEX остановлен")
@@ -6848,6 +7180,7 @@ def main():
         app.router.add_post("/webhook", handle_webhook)
         app.router.add_get("/tokens", token_stats)
         app.on_startup.append(on_startup)
+        app.on_startup.append(on_startup_diagnose)
         app.on_shutdown.append(on_shutdown)
 
         port = int(os.environ.get("PORT", 10000))
