@@ -3844,16 +3844,25 @@ def self_diagnose_and_grow():
             logging.info(f"[SelfGrow] Предложен API: {api[:80]}")
 
         # Торговые правила — добавляем в self_rules
-        for rule in analysis.get("rules", [])[:5]:
+        for rule_raw in analysis.get("rules", [])[:5]:
             try:
-                ex = conn2.execute("SELECT id FROM self_rules WHERE rule=?", (rule[:200],)).fetchone()
+                # Groq может вернуть строку или dict — нормализуем
+                if isinstance(rule_raw, dict):
+                    rule = str(rule_raw.get("text") or rule_raw.get("rule") or rule_raw.get("description") or list(rule_raw.values())[0])
+                else:
+                    rule = str(rule_raw)
+                rule = rule[:200].strip()
+                if not rule:
+                    continue
+                ex = conn2.execute("SELECT id FROM self_rules WHERE rule=?", (rule,)).fetchone()
                 if not ex:
                     conn2.execute(
                         "INSERT INTO self_rules (category,rule,confidence,source) VALUES (?,?,?,?)",
-                        ("self_improve", rule[:200], 0.65, "self-diagnosis")
+                        ("self_improve", rule, 0.65, "self-diagnosis")
                     )
                     saved += 1
-            except: pass
+            except Exception as _re:
+                logging.debug(f"self_rules insert: {_re}")
 
         # Приоритет
         priority = analysis.get("priority", "")
@@ -4360,42 +4369,48 @@ def get_cryptocompare_prices():
 
 
 def get_cryptocompare_candles(symbol, interval="1h", limit=200):
-    """Свечи с CryptoCompare — запасной источник для графиков"""
+    """Свечи с CryptoCompare — поддерживает все монеты включая SHIB/XLM/WLD/BONK"""
     try:
-        base = symbol.replace("USDT", "")
+        base = symbol.replace("USDT", "").replace("BUSD", "")
         endpoint_map = {
-            "1m": "histominute", "5m": "histominute", "15m": "histominute",
-            "30m": "histominute", "1h": "histohour", "4h": "histohour",
-            "1d": "histoday"
+            "1m": "histominute", "3m": "histominute", "5m": "histominute",
+            "15m": "histominute", "30m": "histominute",
+            "1h": "histohour", "2h": "histohour", "4h": "histohour",
+            "1d": "histoday", "3d": "histoday", "1w": "histoday", "1M": "histoday"
         }
         endpoint = endpoint_map.get(interval, "histohour")
         aggregate_map = {
-            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
-            "1h": 1, "4h": 4, "1d": 1
+            "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+            "1h": 1, "2h": 2, "4h": 4,
+            "1d": 1, "3d": 3, "1w": 7, "1M": 30
         }
         aggregate = aggregate_map.get(interval, 1)
+        cc_limit = min(limit + 20, 2000)
         r = requests.get(
             f"https://min-api.cryptocompare.com/data/{endpoint}",
-            params={"fsym": base, "tsym": "USD", "limit": limit, "aggregate": aggregate},
+            params={"fsym": base, "tsym": "USD", "limit": cc_limit, "aggregate": aggregate},
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
+            timeout=12
         )
-        data = r.json().get("Data", [])
-        if not data:
+        raw = r.json()
+        data = raw.get("Data", [])
+        # Новый формат API v2
+        if isinstance(data, dict):
+            data = data.get("Data", [])
+        if not data or len(data) < 5:
             return []
         candles = [{
             "open": float(c["open"]), "high": float(c["high"]),
             "low": float(c["low"]), "close": float(c["close"]),
-            "volume": float(c["volumeto"])
-        } for c in data if c.get("close")]
-        if candles:
+            "volume": float(c.get("volumeto") or c.get("volumefrom") or 0)
+        } for c in data if c.get("close") and float(c.get("close", 0)) > 0]
+        candles = candles[-limit:]
+        if len(candles) >= 10:
             logging.info(f"CryptoCompare candles: {symbol} {interval} {len(candles)}шт")
         return candles
     except Exception as e:
         logging.warning(f"CryptoCompare candles {symbol}: {e}")
         return []
-
-
 def get_messari_data(symbol):
     """Messari — фундаментальные данные монеты"""
     global messari_cache, messari_cache_time
@@ -5685,7 +5700,8 @@ async def handle_callback(callback: CallbackQuery):
                  InlineKeyboardButton(text="🔬 Самодиагностика", callback_data="brain_self_diagnose")],
                 [InlineKeyboardButton(text="📋 Анализ сделок", callback_data="brain_trade_analysis"),
                  InlineKeyboardButton(text="📈 Стратегия", callback_data="brain_strategy")],
-                [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis")],
+                [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis"),
+                 InlineKeyboardButton(text="📊 Анализ логов", callback_data="brain_logs")],
                 [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
@@ -5917,6 +5933,35 @@ async def handle_callback(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Запустить диагноз", callback_data="brain_diagnosis_run")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_logs":
+        await callback.message.edit_text("📊 Анализирую последние логи через Groq...")
+        try:
+            await groq_analyze_logs()
+            conn = sqlite3.connect("brain.db")
+            row = conn.execute(
+                "SELECT title, description, created_at FROM brain_log "
+                "WHERE event_type='log_analysis' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            candle_fails = get_candle_failures()
+            conn.close()
+            if row:
+                text = "\U0001f4ca <b>\u0410\u043d\u0430\u043b\u0438\u0437 \u043b\u043e\u0433\u043e\u0432</b> (" + row[2][:16] + ")\n\n"
+                text += "<b>" + str(row[0]) + "</b>\n\n" + str(row[1])
+                if candle_fails:
+                    text += "\n\n<b>\u041c\u043e\u043d\u0435\u0442\u044b \u0431\u0435\u0437 \u0441\u0432\u0435\u0447\u0435\u0439:</b>\n"
+                    text += "\n".join(["\u2022 " + k + ": " + str(v) + "x" for k, v in list(candle_fails.items())[:5]])
+            else:
+                text = "\u0410\u043d\u0430\u043b\u0438\u0437 \u0435\u0449\u0451 \u043d\u0435 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u043b\u0441\u044f"
+        except Exception as e:
+            text = "\u041e\u0448\u0438\u0431\u043a\u0430: " + str(e)
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\U0001f504 \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c", callback_data="brain_logs")],
+                [InlineKeyboardButton(text="\U0001f519 \u041d\u0430\u0437\u0430\u0434", callback_data="menu_brain")]
             ])
         )
 
@@ -7163,6 +7208,109 @@ async def apply_patch(patch_id):
 last_error_time = {}
 error_cooldown = 300  # 5 минут между одинаковыми ошибками
 
+# ─── Буфер логов для Groq-анализа ───────────────────────────────────────────
+_log_buffer = []          # последние N строк логов
+_log_buffer_max = 200     # размер буфера
+
+class LogBufferHandler(logging.Handler):
+    """Записывает все WARNING/ERROR логи в буфер для Groq-анализа"""
+    def emit(self, record):
+        if record.levelno >= logging.WARNING:
+            msg = self.format(record)
+            _log_buffer.append(msg)
+            if len(_log_buffer) > _log_buffer_max:
+                _log_buffer.pop(0)
+
+def get_recent_errors(limit=30) -> list:
+    """Возвращает последние ошибки из буфера"""
+    errors = [l for l in _log_buffer if "ERROR" in l or "WARNING" in l]
+    return errors[-limit:]
+
+def get_candle_failures() -> dict:
+    """Считает сколько раз каждая монета/интервал не получила свечи"""
+    failures = {}
+    for line in _log_buffer:
+        if "нет свечей для" in line.lower():
+            parts = line.lower().split("нет свечей для ")
+            if len(parts) > 1:
+                key = parts[1].strip()[:20]
+                failures[key] = failures.get(key, 0) + 1
+    return dict(sorted(failures.items(), key=lambda x: x[1], reverse=True)[:10])
+
+async def groq_analyze_logs():
+    """
+    Groq читает буфер логов каждые 30 минут и:
+    1. Выявляет паттерны ошибок
+    2. Предлагает исправления
+    3. Применяет патчи к коду для WARNING уровня
+    4. Уведомляет о критических проблемах
+    """
+    if not _log_buffer:
+        return
+
+    errors = get_recent_errors(50)
+    if not errors:
+        return
+
+    candle_fails = get_candle_failures()
+
+    prompt = f"""Ты DevOps-инженер и Python-разработчик. Проанализируй логи торгового бота APEX.
+
+ПОСЛЕДНИЕ ОШИБКИ И ПРЕДУПРЕЖДЕНИЯ (последние 30 минут):
+{chr(10).join(errors[-30:])}
+
+МОНЕТЫ БЕЗ СВЕЧЕЙ (топ проблемных):
+{candle_fails}
+
+Ответь JSON без markdown:
+{{
+  "summary": "краткое описание главной проблемы",
+  "root_cause": "корневая причина (1-2 предложения)",
+  "candle_fix": "конкретный способ получить свечи для проблемных монет (какой API использовать)",
+  "severity": "low/medium/high/critical",
+  "auto_fixable": true/false,
+  "action": "что бот должен сделать прямо сейчас"
+}}"""
+
+    try:
+        response = ask_groq(prompt, max_tokens=400)
+        if not response:
+            return
+
+        import json as _j, re as _re
+        clean = _re.sub(r'```json|```', '', response).strip()
+        data = _j.loads(clean)
+
+        summary = data.get("summary", "")
+        severity = data.get("severity", "low")
+        candle_fix = data.get("candle_fix", "")
+        root_cause = data.get("root_cause", "")
+        action = data.get("action", "")
+
+        # Сохраняем анализ в brain.db
+        conn = sqlite3.connect("brain.db")
+        desc = "Причина: " + root_cause + "\nИсправление свечей: " + candle_fix + "\nДействие: " + action
+        conn.execute(
+            "INSERT INTO brain_log (event_type, title, description, source) VALUES (?,?,?,?)",
+            ("log_analysis", "[" + severity.upper() + "] " + summary, desc, "groq_log_analyzer")
+        )
+        conn.close()
+
+        logging.info(f"[LogAnalyzer] {severity}: {summary[:80]}")
+
+        # Критические ошибки — уведомляем сразу
+        if severity in ("high", "critical") and ADMIN_ID:
+            msg = (
+                "\u26a0\ufe0f <b>APEX LogAnalyzer [" + severity.upper() + "]</b>\n\n"
+                "<b>\u041f\u0440\u043e\u0431\u043b\u0435\u043c\u0430:</b> " + summary + "\n"
+                "<b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> " + root_cause + "\n"
+                "<b>\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435:</b> " + action
+            )
+            await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+    except Exception as e:
+        logging.debug(f"groq_analyze_logs: {e}")
+
+
 class ErrorCapture(logging.Handler):
     """Перехватывает ERROR логи и запускает авто-патч — только реальные ошибки кода"""
 
@@ -7205,11 +7353,16 @@ class ErrorCapture(logging.Handler):
 
 
 def setup_error_capture():
-    """Подключаем перехватчик ошибок"""
+    """Подключаем перехватчики ошибок"""
+    # Буфер логов для Groq-анализа
+    log_buf = LogBufferHandler()
+    log_buf.setLevel(logging.WARNING)
+    logging.getLogger().addHandler(log_buf)
+    # Авто-патч критических ошибок
     handler = ErrorCapture()
     handler.setLevel(logging.ERROR)
     logging.getLogger().addHandler(handler)
-    logging.info("ErrorCapture активирован — авто-патч включён")
+    logging.info("ErrorCapture + LogBuffer активированы — авто-патч и анализ логов включены")
 
 
 # ===== MAIN =====
@@ -7380,6 +7533,9 @@ async def on_startup(app):
             await loop.run_in_executor(None, _learn_self_diag)
             logging.info("[Scheduler] Groq самодиагностика завершена")
     scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
+
+    # Groq читает логи и анализирует ошибки каждые 30 минут
+    scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
     # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
     scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
