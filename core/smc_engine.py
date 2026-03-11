@@ -119,15 +119,34 @@ def _ordered_sources(symbol):
     scores = {src: _reliability.get(src, defaults.get(src,0.5)) for src in defaults}
     return sorted(scores, key=lambda s: scores[s], reverse=True)
 
+def _ordered_sources_for_interval(symbol, interval):
+    """Для коротких TF (1m/5m) ставим Binance Spot первым — он надёжнее CryptoCompare для альткоинов"""
+    base_order = _ordered_sources(symbol)
+    if interval in ("1m", "5m", "3m"):
+        # Binance Spot и Futures в начало для коротких ТФ
+        priority = ["binance_spot", "binance_futures", "mexc", "gate_io", "cryptocompare", "kraken", "coingecko", "synthetic"]
+        return priority
+    return base_order
+
 # ─── Фетчеры ─────────────────────────────────────────────────────────────────
 
 def _fetch_cryptocompare(symbol, interval, limit):
     base = symbol.replace("USDT","").replace("BUSD","")
     ep, agg = CC_INTERVALS.get(interval, ("histohour",1))
-    r = requests.get(f"https://min-api.cryptocompare.com/data/{ep}",
-        params={"fsym":base,"tsym":"USD","limit":limit,"aggregate":agg},
-        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-    data = r.json().get("Data",[])
+    # v2 API для минутных данных — надёжнее для альткоинов
+    if ep == "histominute":
+        r = requests.get(f"https://min-api.cryptocompare.com/data/v2/{ep}",
+            params={"fsym":base,"tsym":"USD","limit":limit,"aggregate":agg},
+            headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        raw = r.json()
+        data = raw.get("Data",{}).get("Data",[])
+        if not data:
+            data = raw.get("Data",[])
+    else:
+        r = requests.get(f"https://min-api.cryptocompare.com/data/{ep}",
+            params={"fsym":base,"tsym":"USD","limit":limit,"aggregate":agg},
+            headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        data = r.json().get("Data",[])
     if not data: raise ValueError("Empty CC")
     return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),
              "close":float(c["close"]),"volume":float(c.get("volumeto",0))} for c in data if c.get("close")]
@@ -244,7 +263,7 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
         cached, ts = _candle_cache[ck]
         if time.time() - ts < ttl: return cached
 
-    sources = _ordered_sources(symbol)
+    sources = _ordered_sources_for_interval(symbol, interval)
     attempts = 0
     all_errors = []
 
