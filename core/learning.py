@@ -862,3 +862,457 @@ def resolve_gap(gap_id: int, answer: str):
 
 # Инициализируем новые таблицы
 _init_new_tables()
+
+
+# ═══════════════════════════════════════════════════════════════
+# GROQ — МОЗГ: АНАЛИЗ СДЕЛОК, СТРАТЕГИИ, САМОДИАГНОСТИКА
+# ═══════════════════════════════════════════════════════════════
+
+def _groq_call(prompt: str, max_tokens: int = 600) -> str:
+    """Вызов Groq API — используется для всех аналитических задач"""
+    try:
+        import os, requests
+        key = os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            return ""
+        models = ["llama-3.1-8b-instant", "llama-3.1-70b-specdec", "gemma2-9b-it"]
+        for model in models:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": max_tokens, "temperature": 0.3},
+                    timeout=15
+                )
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"].strip()
+            except Exception:
+                continue
+        return ""
+    except Exception as e:
+        logging.debug(f"_groq_call: {e}")
+        return ""
+
+
+def analyze_closed_trade(signal_id: int):
+    """
+    Groq анализирует закрытую сделку — почему WIN или LOSS.
+    Записывает вывод и создаёт правило если нужно.
+    Вызывается автоматически при close_signal().
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("""
+            SELECT symbol, direction, grade, entry, sl, tp1, result,
+                   rr_achieved, hours_open, confluence, regime, timeframe, created_at
+            FROM signal_log WHERE id=?
+        """, (signal_id,)).fetchone()
+        if not row:
+            conn.close(); return
+
+        symbol, direction, grade, entry, sl, tp1, result, rr, hours, confluence, regime, tf, created = row
+
+        # Последний самоанализ для контекста
+        prev = conn.execute(
+            "SELECT insights FROM self_analysis ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        prev_insight = prev[0] if prev else "нет данных"
+
+        prompt = f"""Ты — торговый аналитик APEX. Проанализируй закрытую сделку.
+
+СДЕЛКА:
+- Монета: {symbol} | Направление: {direction} | Грейд: {grade}
+- Вход: {entry} | SL: {sl} | TP1: {tp1}
+- Результат: {result} | RR достигнут: {rr} | Время в сделке: {hours}ч
+- Confluence score: {confluence} | Режим рынка: {regime} | Таймфрейм: {tf}
+
+КОНТЕКСТ (предыдущий самоанализ): {prev_insight}
+
+Ответь СТРОГО в формате JSON:
+{{
+  "verdict": "WIN|LOSS|EXPIRED",
+  "reason": "1-2 предложения — главная причина результата",
+  "mistake": "что было сделано неправильно или null",
+  "lesson": "конкретный вывод для следующих сделок",
+  "rule_type": "AVOID|PREFER|TIMING|null",
+  "rule_text": "текст правила или null",
+  "confidence": 0.0-1.0
+}}"""
+
+        response = _groq_call(prompt, max_tokens=400)
+        if not response:
+            conn.close(); return
+
+        # Чистим и парсим JSON
+        import json, re
+        clean = re.sub(r'```json|```', '', response).strip()
+        data = json.loads(clean)
+
+        lesson = data.get("lesson", "")
+        rule_type = data.get("rule_type")
+        rule_text = data.get("rule_text")
+        confidence = float(data.get("confidence", 0.6))
+        reason = data.get("reason", "")
+
+        # Сохраняем анализ в brain_log
+        conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
+            VALUES (?,?,?,?)""",
+            ("trade_analysis", f"[{result}] {symbol} {direction}",
+             f"Причина: {reason}\nУрок: {lesson}", "groq_trade_analysis"))
+
+        # Если Groq предлагает правило — создаём его
+        if rule_type and rule_text and confidence >= 0.65:
+            conn.execute("""INSERT OR IGNORE INTO self_rules
+                (rule_type, rule_text, confidence, source, created_at)
+                VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                (rule_type.lower(), rule_text, confidence, "groq_trade_analysis"))
+            logging.info(f"[Learning] Groq создал правило [{rule_type}]: {rule_text[:60]}")
+
+        conn.commit()
+        conn.close()
+        logging.info(f"[Learning] Groq проанализировал сделку #{signal_id} {symbol}: {reason[:80]}")
+
+    except Exception as e:
+        logging.error(f"analyze_closed_trade: {e}")
+
+
+def groq_build_strategy():
+    """
+    Groq смотрит на все паттерны за последние 30 дней и формулирует
+    оптимальную стратегию — лучшие условия входа, монеты, время, фильтры.
+    Вызывается раз в день из brain_builder.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+
+        # Собираем данные
+        rows = conn.execute("""
+            SELECT symbol, direction, timeframe, regime, confluence, grade,
+                   result, rr_achieved, hours_open
+            FROM signal_log
+            WHERE result != 'PENDING'
+            ORDER BY id DESC LIMIT 200
+        """).fetchall()
+
+        if len(rows) < 10:
+            conn.close(); return "Мало данных для стратегии"
+
+        # Статистика
+        wins = [r for r in rows if r[6].startswith("tp")]
+        losses = [r for r in rows if r[6] == "sl"]
+        total = len(rows)
+        wr = len(wins) / total * 100
+
+        # Лучшие условия
+        from collections import defaultdict
+        tf_stats = defaultdict(lambda: {"w": 0, "t": 0})
+        grade_stats = defaultdict(lambda: {"w": 0, "t": 0})
+        regime_stats = defaultdict(lambda: {"w": 0, "t": 0})
+        conf_bins = defaultdict(lambda: {"w": 0, "t": 0})
+
+        for r in rows:
+            tf_stats[r[2]]["t"] += 1
+            grade_stats[r[5]]["t"] += 1
+            regime_stats[r[3]]["t"] += 1
+            cb = f"{(r[4]//10)*10}-{(r[4]//10)*10+10}"
+            conf_bins[cb]["t"] += 1
+            if r[6].startswith("tp"):
+                tf_stats[r[2]]["w"] += 1
+                grade_stats[r[5]]["w"] += 1
+                regime_stats[r[3]]["w"] += 1
+                conf_bins[cb]["w"] += 1
+
+        def wr_str(d):
+            return {k: f"{v['w']/v['t']*100:.0f}% ({v['t']} сд)" for k, v in d.items() if v["t"] >= 2}
+
+        summary = {
+            "total": total, "win_rate": f"{wr:.1f}%",
+            "by_timeframe": wr_str(tf_stats),
+            "by_grade": wr_str(grade_stats),
+            "by_regime": wr_str(regime_stats),
+            "by_confluence": wr_str(conf_bins)
+        }
+
+        # Последние правила которые сработали
+        rules = conn.execute("""
+            SELECT rule_type, rule_text, confidence FROM self_rules
+            WHERE confidence > 0.6 ORDER BY created_at DESC LIMIT 10
+        """).fetchall()
+        rules_text = "\n".join([f"- [{r[0]}] {r[1]} (conf:{r[2]:.2f})" for r in rules])
+
+        prompt = f"""Ты — главный стратег торгового бота APEX. 
+На основе реальной статистики за последние 30 дней сформулируй оптимальную стратегию.
+
+СТАТИСТИКА:
+{json.dumps(summary, ensure_ascii=False, indent=2)}
+
+АКТИВНЫЕ ПРАВИЛА:
+{rules_text or "нет"}
+
+Сформулируй:
+1. ЛУЧШИЕ УСЛОВИЯ ВХОДА (таймфрейм, грейд, confluence, режим рынка)
+2. ЧТО ИЗБЕГАТЬ (где больше всего потерь)  
+3. ВРЕМЕННЫЕ ОКНА (когда лучше торговать)
+4. ПРИОРИТЕТ МОНЕТ (если видишь паттерн)
+5. СЛЕДУЮЩИЙ ШАГ (что нужно улучшить боту)
+
+Отвечай кратко, конкретно, на русском. Максимум 300 слов."""
+
+        strategy = _groq_call(prompt, max_tokens=600)
+        if not strategy:
+            conn.close(); return ""
+
+        # Сохраняем стратегию
+        conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
+            VALUES (?,?,?,?)""",
+            ("strategy", "📊 Стратегия APEX (обновлено)", strategy, "groq_strategy"))
+
+        # Также в knowledge
+        try:
+            conn.execute("""INSERT OR REPLACE INTO knowledge (topic, summary, source, created_at)
+                VALUES (?,?,?,CURRENT_TIMESTAMP)""",
+                ("apex_strategy", strategy, "groq_strategy"))
+        except Exception:
+            pass
+
+        conn.commit()
+        conn.close()
+        logging.info("[Learning] Groq обновил стратегию")
+        return strategy
+
+    except Exception as e:
+        logging.error(f"groq_build_strategy: {e}")
+        return ""
+
+
+def get_current_strategy() -> str:
+    """Возвращает последнюю сформулированную стратегию для показа в боте"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("""
+            SELECT description, created_at FROM brain_log
+            WHERE event_type='strategy' ORDER BY id DESC LIMIT 1
+        """).fetchone()
+        conn.close()
+        if row:
+            return f"📊 <b>Стратегия APEX</b> (обновлено: {row[1][:16]})\n\n{row[0]}"
+        return "Стратегия ещё не сформирована — запусти анализ"
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
+def groq_self_diagnosis():
+    """
+    Groq анализирует свои ОШИБКИ — смотрит на потери и объясняет
+    что именно он не учёл: объёмы, новости, китов, структуру.
+    Это самый глубокий уровень самообучения.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+
+        # Последние потери
+        losses = conn.execute("""
+            SELECT symbol, direction, grade, confluence, regime, timeframe,
+                   entry, sl, rr_achieved, hours_open, created_at
+            FROM signal_log
+            WHERE result='sl'
+            ORDER BY id DESC LIMIT 15
+        """).fetchall()
+
+        if len(losses) < 3:
+            conn.close(); return ""
+
+        # Предыдущие диагнозы
+        prev_diag = conn.execute("""
+            SELECT description FROM brain_log
+            WHERE event_type='self_diagnosis'
+            ORDER BY id DESC LIMIT 2
+        """).fetchall()
+        prev_text = "\n".join([r[0][:200] for r in prev_diag]) if prev_diag else "нет"
+
+        losses_text = "\n".join([
+            f"- {r[0]} {r[1]} {r[2]} conf:{r[3]} {r[4]} {r[5]} rr:{r[8]} hours:{r[9]}"
+            for r in losses
+        ])
+
+        # Активные правила которые НЕ спасли
+        rules = conn.execute("""
+            SELECT rule_type, rule_text FROM self_rules
+            WHERE rule_type IN ('avoid','market') ORDER BY created_at DESC LIMIT 5
+        """).fetchall()
+        rules_text = "\n".join([f"- [{r[0]}] {r[1]}" for r in rules]) if rules else "нет"
+
+        prompt = f"""Ты — APEX, торговый бот с самосознанием. Проведи честный самоанализ своих ошибок.
+
+МОИ ПОСЛЕДНИЕ ПОТЕРИ:
+{losses_text}
+
+МОИ ТЕКУЩИЕ ПРАВИЛА (которые должны были защитить):
+{rules_text}
+
+ПРЕДЫДУЩИЕ ДИАГНОЗЫ:
+{prev_text}
+
+Проведи глубокий самоанализ:
+1. СИСТЕМНАЯ ОШИБКА: какой паттерн я повторяю в потерях?
+2. ЧТО Я ИГНОРИРУЮ: объёмы китов? новости? время суток? ликвидность?
+3. РАЗРЫВ МЕЖДУ ТЕОРИЕЙ И ПРАКТИКОЙ: почему мои правила не работают?
+4. НОВЫЕ ПРАВИЛА: 2-3 конкретных правила которые я должен добавить
+5. САМООЦЕНКА: насколько мои прогнозы отражают реальность рынка?
+
+Будь честным и конкретным. Не оправдывайся. Максимум 250 слов. На русском."""
+
+        diagnosis = _groq_call(prompt, max_tokens=500)
+        if not diagnosis:
+            conn.close(); return ""
+
+        conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
+            VALUES (?,?,?,?)""",
+            ("self_diagnosis", "🔬 Самодиагностика ошибок", diagnosis, "groq_diagnosis"))
+        conn.commit()
+        conn.close()
+
+        logging.info("[Learning] Groq провёл самодиагностику")
+        return diagnosis
+
+    except Exception as e:
+        logging.error(f"groq_self_diagnosis: {e}")
+        return ""
+
+
+def get_groq_trade_insight(symbol: str, direction: str, grade: str,
+                            confluence: int, regime: str, tf: str) -> str:
+    """
+    Быстрый Groq-инсайт для нового сигнала — 1-2 предложения.
+    Вызывается в full_scan перед отправкой сигнала.
+    """
+    try:
+        # Контекст из истории по этой монете
+        conn = sqlite3.connect(DB_PATH)
+        hist = conn.execute("""
+            SELECT result, confluence, regime FROM signal_log
+            WHERE symbol=? AND result!='PENDING'
+            ORDER BY id DESC LIMIT 5
+        """, (symbol,)).fetchall()
+        conn.close()
+
+        hist_text = ", ".join([f"{r[0]}(conf:{r[1]})" for r in hist]) if hist else "нет истории"
+
+        # Текущая стратегия
+        strategy_row = None
+        try:
+            conn2 = sqlite3.connect(DB_PATH)
+            strategy_row = conn2.execute(
+                "SELECT description FROM brain_log WHERE event_type='strategy' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            conn2.close()
+        except Exception:
+            pass
+        strategy_hint = strategy_row[0][:150] if strategy_row else ""
+
+        prompt = f"""APEX сигнал: {symbol} {direction} {grade} | confluence:{confluence} | {regime} | {tf}
+История монеты: {hist_text}
+Стратегия: {strategy_hint}
+
+Дай 1-2 предложения: почему эта сделка интересна или что настораживает. Кратко, конкретно. Без лишних слов."""
+
+        return _groq_call(prompt, max_tokens=120) or ""
+
+    except Exception as e:
+        logging.debug(f"get_groq_trade_insight: {e}")
+        return ""
+
+
+def groq_whale_context(symbol: str, volume_spike: float, direction: str) -> str:
+    """
+    Groq интерпретирует аномальный объём — это кит накапливает или сбрасывает?
+    volume_spike = во сколько раз объём превышает среднее (например 3.5)
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Есть ли у нас история с этой монетой при похожих объёмах?
+        hist = conn.execute("""
+            SELECT result FROM signal_log
+            WHERE symbol=? AND result!='PENDING'
+            ORDER BY id DESC LIMIT 10
+        """, (symbol,)).fetchall()
+        conn.close()
+
+        wr_hist = ""
+        if hist:
+            w = sum(1 for r in hist if r[0].startswith("tp"))
+            wr_hist = f"история: {w}/{len(hist)} wins"
+
+        prompt = f"""Монета: {symbol} | Направление сигнала: {direction}
+Аномальный объём: в {volume_spike:.1f}x раз выше среднего
+{wr_hist}
+
+Это кит накапливает позицию или сбрасывает? Дай 1 предложение — интерпретация объёма."""
+
+        return _groq_call(prompt, max_tokens=80) or ""
+
+    except Exception as e:
+        logging.debug(f"groq_whale_context: {e}")
+        return ""
+
+
+def groq_news_impact(symbol: str, news_headlines: list) -> str:
+    """
+    Groq оценивает влияние последних новостей на торговый сигнал.
+    news_headlines — список заголовков (до 5 штук)
+    """
+    try:
+        if not news_headlines:
+            return ""
+
+        headlines_text = "\n".join([f"- {h}" for h in news_headlines[:5]])
+
+        prompt = f"""Монета: {symbol}
+Последние новости:
+{headlines_text}
+
+Как эти новости влияют на краткосрочное движение цены? 
+Оцени: BULLISH / BEARISH / NEUTRAL и объясни в 1 предложении."""
+
+        return _groq_call(prompt, max_tokens=100) or ""
+
+    except Exception as e:
+        logging.debug(f"groq_news_impact: {e}")
+        return ""
+
+
+def get_latest_diagnosis() -> str:
+    """Возвращает последнюю самодиагностику для показа в боте"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("""
+            SELECT description, created_at FROM brain_log
+            WHERE event_type='self_diagnosis' ORDER BY id DESC LIMIT 1
+        """).fetchone()
+        conn.close()
+        if row:
+            return f"🔬 <b>Самодиагностика APEX</b> (обновлено: {row[1][:16]})\n\n{row[0]}"
+        return "Самодиагностика ещё не запускалась"
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
+def get_latest_trade_analysis(limit: int = 5) -> str:
+    """Возвращает последние Groq-анализы сделок"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("""
+            SELECT title, description, created_at FROM brain_log
+            WHERE event_type='trade_analysis'
+            ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        conn.close()
+        if not rows:
+            return "Анализов сделок пока нет"
+        text = "📋 <b>Анализ последних сделок</b>\n\n"
+        for r in rows:
+            text += f"<b>{r[0]}</b> ({r[2][:10]})\n{r[1][:200]}\n\n"
+        return text.strip()
+    except Exception as e:
+        return f"Ошибка: {e}"
