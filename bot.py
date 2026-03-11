@@ -3086,21 +3086,39 @@ def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg
 
 # ===== AI BRAIN =====
 
+# Трекер суточного расхода токенов
+_groq_tokens_used = 0
+_groq_tokens_reset_ts = 0
+_GROQ_DAILY_LIMIT = 480_000  # Оставляем 20k буфер от 500k
+
+def _track_tokens(count: int):
+    global _groq_tokens_used, _groq_tokens_reset_ts
+    now = time.time()
+    # Сбрасываем счётчик каждые 24ч
+    if now - _groq_tokens_reset_ts > 86400:
+        _groq_tokens_used = 0
+        _groq_tokens_reset_ts = now
+    _groq_tokens_used += count
+
+def _tokens_available() -> bool:
+    return _groq_tokens_used < _GROQ_DAILY_LIMIT
+
 def ask_groq(prompt, max_tokens=800):
     """
     Умный запрос к Groq:
+    - Трекинг суточного лимита токенов
     - Retry при rate limit (до 3 попыток)
-    - Fallback на более лёгкую модель
+    - Fallback на модели с отдельными лимитами
     - Сокращает промпт если он слишком большой
     """
     # Сокращаем промпт если больше 6000 символов — экономим токены
     if len(prompt) > 6000:
-        prompt = prompt[:6000] + "\n[промпт сокращён]"
+        prompt = prompt[:5000] + "\n[промпт сокращён для экономии токенов]"
 
     models = [
-        "llama-3.1-8b-instant",       # основная — 500k TPD/день, не исчерпывается
-        "llama-3.3-70b-versatile",    # fallback — умнее но только 100k TPD
-        "mixtral-8x7b-32768",         # резерв
+        "llama-3.1-8b-instant",       # основная — 500k TPD/день
+        "llama-3.1-70b-specdec",      # fallback — 100k TPD но быстрее 70b-versatile
+        "gemma2-9b-it",               # резерв — отдельный лимит
     ]
 
     for attempt in range(3):
@@ -3112,11 +3130,12 @@ def ask_groq(prompt, max_tokens=800):
                 max_tokens=max_tokens,
                 timeout=30,
             )
+            _track_tokens(len(prompt) // 4 + max_tokens)  # приблизительный подсчёт
             return r.choices[0].message.content
         except Exception as e:
             err_str = str(e).lower()
             if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
-                wait = 10 * (attempt + 1)  # 10, 20, 30 сек
+                wait = 15 * (attempt + 1)  # 15, 30, 45 сек
                 logging.warning(f"Groq rate limit (попытка {attempt+1}), жду {wait}с...")
                 time.sleep(wait)
                 continue
@@ -6648,13 +6667,13 @@ async def on_startup(app):
             import asyncio as _a
             await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
     scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
-    # Brain Builder — каждый час быстрый цикл, раз в сутки полный
-    scheduler.add_job(run_brain_builder_async, "interval", hours=1)
+    # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
+    scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
     scheduler.start()
     setup_error_capture()
     # Первый цикл обучения — через 60 сек после старта
-    asyncio.get_running_loop().call_later(60, lambda: asyncio.create_task(run_brain_builder_async()))
+    asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))  # 5 мин после старта
     logging.info("APEX запущен!")
 
 
@@ -6670,9 +6689,12 @@ def main():
         app = web.Application()
 
         async def health(request):
-            return web.Response(text="APEX OK")
+            # Включаем статистику токенов в health endpoint
+            token_pct = round(_groq_tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT > 0 else 0
+            return web.Response(text=f"APEX OK | tokens: {_groq_tokens_used}/{_GROQ_DAILY_LIMIT} ({token_pct}%)")
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
+        app.router.add_head("/", health)  # Render шлёт HEAD запросы
 
         async def handle_webhook(request):
             try:
@@ -6684,7 +6706,16 @@ def main():
                 logging.error(f"Webhook error: {e}")
             return web.Response(text="OK")
 
+        async def token_stats(request):
+            token_pct = round(_groq_tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT > 0 else 0
+            return web.json_response({
+                "tokens_used": _groq_tokens_used,
+                "tokens_limit": _GROQ_DAILY_LIMIT,
+                "percent": token_pct,
+                "available": _tokens_available()
+            })
         app.router.add_post("/webhook", handle_webhook)
+        app.router.add_get("/tokens", token_stats)
         app.on_startup.append(on_startup)
         app.on_shutdown.append(on_shutdown)
 
