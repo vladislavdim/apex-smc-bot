@@ -1660,7 +1660,65 @@ def analyze_trade_type(symbol, trade_type="swing"):
         return None
 
 
-def full_scan(symbol, timeframe="1h"):
+def scan_for_trade_type(trade_type="swing", limit=30):
+    """
+    Быстрый скан топ-30 монет и возвращает только те где ЕСТЬ сигнал.
+    Используется когда юзер нажимает Скальп/Свинг/Долгосрок.
+    Возвращает список dict: {symbol, direction, grade, entry, sl, tp1}
+    """
+    try:
+        pairs = get_top_pairs(limit)
+        found = []
+
+        # Определяем главный ТФ для каждой категории
+        main_tfs = {"scalp": "15m", "swing": "1h", "long": "1d"}
+        main_tf = main_tfs.get(trade_type, "1h")
+        tfs = TF_CATEGORIES.get(trade_type, ["1h"])
+
+        for symbol in pairs:
+            try:
+                results = {}
+                for tf in tfs[:2]:  # Берём 2 ТФ для скорости
+                    d = smc_on_tf(symbol, tf)
+                    results[tf] = d
+
+                bullish = [tf for tf, d in results.items() if d == "BULLISH"]
+                bearish = [tf for tf, d in results.items() if d == "BEARISH"]
+
+                if not bullish and not bearish:
+                    continue
+                if len(bullish) == len(bearish):
+                    continue
+
+                direction = "BULLISH" if len(bullish) > len(bearish) else "BEARISH"
+                match_count = max(len(bullish), len(bearish))
+                total = min(len(tfs), 2)
+
+                if match_count == total and total >= 2:
+                    grade = "🔥🔥 ТОП"
+                elif match_count >= 1:
+                    grade = "✅ ЕСТЬ"
+                else:
+                    continue
+
+                found.append({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "grade": grade,
+                    "trade_type": trade_type,
+                })
+            except:
+                continue
+
+        # Сортируем: ТОП сначала
+        found.sort(key=lambda x: 0 if "ТОП" in x["grade"] else 1)
+        return found[:15]
+
+    except Exception as e:
+        logging.error(f"scan_for_trade_type {trade_type}: {e}")
+        return []
+
+
     """Полный SMC анализ с мультитаймфреймом + все новые фильтры"""
     try:
         # ── 0. Рыночный режим — в боковике сигналов нет ──
@@ -4262,12 +4320,16 @@ def ask_ai(user_id, user_name, user_message):
 {history_text}
 
 ПРАВИЛА:
-- Цены ВСЕГДА берёшь из блока "ЖИВЫЕ ЦЕНЫ" выше — они актуальны прямо сейчас
-- Если спрашивают про монету которой нет в блоке — честно скажи что нет данных
-- Никогда не придумывай цены из памяти
-- Говори дерзко, кратко, по делу — как опытный трейдер разговаривает с другом
-- Если спрашивают про сделки — используй данные из "МОЯ КАРТИНА МИРА"
-- Если нет конкретных данных — скажи честно что рынок неясен, не выдумывай
+- ПЕРВОЕ И ГЛАВНОЕ: ВСЕГДА отвечай именно на то что спросили. Не уходи в сторону, не давай общие рассуждения вместо конкретного ответа
+- Цены ВСЕГДА берёшь из блока "ЖИВЫЕ ЦЕНЫ" — они актуальны прямо сейчас
+- Если спрашивают про монету которой нет в блоке — честно скажи что нет данных, не придумывай
+- Говори как опытный трейдер другу: кратко, конкретно, с чувством юмора если уместно
+- Если спросили "что думаешь о BTC?" — дай своё мнение с обоснованием, не просто "смотри график"
+- Если спросили про вход/выход — дай конкретные уровни или честно скажи что сетапа нет
+- Если спрашивают про сделки/сигналы — используй данные из "МОЯ КАРТИНА МИРА"
+- Если нет данных — скажи честно, не выдумывай цифры
+- Пиши без лишней воды: 3-5 предложений максимум если не просят развёрнуто
+- Не начинай каждый ответ с "Привет" или "Конечно" — сразу по делу
 
 {user_name}: {user_message}
 APEX:"""
@@ -4285,8 +4347,6 @@ def main_menu():
          InlineKeyboardButton(text="🔄 Свинг", callback_data="menu_trade_swing"),
          InlineKeyboardButton(text="📈 Долгосрок", callback_data="menu_trade_long")],
         [InlineKeyboardButton(text="⏱ Выбрать таймфрейм", callback_data="menu_tf"),
-         InlineKeyboardButton(text="🔬 Бектест", callback_data="menu_backtest")],
-        [InlineKeyboardButton(text="💰 Риск калькулятор", callback_data="menu_risk"),
          InlineKeyboardButton(text="📓 Дневник сделок", callback_data="menu_journal")],
         [InlineKeyboardButton(text="🔔 Алерты", callback_data="menu_alerts"),
          InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats")],
@@ -5323,48 +5383,162 @@ async def handle_callback(callback: CallbackQuery):
             ])
         )
 
-    elif data.startswith("menu_trade_"):
+    elif data.startswith("menu_trade_") and not data.startswith("menu_trade_refresh_"):
         trade_type = data.replace("menu_trade_", "")
         type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
-        tfs = TF_CATEGORIES.get(trade_type, [])
+        type_desc   = {
+            "scalp": "15м–1ч | вход/выход быстро",
+            "swing": "1ч–4ч  | несколько часов",
+            "long":  "1д–1нед | дни и недели",
+        }
         label = type_labels.get(trade_type, trade_type)
-        # Показываем клавиатуру выбора монеты
-        try:
+        desc  = type_desc.get(trade_type, "")
+
+        await callback.message.edit_text(
+            f"{label}\n<i>{desc}</i>\n\n⏳ Сканирую рынок, ищу активные сетапы...",
+            parse_mode="HTML"
+        )
+
+        signals = await asyncio.get_running_loop().run_in_executor(
+            None, scan_for_trade_type, trade_type, 30
+        )
+
+        if not signals:
             await callback.message.edit_text(
-                f"{label} — выбери монету:\n"
-                f"Таймфреймы: {', '.join([TF_LABELS.get(t,t) for t in tfs])}\n\n"
-                f"Или напиши: /trade BTC {trade_type}",
-                reply_markup=pairs_keyboard(f"trade_{trade_type}", 0)
+                f"{label}\n\n😴 Сейчас нет чётких сигналов.\n"
+                f"Рынок в боковике или сетапы ещё не сформированы.\n\n"
+                f"<i>Обычно сигналы появляются после важных уровней или новостей</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}")],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
+                ])
             )
-        except:
-            await callback.message.answer(
-                f"{label} — выбери монету:",
-                reply_markup=pairs_keyboard(f"trade_{trade_type}", 0)
+            return
+
+        # Показываем список монет где есть сигнал
+        top = [s for s in signals if "ТОП" in s["grade"]]
+        ok  = [s for s in signals if "ЕСТЬ" in s["grade"]]
+
+        lines = [f"{label} — найдено сигналов: <b>{len(signals)}</b>", ""]
+        if top:
+            lines.append("🔥 <b>Сильные сетапы:</b>")
+            for s in top[:5]:
+                emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+                lines.append(f"  {emoji} {s['symbol'].replace('USDT','')} — {s['direction']}")
+        if ok:
+            lines.append("\n✅ <b>Есть сигнал:</b>")
+            for s in ok[:8]:
+                emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+                lines.append(f"  {emoji} {s['symbol'].replace('USDT','')}")
+
+        lines.append("\n<i>Выбери монету для полного анализа 👇</i>")
+
+        # Кнопки — только монеты с сигналами
+        buttons = []
+        row = []
+        for s in signals[:12]:
+            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+            grade_icon = "🔥" if "ТОП" in s["grade"] else ""
+            btn_text = f"{grade_icon}{emoji} {s['symbol'].replace('USDT','')}"
+            row.append(InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"trade_{trade_type}_{s['symbol']}"
+            ))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}"),
+            InlineKeyboardButton(text="🔙 Назад",    callback_data="menu_back"),
+        ])
+
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+
+    elif data.startswith("menu_trade_refresh_"):
+        trade_type = data.replace("menu_trade_refresh_", "")
+        # Переотправляем как обычный menu_trade_ запрос
+        await callback.message.edit_text("🔄 Обновляю...", parse_mode="HTML")
+        signals = await asyncio.get_running_loop().run_in_executor(
+            None, scan_for_trade_type, trade_type, 30
+        )
+        type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
+        label = type_labels.get(trade_type, trade_type)
+
+        if not signals:
+            await callback.message.edit_text(
+                f"{label}\n\n😴 Сигналов нет — рынок в боковике.\n<i>Попробуй позже</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}")],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
+                ])
             )
+            return
+
+        buttons = []
+        row = []
+        for s in signals[:12]:
+            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+            grade_icon = "🔥" if "ТОП" in s["grade"] else ""
+            btn_text = f"{grade_icon}{emoji} {s['symbol'].replace('USDT','')}"
+            row.append(InlineKeyboardButton(text=btn_text, callback_data=f"trade_{trade_type}_{s['symbol']}"))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"menu_trade_refresh_{trade_type}"),
+            InlineKeyboardButton(text="🔙 Назад",    callback_data="menu_back"),
+        ])
+        await callback.message.edit_text(
+            f"{label} — найдено: <b>{len(signals)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
 
     elif data.startswith("trade_scalp_") or data.startswith("trade_swing_") or data.startswith("trade_long_"):
         parts = data.split("_", 2)
         trade_type = parts[1]
         symbol = parts[2]
         type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
-        await callback.message.edit_text(f"🔍 Анализирую {symbol} [{type_labels.get(trade_type, trade_type)}]...")
+        await callback.message.edit_text(f"🔍 Полный анализ {symbol} [{type_labels.get(trade_type, trade_type)}]...")
         result = await asyncio.get_running_loop().run_in_executor(
             None, analyze_trade_type, symbol, trade_type
         )
         if result:
+            # Добавляем риск-менеджмент если есть депозит
+            mem = get_user_memory(user_id)
+            risk_block = ""
+            if mem["deposit"] > 0:
+                rc = calc_risk(mem["deposit"], mem["risk"], result["entry"], result["sl"])
+                if rc:
+                    risk_block = (
+                        f"\n💰 <b>Риск-менеджмент:</b>\n"
+                        f"Размер позиции: <b>{rc['position_size']:.2f}</b> USDT\n"
+                        f"Риск в $: <b>${rc['risk_amount']:.2f}</b> ({mem['risk']}%)\n"
+                    )
             await callback.message.edit_text(
-                result["text"],
+                result["text"] + risk_block,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 К монетам", callback_data=f"menu_trade_{trade_type}")]
+                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],
+                    [InlineKeyboardButton(text="🔙 К сигналам", callback_data=f"menu_trade_{trade_type}")],
                 ])
             )
         else:
             await callback.message.edit_text(
-                f"😴 {symbol} — нет сигнала для {trade_type}.\nПопробуй другую монету или тип сделки.",
+                f"😴 {symbol} — нет сигнала для {type_labels.get(trade_type, trade_type)}.\n"
+                f"Попробуй другую монету.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Повторить", callback_data=data),
-                     InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu_trade_{trade_type}")]
+                    [InlineKeyboardButton(text="🔙 К сигналам", callback_data=f"menu_trade_{trade_type}")]
                 ])
             )
 
