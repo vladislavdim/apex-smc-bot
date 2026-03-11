@@ -4287,41 +4287,70 @@ def ask_ai(user_id, user_name, user_message):
     is_deal_q  = any(w in q for w in ["сделк", "сигнал", "вход", "выход", "лонг", "шорт", "купить", "продать", "tp", "стоп"])
     is_price_q = any(w in q for w in ["цена", "курс", "сколько стоит", "почём", "стоимость"])
 
+    # ── Триггер анализа конкретной монеты ──
+    # "разбор btc", "анализ ton", "посмотри на sol", "что по eth"
+    analysis_triggers = [
+        "разбор", "анализ", "посмотри", "проверь", "что по", "что с",
+        "дай разбор", "дай анализ", "сигнал по", "вход по", "смотри",
+        "analyse", "analyze", "check", "scan"
+    ]
+    found_symbol = None
+    if any(t in q for t in analysis_triggers) or is_deal_q:
+        # Ищем упоминание монеты в сообщении
+        for alias, sym in SYMBOL_ALIASES.items():
+            if alias in q:
+                found_symbol = sym
+                break
+        # Если нашли монету — запускаем full_scan вместо болтовни
+        if found_symbol:
+            try:
+                scan_result = full_scan(found_symbol)
+                if scan_result:
+                    return scan_result
+                else:
+                    # Нет сигнала — объясняем почему
+                    price_data = prices.get(found_symbol)
+                    price_str = f"${price_data['price']:,.4f}" if price_data else "нет данных"
+                    return (
+                        f"📊 <b>{found_symbol}</b> | {price_str}\n\n"
+                        f"😴 Чёткого SMC сетапа нет прямо сейчас.\n"
+                        f"Таймфреймы конфликтуют или рынок в боковике.\n\n"
+                        f"<i>Попробуй через 15-30 мин — рынок меняется.</i>"
+                    )
+            except Exception as e:
+                logging.error(f"ask_ai full_scan {found_symbol}: {e}")
+
     # Считаем реальное количество монет в ценах
     prices_count = len(prices) if prices else 0
 
-    prompt = f"""Ты APEX — AI трейдер с доступом к живым данным. Дата: {now}
+    prompt = f"""Ты APEX — торговый бот. Отвечаешь ТОЛЬКО по делу. Дата: {now}
 
-ВАЖНО О МОИХ ВОЗМОЖНОСТЯХ:
-- Цены в реальном времени: {prices_count} монет (CoinGecko + CoinPaprika + CryptoCompare)
-- Свечи/графики: CryptoCompare API (любая монета из топ-200, все таймфреймы 1m–1d)
-- SMC анализ: Order Block, FVG, структура свингов, мультитаймфрейм 15m/1h/4h
-- Если монеты нет в блоке ЖИВЫЕ ЦЕНЫ — честно скажи что нет данных по ней
+ДАННЫЕ:
+- Цен в базе: {prices_count} монет
+- SMC анализ по любой монете доступен через кнопки меню
 
 {user_context}
 
 {live_prices_text}
 
 {f"РЕСЁРЧ:{chr(10)}{research_result}" if research_result else ""}
-{f"НОВОСТИ:{chr(10)}{recent_news[:400]}" if recent_news and not research_result else ""}
-{f"ЗНАНИЯ:{chr(10)}{knowledge[:300]}" if knowledge else ""}
-{f"ФУНДАМЕНТАЛ (Messari):{chr(10)}{messari_context}" if messari_context else ""}
-{f"МОЯ КАРТИНА МИРА (накопленный опыт):{chr(10)}{worldview[:600]}" if worldview else f"МОЙ ОПЫТ:{chr(10)}{brain_context[:400]}" if brain_context else ""}
+{f"НОВОСТИ:{chr(10)}{recent_news[:300]}" if recent_news and not research_result else ""}
+{f"ЗНАНИЯ:{chr(10)}{knowledge[:200]}" if knowledge else ""}
+{f"ФУНДАМЕНТАЛ:{chr(10)}{messari_context}" if messari_context else ""}
+{f"ОПЫТ:{chr(10)}{worldview[:400]}" if worldview else f"ОПЫТ:{chr(10)}{brain_context[:300]}" if brain_context else ""}
 
-ИСТОРИЯ:
-{history_text}
+ИСТОРИЯ (последние):
+{history_text[-800:] if history_text else "—"}
 
-ЗАДАЧА: {"Дай список монет из блока ЖИВЫЕ ЦЕНЫ — сколько их и какие" if is_list_q else "Дай конкретный сигнал/уровни" if is_deal_q else "Дай цену из блока ЖИВЫЕ ЦЕНЫ" if is_price_q else "Ответь точно на вопрос"}
-
-ЖЁСТКИЕ ПРАВИЛА:
-1. Отвечай ТОЛЬКО на то что спросили — не меняй тему
-2. Если спросили "какие монеты мониторишь" — дай список из ЖИВЫЕ ЦЕНЫ, без сигналов
-3. Если спросили про конкретную монету — говори только про неё
-4. Цены ТОЛЬКО из блока ЖИВЫЕ ЦЕНЫ — никогда не выдумывай
-5. Не давай сигналы если не просили — это разные вещи
-6. Пиши кратко: 2-4 предложения если не просят подробно
-7. Не начинай с "Привет", "Конечно", "Отличный вопрос" — сразу по делу
-8. Если нет данных — скажи "нет данных", не выдумывай
+ПРАВИЛА — СТРОГО:
+1. Отвечай ТОЛЬКО на заданный вопрос — 2-4 предложения максимум
+2. Если спросили цену — дай цену из ЖИВЫЕ ЦЕНЫ, ничего лишнего
+3. Если спросили список монет — дай список из ЖИВЫЕ ЦЕНЫ
+4. НЕ давай сигналы если не просили
+5. НЕ спрашивай "что ты хочешь" — отвечай на то что спросили
+6. НЕ начинай с "Привет", "Конечно", "Отличный" — сразу ответ
+7. НЕ придумывай цены — только из блока ЖИВЫЕ ЦЕНЫ
+8. Стиль: короткий, конкретный, как опытный трейдер другу
 
 {user_name}: {user_message}
 APEX:"""
@@ -4846,33 +4875,68 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data.startswith("tf_"):
         tf = data.replace("tf_", "")
-        await callback.message.edit_text(f"🔍 Сканирую все монеты на {TF_LABELS.get(tf, tf)}...")
-        found = []
-        for symbol in PAIRS:
+        pairs = get_top_pairs(50)
+        await callback.message.edit_text(
+            f"🔍 Сканирую топ-50 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
+        )
+        signals = []
+        for symbol in pairs:
             try:
-                candles = get_candles(symbol, tf, 100)
-                if len(candles) < 20:
-                    continue
-                highs, lows = find_swings(candles)
-                classified = classify_swings(highs, lows)
-                events = detect_events(candles, classified)
-                if events:
-                    direction = events[0]["direction"]
-                    price = candles[-1]["close"]
-                    emoji = "🟢" if direction == "BULLISH" else "🔴"
-                    found.append(f"{emoji} {symbol.replace('USDT','')}: {direction} @ {price:.4f}")
-                await asyncio.sleep(0.5)
+                sig = await asyncio.get_running_loop().run_in_executor(
+                    None, full_scan_raw, symbol, tf
+                )
+                if sig:
+                    signals.append(sig)
+                await asyncio.sleep(0.1)
             except:
                 pass
 
-        if found:
-            text = f"⏱ <b>Сигналы на {TF_LABELS.get(tf, tf)}:</b>\n\n" + "\n".join(found)
-        else:
-            text = f"😴 На таймфрейме {TF_LABELS.get(tf, tf)} сигналов нет"
+        if not signals:
+            text = f"😴 На {TF_LABELS.get(tf, tf)} чётких сетапов нет.\nПопробуй другой таймфрейм."
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_tf")]
+            ]))
+            return
 
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_tf")]
-        ]))
+        # Сортируем: МЕГА ТОП первые
+        grade_order = {"МЕГА ТОП": 0, "ТОП СДЕЛКА": 1, "ХОРОШАЯ": 2}
+        signals.sort(key=lambda x: grade_order.get(x.get("grade", ""), 3))
+
+        # Отправляем первый сигнал в текущее сообщение
+        top = signals[0]
+        direction = top.get("direction", "")
+        emoji = "🟢" if direction == "BULLISH" else "🔴"
+
+        # Показываем краткую сводку всех + полный топ сигнал
+        summary_lines = []
+        for s in signals[:8]:
+            d = s.get("direction", "")
+            ic = "🟢" if d == "BULLISH" else "🔴"
+            grade_short = s.get("grade", "")
+            fire = "🔥🔥🔥" if grade_short == "МЕГА ТОП" else "🔥🔥" if grade_short == "ТОП СДЕЛКА" else "✅"
+            summary_lines.append(f"{fire} {ic} {s['symbol'].replace('USDT','')} — {d}")
+
+        summary = "\n".join(summary_lines)
+        header = (
+            f"⏱ <b>Скан {TF_LABELS.get(tf, tf)}</b> | найдено: {len(signals)}\n"
+            f"{'━'*22}\n\n"
+            f"{summary}\n\n"
+            f"{'━'*22}\n"
+            f"<b>Лучший сигнал:</b>\n\n"
+            + top["text"]
+        )
+
+        if len(header) > 4000:
+            header = header[:3990] + "..."
+
+        await callback.message.edit_text(
+            header,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_tf")]
+            ])
+        )
 
     elif data.startswith("scan_"):
         symbol = data.replace("scan_", "")
