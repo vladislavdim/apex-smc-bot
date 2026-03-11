@@ -119,6 +119,24 @@ except ImportError as e:
     _learn_whale_ctx = lambda *a: ""
     _learn_news_impact = lambda *a: ""
 
+# Web Learner — автономный поиск знаний
+try:
+    from web_learner import (
+        run_web_learning_cycle as _web_learn_cycle,
+        get_web_knowledge_summary as _web_knowledge_summary,
+        groq_decide_learning_agenda as _web_groq_agenda,
+        init_web_learner_db as _web_init_db,
+    )
+    _WEB_LEARNER_OK = True
+    logging.info("web_learner.py загружен успешно")
+except ImportError as e:
+    _WEB_LEARNER_OK = False
+    logging.warning(f"web_learner.py не найден: {e}")
+    _web_learn_cycle = lambda: []
+    _web_knowledge_summary = lambda: "WebLearner недоступен"
+    _web_groq_agenda = lambda: []
+    _web_init_db = lambda: None
+
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
@@ -186,7 +204,8 @@ def init_db():
         timeframe TEXT, estimated_hours INTEGER, grade TEXT,
         result TEXT DEFAULT 'pending',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        closed_at TEXT)""")
+        closed_at TEXT,
+        learning_id INTEGER DEFAULT NULL)""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS knowledge (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -317,6 +336,12 @@ def init_db():
         impact_score REAL DEFAULT 0.5,
         source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # Миграция: добавляем learning_id если ещё нет
+    try:
+        c.execute("ALTER TABLE signals ADD COLUMN learning_id INTEGER DEFAULT NULL")
+    except Exception:
+        pass  # Колонка уже существует
 
     conn.commit()
     conn.close()
@@ -2161,7 +2186,8 @@ def full_scan(symbol, timeframe="1h"):
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
         wr_str = f"{win_rate:.0f}% WR" if win_rate > 0 else "нет истории"
 
-        save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"])
+        save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
+                       confluence=total_weight, regime=regime.get("mode","UNKNOWN") if isinstance(regime, dict) else str(regime))
 
         # ── 6. AI комментарий к сигналу — с учётом правил самообучения ──
         brain_ctx = get_brain_context(symbol, direction)
@@ -2223,17 +2249,33 @@ def full_scan(symbol, timeframe="1h"):
         return None
 
 
-def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade):
+def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade, confluence=0, regime="UNKNOWN"):
+    """Сохраняем сигнал в обе таблицы: signals (трекинг) + signal_log (обучение)"""
+    learning_id = None
+    try:
+        # Сохраняем в learning.py signal_log для Groq-анализа
+        if _LEARNING_OK:
+            learning_id = _learn_save_signal(
+                symbol, direction, grade, entry, sl, tp1, tp2, tp3,
+                timeframe, confluence, regime, signal_type
+            )
+    except Exception as e:
+        logging.warning(f"save_signal learning: {e}")
+
     try:
         conn = sqlite3.connect("brain.db")
         conn.execute(
-            "INSERT INTO signals VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,'pending',CURRENT_TIMESTAMP,NULL)",
-            (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade)
+            "INSERT INTO signals VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,'pending',CURRENT_TIMESTAMP,NULL,?)",
+            (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade, learning_id)
         )
         conn.commit()
+        # Запоминаем learning_id рядом с signals id
+        sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.close()
+        return sig_id, learning_id
     except Exception as e:
         logging.error(f"Save signal error: {e}")
+        return None, learning_id
 
 # ===== САМООБУЧЕНИЕ =====
 
@@ -2303,11 +2345,26 @@ def check_pending_signals():
                     "UPDATE signals SET result=?, closed_at=CURRENT_TIMESTAMP WHERE id=?",
                     (result, sig_id)
                 )
+                # Сохраняем learning_id если есть
+                learning_id = conn2.execute(
+                    "SELECT learning_id FROM signals WHERE id=?", (sig_id,)
+                ).fetchone()
                 conn2.commit()
                 conn2.close()
 
                 is_win = result in ("tp1", "tp2", "tp3")
                 update_signal_learning(symbol, hours_elapsed, is_win, timeframe, result)
+
+                # Закрываем сигнал в learning.py — это запускает Groq анализ автоматически
+                if _LEARNING_OK:
+                    l_id = learning_id[0] if learning_id and learning_id[0] else None
+                    if l_id:
+                        # close_signal теперь сам вызывает analyze_closed_trade
+                        import threading
+                        threading.Thread(target=_learn_close_signal, args=(l_id, result, hit_tp or 0), daemon=True).start()
+                    else:
+                        # Нет learning_id — анализируем напрямую через поиск по символу
+                        threading.Thread(target=_learn_analyze_by_symbol, args=(symbol, direction, entry, result, hours_elapsed, timeframe), daemon=True).start()
 
                 # Рефлексия по КАЖДОМУ сигналу
                 asyncio.create_task(signal_reflection(
@@ -2326,12 +2383,6 @@ def check_pending_signals():
                         sig_id, symbol, direction, entry, sl, result, hours_elapsed, timeframe
                     ))
 
-                # Groq анализирует каждую закрытую сделку и создаёт правило
-                if _LEARNING_OK:
-                    asyncio.get_event_loop().run_in_executor(
-                        None, _learn_analyze_trade, sig_id
-                    )
-
                 closed.append({
                     "signal_id": sig_id,
                     "symbol": symbol,
@@ -2345,6 +2396,30 @@ def check_pending_signals():
     except Exception as e:
         logging.error(f"Check signals error: {e}")
         return []
+
+def _learn_analyze_by_symbol(symbol, direction, entry, result, hours, timeframe):
+    """Fallback: сохраняем в signal_log и анализируем если нет learning_id"""
+    try:
+        if not _LEARNING_OK:
+            return
+        # Ищем последний сигнал этой монеты в signal_log без результата
+        import sqlite3 as _sq
+        conn = _sq.connect("brain.db")
+        row = conn.execute(
+            "SELECT id FROM signal_log WHERE symbol=? AND result='PENDING' ORDER BY id DESC LIMIT 1",
+            (symbol,)
+        ).fetchone()
+        conn.close()
+        if row:
+            _learn_close_signal(row[0], result)
+        else:
+            # Создаём запись для анализа
+            l_id = _learn_save_signal(symbol, direction, "AUTO", entry, entry*0.98, entry*1.02, entry*1.03, entry*1.04, timeframe, 0, "UNKNOWN", "auto")
+            if l_id:
+                _learn_close_signal(l_id, result)
+    except Exception as e:
+        logging.warning(f"_learn_analyze_by_symbol: {e}")
+
 
 def update_signal_learning(symbol, hours_to_close, is_win, timeframe, result):
     try:
@@ -5702,7 +5777,8 @@ async def handle_callback(callback: CallbackQuery):
                  InlineKeyboardButton(text="📈 Стратегия", callback_data="brain_strategy")],
                 [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis"),
                  InlineKeyboardButton(text="📊 Анализ логов", callback_data="brain_logs")],
-                [InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
+                [InlineKeyboardButton(text="🌐 Веб-знания", callback_data="brain_web_knowledge"),
+                 InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
         )
@@ -5964,6 +6040,36 @@ async def handle_callback(callback: CallbackQuery):
                 [InlineKeyboardButton(text="\U0001f519 \u041d\u0430\u0437\u0430\u0434", callback_data="menu_brain")]
             ])
         )
+
+    elif data == "brain_web_knowledge":
+        await callback.message.edit_text("🌐 Загружаю веб-знания...")
+        try:
+            summary = _web_knowledge_summary()
+        except Exception as e:
+            summary = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            f"🌐 <b>Знания из интернета</b>\n\n{summary}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔍 Изучить сейчас", callback_data="brain_web_learn_now")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_web_learn_now":
+        await callback.message.edit_text("🔍 Groq составляет агенду и начинает поиск...")
+        try:
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, _web_learn_cycle)
+            text = f"✅ Изучено тем: {len(results)}\n"
+            for r in results[:3]:
+                text += f"\n• {r['topic']}: {str(r.get('result',{}).get('summary',''))[:100]}"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brain_web_knowledge")]
+            ]))
 
     elif data == "brain_diagnosis_run":
         await callback.message.edit_text("⏳ Groq проводит глубокий самоанализ ошибок...")
@@ -7035,7 +7141,8 @@ def full_scan_raw(symbol, timeframe="1h"):
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
         save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"])
-
+        save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
+                       confluence=total_weight, regime=regime.get("mode","UNKNOWN") if isinstance(regime, dict) else str(regime))
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
@@ -7481,6 +7588,8 @@ async def run_brain_builder_full_async():
 
 async def on_startup(app):
     init_db()
+    if _WEB_LEARNER_OK:
+        _web_init_db()
     await restore_db_from_github()
     threading.Thread(target=get_top_pairs, daemon=True).start()
 
@@ -7539,6 +7648,20 @@ async def on_startup(app):
     # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
     scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
+
+    # Web Learner — автономный поиск знаний каждые 4 часа
+    async def _run_web_learner():
+        if _WEB_LEARNER_OK:
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, _web_learn_cycle)
+            if results:
+                logging.info(f"[WebLearner] Изучено тем: {len(results)}")
+            await backup_db_to_github()
+    scheduler.add_job(_run_web_learner, "interval", hours=4, jitter=900)
+    # Первый запуск агенды через 5 минут после старта
+    scheduler.add_job(_run_web_learner, "date",
+        run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
+
     scheduler.start()
     setup_error_capture()
     # Первый цикл обучения — через 60 сек после старта
