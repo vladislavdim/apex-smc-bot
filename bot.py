@@ -245,6 +245,53 @@ def init_db():
         closed_at TEXT,
         learning_id INTEGER DEFAULT NULL)""")
 
+    # signal_log — детальный лог (используется learning.py и autopilot)
+    c.execute("""CREATE TABLE IF NOT EXISTS signal_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol      TEXT,
+        direction   TEXT,
+        grade       TEXT,
+        entry       REAL,
+        sl          REAL,
+        tp1         REAL,
+        tp2         REAL,
+        tp3         REAL,
+        timeframe   TEXT,
+        result      TEXT    DEFAULT 'PENDING',
+        hit_tp      INTEGER DEFAULT 0,
+        rr_achieved REAL    DEFAULT 0,
+        hours_open  REAL    DEFAULT 0,
+        confluence  INTEGER DEFAULT 0,
+        regime      TEXT,
+        source      TEXT,
+        notes       TEXT    DEFAULT '',
+        created_at  TEXT    DEFAULT CURRENT_TIMESTAMP,
+        closed_at   TEXT)""")
+
+    # observations — наблюдения бота о рынке
+    c.execute("""CREATE TABLE IF NOT EXISTS observations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol      TEXT,
+        observation TEXT,
+        context     TEXT,
+        created_at  TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # brain_log — лог всех событий мозга (autopilot, diagnoses, fixes)
+    c.execute("""CREATE TABLE IF NOT EXISTS brain_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type  TEXT,
+        title       TEXT,
+        description TEXT,
+        source      TEXT,
+        created_at  TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # alerts
+    c.execute("""CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, symbol TEXT, price REAL, direction TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        triggered INTEGER DEFAULT 0)""")
+
     c.execute("""CREATE TABLE IF NOT EXISTS knowledge (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         topic TEXT, content TEXT, source TEXT,
@@ -330,12 +377,25 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT,
         rule TEXT,
+        rule_type TEXT,
+        rule_text TEXT,
         confidence REAL DEFAULT 0.5,
         confirmed_by INTEGER DEFAULT 0,
         contradicted_by INTEGER DEFAULT 0,
         source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # Миграция — добавляем колонки если их нет (для существующих БД)
+    for col, typedef in [
+        ("rule_type", "TEXT"),
+        ("rule_text", "TEXT"),
+        ("source",    "TEXT"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE self_rules ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass
 
     # Наблюдения — что бот заметил о рынке
     c.execute("""CREATE TABLE IF NOT EXISTS observations (
@@ -7512,9 +7572,9 @@ def full_scan_raw(symbol, timeframe="1h"):
         wr_str = f"{win_rate:.0f}% WR" if win_rate > 0 else "нет истории"
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
-        save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"])
+        conf_score = len(confluence) * 15  # приблизительный score
         save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
-                       confluence=total_weight, regime=regime.get("mode","UNKNOWN") if isinstance(regime, dict) else str(regime))
+                       confluence=conf_score, regime="UNKNOWN")
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
