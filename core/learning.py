@@ -206,6 +206,38 @@ def init_learning():
         except Exception:
             pass  # колонка уже есть
 
+    # symbol_stats — статистика по монетам для web_learner
+    conn.execute("""CREATE TABLE IF NOT EXISTS symbol_stats (
+        symbol      TEXT PRIMARY KEY,
+        total       INTEGER DEFAULT 0,
+        wins        INTEGER DEFAULT 0,
+        losses      INTEGER DEFAULT 0,
+        win_rate    REAL    DEFAULT 0.0,
+        avg_rr      REAL    DEFAULT 0.0,
+        last_updated TEXT
+    )""")
+
+    # pattern_memory — паттерны рынка
+    conn.execute("""CREATE TABLE IF NOT EXISTS pattern_memory (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol      TEXT,
+        pattern     TEXT,
+        timeframe   TEXT,
+        result      TEXT,
+        confidence  REAL DEFAULT 0.5,
+        created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # knowledge_gaps — пробелы в знаниях
+    conn.execute("""CREATE TABLE IF NOT EXISTS knowledge_gaps (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        query      TEXT,
+        source     TEXT,
+        resolved   INTEGER DEFAULT 0,
+        answer     TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     conn.commit()
     conn.close()
 
