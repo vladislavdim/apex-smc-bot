@@ -201,7 +201,7 @@ except ImportError as e:
     _autopilot_status = lambda: "Автопилот недоступен"
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "491292600") or "491292600")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
