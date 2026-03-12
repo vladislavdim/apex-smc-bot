@@ -116,6 +116,96 @@ def init_learning():
         action_taken TEXT
     )""")
 
+    # self_rules — создаём здесь, потому что _seed_smc_knowledge() пишет в неё
+    # и вызывается ДО того как bot.py успевает запустить init_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS self_rules (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        category        TEXT,
+        rule            TEXT,
+        rule_type       TEXT,
+        rule_text       TEXT,
+        confidence      REAL    DEFAULT 0.5,
+        confirmed_by    INTEGER DEFAULT 0,
+        contradicted_by INTEGER DEFAULT 0,
+        source          TEXT,
+        created_at      TEXT    DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TEXT    DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # signals
+    conn.execute("""CREATE TABLE IF NOT EXISTS signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT, direction TEXT, signal_type TEXT,
+        entry REAL, tp1 REAL, tp2 REAL, tp3 REAL, sl REAL,
+        timeframe TEXT, estimated_hours INTEGER, grade TEXT,
+        result TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        closed_at TEXT, learning_id INTEGER DEFAULT NULL
+    )""")
+
+    # alerts
+    conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, symbol TEXT, price_level REAL, direction TEXT,
+        triggered INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # observations
+    conn.execute("""CREATE TABLE IF NOT EXISTS observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT, observation TEXT, context TEXT,
+        outcome TEXT, confirmed INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # brain_log
+    conn.execute("""CREATE TABLE IF NOT EXISTS brain_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT, title TEXT,
+        description TEXT, source TEXT, impact TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # web_knowledge
+    conn.execute("""CREATE TABLE IF NOT EXISTS web_knowledge (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT, query TEXT, summary TEXT,
+        source_url TEXT, relevance REAL DEFAULT 0.5,
+        applied INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # learning_agenda
+    conn.execute("""CREATE TABLE IF NOT EXISTS learning_agenda (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT UNIQUE, query TEXT,
+        priority INTEGER DEFAULT 5, reason TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        completed_at TEXT
+    )""")
+
+    # Миграции — добавляем колонки в старые таблицы
+    _col_migrations = [
+        ("self_rules",      "rule_type",   "TEXT"),
+        ("self_rules",      "rule_text",   "TEXT"),
+        ("self_rules",      "source",      "TEXT"),
+        ("brain_log",       "title",       "TEXT"),
+        ("brain_log",       "source",      "TEXT"),
+        ("brain_log",       "impact",      "TEXT"),
+        ("signals",         "learning_id", "INTEGER DEFAULT NULL"),
+        ("signal_log",      "confluence",  "INTEGER DEFAULT 0"),
+        ("signal_log",      "regime",      "TEXT"),
+        ("web_knowledge",   "query",       "TEXT"),
+        ("learning_agenda", "query",       "TEXT"),
+    ]
+    for tbl, col, typedef in _col_migrations:
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass  # колонка уже есть
+
     conn.commit()
     conn.close()
 
