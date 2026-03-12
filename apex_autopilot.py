@@ -79,7 +79,11 @@ def live_market_analysis() -> dict:
         """).fetchone()
 
         total, wins, losses, avg_conf = today_stats if today_stats else (0, 0, 0, 0)
-        wr = round((wins or 0) / (total or 1) * 100, 1)
+        total = total or 0
+        wins = wins or 0
+        losses = losses or 0
+        avg_conf = avg_conf or 0
+        wr = round(wins / (total or 1) * 100, 1)
 
         # Активные правила (топ по confidence)
         top_rules = conn.execute("""
