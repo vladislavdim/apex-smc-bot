@@ -415,14 +415,25 @@ def init_db():
 
     # Миграция — добавляем колонки если их нет (для существующих БД)
     for col, typedef in [
-        ("rule_type", "TEXT"),
-        ("rule_text", "TEXT"),
-        ("source",    "TEXT"),
+        ("rule_type",       "TEXT"),
+        ("rule_text",       "TEXT"),
+        ("source",          "TEXT"),
+        ("category",        "TEXT"),
+        ("rule",            "TEXT"),
+        ("confirmed_by",    "INTEGER DEFAULT 0"),
+        ("contradicted_by", "INTEGER DEFAULT 0"),
+        ("updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
     ]:
         try:
             c.execute(f"ALTER TABLE self_rules ADD COLUMN {col} {typedef}")
         except Exception:
             pass
+
+    # Миграция alerts — добавляем price_level если нет
+    try:
+        c.execute("ALTER TABLE alerts ADD COLUMN price_level REAL")
+    except Exception:
+        pass
 
     # Наблюдения — что бот заметил о рынке
     c.execute("""CREATE TABLE IF NOT EXISTS observations (
@@ -4188,24 +4199,43 @@ def self_diagnose_and_grow():
         conn2 = sqlite3.connect("brain.db")
         saved = 0
 
+        def _to_str(v):
+            """Нормализует любое значение (str/dict/list) в строку"""
+            if isinstance(v, dict):
+                return str(v.get("text") or v.get("rule") or v.get("description") or v.get("name") or list(v.values())[0])
+            elif isinstance(v, list):
+                return " ".join(str(x) for x in v)
+            return str(v)
+
         # Сохраняем пробелы как знания
-        for gap in analysis.get("gaps", [])[:5]:
-            save_knowledge("gap", gap[:200], "self-diagnosis")
+        gaps_raw = analysis.get("gaps", [])
+        if not isinstance(gaps_raw, list):
+            gaps_raw = [gaps_raw] if gaps_raw else []
+        for gap in gaps_raw[:5]:
+            try:
+                save_knowledge("gap", _to_str(gap)[:200], "self-diagnosis")
+            except Exception:
+                pass
 
         # Бесплатные API которые стоит добавить — записываем в мозг
-        for api in analysis.get("free_apis", [])[:3]:
-            save_knowledge("suggested_api", api[:200], "self-diagnosis")
-            logging.info(f"[SelfGrow] Предложен API: {api[:80]}")
+        apis_raw = analysis.get("free_apis", [])
+        if not isinstance(apis_raw, list):
+            apis_raw = [apis_raw] if apis_raw else []
+        for api in apis_raw[:3]:
+            try:
+                api_str = _to_str(api)[:200]
+                save_knowledge("suggested_api", api_str, "self-diagnosis")
+                logging.info(f"[SelfGrow] Предложен API: {api_str[:80]}")
+            except Exception:
+                pass
 
         # Торговые правила — добавляем в self_rules
-        for rule_raw in analysis.get("rules", [])[:5]:
+        rules_raw = analysis.get("rules", [])
+        if not isinstance(rules_raw, list):
+            rules_raw = [rules_raw] if rules_raw else []
+        for rule_raw in rules_raw[:5]:
             try:
-                # Groq может вернуть строку или dict — нормализуем
-                if isinstance(rule_raw, dict):
-                    rule = str(rule_raw.get("text") or rule_raw.get("rule") or rule_raw.get("description") or list(rule_raw.values())[0])
-                else:
-                    rule = str(rule_raw)
-                rule = rule[:200].strip()
+                rule = _to_str(rule_raw)[:200].strip()
                 if not rule:
                     continue
                 ex = conn2.execute("SELECT id FROM self_rules WHERE rule=?", (rule,)).fetchone()
