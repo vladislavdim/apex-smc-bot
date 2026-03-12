@@ -65,7 +65,7 @@ try:
         run_self_analysis as _learn_self_analysis,
         get_self_analysis_text as _learn_self_analysis_text,
         get_all_stats_text as _learn_all_stats,
-        find_similar_patterns as _learn_patterns,
+        find_similar_paramsatterns as _learn_patterns,
         save_pattern as _learn_save_pattern,
         decay_old_rules as _learn_decay,
         get_btc_correlation as _learn_btc_corr,
