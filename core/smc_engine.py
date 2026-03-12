@@ -113,7 +113,7 @@ def _learn_fact(fact, context=""):
 def _ordered_sources(symbol):
     _load_reliability()
     defaults = {
-        "cryptocompare":0.80, "binance_futures":0.75, "binance_spot":0.70,
+        "bybit":0.82, "cryptocompare":0.80, "binance_futures":0.75, "binance_spot":0.70,
         "mexc":0.60, "kraken":0.58, "gate_io":0.55, "coingecko":0.50, "synthetic":0.10
     }
     scores = {src: _reliability.get(src, defaults.get(src,0.5)) for src in defaults}
@@ -123,14 +123,29 @@ def _ordered_sources_for_interval(symbol, interval):
     """Для коротких TF (1m/5m) ставим Binance Spot первым — он надёжнее CryptoCompare для альткоинов"""
     base_order = _ordered_sources(symbol)
     if interval in ("1m", "5m", "3m"):
-        # Binance Spot и Futures в начало для коротких ТФ
-        priority = ["binance_spot", "binance_futures", "mexc", "gate_io", "cryptocompare", "kraken", "coingecko", "synthetic"]
+        priority = ["bybit", "binance_spot", "binance_futures", "mexc", "gate_io", "cryptocompare", "kraken", "coingecko", "synthetic"]
         return priority
     return base_order
 
 # ─── Фетчеры ─────────────────────────────────────────────────────────────────
 
-def _fetch_cryptocompare(symbol, interval, limit):
+def _fetch_bybit(symbol, interval, limit):
+    bi_map = {"1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
+              "1h":"60","2h":"120","4h":"240","1d":"D","1w":"W"}
+    r = requests.get("https://api.bybit.com/v5/market/kline",
+        params={"category":"linear","symbol":symbol,
+                "interval":bi_map.get(interval,"60"),"limit":limit},
+        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+    if r.status_code != 200: raise ValueError(f"Bybit HTTP {r.status_code}")
+    data = r.json()
+    rows = data.get("result",{}).get("list",[])
+    if not rows: raise ValueError("Empty Bybit")
+    # Bybit возвращает в обратном порядке [time,open,high,low,close,volume,...]
+    rows = list(reversed(rows))
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),
+             "close":float(c[4]),"volume":float(c[5])} for c in rows]
+
+
     base = symbol.replace("USDT","").replace("BUSD","")
     ep, agg = CC_INTERVALS.get(interval, ("histohour",1))
     # v2 API для минутных данных — надёжнее для альткоинов
@@ -246,7 +261,7 @@ def _fetch_synthetic(symbol, interval, limit):
     return candles[-limit:]
 
 _FETCHERS = {
-    "cryptocompare":_fetch_cryptocompare, "binance_futures":_fetch_binance_futures,
+    "bybit":_fetch_bybit, "cryptocompare":_fetch_cryptocompare, "binance_futures":_fetch_binance_futures,
     "binance_spot":_fetch_binance_spot, "mexc":_fetch_mexc,
     "kraken":_fetch_kraken, "gate_io":_fetch_gate,
     "coingecko":_fetch_coingecko, "synthetic":_fetch_synthetic,
