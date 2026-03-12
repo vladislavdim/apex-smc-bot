@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: apex-smc-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    ignoredPaths:
+      - brain.db
+      - "*.db"
+      - "*.db-shm"
+      - "*.db-wal"
