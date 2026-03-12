@@ -159,6 +159,10 @@ except ImportError as e:
 
 # Brain Router — умный диспетчер источников данных и самообучение
 try:
+    import sys as _sys2, os as _os2
+    _bd = _os2.path.dirname(_os2.path.abspath(__file__))
+    if _bd not in _sys2.path:
+        _sys2.path.insert(0, _bd)
     from brain_router import router as _brain_router
     _ROUTER_OK = True
     logging.info("brain_router.py загружен успешно")
@@ -201,7 +205,7 @@ except ImportError as e:
     _autopilot_status = lambda: "Автопилот недоступен"
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "491292600") or "491292600")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
@@ -1276,6 +1280,17 @@ def get_candles(symbol, interval="1h", limit=200):
                         return candles
         except Exception as e:
             logging.warning(f"CoinGecko {symbol} {interval}: {e}")
+
+    # 6. Brain Router — синтетические свечи + workarounds из brain.db
+    if _ROUTER_OK:
+        try:
+            rc = _brain_router.candles(symbol, interval, limit)
+            if rc and len(rc) >= 10:
+                logging.info(f"Свечи BrainRouter: {symbol} {interval} {len(rc)}шт")
+                candle_cache[cache_key] = (rc, time.time())
+                return rc
+        except Exception as e:
+            logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
 
     logging.warning(f"Нет свечей для {symbol} {interval}")
     return []
