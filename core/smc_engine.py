@@ -146,6 +146,7 @@ def _fetch_bybit(symbol, interval, limit):
              "close":float(c[4]),"volume":float(c[5])} for c in rows]
 
 
+def _fetch_cryptocompare(symbol, interval, limit):
     base = symbol.replace("USDT","").replace("BUSD","")
     ep, agg = CC_INTERVALS.get(interval, ("histohour",1))
     # v2 API для минутных данных — надёжнее для альткоинов
