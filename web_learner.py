@@ -44,6 +44,23 @@ def init_web_learner_db():
         actual_win_rate REAL,
         source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS pattern_memory (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol     TEXT,
+        pattern    TEXT,
+        timeframe  TEXT,
+        result     TEXT,
+        confidence REAL DEFAULT 0.5,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS knowledge_gaps (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        query      TEXT,
+        source     TEXT,
+        resolved   INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
     conn.commit()
     conn.close()
 
