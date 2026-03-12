@@ -148,7 +148,14 @@ def live_market_analysis() -> dict:
             return {}
 
         clean = re.sub(r'```json|```', '', response).strip()
-        data = json.loads(clean)
+        try:
+            data = json.loads(clean)
+        except Exception:
+            logging.warning(f"[Autopilot] live_market_analysis: не удалось распарсить JSON: {clean[:100]}")
+            return {}
+        if not isinstance(data, dict):
+            logging.warning(f"[Autopilot] live_market_analysis: ожидался dict, получен {type(data)}")
+            return {}
 
         # Сохраняем наблюдение
         conn = sqlite3.connect(DB_PATH)
@@ -313,7 +320,13 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
             return
 
         clean = re.sub(r'```json|```', '', response).strip()
-        data = json.loads(clean)
+        try:
+            data = json.loads(clean)
+        except Exception:
+            logging.warning(f"[Autopilot] monitor_open_trades: JSON parse error: {clean[:100]}")
+            return
+        if not isinstance(data, dict):
+            return
 
         root_cause = data.get("root_cause", "")
         fix_type = data.get("fix_type")
@@ -598,7 +611,13 @@ def system_error_diagnosis():
             return ""
 
         clean = re.sub(r'```json|```', '', response).strip()
-        data = json.loads(clean)
+        try:
+            data = json.loads(clean)
+        except Exception:
+            logging.warning(f"[Autopilot] system_error_diagnosis: JSON parse error: {clean[:100]}")
+            return ""
+        if not isinstance(data, dict):
+            return ""
 
         problem = data.get("system_problem", "")
         fix_priority = int(data.get("fix_priority", 5))
