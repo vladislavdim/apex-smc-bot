@@ -425,11 +425,17 @@ def groq_research_topic(topic: str, query: str) -> dict:
         # Сохраняем в базу
         conn = sqlite3.connect(DB_PATH)
 
-        # Основные знания
-        conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
-            VALUES (?,?,?,?,?)""",
-            (topic, query, data.get("summary", ""), texts[0]["url"] if texts else "",
-             float(data.get("relevance", 0.5))))
+        # Основные знания — safe insert с fallback
+        try:
+            conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
+                VALUES (?,?,?,?,?)""",
+                (topic, query, data.get("summary", ""), texts[0]["url"] if texts else "",
+                 float(data.get("relevance", 0.5))))
+        except Exception:
+            conn.execute("""INSERT INTO web_knowledge (topic, summary, source_url, relevance)
+                VALUES (?,?,?,?)""",
+                (topic, data.get("summary", ""), texts[0]["url"] if texts else "",
+                 float(data.get("relevance", 0.5))))
 
         # Торговые правила → в self_rules
         for rule_item in data.get("trading_rules", []):
@@ -483,12 +489,29 @@ def run_web_learning_cycle():
         init_web_learner_db()
         logging.info("[WebLearner] 🔍 Начинаю цикл самообучения...")
 
+        # Добавляем колонку query если нет (миграция)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("ALTER TABLE learning_agenda ADD COLUMN query TEXT")
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
         # Сначала проверяем незакрытые темы из агенды
         conn = sqlite3.connect(DB_PATH)
-        pending = conn.execute("""
-            SELECT topic, query FROM learning_agenda
-            WHERE status='pending' ORDER BY priority DESC LIMIT 3
-        """).fetchall()
+        try:
+            pending = conn.execute("""
+                SELECT topic, query FROM learning_agenda
+                WHERE status='pending' ORDER BY priority DESC LIMIT 3
+            """).fetchall()
+        except Exception:
+            # Старая БД без query — берём только topic
+            rows = conn.execute("""
+                SELECT topic FROM learning_agenda
+                WHERE status='pending' ORDER BY priority DESC LIMIT 3
+            """).fetchall()
+            pending = [(r[0], r[0]) for r in rows]
         conn.close()
 
         if not pending:
@@ -554,11 +577,18 @@ def get_daily_market_digest() -> str:
 
         # Сохраняем в web_knowledge
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
-            VALUES (?,?,?,?,?)""",
-            ("daily_digest", "market_news",
-             f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
-             "rss_feeds", 0.9))
+        try:
+            conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
+                VALUES (?,?,?,?,?)""",
+                ("daily_digest", "market_news",
+                 f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
+                 "rss_feeds", 0.9))
+        except Exception:
+            conn.execute("""INSERT INTO web_knowledge (topic, summary, source_url, relevance)
+                VALUES (?,?,?,?)""",
+                ("daily_digest",
+                 f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
+                 "rss_feeds", 0.9))
         conn.commit()
         conn.close()
 
