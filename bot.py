@@ -65,7 +65,7 @@ try:
         run_self_analysis as _learn_self_analysis,
         get_self_analysis_text as _learn_self_analysis_text,
         get_all_stats_text as _learn_all_stats,
-        find_similar_paramsatterns as _learn_patterns,
+        find_similar_patterns as _learn_patterns,
         save_pattern as _learn_save_pattern,
         decay_old_rules as _learn_decay,
         get_btc_correlation as _learn_btc_corr,
@@ -6101,17 +6101,34 @@ async def handle_callback(callback: CallbackQuery):
             ).fetchall()
             obs_count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
             model_count = conn.execute("SELECT COUNT(*) FROM market_model").fetchone()[0]
-            avoid_count = conn.execute("SELECT COUNT(*) FROM self_rules WHERE category='avoid'").fetchone()[0]
+            # avoid_count — проверяем оба варианта (старый category и новый rule_type)
+            avoid_count = conn.execute(
+                "SELECT COUNT(*) FROM self_rules WHERE rule_type='avoid' OR category='avoid'"
+            ).fetchone()[0]
+            # knowledge_count — из таблицы knowledge напрямую
+            knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+            # pattern_count — из signal_log
+            try:
+                pattern_count = conn.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
+            except Exception:
+                pattern_count = 0
+            # coin_count — правила по монетам
+            try:
+                coin_count = conn.execute(
+                    "SELECT COUNT(DISTINCT symbol) FROM signal_log WHERE symbol IS NOT NULL"
+                ).fetchone()[0]
+            except Exception:
+                coin_count = 0
             conn.close()
 
-            # Данные из brain_builder
+            # Данные из brain_builder (если доступен)
             brain = get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}
-            knowledge_count = brain.get("knowledge_count", 0)
-            pattern_count = brain.get("pattern_count", 0)
-            coin_count = brain.get("coin_count", 0)
+            if brain.get("knowledge_count", 0) > knowledge_count:
+                knowledge_count = brain.get("knowledge_count", 0)
+            if brain.get("pattern_count", 0) > pattern_count:
+                pattern_count = brain.get("pattern_count", 0)
             macro_summary = brain.get("macro_summary", "")[:200]
             macro_time = brain.get("macro_time", "")
-            # Объединяем правила из обеих БД
             bb_rules = brain.get("top_rules", "")
         except Exception as e:
             rule_count = obs_count = model_count = avoid_count = 0
@@ -7466,8 +7483,14 @@ async def auto_scan_job():
         return
 
     # Отправляем только МЕГА ТОП — без спама
+    now_ts = time.time()
     for sd in mega_signals[:5]:
         try:
+            cache_key = f"{sd['symbol']}:{sd['direction']}"
+            last_sent = _sent_signal_cache.get(cache_key, 0)
+            if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+                continue  # уже слали этот сигнал недавно
+            _sent_signal_cache[cache_key] = now_ts
             await bot.send_message(ADMIN_ID, sd["text"], parse_mode="HTML")
             await asyncio.sleep(1)
         except:
@@ -7628,6 +7651,10 @@ GITHUB_FILE = os.environ.get("GITHUB_FILE", "bot.py")
 # Очередь ожидающих патчей: patch_id -> {code, description, error}
 pending_patches = {}
 patch_counter = 0
+
+# Кэш отправленных сигналов — symbol:direction -> timestamp (не спамим одним сигналом)
+_sent_signal_cache: dict = {}
+_SIGNAL_COOLDOWN_HOURS = 4  # один и тот же сигнал не чаще раз в 4 часа
 
 def github_get_file():
     """Читаем текущий bot.py прямо из GitHub"""
@@ -7965,7 +7992,7 @@ async def backup_db_to_github():
         )
         sha = r.json().get("sha", "") if r.status_code == 200 else ""
         payload = {
-            "message": f"brain.db backup {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "message": f"brain.db backup {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]",
             "content": encoded,
             "branch": "main"
         }
@@ -8034,10 +8061,10 @@ async def run_brain_builder_full_async():
 
 
 async def on_startup(app):
-    init_db()
+    await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
+    init_db()                        # потом применяем миграции к восстановленной БД
     if _WEB_LEARNER_OK:
         _web_init_db()
-    await restore_db_from_github()
     threading.Thread(target=get_top_pairs, daemon=True).start()
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
