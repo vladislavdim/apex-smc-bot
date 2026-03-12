@@ -483,10 +483,16 @@ def init_db():
         except Exception:
             pass
 
+    # symbol_stats — статистика по монетам для web_learner
+    c.execute("""CREATE TABLE IF NOT EXISTS symbol_stats (
+        symbol TEXT PRIMARY KEY,
+        win_rate REAL DEFAULT 0,
+        total INTEGER DEFAULT 0,
+        avg_rr REAL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
     conn.commit()
     conn.close()
-
-# ===== USER MEMORY =====
 
 def get_user_memory(user_id):
     try:
@@ -688,7 +694,7 @@ def get_top_pairs(limit=100):
     FORCED = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "TONUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
-        "ADAUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT", "ATOMUSDT",
+        "ADAUSDT", "DOTUSDT", "POLUSDT", "LTCUSDT", "ATOMUSDT",
         "NEARUSDT", "INJUSDT", "SUIUSDT", "APTUSDT", "OPUSDT",
         "UNIUSDT", "PEPEUSDT", "SHIBUSDT", "TRXUSDT", "XLMUSDT",
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
@@ -3181,16 +3187,11 @@ def save_self_rule(category, rule, confidence=0.5, source="auto"):
             )
             log_brain_event("rule_strengthened", f"{category}: {rule[:80]}", f"confidence → {new_conf:.1f}")
         else:
-           conn.execute(
-    """
-    INSERT INTO self_rules 
-    (category, rule, confidence, source, confirmed_by, contradicted_by, created_at, updated_at, score, status)
-    VALUES (?,?,?,?,0,0,datetime('now'),datetime('now'),0,'active')
-    """,
-    (category, rule, confidence, source)
-)
-
-log_brain_event("rule_added", f"{category}: {rule[:80]}", f"confidence={confidence}")
+            conn.execute(
+                "INSERT INTO self_rules (category, rule, rule_type, rule_text, confidence, source) VALUES (?,?,?,?,?,?)",
+                (category, rule, "auto", rule, confidence, source)
+            )
+            log_brain_event("rule_added", f"{category}: {rule[:80]}", f"confidence={confidence}")
 
         conn.commit()
         conn.close()
@@ -4210,8 +4211,8 @@ def self_diagnose_and_grow():
                 ex = conn2.execute("SELECT id FROM self_rules WHERE rule=?", (rule,)).fetchone()
                 if not ex:
                     conn2.execute(
-                        "INSERT INTO self_rules (category,rule,confidence,source) VALUES (?,?,?,?)",
-                        ("self_improve", rule, 0.65, "self-diagnosis")
+                        "INSERT INTO self_rules (category, rule, rule_type, rule_text, confidence, source) VALUES (?,?,?,?,?,?)",
+                        ("self_improve", rule, "auto", rule, 0.65, "self-diagnosis")
                     )
                     saved += 1
             except Exception as _re:
