@@ -6145,21 +6145,7 @@ async def handle_callback(callback: CallbackQuery):
             f"<i>{macro_summary}</i>\n"
         ) if macro_summary else ""
 
-        # Последние изученные знания
         recent_knowledge = ""
-        try:
-            conn2 = sqlite3.connect("brain.db")
-            recent = conn2.execute("""
-                SELECT topic, content FROM knowledge
-                ORDER BY created_at DESC LIMIT 3
-            """).fetchall()
-            conn2.close()
-            if recent:
-                recent_knowledge = "\n\n📖 <b>Последние знания:</b>\n"
-                for topic, content in recent:
-                    recent_knowledge += f"• <b>{topic}</b>: {str(content)[:80]}...\n"
-        except Exception:
-            pass
 
         await callback.message.edit_text(
             f"🧠 <b>Мозг APEX</b>\n"
@@ -6178,9 +6164,7 @@ async def handle_callback(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚡️ Обучить сейчас", callback_data="brain_learn_now"),
                  InlineKeyboardButton(text="🌍 Макро анализ", callback_data="brain_macro")],
-                [InlineKeyboardButton(text="📊 Самоанализ", callback_data="brain_self_analysis"),
-                 InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy")],
-                [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status"),
+                [InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy"),
                  InlineKeyboardButton(text="📋 Анализ сделок", callback_data="brain_trade_analysis")],
                 [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis"),
                  InlineKeyboardButton(text="📊 Анализ логов", callback_data="brain_logs")],
