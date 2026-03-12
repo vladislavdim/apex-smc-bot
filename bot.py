@@ -334,13 +334,11 @@ def init_db():
         note TEXT, pnl_percent REAL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
-    # Алерты на пробой уровней
-    c.execute("""CREATE TABLE IF NOT EXISTS alerts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER, symbol TEXT,
-        price_level REAL, direction TEXT,
-        triggered INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    # Миграция alerts — добавляем price_level если таблица создана со старой схемой (price)
+    try:
+        c.execute("ALTER TABLE alerts ADD COLUMN price_level REAL")
+    except Exception:
+        pass  # колонка уже есть
 
     # ===== ОШИБКИ БОТА =====
     c.execute("""CREATE TABLE IF NOT EXISTS bot_errors (
@@ -3097,7 +3095,7 @@ def save_self_rule(category, rule, confidence=0.5, source="auto"):
             log_brain_event("rule_strengthened", f"{category}: {rule[:80]}", f"confidence → {new_conf:.1f}")
         else:
             conn.execute(
-                "INSERT INTO self_rules VALUES (NULL,?,?,?,0,0,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+                "INSERT INTO self_rules (category, rule, confidence, source, confirmed_by, contradicted_by) VALUES (?,?,?,?,0,0)",
                 (category, rule, confidence, source)
             )
             log_brain_event("rule_added", f"{category}: {rule[:80]}", f"confidence={confidence}")
