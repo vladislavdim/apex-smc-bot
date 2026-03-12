@@ -3181,11 +3181,16 @@ def save_self_rule(category, rule, confidence=0.5, source="auto"):
             )
             log_brain_event("rule_strengthened", f"{category}: {rule[:80]}", f"confidence → {new_conf:.1f}")
         else:
-            conn.execute(
-                "INSERT INTO self_rules (category, rule, confidence, source, confirmed_by, contradicted_by) VALUES (?,?,?,?,0,0)",
-                (category, rule, confidence, source)
-            )
-            log_brain_event("rule_added", f"{category}: {rule[:80]}", f"confidence={confidence}")
+           conn.execute(
+    """
+    INSERT INTO self_rules 
+    (category, rule, confidence, source, confirmed_by, contradicted_by, created_at, updated_at, score, status)
+    VALUES (?,?,?,?,0,0,datetime('now'),datetime('now'),0,'active')
+    """,
+    (category, rule, confidence, source)
+)
+
+log_brain_event("rule_added", f"{category}: {rule[:80]}", f"confidence={confidence}")
 
         conn.commit()
         conn.close()
