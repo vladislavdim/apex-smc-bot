@@ -441,6 +441,21 @@ def init_db():
     except Exception:
         pass  # Колонка уже существует
 
+    # Миграция brain_log — добавляем колонки title и source если нет
+    for col, typedef in [("title", "TEXT"), ("source", "TEXT"), ("impact", "TEXT")]:
+        try:
+            c.execute(f"ALTER TABLE brain_log ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass
+
+    # Миграция web_knowledge и learning_agenda — добавляем query если нет
+    for tbl_col in [("web_knowledge", "query", "TEXT"),
+                    ("learning_agenda", "query", "TEXT")]:
+        try:
+            c.execute(f"ALTER TABLE {tbl_col[0]} ADD COLUMN {tbl_col[1]} {tbl_col[2]}")
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
 
