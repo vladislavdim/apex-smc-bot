@@ -157,6 +157,31 @@ except ImportError as e:
     _ext_session = lambda: {}
     _ext_summary = lambda: {}
 
+# Brain Router — умный диспетчер источников данных и самообучение
+try:
+    from brain_router import router as _brain_router
+    _ROUTER_OK = True
+    logging.info("brain_router.py загружен успешно")
+except ImportError as e:
+    _ROUTER_OK = False
+    logging.warning(f"brain_router.py не найден: {e}")
+    class _DummyRouter:
+        def candles(self, s, i="1h", l=200): return []
+        def signal_context(self, *a, **k): return ""
+        def accumulation(self, s): return {"score":0,"phase":"UNKNOWN","signals":[]}
+        def contradictions(self, *a, **k): return {"conflicts":[],"warnings":[],"severity":"LOW","verdict":"","has_conflicts":False}
+        def learn(self, *a, **k): pass
+        def daily_review(self): pass
+        def strategy(self): return ""
+        def insights(self): return "brain_router.py не загружен"
+        def source_stats(self): return "brain_router.py не загружен"
+        def oi(self, s): return {"oi":0,"oi_change_4h":0,"signal":"NEUTRAL"}
+        def funding(self, s): return {"rate":0,"signal":"NEUTRAL","warning":""}
+        def social(self, s): return {"galaxy_score":0,"social_volume":0,"signal":"NEUTRAL"}
+        def session(self): return {"session":"unknown","hour_utc":0,"quality":"?","day_of_week":0}
+        def seasonality(self): return {"month":0,"btc_return":0,"bias":"NEUTRAL","notes":""}
+    _brain_router = _DummyRouter()
+
 # Autopilot — автономный самообучающийся мозг
 try:
     from apex_autopilot import (
@@ -2380,6 +2405,37 @@ def full_scan(symbol, timeframe="1h"):
             except Exception:
                 pass
 
+        # ── 6.6 Brain Router контекст — OI, Funding, сессия, сезонность, накопление ──
+        router_ctx = ""
+        router_contradiction = ""
+        router_accum = ""
+        try:
+            if _ROUTER_OK:
+                # Полный контекст сигнала
+                router_ctx = _brain_router.signal_context(
+                    symbol, direction, timeframe,
+                    total_weight,
+                    regime.get("mode","UNKNOWN") if isinstance(regime, dict) else str(regime),
+                    mtf.get("grade","?")
+                )
+                # Детектор противоречий
+                fg_val = fg.get("value", 50) if isinstance(fg, dict) else 50
+                funding_sig = _brain_router.funding(symbol).get("signal","NEUTRAL")
+                contra = _brain_router.contradictions(
+                    symbol, direction, fg_val, funding_sig, "NEUTRAL", mtf.get("grade","?")
+                )
+                if contra["conflicts"] or contra["warnings"]:
+                    router_contradiction = contra["verdict"] + "\n" + "\n".join(
+                        contra["conflicts"] + contra["warnings"]
+                    )
+                # Накопление только для топовых сигналов
+                if mtf.get("grade","") in ("МЕГА ТОП", "ТОП СДЕЛКА"):
+                    accum = _brain_router.accumulation(symbol)
+                    if accum["score"] >= 60:
+                        router_accum = f"📦 Wyckoff {accum['phase']}: {accum['score']}/100"
+        except Exception as _re:
+            logging.debug(f"[Router] signal context error: {_re}")
+
         # ── 7. Уровень инвалидации (когда сигнал отменяется) ──
         invalidation = sl  # Если цена закроется за стопом — сигнал недействителен
         inv_text = f"Сигнал отменяется если цена закроется {'ниже' if direction == 'BULLISH' else 'выше'} <code>{smart_price_fmt(invalidation)}</code>"
@@ -2416,6 +2472,9 @@ def full_scan(symbol, timeframe="1h"):
             f"💬 <b>APEX думает:</b>\n<i>{signal_comment}</i>\n"
             + (f"\n🤖 <b>Groq:</b> <i>{groq_insight}</i>\n" if groq_insight else "")
             + (f"\n🐋 <b>Киты:</b> <i>{whale_desc}</i>\n" if whale_desc else "")
+            + (f"\n{router_accum}\n" if router_accum else "")
+            + (f"\n📡 <b>Роутер:</b>\n<i>{router_ctx}</i>\n" if router_ctx else "")
+            + (f"\n⚠️ <b>Конфликт:</b>\n<i>{router_contradiction}</i>\n" if router_contradiction else "")
             + f"{'━'*26}"
         )
     except Exception as e:
@@ -2539,6 +2598,19 @@ def check_pending_signals():
                     else:
                         # Нет learning_id — анализируем напрямую через поиск по символу
                         threading.Thread(target=_learn_analyze_by_symbol, args=(symbol, direction, entry, result, hours_elapsed, timeframe), daemon=True).start()
+
+                # Brain Router — обучаем на результате (часы входа, урок, правило)
+                if _ROUTER_OK:
+                    try:
+                        threading.Thread(
+                            target=_brain_router.learn,
+                            args=(symbol, direction, grade, timeframe, result,
+                                  confluence or 0, entry, sl, tp1,
+                                  regime if isinstance(regime, str) else (regime.get("mode","?") if isinstance(regime, dict) else "?")),
+                            daemon=True
+                        ).start()
+                    except Exception as _re:
+                        logging.debug(f"[Router] learn on close: {_re}")
 
                 # Автопилот — глубокий разбор + автофикс при потере
                 if _AUTOPILOT_OK:
@@ -6172,7 +6244,10 @@ async def handle_callback(callback: CallbackQuery):
                  InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
                 [InlineKeyboardButton(text="🤖 Автопилот", callback_data="brain_autopilot"),
                  InlineKeyboardButton(text="🔌 Плагин Groq", callback_data="brain_extensions")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+                [InlineKeyboardButton(text="📡 Надёжность источников", callback_data="brain_router_sources"),
+                 InlineKeyboardButton(text="🧩 Роутер инсайты", callback_data="brain_router_insights")],
+                [InlineKeyboardButton(text="📅 Стратегия роутера", callback_data="brain_router_strategy"),
+                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
             ])
         )
 
@@ -6431,6 +6506,77 @@ async def handle_callback(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="\U0001f504 \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c", callback_data="brain_logs")],
                 [InlineKeyboardButton(text="\U0001f519 \u041d\u0430\u0437\u0430\u0434", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_router_sources":
+        await callback.message.edit_text("📡 Загружаю статистику источников роутера...")
+        try:
+            text = _brain_router.source_stats() if _ROUTER_OK else "brain_router.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="brain_router_sources")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_router_insights":
+        await callback.message.edit_text("🧩 Загружаю инсайты роутера...")
+        try:
+            text = _brain_router.insights() if _ROUTER_OK else "brain_router.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="brain_router_insights")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_router_strategy":
+        await callback.message.edit_text("📅 Загружаю стратегию роутера...")
+        try:
+            if _ROUTER_OK:
+                text = _brain_router.strategy()
+                if not text or "не сформирована" in text:
+                    text = ("📅 <b>Стратегия роутера</b>\n\n"
+                            "Стратегия формируется после накопления истории сделок.\n"
+                            "Groq анализирует паттерны ежедневно в 05:00 UTC.\n\n"
+                            "Данных пока недостаточно — дайте боту поработать.")
+                else:
+                    text = f"📅 <b>Стратегия роутера</b>\n\n{text}"
+            else:
+                text = "brain_router.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Пересчитать", callback_data="brain_router_strategy_refresh")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_router_strategy_refresh":
+        await callback.message.edit_text("🔄 Groq пересчитывает стратегию...")
+        try:
+            if _ROUTER_OK:
+                import threading
+                threading.Thread(target=_brain_router.daily_review, daemon=True).start()
+                text = "✅ Стратегия запущена на пересчёт. Вернитесь через 1-2 минуты."
+            else:
+                text = "brain_router.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📅 Посмотреть стратегию", callback_data="brain_router_strategy")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
             ])
         )
 
@@ -8101,6 +8247,15 @@ async def on_startup(app):
 
     # Groq читает логи и анализирует ошибки каждые 30 минут
     scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
+
+    # Brain Router — ежедневный обзор стратегии в 05:30 (после strategy_update)
+    async def _router_daily_review():
+        if _ROUTER_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _brain_router.daily_review)
+            logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
+    scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
+
     # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
     scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
