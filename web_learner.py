@@ -593,3 +593,86 @@ def get_web_knowledge_summary() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"WebLearner: {e}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# GROQ САМОУЛУЧШЕНИЕ
+# ═══════════════════════════════════════════════════════════════
+
+def groq_self_improve():
+    """
+    Groq анализирует свои результаты и генерирует улучшения —
+    новые правила для self_rules на основе статистики сделок.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+
+        # Статистика за 7 дней
+        stats = conn.execute("""
+            SELECT symbol, result, rr_achieved, timeframe, confluence, regime
+            FROM signal_log
+            WHERE created_at > datetime('now', '-7 days')
+            ORDER BY created_at DESC LIMIT 50
+        """).fetchall()
+
+        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+        wins  = len([s for s in stats if s[1] in ('tp1','tp2','tp3')])
+        losses = len([s for s in stats if s[1] == 'sl'])
+        total = len(stats)
+        wr = round(wins / total * 100, 1) if total > 0 else 0
+
+        best  = [(s[0], s[2]) for s in stats if s[1] in ('tp2','tp3')][:5]
+        worst = [(s[0], s[4]) for s in stats if s[1] == 'sl'][:5]
+
+        conn.close()
+
+        prompt = f"""Ты — AI торговый бот APEX. Проанализируй свои результаты и предложи улучшения.
+
+СТАТИСТИКА (7 дней):
+- Всего: {total} | WR: {wr}% | Победы: {wins} | Потери: {losses}
+- Лучшие сделки (монета, RR): {best}
+- Худшие (монета, confluence): {worst}
+- Правил в базе: {rules_count}
+
+Придумай 3-5 конкретных правил которые повысят WR.
+Ответь в JSON:
+{{
+  "improvements": [
+    {{
+      "rule_type": "prefer|avoid|timing|risk",
+      "rule_text": "текст правила",
+      "confidence": 0.0-1.0
+    }}
+  ],
+  "insight": "главный вывод"
+}}"""
+
+        response = _groq(prompt, max_tokens=600)
+        if not response:
+            return []
+
+        import re, json
+        clean = re.sub(r'```json|```', '', response).strip()
+        data = json.loads(clean)
+        improvements = data.get("improvements", [])
+
+        conn = sqlite3.connect(DB_PATH)
+        saved = 0
+        for imp in improvements:
+            rule_text = imp.get("rule_text")
+            if rule_text and float(imp.get("confidence", 0)) >= 0.65:
+                conn.execute("""INSERT OR IGNORE INTO self_rules
+                    (rule_type, rule_text, confidence, source, created_at)
+                    VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                    (imp.get("rule_type", "prefer"), rule_text,
+                     imp.get("confidence", 0.7), "groq_self_improve"))
+                saved += 1
+        conn.commit()
+        conn.close()
+
+        logging.info(f"[WebLearner] Groq самоулучшение: {saved} правил добавлено")
+        return improvements
+
+    except Exception as e:
+        logging.error(f"groq_self_improve: {e}")
+        return []
