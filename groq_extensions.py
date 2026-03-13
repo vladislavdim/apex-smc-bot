@@ -84,11 +84,41 @@ def filter_consecutive_losses(symbol, direction, price, confluence, regime, fg=N
     return True, ""
 
 
+def filter_dead_zone_signals(symbol, direction, price, confluence, regime, fg=None):
+    """Фильтр: не торгуем в мёртвой зону 22:00-02:00 UTC если слабый сигнал."""
+    from datetime import datetime as _dt
+    hour = _dt.utcnow().hour
+    if (22 <= hour or hour <= 1) and confluence < 70:
+        return False, f"Мёртвая зона UTC {hour}:xx + слабый confluence={confluence}"
+    return True, ""
+
+
+def filter_btc_correlation(symbol, direction, price, confluence, regime, fg=None):
+    """Фильтр: не входим в лонг альта если BTC падает."""
+    if symbol == "BTCUSDT":
+        return True, ""
+    try:
+        import sqlite3 as _sq
+        # Читаем последнее изменение BTC из кэша если есть
+        conn = _sq.connect(DB_PATH)
+        btc_note = conn.execute(
+            "SELECT description FROM brain_log WHERE title LIKE '%BTC%' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if btc_note and "падает" in str(btc_note[0]) and direction == "BULLISH":
+            return False, "BTC падает — лонги на альты заблокированы"
+    except Exception:
+        pass
+    return True, ""
+
+
 # Реестр активных фильтров — Groq может добавлять/убирать
 ACTIVE_FILTERS = [
     filter_meme_coins_high_fg,
     filter_low_confluence_sideways,
     filter_consecutive_losses,
+    filter_dead_zone_signals,
+    filter_btc_correlation,
     # Groq добавляет новые фильтры сюда ↓
 ]
 
