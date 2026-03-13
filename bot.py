@@ -3301,7 +3301,7 @@ def main():
 
         async def health(request):
             # Включаем статистику токенов в health endpoint
-            token_pct = round(_groq_tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT == int(os.environ.get('GROQ_DAILY_LIMIT', 0)) or 0 else 0
+            token_pct = round(_groq_tokens_used / Значение для использования в качестве _GROQ_DAILY_LIMIT, например, 1000 * 100) if _GROQ_DAILY_LIMIT == int(os.environ.get('GROQ_DAILY_LIMIT', 0)) or 0 else 0
             return web.Response(text=f"APEX OK | tokens: {_groq_tokens_used}/{_GROQ_DAILY_LIMIT} ({token_pct}%)")
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
