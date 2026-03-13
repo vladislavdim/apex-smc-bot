@@ -390,6 +390,39 @@ def init_db():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         fixed_at TEXT)""")
 
+    # Таблицы из learning.py — создаём здесь тоже чтобы close_signal не падал
+    c.execute("""CREATE TABLE IF NOT EXISTS signal_stats (
+        symbol TEXT PRIMARY KEY,
+        total INTEGER DEFAULT 0, wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0,
+        win_rate REAL DEFAULT 0, avg_hours REAL DEFAULT 0,
+        best_tf TEXT, worst_tf TEXT, last_updated TEXT)""")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS auto_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_type TEXT, target TEXT, condition TEXT,
+        confidence REAL DEFAULT 0.5, confirmed INTEGER DEFAULT 0,
+        violated INTEGER DEFAULT 0, active INTEGER DEFAULT 1,
+        last_check TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS self_analysis (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        period TEXT, wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0,
+        win_rate REAL DEFAULT 0, patterns TEXT, recommendations TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS pattern_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern_type TEXT, symbol TEXT, direction TEXT,
+        result TEXT, hours_open REAL, timeframe TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # Добавляем confluence и regime в signals если нет
+    for _col, _type in [("confluence", "INTEGER DEFAULT 0"), ("regime", "TEXT DEFAULT 'UNKNOWN'")]:
+        try:
+            c.execute(f"ALTER TABLE signals ADD COLUMN {_col} {_type}")
+        except Exception:
+            pass
+
     # Счётчик повторных ошибок
     c.execute("""CREATE TABLE IF NOT EXISTS error_patterns (
         error_type TEXT PRIMARY KEY,
@@ -2636,14 +2669,23 @@ def check_pending_signals():
                         # Нет learning_id — анализируем напрямую через поиск по символу
                         threading.Thread(target=_learn_analyze_by_symbol, args=(symbol, direction, entry, result, hours_elapsed, timeframe), daemon=True).start()
 
+                # Получаем confluence и regime из БД для этого сигнала
+                try:
+                    _row_extra = sqlite3.connect("brain.db").execute(
+                        "SELECT confluence, regime FROM signals WHERE id=?", (sig_id,)
+                    ).fetchone()
+                    _confluence_val = _row_extra[0] if _row_extra and _row_extra[0] else 0
+                    _regime_val = _row_extra[1] if _row_extra and _row_extra[1] else "UNKNOWN"
+                except Exception:
+                    _confluence_val, _regime_val = 0, "UNKNOWN"
+
                 # Brain Router — обучаем на результате (часы входа, урок, правило)
                 if _ROUTER_OK:
                     try:
                         threading.Thread(
                             target=_brain_router.learn,
                             args=(symbol, direction, grade, timeframe, result,
-                                  confluence or 0, entry, sl, tp1,
-                                  regime if isinstance(regime, str) else (regime.get("mode","?") if isinstance(regime, dict) else "?")),
+                                  _confluence_val, entry, sl, tp1, _regime_val),
                             daemon=True
                         ).start()
                     except Exception as _re:
@@ -2658,7 +2700,7 @@ def check_pending_signals():
                         direction=direction,
                         result=result,
                         hours_open=hours_elapsed,
-                        confluence=confluence or 0
+                        confluence=_confluence_val
                     )
 
                 # Рефлексия по КАЖДОМУ сигналу
@@ -3937,14 +3979,14 @@ def search_web_free(query, limit=5):
         if r.status_code == 200:
             data = r.json()
             news = data.get("Data", [])
-            # Ищем релевантные по ключевым словам
+            # Фильтруем только dict элементы (защита от строк в ответе)
+            news = [n for n in news if isinstance(n, dict)]
             relevant = [n for n in news if any(w in (n.get("title","") + n.get("body","")).lower() for w in words)]
-            # Если нет релевантных — берём просто свежие
             to_use = relevant[:3] if relevant else news[:3]
             for n in to_use:
                 title = n.get("title", "")
                 body  = n.get("body", "")[:400]
-                src   = n.get("source_info", {}).get("name", "CryptoCompare")
+                src   = n.get("source_info", {}).get("name", "CryptoCompare") if isinstance(n.get("source_info"), dict) else "CryptoCompare"
                 results.append(f"[{src}] {title}\n{body}")
     except Exception as e:
         logging.warning(f"CryptoCompare news: {e}")
@@ -8261,7 +8303,21 @@ except ImportError:
         return {}
 
     def get_brain_summary():
-        return {}
+        try:
+            conn = sqlite3.connect("brain.db")
+            kc = conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone()
+            rc = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()
+            conn.close()
+            return {
+                "knowledge_count": kc[0] if kc else 0,
+                "coin_count": rc[0] if rc else 0,
+                "pattern_count": 0,
+                "macro_summary": "Нет данных",
+                "macro_time": ""
+            }
+        except Exception:
+            return {"knowledge_count": 0, "coin_count": 0, "pattern_count": 0,
+                    "macro_summary": "Нет данных", "macro_time": ""}
 
 
 async def run_brain_builder_async():
