@@ -15,31 +15,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 # ── WAL патч ──
-_orig_connect_br = sqlite3.connect
-def _wal_connect_br(db, timeout=30, **kw):
-    kw.setdefault("check_same_thread", False)
-    conn = _orig_connect_br(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_br
 
 # ── WAL патч ──
-_orig_connect_br = sqlite3.connect
-def _wal_connect_br(db, timeout=15, **kw):
-    conn = _orig_connect_br(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=8000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_br
 
 # ──────────────────────────────────────────────────────────────
 # КОНФИГУРАЦИЯ
