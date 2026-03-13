@@ -10,18 +10,21 @@ from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ── WAL патч — решает "database is locked" для всех connect в bot.py ──
-_orig_connect_bot = sqlite3.connect
-def _wal_connect_bot(db, timeout=30, **kw):
-    kw.setdefault("check_same_thread", False)
-    conn = _orig_connect_bot(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_bot
+# WAL патч — только здесь, один раз для всего процесса
+if not getattr(sqlite3, '_wal_patched', False):
+    _orig_connect = sqlite3.connect
+    def _wal_connect(db, timeout=30, **kw):
+        kw.setdefault("check_same_thread", False)
+        conn = _orig_connect(db, timeout=timeout, **kw)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        return conn
+    sqlite3.connect = _wal_connect
+    sqlite3._wal_patched = True
 
 from groq import Groq
 from aiohttp import web
@@ -3612,7 +3615,7 @@ def save_self_rule(category, rule, confidence=0.5, source="auto"):
             log_brain_event("rule_strengthened", f"{category}: {rule[:80]}", f"confidence → {new_conf:.1f}")
         else:
             conn.execute(
-                "INSERT OR IGNORE INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active) VALUES (?,?,?,?,?,?,1)",
+                "INSERT OR IGNORE INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active) VALUES (?, ?, ?, ?, ?, ?, 1)",
                 (category, rule, "auto", rule, confidence, source)
             )
             log_brain_event("rule_added", f"{category}: {rule[:80]}", f"confidence={confidence}")
@@ -4666,7 +4669,7 @@ def self_diagnose_and_grow():
                 ex = conn2.execute("SELECT id FROM self_rules WHERE rule=?", (rule,)).fetchone()
                 if not ex:
                     conn2.execute(
-                        "INSERT OR IGNORE INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active) VALUES (?,?,?,?,?,?,1)",
+                        "INSERT OR IGNORE INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active) VALUES (?, ?, ?, ?, ?, ?, 1)",
                         ("self_improve", rule, "auto", rule, 0.65, "self-diagnosis")
                     )
                     saved += 1
