@@ -43,7 +43,7 @@ except NameError:
     _brain_router = _DummyRouter()
 
 # Groq токены — определяются в market.py, fallback на случай если не экспортировались
-try: _GROQ_DAILY_LIMIT
+from market import _GROQ_DAILY_LIMIT
 except NameError: _GROQ_DAILY_LIMIT = 480_000
 try: _groq_tokens_used
 except NameError: _groq_tokens_used = 0
