@@ -445,7 +445,7 @@ def groq_research_topic(topic: str, query: str) -> dict:
         for rule_item in data.get("trading_rules", []):
             rule_text = rule_item.get("rule", "")
             confidence = float(rule_item.get("confidence", 0.6))
-            rule_type = rule_item.get("type", "PREFER").lower()
+            rule_type = (rule_item.get("type") or "PREFER").lower()
             if rule_text and confidence >= 0.6:
                 conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at)
                     VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
