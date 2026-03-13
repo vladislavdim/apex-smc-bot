@@ -1086,3 +1086,177 @@ def get_volume_profile(candles: list, bins: int = 10) -> dict:
         "current_zone": current_zone,
         "current_price": round(current, 6)
     }
+
+
+# ===== SUPPLY / DEMAND ЗОНЫ =====
+def find_supply_demand(candles: list, direction: str) -> dict | None:
+    """
+    Supply/Demand зоны — усиленная версия Order Block.
+    Supply (предложение): зона откуда цена резко упала (медвежья зона).
+    Demand (спрос): зона откуда цена резко выросла (бычья зона).
+    Совпадение с OB = очень сильный уровень.
+    """
+    if len(candles) < 20:
+        return None
+    try:
+        closes = [c["close"] for c in candles]
+        # Ищем резкие движения (импульс > 1.5% за свечу)
+        for i in range(len(candles)-10, max(0, len(candles)-50), -1):
+            c = candles[i]
+            move = abs(c["close"] - c["open"]) / c["open"] * 100
+            if move < 1.5:
+                continue
+            is_bullish = c["close"] > c["open"]
+            if direction == "BULLISH" and is_bullish:
+                # Demand зона — основание импульса вверх
+                zone_bottom = min(c["open"], c["low"])
+                zone_top = max(c["open"], c["close"]) * 0.998
+                if candles[-1]["close"] > zone_top:
+                    continue  # цена уже выше зоны
+                return {
+                    "type": "DEMAND",
+                    "bottom": round(zone_bottom, 6),
+                    "top": round(zone_top, 6),
+                    "strength": "STRONG" if move > 3 else "MODERATE",
+                    "candle_idx": i
+                }
+            elif direction == "BEARISH" and not is_bullish:
+                # Supply зона — вершина импульса вниз
+                zone_bottom = min(c["open"], c["close"]) * 1.002
+                zone_top = max(c["open"], c["high"])
+                if candles[-1]["close"] < zone_bottom:
+                    continue
+                return {
+                    "type": "SUPPLY",
+                    "bottom": round(zone_bottom, 6),
+                    "top": round(zone_top, 6),
+                    "strength": "STRONG" if move > 3 else "MODERATE",
+                    "candle_idx": i
+                }
+    except Exception:
+        pass
+    return None
+
+
+# ===== WYCKOFF ФАЗЫ (расширенные) =====
+def detect_wyckoff_phase(candles: list) -> dict:
+    """
+    Полные Wyckoff фазы:
+    Accumulation → Markup → Distribution → Markdown
+    Анализирует последние 50 свечей.
+    """
+    if len(candles) < 30:
+        return {"phase": "UNKNOWN", "score": 0, "signals": []}
+
+    try:
+        last50 = candles[-50:] if len(candles) >= 50 else candles
+        closes = [c["close"] for c in last50]
+        vols = [c.get("volume", 0) for c in last50]
+        highs = [c["high"] for c in last50]
+        lows = [c["low"] for c in last50]
+
+        price_now = closes[-1]
+        avg_vol = sum(vols) / len(vols) if vols else 1
+        recent_vol = sum(vols[-5:]) / 5 if len(vols) >= 5 else avg_vol
+
+        # Разбиваем на трети
+        third = len(closes) // 3
+        first_third = closes[:third]
+        last_third = closes[-third:]
+        first_avg = sum(first_third) / len(first_third)
+        last_avg = sum(last_third) / len(last_third)
+
+        range_pct = (max(highs) - min(lows)) / min(lows) * 100 if min(lows) > 0 else 0
+        trend_change = (last_avg - first_avg) / first_avg * 100
+
+        signals = []
+        score = 0
+
+        # ACCUMULATION: боковик + низкий объём + потом всплеск
+        if range_pct < 8 and recent_vol > avg_vol * 1.3 and trend_change > -2:
+            score += 40
+            signals.append("Боковик с всплеском объёма")
+            if trend_change > 0:
+                score += 20
+                signals.append("Цена начинает расти")
+            phase = "ACCUMULATION"
+
+        # MARKUP: устойчивый рост + объём подтверждает
+        elif trend_change > 5 and recent_vol >= avg_vol * 0.8:
+            score += 60
+            signals.append(f"Устойчивый рост +{trend_change:.1f}%")
+            phase = "MARKUP"
+
+        # DISTRIBUTION: боковик на хаях + объём падает
+        elif range_pct < 8 and price_now >= max(highs) * 0.95 and recent_vol < avg_vol:
+            score += 40
+            signals.append("Боковик на хаях + объём падает")
+            phase = "DISTRIBUTION"
+
+        # MARKDOWN: устойчивое падение
+        elif trend_change < -5:
+            score += 60
+            signals.append(f"Устойчивое падение {trend_change:.1f}%")
+            phase = "MARKDOWN"
+
+        else:
+            phase = "TRANSITION"
+            score = 20
+            signals.append("Переходная фаза")
+
+        return {
+            "phase": phase,
+            "score": min(score, 100),
+            "signals": signals,
+            "range_pct": round(range_pct, 1),
+            "trend_change": round(trend_change, 1),
+            "vol_ratio": round(recent_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+        }
+    except Exception:
+        return {"phase": "UNKNOWN", "score": 0, "signals": []}
+
+
+# ===== МНОГОМОНЕТНАЯ КОРРЕЛЯЦИЯ =====
+def check_multi_coin_correlation(symbol: str, direction: str, get_candles_fn) -> dict:
+    """
+    Проверяет согласованность движения похожих монет.
+    Если SOL, AVAX, NEAR одновременно BULLISH — сигнал сильнее.
+    """
+    CORRELATED_GROUPS = {
+        "SOLUSDT":  ["AVAXUSDT", "NEARUSDT", "SUIUSDT"],
+        "AVAXUSDT": ["SOLUSDT", "NEARUSDT", "ATOMUSDT"],
+        "NEARUSDT": ["SOLUSDT", "SUIUSDT", "INJUSDT"],
+        "LINKUSDT": ["INJUSDT", "ARBUSDT"],
+        "ARBUSDT":  ["LINKUSDT", "INJUSDT"],
+        "BTCUSDT":  ["ETHUSDT"],
+        "ETHUSDT":  ["BTCUSDT", "ARBUSDT"],
+        "XRPUSDT":  ["ADAUSDT", "XLMUSDT"],
+        "ADAUSDT":  ["XRPUSDT", "DOTUSDT"],
+        "LTCUSDT":  ["BTCUSDT"],
+    }
+    corr_symbols = CORRELATED_GROUPS.get(symbol, [])
+    if not corr_symbols:
+        return {"confirmed": 0, "total": 0, "score": 0}
+
+    confirmed = 0
+    for sym in corr_symbols:
+        try:
+            c = get_candles_fn(sym, "1h", 5)
+            if len(c) < 3:
+                continue
+            change = (c[-1]["close"] - c[-3]["close"]) / c[-3]["close"] * 100
+            if direction == "BULLISH" and change > 0.3:
+                confirmed += 1
+            elif direction == "BEARISH" and change < -0.3:
+                confirmed += 1
+        except Exception:
+            continue
+
+    total = len(corr_symbols)
+    ratio = confirmed / total if total > 0 else 0
+    return {
+        "confirmed": confirmed,
+        "total": total,
+        "score": int(ratio * 10),  # макс +10 к confluence
+        "strong": ratio >= 0.6
+    }
