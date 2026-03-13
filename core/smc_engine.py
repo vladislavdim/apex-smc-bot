@@ -4,6 +4,20 @@ APEX SMC Engine v3 — Умный обход барьеров + самообуч
 import requests, sqlite3, time, logging, json
 from datetime import datetime
 
+# ── WAL патч ──
+_orig_connect_smc = sqlite3.connect
+def _wal_connect_smc(db, timeout=15, **kw):
+    conn = _orig_connect_smc(db, timeout=timeout, **kw)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+sqlite3.connect = _wal_connect_smc
+
+
 BINANCE_INTERVALS = {
     "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
     "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"1w"
