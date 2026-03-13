@@ -504,11 +504,17 @@ def init_db():
         ("confirmed_by",    "INTEGER DEFAULT 0"),
         ("contradicted_by", "INTEGER DEFAULT 0"),
         ("updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        ("active",          "INTEGER DEFAULT 1"),
     ]:
         try:
             c.execute(f"ALTER TABLE self_rules ADD COLUMN {col} {typedef}")
         except Exception:
             pass
+    # Активируем все старые записи у которых active=NULL
+    try:
+        c.execute("UPDATE self_rules SET active=1 WHERE active IS NULL")
+    except Exception:
+        pass
 
     # Миграция alerts — добавляем price_level если нет
     try:
@@ -554,11 +560,16 @@ def init_db():
         source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
-    # Миграция: добавляем learning_id если ещё нет
-    try:
-        c.execute("ALTER TABLE signals ADD COLUMN learning_id INTEGER DEFAULT NULL")
-    except Exception:
-        pass  # Колонка уже существует
+    # Миграция signals — добавляем колонки если нет
+    for col, typedef in [
+        ("learning_id", "INTEGER DEFAULT NULL"),
+        ("confluence",  "INTEGER DEFAULT 0"),
+        ("regime",      "TEXT DEFAULT 'UNKNOWN'"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass
 
     # Миграция brain_log — добавляем колонки title и source если нет
     for col, typedef in [("title", "TEXT"), ("source", "TEXT"), ("impact", "TEXT")]:
