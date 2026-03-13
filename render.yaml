@@ -6,11 +6,6 @@ services:
     startCommand: python bot.py
     autoDeploy: true
     buildFilter:
-      paths:
-        - bot.py
-        - market.py
-        - requirements.txt
-        - runtime.txt
       ignoredPaths:
         - brain.db
         - core/learning.py
