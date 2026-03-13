@@ -1496,3 +1496,203 @@ def get_latest_trade_analysis(limit: int = 5) -> str:
         return text.strip()
     except Exception as e:
         return f"Ошибка: {e}"
+
+
+# ===== ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ GROQ =====
+def groq_weekly_report():
+    """
+    Каждое воскресенье Groq анализирует всю неделю:
+    - Какие паттерны работали
+    - Какие нет
+    - Что изменить в следующей неделе
+    Результат → brain.db + отправляет в Telegram
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Статистика за 7 дней
+        week_stats = conn.execute("""
+            SELECT symbol, direction, result, timeframe, hours_open
+            FROM signal_log
+            WHERE created_at >= datetime('now', '-7 days')
+        """).fetchall()
+
+        if not week_stats:
+            conn.close()
+            return "Нет данных за неделю"
+
+        wins = [s for s in week_stats if s[2] in ("tp1","tp2","tp3")]
+        losses = [s for s in week_stats if s[2] == "sl"]
+        total = len(week_stats)
+        wr = len(wins) / total * 100 if total > 0 else 0
+
+        # Лучшие монеты
+        from collections import Counter
+        win_symbols = Counter(s[0] for s in wins)
+        loss_symbols = Counter(s[0] for s in losses)
+        best = win_symbols.most_common(3)
+        worst = loss_symbols.most_common(3)
+
+        # Лучшие таймфреймы
+        win_tfs = Counter(s[3] for s in wins)
+        best_tf = win_tfs.most_common(1)[0] if win_tfs else ("неизвестно", 0)
+
+        # Читаем текущие правила
+        rules = conn.execute(
+            "SELECT rule_text, confidence FROM self_rules ORDER BY confidence DESC LIMIT 10"
+        ).fetchall()
+        rules_text = "\n".join(f"- {r[0][:80]} ({r[1]:.1f})" for r in rules) if rules else "нет правил"
+        conn.close()
+
+        prompt = f"""Ты — APEX торговый бот. Проанализируй свои результаты за неделю и дай честный отчёт.
+
+СТАТИСТИКА НЕДЕЛИ:
+- Всего сигналов: {total}
+- Прибыльных: {len(wins)} ({wr:.1f}% WR)
+- Убыточных: {len(losses)}
+- Лучшие монеты: {', '.join([f"{s[0]}({c})" for s,c in best])}
+- Худшие монеты: {', '.join([f"{s[0]}({c})" for s,c in worst])}
+- Лучший ТФ: {best_tf[0]} ({best_tf[1]} побед)
+
+МОИ ТЕКУЩИЕ ПРАВИЛА:
+{rules_text}
+
+Напиши структурированный отчёт:
+1. Что сработало хорошо на этой неделе
+2. Что не сработало и почему
+3. Конкретные изменения для следующей недели (3-5 правил)
+4. Общая оценка качества сигналов
+
+Ответь на русском, кратко и конкретно. Не более 400 слов."""
+
+        response = _call_groq(prompt, max_tokens=600)
+        if not response:
+            return "Groq недоступен"
+
+        # Сохраняем отчёт
+        conn2 = sqlite3.connect(DB_PATH)
+        conn2.execute("""INSERT OR IGNORE INTO self_analysis
+            (period, wins, losses, win_rate, patterns, recommendations)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            ("weekly", len(wins), len(losses), round(wr, 1),
+             str(best), response[:500]))
+        conn2.commit()
+        conn2.close()
+
+        logging.info(f"[Learning] Еженедельный отчёт сгенерирован: WR={wr:.1f}%")
+        return response
+
+    except Exception as e:
+        logging.error(f"groq_weekly_report: {e}")
+        return ""
+
+
+# ===== GROQ ПЕРЕСМАТРИВАЕТ СТАРЫЕ ПРАВИЛА =====
+def groq_review_old_rules():
+    """
+    Раз в 3 дня Groq берёт правила старше 7 дней,
+    проверяет подтвердились ли они на реальных сделках,
+    удаляет нерабочие (confidence < 0.3).
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+
+        # Правила старше 7 дней
+        old_rules = conn.execute("""
+            SELECT id, rule_type, rule_text, confidence, confirmed_by, contradicted_by
+            FROM self_rules
+            WHERE created_at < datetime('now', '-7 days') AND active=1
+            ORDER BY confidence ASC
+            LIMIT 20
+        """).fetchall()
+
+        if not old_rules:
+            conn.close()
+            return
+
+        deactivated = 0
+        strengthened = 0
+
+        for rule_id, rule_type, rule_text, conf, confirmed, contradicted in old_rules:
+            if not rule_text:
+                continue
+
+            # Правило нерабочее — много противоречий
+            if contradicted > confirmed * 2 and conf < 0.3:
+                conn.execute("UPDATE self_rules SET active=0 WHERE id=?", (rule_id,))
+                deactivated += 1
+                logging.info(f"[Learning] Правило деактивировано: {rule_text[:60]}")
+                continue
+
+            # Правило хорошо работает — усиливаем
+            if confirmed > contradicted * 2 and conf < 0.9:
+                new_conf = min(0.95, conf + 0.1)
+                conn.execute("UPDATE self_rules SET confidence=? WHERE id=?", (new_conf, rule_id))
+                strengthened += 1
+
+        conn.commit()
+        conn.close()
+        logging.info(f"[Learning] Пересмотр правил: деактивировано={deactivated}, усилено={strengthened}")
+
+    except Exception as e:
+        logging.error(f"groq_review_old_rules: {e}")
+
+
+# ===== A/B ТЕСТИРОВАНИЕ СТРАТЕГИЙ =====
+def groq_ab_test_rules():
+    """
+    Groq генерирует две версии правила для слабых монет,
+    запускает параллельно на разных монетах,
+    через неделю оставляет победителя.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+
+        # Монеты со слабым WR
+        weak = conn.execute("""
+            SELECT symbol, win_rate, total FROM signal_stats
+            WHERE total >= 5 AND win_rate < 50
+            ORDER BY win_rate ASC LIMIT 5
+        """).fetchall()
+
+        if not weak:
+            conn.close()
+            return
+
+        for symbol, wr, total in weak:
+            prompt = f"""APEX бот. Монета {symbol} имеет WR={wr:.1f}% за {total} сигналов.
+Предложи два разных подхода (A и B) для улучшения точности сигналов по этой монете.
+Каждый подход — конкретное правило входа/фильтра.
+Формат JSON: {{"a": "правило А", "b": "правило Б"}}
+Только JSON, без пояснений."""
+
+            response = _call_groq(prompt, max_tokens=200)
+            if not response:
+                continue
+
+            try:
+                import json as _json
+                data = _json.loads(response.strip().strip('`').replace('json',''))
+                rule_a = data.get("a", "")
+                rule_b = data.get("b", "")
+
+                if rule_a:
+                    conn.execute("""INSERT OR IGNORE INTO self_rules
+                        (rule_type, rule_text, confidence, source, category)
+                        VALUES (?, ?, ?, ?, ?)""",
+                        ("ab_test_a", rule_a, 0.5, f"ab_test:{symbol}", symbol))
+
+                if rule_b:
+                    conn.execute("""INSERT OR IGNORE INTO self_rules
+                        (rule_type, rule_text, confidence, source, category)
+                        VALUES (?, ?, ?, ?, ?)""",
+                        ("ab_test_b", rule_b, 0.5, f"ab_test:{symbol}", symbol))
+
+                logging.info(f"[Learning] A/B тест для {symbol}: A={rule_a[:50]}")
+            except Exception:
+                pass
+
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        logging.error(f"groq_ab_test_rules: {e}")
