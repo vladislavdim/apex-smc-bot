@@ -23,6 +23,25 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ── Импортируем всю рыночную логику из market.py ──
 from market import *
 
+# Fallback флаги — на случай если market.py не экспортировал их
+try: _LEARNING_OK
+except NameError: _LEARNING_OK = False
+try: _SMC_ENGINE_OK
+except NameError: _SMC_ENGINE_OK = False
+try: _EXT_OK
+except NameError: _EXT_OK = False
+try: _ROUTER_OK
+except NameError: _ROUTER_OK = False
+try: _AUTOPILOT_OK
+except NameError: _AUTOPILOT_OK = False
+try: _WEB_LEARNER_OK
+except NameError: _WEB_LEARNER_OK = False
+try: _brain_router
+except NameError:
+    class _DummyRouter:
+        def __getattr__(self, n): return lambda *a, **k: ""
+    _brain_router = _DummyRouter()
+
 # ===== KEYBOARDS =====
 
 def main_menu():
