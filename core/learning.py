@@ -342,7 +342,7 @@ def _seed_smc_knowledge():
         for rule_type, rule_text, confidence, source in smc_rules:
             conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, active, created_at)
                 VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)""",
-                (rule_type, rule_text, confidence, source, active))
+                (rule_type, rule_text, confidence, source))
 
         conn.commit()
         conn.close()
