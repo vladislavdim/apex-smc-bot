@@ -376,8 +376,8 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
         # Новое правило в self_rules
         if rule_text and confidence >= 0.65:
             conn.execute("""INSERT OR IGNORE INTO self_rules
-                (rule_type, rule_text, confidence, source, created_at)
-                VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                (rule_type, rule_text, confidence, source, active, created_at)
+                VALUES (?,?,?,?,1,CURRENT_TIMESTAMP)""",
                 (rule_type, rule_text, confidence, "autopilot"))
             logging.info(f"[Autopilot] 📌 Новое правило [{rule_type}]: {rule_text[:70]}")
 
