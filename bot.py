@@ -12,18 +12,6 @@ from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # WAL патч — решает "database is locked"
-_orig_connect_bot = sqlite3.connect
-def _wal_connect_bot(db, timeout=30, **kw):
-    kw.setdefault("check_same_thread", False)
-    conn = _orig_connect_bot(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_bot
 
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
