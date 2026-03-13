@@ -7,7 +7,7 @@ from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain.db")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama3-70b-8192"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ═══════════════════════════════════════════════════════════════
 # ИНИЦИАЛИЗАЦИЯ
@@ -44,23 +44,6 @@ def init_web_learner_db():
         actual_win_rate REAL,
         source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-
-    conn.execute("""CREATE TABLE IF NOT EXISTS pattern_memory (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol     TEXT,
-        pattern    TEXT,
-        timeframe  TEXT,
-        result     TEXT,
-        confidence REAL DEFAULT 0.5,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-
-    conn.execute("""CREATE TABLE IF NOT EXISTS knowledge_gaps (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        query      TEXT,
-        source     TEXT,
-        resolved   INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-
     conn.commit()
     conn.close()
 
@@ -80,7 +63,11 @@ def _groq(prompt: str, max_tokens: int = 800) -> str:
                   "max_tokens": max_tokens, "temperature": 0.3},
             timeout=30
         )
-        return r.json()["choices"][0]["message"]["content"].strip()
+        data = r.json()
+        if "choices" not in data:
+            logging.warning(f"web_learner groq: {data.get('error', {}).get('message', 'no choices')}")
+            return ""
+        return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logging.warning(f"web_learner groq: {e}")
         return ""
