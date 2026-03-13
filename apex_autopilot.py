@@ -26,18 +26,6 @@ import requests
 from datetime import datetime, timedelta
 
 # ── WAL патч ──
-_orig_connect_ap = sqlite3.connect
-def _wal_connect_ap(db, timeout=30, **kw):
-    kw.setdefault("check_same_thread", False)
-    conn = _orig_connect_ap(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_ap
 
 DB_PATH     = "brain.db"
 EXT_FILE    = "groq_extensions.py"
