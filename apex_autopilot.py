@@ -522,11 +522,18 @@ def _write_fix_to_extensions(signal_id, symbol, result, fix_type,
             return False
 
         # Проверяем что основные функции на месте
-        required = ["run_all_filters", "run_confluence_boosters", "ACTIVE_FILTERS", "GROQ_CHANGELOG"]
-        for req in required:
-            if req not in new_code:
-                logging.error(f"[Autopilot] ❌ Groq удалил важную функцию: {req}")
-                return False
+        # Расширенный список защищённых функций — Groq не может их удалить
+        required = [
+            "run_all_filters", "run_confluence_boosters",
+            "ACTIVE_FILTERS", "GROQ_CHANGELOG",
+            "filter_meme_coins_high_fg", "filter_low_confluence_sideways",
+            "filter_consecutive_losses", "boost_strong_volume", "boost_clean_structure",
+            "get_extensions_summary",
+        ]
+        missing = [r for r in required if r not in new_code]
+        if missing:
+            logging.error(f"[Autopilot] ❌ Groq удалил защищённые функции: {missing} — откат!")
+            return False
 
         # Пушим на GitHub
         encoded = base64.b64encode(new_code.encode("utf-8")).decode("utf-8")
