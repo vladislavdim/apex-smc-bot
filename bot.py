@@ -977,7 +977,12 @@ def detect_accumulation(symbol):
             score += 8
             signals.append(f"⚡️ BB ширина {bb_width:.1f}% (сжимается)")
 
-        if not signals or score < 30:
+        # Стакан обязателен — без него штраф -15
+        orderbook_confirmed = any("Биды" in s for s in signals)
+        if not orderbook_confirmed:
+            score = max(0, score - 15)
+
+        if not signals or score < 72:  # поднят порог с 30 до 72
             return None
 
         return {
@@ -2463,7 +2468,7 @@ def full_scan(symbol, timeframe="1h"):
                 # Накопление только для топовых сигналов
                 if mtf.get("grade","") in ("МЕГА ТОП", "ТОП СДЕЛКА"):
                     accum = _brain_router.accumulation(symbol)
-                    if accum["score"] >= 60:
+                    if accum["score"] >= 72:
                         router_accum = f"📦 Wyckoff {accum['phase']}: {accum['score']}/100"
         except Exception as _re:
             logging.debug(f"[Router] signal context error: {_re}")
@@ -7547,7 +7552,7 @@ async def deep_market_scan(limit=200):
                 loop.run_in_executor(None, detect_accumulation, symbol),
                 timeout=6.0
             )
-            if acc and acc.get("score", 0) >= 55:  # снижен порог с 60 до 55
+            if acc and acc.get("score", 0) >= 72:  # поднят порог качества
                 accumulations.append({
                     "symbol": symbol,
                     "score": acc["score"],
@@ -7684,7 +7689,7 @@ async def auto_accumulation_scan():
     for symbol in pairs:
         try:
             acc = detect_accumulation(symbol)
-            if acc and acc["score"] >= 60:
+            if acc and acc["score"] >= 72:
                 found.append(acc)
             await asyncio.sleep(0.3)
         except:
@@ -7742,6 +7747,18 @@ def scan_all_for_deals(limit=40):
 def full_scan_raw(symbol, timeframe="1h"):
     """Возвращает dict с текстом и grade для фильтрации"""
     try:
+        # Проверяем есть ли уже открытый сигнал по этому символу в БД
+        try:
+            with sqlite3.connect(DB_PATH) as _chk:
+                _row = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND result=\'pending\' LIMIT 1",
+                    (symbol,)
+                ).fetchone()
+                if _row:
+                    return None  # уже есть открытая сделка — не дублируем
+        except Exception:
+            pass
+
         mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])
         if not mtf:
             return None
@@ -7770,19 +7787,42 @@ def full_scan_raw(symbol, timeframe="1h"):
         if len(confluence) < 2:
             return None
 
-        risk = price * 0.015
+        # Риск и минимальный TP по таймфрейму
+        # 15m: цель 1-3%, 1h: 3-8%, 4h: 8-20%, 1d: 20-60%
+        TF_RISK_MAP = {
+            "15m": 0.008,   # TP1=1.6%, TP3=4%
+            "1h":  0.018,   # TP1=3.6%, TP3=9%
+            "4h":  0.040,   # TP1=8%,   TP3=20%
+            "1d":  0.090,   # TP1=18%,  TP3=45%
+        }
+        MIN_TP1_PCT = {
+            "15m": 0.012,   # минимум 1.2%
+            "1h":  0.030,   # минимум 3%
+            "4h":  0.070,   # минимум 7%
+            "1d":  0.150,   # минимум 15%
+        }
+        risk_pct = TF_RISK_MAP.get(timeframe, 0.018)
+        risk = price * risk_pct
+        min_tp1 = price * MIN_TP1_PCT.get(timeframe, 0.030)
+
         if direction == "BULLISH":
             entry = ob["top"] if ob else price
-            sl = round(entry - risk, 4)
-            tp1 = round(entry + risk * 2, 4)
-            tp2 = round(entry + risk * 3, 4)
-            tp3 = round(entry + risk * 5, 4)
+            sl = smart_round(entry - risk)
+            tp1 = smart_round(entry + risk * 2)
+            tp2 = smart_round(entry + risk * 3)
+            tp3 = smart_round(entry + risk * 5)
+            # Проверяем минимальный TP1
+            if tp1 - entry < min_tp1:
+                return None
         else:
             entry = ob["bottom"] if ob else price
-            sl = round(entry + risk, 4)
-            tp1 = round(entry - risk * 2, 4)
-            tp2 = round(entry - risk * 3, 4)
-            tp3 = round(entry - risk * 5, 4)
+            sl = smart_round(entry + risk)
+            tp1 = smart_round(entry - risk * 2)
+            tp2 = smart_round(entry - risk * 3)
+            tp3 = smart_round(entry - risk * 5)
+            # Проверяем минимальный TP1
+            if entry - tp1 < min_tp1:
+                return None
 
         est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
@@ -7795,6 +7835,20 @@ def full_scan_raw(symbol, timeframe="1h"):
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
+        # Считаем % прибыли для TP
+        if direction == "BULLISH":
+            tp1_pct = (tp1 - entry) / entry * 100
+            tp2_pct = (tp2 - entry) / entry * 100
+            tp3_pct = (tp3 - entry) / entry * 100
+        else:
+            tp1_pct = (entry - tp1) / entry * 100
+            tp2_pct = (entry - tp2) / entry * 100
+            tp3_pct = (entry - tp3) / entry * 100
+
+        # Время по таймфрейму
+        TF_TIME_LABEL = {"15m": "2-6ч", "1h": "12-48ч", "4h": "2-7дн", "1d": "1-4нед"}
+        tf_time_hint = TF_TIME_LABEL.get(timeframe, time_str)
+
         text = (
             f"{'━'*26}\n"
             f"{mtf['grade_emoji']} <b>{mtf['grade']}</b> [{tf_label}]\n"
@@ -7802,12 +7856,12 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"{'━'*26}\n\n"
             f"📐 <b>Таймфреймы:</b>\n{mtf['tf_status']}\n"
             f"{mtf['stars']}\n\n"
-            f"💰 <b>Вход:</b> <code>{entry:.4f}</code>\n"
-            f"🛑 <b>Стоп:</b> <code>{sl:.4f}</code>\n"
-            f"🎯 <b>TP1:</b> <code>{tp1:.4f}</code> (+2R)\n"
-            f"🎯 <b>TP2:</b> <code>{tp2:.4f}</code> (+3R)\n"
-            f"🎯 <b>TP3:</b> <code>{tp3:.4f}</code> (+5R)\n\n"
-            f"⏱ <b>Время отработки:</b> {time_str}\n"
+            f"💰 <b>Вход:</b> <code>{smart_price_fmt(entry)}</code>\n"
+            f"🛑 <b>Стоп:</b> <code>{smart_price_fmt(sl)}</code>\n"
+            f"🎯 <b>TP1:</b> <code>{smart_price_fmt(tp1)}</code> (+{tp1_pct:.1f}%)\n"
+            f"🎯 <b>TP2:</b> <code>{smart_price_fmt(tp2)}</code> (+{tp2_pct:.1f}%)\n"
+            f"🎯 <b>TP3:</b> <code>{smart_price_fmt(tp3)}</code> (+{tp3_pct:.1f}%)\n\n"
+            f"⏱ <b>Горизонт:</b> {tf_time_hint}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
             f"📋 <b>Confluence:</b>\n{conf_text}\n"
             f"{'━'*26}"
