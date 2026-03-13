@@ -9,10 +9,9 @@ on:
         type: string
   push:
     branches: [main]
-    paths:
-      - 'bot.py'
     paths-ignore:
       - 'brain.db'
+      - '*.db'
 
 jobs:
   ai-fix:
