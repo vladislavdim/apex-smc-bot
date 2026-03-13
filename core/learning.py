@@ -14,6 +14,19 @@ APEX Learning v3 — Самообразование, память ошибок, 
 import sqlite3, time, logging, json
 from datetime import datetime, timedelta
 
+# ── WAL патч — решает "database is locked" при многопоточном доступе ──
+_orig_connect_lr = sqlite3.connect
+def _wal_connect_lr(db, timeout=15, **kw):
+    conn = _orig_connect_lr(db, timeout=timeout, **kw)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+sqlite3.connect = _wal_connect_lr
+
 import os as _os
 DB_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "brain.db")
 # Если файл в корне рядом с bot.py — используем текущую директорию
@@ -199,12 +212,36 @@ def init_learning():
         ("signal_log",      "regime",      "TEXT"),
         ("web_knowledge",   "query",       "TEXT"),
         ("learning_agenda", "query",       "TEXT"),
+        # signal_stats — старая БД может иметь только 9 колонок вместо 12
+        ("signal_stats", "tp1_hits",     "INTEGER DEFAULT 0"),
+        ("signal_stats", "tp2_hits",     "INTEGER DEFAULT 0"),
+        ("signal_stats", "tp3_hits",     "INTEGER DEFAULT 0"),
+        ("signal_stats", "sl_hits",      "INTEGER DEFAULT 0"),
+        ("signal_stats", "expired",      "INTEGER DEFAULT 0"),
+        ("signal_stats", "avg_rr",       "REAL DEFAULT 0.0"),
+        ("signal_stats", "last_updated", "TEXT"),
+        # self_rules — добавляем confirmed_by/contradicted_by если их нет
+        ("self_rules", "confirmed_by",    "INTEGER DEFAULT 0"),
+        ("self_rules", "contradicted_by", "INTEGER DEFAULT 0"),
+        ("self_rules", "updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        ("self_rules", "category",        "TEXT"),
+        ("self_rules", "rule",            "TEXT"),
+        # self_rules в web_learner пишет поле active
+        ("self_rules", "active",          "INTEGER DEFAULT 1"),
     ]
     for tbl, col, typedef in _col_migrations:
         try:
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typedef}")
         except Exception:
             pass  # колонка уже есть
+
+    # WAL режим — решает "database is locked" при параллельных потоках
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
 
     # symbol_stats — статистика по монетам для web_learner
     conn.execute("""CREATE TABLE IF NOT EXISTS symbol_stats (
