@@ -164,6 +164,10 @@ RSS_SOURCES = {
     # === МАКРО / ТРАДФИ ===
     "Investopedia_crypto":"https://www.investopedia.com/cryptocurrency-news-5114163",
     "Reuters_crypto":    "https://feeds.reuters.com/reuters/businessNews",
+
+    # === ON-CHAIN / WHALE DATA ===
+    "WhaleAlert":        "https://whale-alert.io/feed",
+    "CryptoQuant_alert": "https://cryptoquant.com/community/blog/rss",
 }
 
 # Конкретные темы для изучения из источников топ трейдеров
@@ -181,6 +185,10 @@ TRADER_KNOWLEDGE_URLS = {
     "volume_profile":    "https://www.tradingview.com/support/solutions/43000502009/",
     "funding_rates":     "https://www.binance.com/en/blog/futures/what-are-funding-rates-421499824684900420",
     "open_interest":     "https://academy.binance.com/en/articles/what-is-open-interest",
+    "supply_demand":     "https://www.babypips.com/learn/forex/support-and-resistance",
+    "wyckoff_phases":    "https://school.stockcharts.com/doku.php?id=market_analysis:the_wyckoff_method",
+    "liquidations":      "https://academy.binance.com/en/articles/what-is-liquidation",
+    "santiment_guide":   "https://academy.santiment.net/",
 }
 
 
