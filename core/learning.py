@@ -437,7 +437,9 @@ def _update_stats(conn, symbol):
         "SELECT rr_achieved FROM signal_log WHERE symbol=? AND rr_achieved!=0", (symbol,)
     ).fetchall()
     avg_rr = sum(r[0] for r in rr_rows) / len(rr_rows) if rr_rows else 0
-    conn.execute("""INSERT OR REPLACE INTO signal_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+    conn.execute("""INSERT OR REPLACE INTO signal_stats
+        (symbol,total,wins,losses,tp1_hits,tp2_hits,tp3_hits,sl_hits,expired,win_rate,avg_rr,last_updated)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (symbol,total,wins,losses,tp1,tp2,tp3,sl,exp,wr,avg_rr,datetime.now().isoformat()))
 
 
