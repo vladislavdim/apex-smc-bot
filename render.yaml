@@ -1,11 +1,21 @@
 services:
   - type: web
     name: apex-smc-bot
-    runtime: python
+    env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    ignoredPaths:
-      - brain.db
-      - "*.db"
-      - "*.db-shm"
-      - "*.db-wal"
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - bot.py
+        - market.py
+        - requirements.txt
+        - runtime.txt
+      ignoredPaths:
+        - brain.db
+        - core/learning.py
+        - core/smc_engine.py
+        - apex_autopilot.py
+        - groq_extensions.py
+        - brain_router.py
+        - web_learner.py
