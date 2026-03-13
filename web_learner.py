@@ -5,20 +5,6 @@ Groq сам решает что искать, ищет, анализирует �
 import requests, sqlite3, logging, json, os, time, re
 from datetime import datetime
 
-# ── WAL патч ──
-_orig_connect_wl = sqlite3.connect
-def _wal_connect_wl(db, timeout=30, **kw):
-    kw.setdefault("check_same_thread", False)
-    conn = _orig_connect_wl(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_wl
-
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain.db")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = "llama-3.1-8b-instant"
@@ -178,10 +164,6 @@ RSS_SOURCES = {
     # === МАКРО / ТРАДФИ ===
     "Investopedia_crypto":"https://www.investopedia.com/cryptocurrency-news-5114163",
     "Reuters_crypto":    "https://feeds.reuters.com/reuters/businessNews",
-
-    # === ON-CHAIN / WHALE DATA ===
-    "WhaleAlert":        "https://whale-alert.io/feed",
-    "CryptoQuant_alert": "https://cryptoquant.com/community/blog/rss",
 }
 
 # Конкретные темы для изучения из источников топ трейдеров
@@ -199,10 +181,6 @@ TRADER_KNOWLEDGE_URLS = {
     "volume_profile":    "https://www.tradingview.com/support/solutions/43000502009/",
     "funding_rates":     "https://www.binance.com/en/blog/futures/what-are-funding-rates-421499824684900420",
     "open_interest":     "https://academy.binance.com/en/articles/what-is-open-interest",
-    "supply_demand":     "https://www.babypips.com/learn/forex/support-and-resistance",
-    "wyckoff_phases":    "https://school.stockcharts.com/doku.php?id=market_analysis:the_wyckoff_method",
-    "liquidations":      "https://academy.binance.com/en/articles/what-is-liquidation",
-    "santiment_guide":   "https://academy.santiment.net/",
 }
 
 
@@ -360,11 +338,6 @@ def groq_research_topic(topic: str, query: str) -> dict:
     Groq ищет информацию по теме и извлекает полезные знания.
     Приоритет: RSS фиды → DuckDuckGo → крипто-сайты
     """
-    # Guard against None args — источник ошибки 'NoneType' has no attribute 'lower'
-    topic = (topic or "").strip()
-    query = (query or topic).strip()
-    if not topic:
-        return {}
     try:
         logging.info(f"[WebLearner] Исследую тему: {topic}")
 
@@ -474,8 +447,8 @@ def groq_research_topic(topic: str, query: str) -> dict:
             confidence = float(rule_item.get("confidence", 0.6))
             rule_type = (rule_item.get("type") or "PREFER").lower()
             if rule_text and confidence >= 0.6:
-                conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at)
-                    VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at, active)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
                     (rule_type, rule_text, confidence, f"web_research:{topic}"))
 
         # Стратегия → в библиотеку
@@ -723,8 +696,8 @@ def groq_self_improve():
             rule_text = imp.get("rule_text")
             if rule_text and float(imp.get("confidence", 0)) >= 0.65:
                 conn.execute("""INSERT OR IGNORE INTO self_rules
-                    (rule_type, rule_text, confidence, source, created_at)
-                    VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                    (rule_type, rule_text, confidence, source, created_at, active)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
                     (imp.get("rule_type", "prefer"), rule_text,
                      imp.get("confidence", 0.7), "groq_self_improve"))
                 saved += 1
