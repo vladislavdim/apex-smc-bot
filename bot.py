@@ -34,6 +34,7 @@ try:
         get_premium_discount, detect_divergence, get_market_profile,
         find_ob_fvg_chain, check_volume_on_structure,
         calculate_cvd, detect_whale_candles, get_volume_profile,
+        find_supply_demand, detect_wyckoff_phase, check_multi_coin_correlation,
     )
     _SMC_ENGINE_OK = True
     logging.info("smc_engine.py загружен успешно")
@@ -53,6 +54,9 @@ except ImportError as e:
     calculate_cvd = lambda c: {"cvd": 0, "trend": "NEUTRAL", "divergence": None, "signal": "NEUTRAL", "buy_pressure_pct": 50}
     detect_whale_candles = lambda c: {"found": False, "spike": 0, "type": "NONE", "strength": 0}
     get_volume_profile = lambda c: {"poc": 0, "high_volume_zones": [], "current_zone": "UNKNOWN"}
+    find_supply_demand = lambda c, d: None
+    detect_wyckoff_phase = lambda c: {"phase": "UNKNOWN", "score": 0, "signals": []}
+    check_multi_coin_correlation = lambda s, d, fn: {"confirmed": 0, "total": 0, "score": 0, "strong": False}
 
 try:
     from learning import (
@@ -69,6 +73,9 @@ try:
         save_pattern as _learn_save_pattern,
         decay_old_rules as _learn_decay,
         get_btc_correlation as _learn_btc_corr,
+        groq_weekly_report as _learn_weekly_report,
+        groq_review_old_rules as _learn_review_rules,
+        groq_ab_test_rules as _learn_ab_test,
         update_streak as _learn_streak,
         get_streak_min_confluence as _learn_streak_threshold,
         update_grade_accuracy as _learn_grade_acc,
@@ -102,6 +109,9 @@ except ImportError as e:
     _learn_save_pattern = lambda *a, **k: None
     _learn_decay = lambda: None
     _learn_btc_corr = lambda s: {"beta": 1.0, "samples": 0, "desc": ""}
+    _learn_weekly_report = lambda: ""
+    _learn_review_rules = lambda: None
+    _learn_ab_test = lambda: None
     _learn_streak = lambda r: {"win_streak": 0, "loss_streak": 0, "extra_filter": False}
     _learn_streak_threshold = lambda: 18
     _learn_grade_acc = lambda *a: None
@@ -212,6 +222,8 @@ TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
 MOBULA_KEY     = os.environ.get("MOBULA_API_KEY", "")
 COINALYZE_KEY  = os.environ.get("COINALYZE_API_KEY", "")
 LUNARCRUSH_KEY = os.environ.get("LUNARCRUSH_API_KEY", "")
+COINGLASS_KEY  = os.environ.get("COINGLASS_API_KEY", "")
+SANTIMENT_KEY  = os.environ.get("SANTIMENT_API_KEY", "")
 
 _API_STATUS = {
     "twelvedata":  bool(os.environ.get("TWELVEDATA_API_KEY", "")),
@@ -1789,6 +1801,206 @@ def get_open_interest(symbol):
     except:
         return None
 
+
+# ===== COINGLASS — ЛИКВИДАЦИИ =====
+_coinglass_cache = {}
+_coinglass_cache_time = 0
+
+def get_liquidations(symbol):
+    """Ликвидации с CoinGlass. Много лонг-ликвидаций = рынок очищен для роста."""
+    global _coinglass_cache, _coinglass_cache_time
+    if time.time() - _coinglass_cache_time < 1800 and symbol in _coinglass_cache:
+        return _coinglass_cache[symbol]
+    try:
+        if not COINGLASS_KEY:
+            return None
+        base = symbol.replace("USDT", "")
+        r = requests.get(
+            "https://open-api.coinglass.com/public/v2/liquidation_ex",
+            headers={"coinglassSecret": COINGLASS_KEY},
+            params={"symbol": base, "interval": "1h"},
+            timeout=10
+        )
+        data = r.json()
+        if data.get("code") != "0" or not data.get("data"):
+            return None
+        item = data["data"][0] if isinstance(data["data"], list) else data["data"]
+        long_liq = float(item.get("longLiquidationUsd", 0))
+        short_liq = float(item.get("shortLiquidationUsd", 0))
+        result = {
+            "long_liq_usd": long_liq,
+            "short_liq_usd": short_liq,
+            "total_usd": long_liq + short_liq,
+            "bias": "LONGS_WIPED" if long_liq > short_liq * 1.5 else
+                    "SHORTS_WIPED" if short_liq > long_liq * 1.5 else "BALANCED"
+        }
+        _coinglass_cache[symbol] = result
+        _coinglass_cache_time = time.time()
+        return result
+    except Exception as e:
+        logging.debug(f"CoinGlass {symbol}: {e}")
+        return None
+
+
+# ===== SANTIMENT — ON-CHAIN =====
+_santiment_cache = {}
+_santiment_cache_time = 0
+
+def get_santiment_data(symbol):
+    """On-chain sentiment с Santiment."""
+    global _santiment_cache, _santiment_cache_time
+    if time.time() - _santiment_cache_time < 3600 and symbol in _santiment_cache:
+        return _santiment_cache[symbol]
+    try:
+        if not SANTIMENT_KEY:
+            return None
+        slug_map = {
+            "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
+            "BNBUSDT":"binance-coin","XRPUSDT":"ripple","ADAUSDT":"cardano",
+            "AVAXUSDT":"avalanche","DOTUSDT":"polkadot","LINKUSDT":"chainlink",
+            "LTCUSDT":"litecoin","ATOMUSDT":"cosmos","NEARUSDT":"near-protocol",
+            "INJUSDT":"injective-protocol","SUIUSDT":"sui","ARBUSDT":"arbitrum"
+        }
+        slug = slug_map.get(symbol)
+        if not slug:
+            return None
+        query = '''{ getMetric(metric: "sentiment_balance_total") {
+            timeseriesData(slug: "%s", from: "utc_now-1d", to: "utc_now", interval: "1h") {
+                datetime value } } }''' % slug
+        r = requests.post(
+            "https://api.santiment.net/graphql",
+            json={"query": query},
+            headers={"Authorization": f"Apikey {SANTIMENT_KEY}"},
+            timeout=10
+        )
+        ts = r.json().get("data",{}).get("getMetric",{}).get("timeseriesData",[])
+        values = [x["value"] for x in ts if x.get("value") is not None]
+        if not values:
+            return None
+        avg = sum(values) / len(values)
+        result = {
+            "sentiment": round(avg, 3),
+            "signal": "BULLISH" if avg > 0.1 else "BEARISH" if avg < -0.1 else "NEUTRAL"
+        }
+        _santiment_cache[symbol] = result
+        _santiment_cache_time = time.time()
+        return result
+    except Exception as e:
+        logging.debug(f"Santiment {symbol}: {e}")
+        return None
+
+
+# ===== WHALE ALERT RSS =====
+_whale_cache = []
+_whale_cache_time = 0
+
+def get_whale_alerts():
+    """Крупные переводы на биржи из Whale Alert RSS."""
+    global _whale_cache, _whale_cache_time
+    if time.time() - _whale_cache_time < 900 and _whale_cache:
+        return _whale_cache
+    try:
+        import re as _re
+        r = requests.get("https://whale-alert.io/feed",
+                         headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
+        items = _re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', r.text)
+        alerts = [i for i in items[1:11] if any(
+            w in i.lower() for w in ["bitcoin","ethereum","transfer","exchange","moved"])]
+        _whale_cache = alerts[:5]
+        _whale_cache_time = time.time()
+        return _whale_cache
+    except Exception as e:
+        logging.debug(f"Whale Alert: {e}")
+        return []
+
+
+# ===== BTC КОРРЕЛЯЦИЯ — ФИЛЬТР =====
+def get_btc_1h_change():
+    """Изменение BTC за последний час."""
+    try:
+        candles = get_candles("BTCUSDT", "1h", 3)
+        if len(candles) < 2:
+            return 0.0
+        return round((candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 3)
+    except Exception:
+        return 0.0
+
+def btc_allows_signal(direction):
+    """Если BTC падает -1.5%+ за час — не даём лонги на альты."""
+    btc_change = get_btc_1h_change()
+    if direction == "BULLISH" and btc_change < -1.5:
+        return False, f"BTC падает {btc_change:.1f}%/ч — лонги опасны"
+    if direction == "BEARISH" and btc_change > 1.5:
+        return False, f"BTC растёт {btc_change:.1f}%/ч — шорты опасны"
+    return True, ""
+
+
+# ===== СТАРШИЙ ТФ КОНТЕКСТ =====
+_htf_cache = {}
+_htf_cache_time = {}
+
+def get_higher_tf_context(symbol):
+    """Недельный тренд как контекст. Не входим против глобального тренда."""
+    if time.time() - _htf_cache_time.get(symbol, 0) < 7200 and symbol in _htf_cache:
+        return _htf_cache[symbol]
+    try:
+        daily = get_candles(symbol, "1d", 14)
+        if len(daily) < 7:
+            return {"trend": "UNKNOWN", "near_resistance": False, "note": ""}
+        closes = [c["close"] for c in daily]
+        price_now = closes[-1]
+        weekly_change = (price_now - closes[-7]) / closes[-7] * 100
+        resistance = max(c["high"] for c in daily)
+        support = min(c["low"] for c in daily)
+        dist_to_res = (resistance - price_now) / price_now * 100
+        dist_to_sup = (price_now - support) / price_now * 100
+        trend = "BULLISH" if weekly_change > 3 else "BEARISH" if weekly_change < -3 else "NEUTRAL"
+        result = {
+            "trend": trend,
+            "weekly_change": round(weekly_change, 1),
+            "dist_to_resistance": round(dist_to_res, 1),
+            "dist_to_support": round(dist_to_sup, 1),
+            "near_resistance": dist_to_res < 2.0,
+            "near_support": dist_to_sup < 2.0,
+            "note": f"Нед: {trend} ({weekly_change:+.1f}%)"
+        }
+        _htf_cache[symbol] = result
+        _htf_cache_time[symbol] = time.time()
+        return result
+    except Exception as e:
+        logging.debug(f"HTF context {symbol}: {e}")
+        return {"trend": "UNKNOWN", "near_resistance": False, "note": ""}
+
+
+# ===== FEAR & GREED ИСТОРИЯ =====
+_fg_hist_cache = None
+_fg_hist_time = 0
+
+def get_fg_history():
+    """F&G за 7 дней — тренд настроения."""
+    global _fg_hist_cache, _fg_hist_time
+    if time.time() - _fg_hist_time < 3600 and _fg_hist_cache:
+        return _fg_hist_cache
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=7&format=json", timeout=8)
+        data = r.json().get("data", [])
+        if not data:
+            return None
+        values = [int(d["value"]) for d in data]
+        avg7 = sum(values) / len(values)
+        result = {
+            "values": values, "avg7": round(avg7, 1),
+            "trend": "IMPROVING" if values[0] > values[-1] else "WORSENING",
+            "current": values[0]
+        }
+        _fg_hist_cache = result
+        _fg_hist_time = time.time()
+        return result
+    except Exception as e:
+        logging.debug(f"F&G history: {e}")
+        return None
+
+
 # ===== DXY SIGNAL =====
 
 dxy_cache = {}
@@ -2152,9 +2364,8 @@ def full_scan(symbol, timeframe="1h"):
         if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
             return None
 
-        # ── 0.5. Проверяем правила самообучения ──
+        # ── 0.5. Groq читает свои правила перед сигналом ──
         avoid_rules = get_self_rules("avoid")
-        # Если есть сильное правило избегать эту монету — пропускаем
         for rule_row in avoid_rules:
             try:
                 rule_text = str(rule_row[0] if len(rule_row) == 1 else rule_row[1] or "")
@@ -2164,6 +2375,17 @@ def full_scan(symbol, timeframe="1h"):
             if symbol in rule_text and conf >= 0.75:
                 logging.info(f"full_scan {symbol}: пропущен по правилу самообучения")
                 return None
+
+        # Читаем лучшие правила по этому символу для контекста Groq
+        try:
+            with sqlite3.connect("brain.db") as _rc:
+                _sym_rules = _rc.execute(
+                    "SELECT rule_text, confidence FROM self_rules WHERE (rule_text LIKE ? OR category LIKE ?) AND active=1 ORDER BY confidence DESC LIMIT 5",
+                    (f"%{symbol}%", f"%{symbol}%")
+                ).fetchall()
+                _groq_symbol_context = "; ".join([r[0][:80] for r in _sym_rules if r[0]]) if _sym_rules else ""
+        except Exception:
+            _groq_symbol_context = ""
 
         # ── 1. Мультитаймфрейм SMC ──
         mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])
@@ -2186,6 +2408,31 @@ def full_scan(symbol, timeframe="1h"):
         oi = get_open_interest(symbol)
         dxy = get_dxy_signal()
         econ = get_upcoming_events()
+
+        # ── 2.5. Новые источники данных ──
+        liquidations = get_liquidations(symbol)
+        santiment = get_santiment_data(symbol)
+        htf = get_higher_tf_context(symbol)
+        fg_hist = get_fg_history()
+
+        # BTC корреляция — если BTC против нас, пропускаем
+        btc_ok, btc_reason = btc_allows_signal(direction)
+        if not btc_ok and symbol != "BTCUSDT":
+            logging.info(f"[BTC Filter] {symbol} пропущен: {btc_reason}")
+            return None
+
+        # Старший ТФ — не входим в лонг у сопротивления
+        if htf.get("near_resistance") and direction == "BULLISH":
+            logging.info(f"[HTF Filter] {symbol} у сопротивления ({htf['dist_to_resistance']:.1f}% до него) — лонг пропущен")
+            return None
+        if htf.get("near_support") and direction == "BEARISH":
+            logging.info(f"[HTF Filter] {symbol} у поддержки — шорт пропущен")
+            return None
+
+        # Мёртвая зона (22:00-02:00 UTC) — снижаем агрессивность
+        from datetime import datetime as _dt
+        _hour = _dt.utcnow().hour
+        _dead_zone = (22 <= _hour or _hour <= 1)
 
         # ── 3. Взвешенный confluence ──
         weights = get_confluence_weights(symbol)
@@ -2248,6 +2495,77 @@ def full_scan(symbol, timeframe="1h"):
             elif oi["trend"] == "GROWING" and direction == "BEARISH":
                 confluence.append(f"✅ OI растёт — шортисты добавляют")
                 total_weight += 7
+
+        # CoinGlass ликвидации
+        if liquidations:
+            if direction == "BULLISH" and liquidations["bias"] == "LONGS_WIPED":
+                liq_m = liquidations["long_liq_usd"] / 1_000_000
+                confluence.append(f"✅ Лонги ликвидированы ${liq_m:.1f}M — рынок очищен (+10)")
+                total_weight += 10
+            elif direction == "BEARISH" and liquidations["bias"] == "SHORTS_WIPED":
+                liq_m = liquidations["short_liq_usd"] / 1_000_000
+                confluence.append(f"✅ Шорты ликвидированы ${liq_m:.1f}M — рынок очищен (+10)")
+                total_weight += 10
+            elif liquidations["total_usd"] > 5_000_000:
+                confluence.append(f"⚠️ Высокие ликвидации ${liquidations['total_usd']/1e6:.1f}M — волатильность")
+
+        # Santiment on-chain sentiment
+        if santiment and santiment["signal"] == direction[:7]:
+            confluence.append(f"✅ Santiment: {santiment['sentiment']:+.3f} — on-chain подтверждает (+8)")
+            total_weight += 8
+        elif santiment and santiment["signal"] not in ("NEUTRAL", direction[:7]):
+            confluence.append(f"⚠️ Santiment противоречит ({santiment['signal']})")
+            total_weight -= 5
+
+        # Старший ТФ контекст
+        if htf["trend"] != "UNKNOWN":
+            if htf["trend"] == direction[:7] if direction != "BEARISH" else htf["trend"] == "BEARISH":
+                confluence.append(f"✅ {htf['note']} — глобальный тренд совпадает (+8)")
+                total_weight += 8
+            elif htf["trend"] == "NEUTRAL":
+                pass  # нейтрально
+            else:
+                confluence.append(f"⚠️ {htf['note']} — против глобального тренда (-8)")
+                total_weight -= 8
+
+        # F&G тренд
+        if fg_hist:
+            if fg_hist["trend"] == "IMPROVING" and direction == "BULLISH":
+                confluence.append(f"✅ F&G улучшается {fg_hist['avg7']:.0f}→{fg_hist['current']} (+5)")
+                total_weight += 5
+
+        # Мёртвая зона — штраф
+        if _dead_zone:
+            confluence.append(f"⚠️ Мёртвая зона (UTC {_hour}:xx) — ликвидность низкая (-10)")
+            total_weight -= 10
+
+        # Supply/Demand зоны
+        sd_zone = find_supply_demand(candles, direction)
+        if sd_zone:
+            strength_label = "сильная" if sd_zone["strength"] == "STRONG" else "умеренная"
+            confluence.append(f"✅ {sd_zone['type']} зона {sd_zone['bottom']:.4f}–{sd_zone['top']:.4f} ({strength_label}) (+12)")
+            total_weight += 12 if sd_zone["strength"] == "STRONG" else 7
+
+        # Wyckoff фаза
+        wyckoff = detect_wyckoff_phase(candles)
+        if wyckoff["phase"] == "ACCUMULATION" and direction == "BULLISH":
+            confluence.append(f"✅ Wyckoff ACCUMULATION — готовится памп (+12)")
+            total_weight += 12
+        elif wyckoff["phase"] == "MARKUP" and direction == "BULLISH":
+            confluence.append(f"✅ Wyckoff MARKUP — тренд активен (+8)")
+            total_weight += 8
+        elif wyckoff["phase"] == "DISTRIBUTION" and direction == "BEARISH":
+            confluence.append(f"✅ Wyckoff DISTRIBUTION — готовится дамп (+12)")
+            total_weight += 12
+        elif wyckoff["phase"] == "MARKDOWN" and direction == "BEARISH":
+            confluence.append(f"✅ Wyckoff MARKDOWN — падение продолжается (+8)")
+            total_weight += 8
+
+        # Многомонетная корреляция
+        corr = check_multi_coin_correlation(symbol, direction, get_candles)
+        if corr["strong"]:
+            confluence.append(f"✅ {corr['confirmed']}/{corr['total']} коррелированных монет подтверждают (+{corr['score']})")
+            total_weight += corr["score"]
 
         # DXY
         if dxy:
@@ -8364,6 +8682,30 @@ async def on_startup(app):
         logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
     scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
+
+    # Еженедельный отчёт — каждое воскресенье в 08:00 UTC
+    async def _weekly_report_job():
+        try:
+            loop = asyncio.get_running_loop()
+            report = await loop.run_in_executor(None, _learn_weekly_report)
+            if report and ADMIN_ID:
+                text = f"📊 <b>Еженедельный отчёт APEX</b>\n" + "━"*24 + f"\n\n{report[:1500]}"
+                await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"weekly_report_job: {e}")
+
+    scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0)
+
+    # Пересмотр правил — каждые 3 дня
+    async def _review_rules_job():
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_review_rules)
+            await loop.run_in_executor(None, _learn_ab_test)
+        except Exception as e:
+            logging.error(f"review_rules_job: {e}")
+
+    scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
     scheduler.add_job(auto_scan_job, "interval", minutes=15)
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
     scheduler.add_job(auto_research, "interval", hours=2)
