@@ -14,13 +14,14 @@ APEX Learning v3 — Самообразование, память ошибок, 
 import sqlite3, time, logging, json
 from datetime import datetime, timedelta
 
-# ── WAL патч — решает "database is locked" при многопоточном доступе ──
+# ── WAL патч ──
 _orig_connect_lr = sqlite3.connect
-def _wal_connect_lr(db, timeout=15, **kw):
+def _wal_connect_lr(db, timeout=30, **kw):
+    kw.setdefault("check_same_thread", False)
     conn = _orig_connect_lr(db, timeout=timeout, **kw)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA synchronous=NORMAL")
     except Exception:
         pass
@@ -201,47 +202,39 @@ def init_learning():
 
     # Миграции — добавляем колонки в старые таблицы
     _col_migrations = [
-        ("self_rules",      "rule_type",   "TEXT"),
-        ("self_rules",      "rule_text",   "TEXT"),
-        ("self_rules",      "source",      "TEXT"),
-        ("brain_log",       "title",       "TEXT"),
-        ("brain_log",       "source",      "TEXT"),
-        ("brain_log",       "impact",      "TEXT"),
-        ("signals",         "learning_id", "INTEGER DEFAULT NULL"),
-        ("signal_log",      "confluence",  "INTEGER DEFAULT 0"),
-        ("signal_log",      "regime",      "TEXT"),
-        ("web_knowledge",   "query",       "TEXT"),
-        ("learning_agenda", "query",       "TEXT"),
-        # signal_stats — старая БД может иметь только 9 колонок вместо 12
-        ("signal_stats", "tp1_hits",     "INTEGER DEFAULT 0"),
-        ("signal_stats", "tp2_hits",     "INTEGER DEFAULT 0"),
-        ("signal_stats", "tp3_hits",     "INTEGER DEFAULT 0"),
-        ("signal_stats", "sl_hits",      "INTEGER DEFAULT 0"),
-        ("signal_stats", "expired",      "INTEGER DEFAULT 0"),
-        ("signal_stats", "avg_rr",       "REAL DEFAULT 0.0"),
-        ("signal_stats", "last_updated", "TEXT"),
-        # self_rules — добавляем confirmed_by/contradicted_by если их нет
-        ("self_rules", "confirmed_by",    "INTEGER DEFAULT 0"),
-        ("self_rules", "contradicted_by", "INTEGER DEFAULT 0"),
-        ("self_rules", "updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
-        ("self_rules", "category",        "TEXT"),
-        ("self_rules", "rule",            "TEXT"),
-        # self_rules в web_learner пишет поле active
-        ("self_rules", "active",          "INTEGER DEFAULT 1"),
+        ("self_rules",      "rule_type",        "TEXT"),
+        ("self_rules",      "rule_text",        "TEXT"),
+        ("self_rules",      "source",           "TEXT"),
+        ("self_rules",      "confirmed_by",     "INTEGER DEFAULT 0"),
+        ("self_rules",      "contradicted_by",  "INTEGER DEFAULT 0"),
+        ("self_rules",      "updated_at",       "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        ("self_rules",      "active",           "INTEGER DEFAULT 1"),
+        ("self_rules",      "category",         "TEXT"),
+        ("self_rules",      "rule",             "TEXT"),
+        ("brain_log",       "title",            "TEXT"),
+        ("brain_log",       "source",           "TEXT"),
+        ("brain_log",       "impact",           "TEXT"),
+        ("signals",         "learning_id",      "INTEGER DEFAULT NULL"),
+        ("signals",         "confluence",       "INTEGER DEFAULT 0"),
+        ("signals",         "regime",           "TEXT DEFAULT 'UNKNOWN'"),
+        ("signal_log",      "confluence",       "INTEGER DEFAULT 0"),
+        ("signal_log",      "regime",           "TEXT"),
+        ("web_knowledge",   "query",            "TEXT"),
+        ("learning_agenda", "query",            "TEXT"),
+        # signal_stats — старая БД имеет 9 колонок, нужно 12
+        ("signal_stats",    "tp1_hits",         "INTEGER DEFAULT 0"),
+        ("signal_stats",    "tp2_hits",         "INTEGER DEFAULT 0"),
+        ("signal_stats",    "tp3_hits",         "INTEGER DEFAULT 0"),
+        ("signal_stats",    "sl_hits",          "INTEGER DEFAULT 0"),
+        ("signal_stats",    "expired",          "INTEGER DEFAULT 0"),
+        ("signal_stats",    "avg_rr",           "REAL DEFAULT 0.0"),
+        ("signal_stats",    "last_updated",     "TEXT"),
     ]
     for tbl, col, typedef in _col_migrations:
         try:
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typedef}")
         except Exception:
             pass  # колонка уже есть
-
-    # WAL режим — решает "database is locked" при параллельных потоках
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=8000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
 
     # symbol_stats — статистика по монетам для web_learner
     conn.execute("""CREATE TABLE IF NOT EXISTS symbol_stats (
