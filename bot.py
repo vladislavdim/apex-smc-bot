@@ -9,13 +9,14 @@ import json
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ── WAL патч — решает "database is locked" для всех 50+ connect в bot.py ──
+# ── WAL патч — решает "database is locked" для всех connect в bot.py ──
 _orig_connect_bot = sqlite3.connect
-def _wal_connect_bot(db, timeout=15, **kw):
+def _wal_connect_bot(db, timeout=30, **kw):
+    kw.setdefault("check_same_thread", False)
     conn = _orig_connect_bot(db, timeout=timeout, **kw)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA synchronous=NORMAL")
     except Exception:
         pass
@@ -2030,18 +2031,16 @@ def get_dxy_signal():
             timeout=10
         )
         data = r.json()
-        # Безопасный доступ — result может быть None если Yahoo не отвечает
-        chart = data.get("chart", {}) or {}
-        results = chart.get("result") or []
-        if not results or not isinstance(results, list):
-            logging.warning(f"DXY: нет result в ответе Yahoo")
+        # Безопасный доступ — Yahoo иногда возвращает null в result
+        results = (data.get("chart") or {}).get("result") or []
+        if not results:
+            logging.warning("DXY: пустой ответ от Yahoo Finance")
             return None
-        quote = results[0].get("indicators", {}).get("quote", [{}])
-        closes_raw = quote[0].get("close", []) if quote else []
+        quote = (results[0].get("indicators") or {}).get("quote") or [{}]
+        closes_raw = (quote[0] if quote else {}).get("close") or []
         closes = [c for c in closes_raw if c is not None]
         if len(closes) < 2:
             return None
-
         change = (closes[-1] - closes[-3]) / closes[-3] * 100 if len(closes) >= 3 else 0
         dxy_cache = {
             "value": round(closes[-1], 2),
@@ -2380,6 +2379,10 @@ def full_scan(symbol, timeframe="1h"):
     try:
         # ── 0. Рыночный режим — в боковике сигналов нет ──
         regime = get_market_regime(symbol)
+        # Защита: если regime вернулся строкой или None — приводим к dict
+        if not isinstance(regime, dict):
+            regime = {"mode": str(regime) if regime else "UNKNOWN",
+                      "direction": "NONE", "confidence": 0}
         if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
             return None
 
@@ -2871,7 +2874,7 @@ def full_scan(symbol, timeframe="1h"):
             f"🎯 <b>TP3:</b> <code>{smart_price_fmt(tp3)}</code> (+5R)\n\n"
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence_str}\n"
-            f"🧠 <b>Режим рынка:</b> {regime['mode']} ({regime['direction']})\n"
+            f"🧠 <b>Режим рынка:</b> {regime.get('mode','?') if isinstance(regime,dict) else regime} ({regime.get('direction','') if isinstance(regime,dict) else ''})\n"
             f"{econ_warn}"
             f"❌ <b>Инвалидация:</b> {inv_text}\n\n"
             f"📋 <b>Confluence [{total_weight}/100]:</b>\n{conf_text}\n"
@@ -2905,11 +2908,13 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
     try:
         conn = sqlite3.connect("brain.db")
         conn.execute(
-            "INSERT INTO signals VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,'pending',CURRENT_TIMESTAMP,NULL,?)",
+            """INSERT INTO signals
+               (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
+                timeframe, estimated_hours, grade, result, created_at, closed_at, learning_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',CURRENT_TIMESTAMP,NULL,?)""",
             (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade, learning_id)
         )
         conn.commit()
-        # Запоминаем learning_id рядом с signals id
         sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.close()
         return sig_id, learning_id
@@ -4151,7 +4156,8 @@ def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg
         if funding is not None:
             factors.append(f"Funding Rate {funding:+.4f}%")
         if regime:
-            factors.append(f"рынок в режиме {regime['mode']}")
+            regime_mode = regime.get("mode", str(regime)) if isinstance(regime, dict) else str(regime)
+            factors.append(f"рынок в режиме {regime_mode}")
 
         factors_text = ", ".join(factors)
         past_errors = get_knowledge(f"error_{symbol}")
@@ -6191,6 +6197,8 @@ def scan_diagnostics(symbol):
             lines.append(f"{'✅' if ob else '❌'} Order Block: {'найден' if ob else 'не найден'}")
             lines.append(f"{'✅' if fvg else '❌'} FVG: {'найден' if fvg else 'не найден'}")
             regime = get_market_regime(symbol)
+            if not isinstance(regime, dict):
+                regime = {"mode": str(regime) if regime else "UNKNOWN", "direction": "NONE", "confidence": 0}
             lines.append(f"🧠 Режим: {regime['mode']} (уверенность {regime['confidence']}%)")
             if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
                 lines.append("⛔️ Заблокировано: рынок в глубоком боковике")
@@ -8689,6 +8697,14 @@ async def run_brain_builder_full_async():
 async def on_startup(app):
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
+    # Применяем миграции learning.py (signal_stats, self_rules, confirmed_by и др.)
+    if _LEARNING_OK:
+        try:
+            from learning import init_learning
+            init_learning()
+            logging.info("init_learning() — миграции применены")
+        except Exception as _ile:
+            logging.warning(f"init_learning: {_ile}")
     if _WEB_LEARNER_OK:
         _web_init_db()
     threading.Thread(target=get_top_pairs, daemon=True).start()
