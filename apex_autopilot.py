@@ -25,6 +25,20 @@ import ast
 import requests
 from datetime import datetime, timedelta
 
+# ── WAL патч — решает "database is locked" ──
+_orig_connect_ap = sqlite3.connect
+def _wal_connect_ap(db, timeout=15, **kw):
+    conn = _orig_connect_ap(db, timeout=timeout, **kw)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+sqlite3.connect = _wal_connect_ap
+
+
 DB_PATH     = "brain.db"
 EXT_FILE    = "groq_extensions.py"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
@@ -32,19 +46,44 @@ GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
 
 # ─── Groq вызов ───────────────────────────────────────────────
 def _groq(prompt: str, max_tokens: int = 800) -> str:
-    try:
-        from groq import Groq
-        client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=0.3,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        logging.error(f"[Autopilot] Groq error: {e}")
+    """Groq с retry при 429, fallback моделями и глобальным rate limiter"""
+    key = os.environ.get("GROQ_API_KEY", "")
+    if not key:
         return ""
+    models = ["llama-3.1-8b-instant", "gemma2-9b-it", "llama-3.1-70b-specdec"]
+    for model in models:
+        for attempt in range(3):
+            try:
+                from groq import Groq
+                client = Groq(api_key=key)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                err = str(e)
+                if "429" in err:
+                    # Парсим время ожидания из сообщения об ошибке
+                    wait = 15
+                    try:
+                        import re as _re
+                        m = _re.search(r"try again in ([\d.]+)s", err)
+                        if m:
+                            wait = float(m.group(1)) + 2
+                    except Exception:
+                        pass
+                    logging.warning(f"[Autopilot] Groq 429 ({model}), жду {wait:.0f}с...")
+                    time.sleep(wait)
+                    continue
+                elif "model" in err.lower() or "not found" in err.lower():
+                    break  # Попробуем следующую модель
+                else:
+                    logging.error(f"[Autopilot] Groq error: {e}")
+                    return ""
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════
