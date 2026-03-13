@@ -15,18 +15,6 @@ import sqlite3, time, logging, json
 from datetime import datetime, timedelta
 
 # ── WAL патч ──
-_orig_connect_lr = sqlite3.connect
-def _wal_connect_lr(db, timeout=30, **kw):
-    kw.setdefault("check_same_thread", False)
-    conn = _orig_connect_lr(db, timeout=timeout, **kw)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
-sqlite3.connect = _wal_connect_lr
 
 import os as _os
 DB_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "brain.db")
@@ -57,6 +45,18 @@ def init_learning():
         avg_rr       REAL    DEFAULT 0.0,
         last_updated TEXT
     )""")
+    # Миграция — добавляем новые колонки если старая БД
+    for _col, _def in [
+        ("tp1_hits", "INTEGER DEFAULT 0"),
+        ("tp2_hits", "INTEGER DEFAULT 0"),
+        ("tp3_hits", "INTEGER DEFAULT 0"),
+        ("sl_hits",  "INTEGER DEFAULT 0"),
+        ("expired",  "INTEGER DEFAULT 0"),
+        ("avg_rr",   "REAL DEFAULT 0.0"),
+        ("win_rate", "REAL DEFAULT 0.0"),
+    ]:
+        try: conn.execute(f"ALTER TABLE signal_stats ADD COLUMN {_col} {_def}")
+        except: pass
 
     # Детальный лог сигналов
     conn.execute("""CREATE TABLE IF NOT EXISTS signal_log (
@@ -142,9 +142,19 @@ def init_learning():
         confirmed_by    INTEGER DEFAULT 0,
         contradicted_by INTEGER DEFAULT 0,
         source          TEXT,
+        active          INTEGER DEFAULT 1,
         created_at      TEXT    DEFAULT CURRENT_TIMESTAMP,
         updated_at      TEXT    DEFAULT CURRENT_TIMESTAMP
     )""")
+    # Миграция self_rules для старых БД
+    for _col, _def in [
+        ("active",          "INTEGER DEFAULT 1"),
+        ("confirmed_by",    "INTEGER DEFAULT 0"),
+        ("contradicted_by", "INTEGER DEFAULT 0"),
+        ("updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
+    ]:
+        try: conn.execute(f"ALTER TABLE self_rules ADD COLUMN {_col} {_def}")
+        except: pass
 
     # signals
     conn.execute("""CREATE TABLE IF NOT EXISTS signals (
@@ -154,8 +164,18 @@ def init_learning():
         timeframe TEXT, estimated_hours INTEGER, grade TEXT,
         result TEXT DEFAULT 'pending',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        closed_at TEXT, learning_id INTEGER DEFAULT NULL
+        closed_at TEXT, learning_id INTEGER DEFAULT NULL,
+        confluence INTEGER DEFAULT 0,
+        regime TEXT DEFAULT 'UNKNOWN'
     )""")
+    # Миграция signals таблицы для старых БД
+    for _col, _def in [
+        ("learning_id", "INTEGER DEFAULT NULL"),
+        ("confluence",  "INTEGER DEFAULT 0"),
+        ("regime",      "TEXT DEFAULT 'UNKNOWN'"),
+    ]:
+        try: conn.execute(f"ALTER TABLE signals ADD COLUMN {_col} {_def}")
+        except: pass
 
     # alerts
     conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
@@ -320,9 +340,9 @@ def _seed_smc_knowledge():
         ]
 
         for rule_type, rule_text, confidence, source in smc_rules:
-            conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at)
-                VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
-                (rule_type, rule_text, confidence, source))
+            conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, active, created_at)
+                VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)""",
+                (rule_type, rule_text, confidence, source, active))
 
         conn.commit()
         conn.close()
@@ -1174,8 +1194,8 @@ def analyze_closed_trade(signal_id: int):
         # Если Groq предлагает правило — создаём его
         if rule_type and rule_text and confidence >= 0.65:
             conn.execute("""INSERT OR IGNORE INTO self_rules
-                (rule_type, rule_text, confidence, source, created_at)
-                VALUES (?,?,?,?,CURRENT_TIMESTAMP)""",
+                (rule_type, rule_text, confidence, source, created_at, active)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
                 (rule_type.lower(), rule_text, confidence, "groq_trade_analysis"))
             logging.info(f"[Learning] Groq создал правило [{rule_type}]: {rule_text[:60]}")
 
@@ -1707,14 +1727,14 @@ def groq_ab_test_rules():
 
                 if rule_a:
                     conn.execute("""INSERT OR IGNORE INTO self_rules
-                        (rule_type, rule_text, confidence, source, category)
-                        VALUES (?, ?, ?, ?, ?)""",
+                        (rule_type, rule_text, confidence, source, category, active)
+                        VALUES (?, ?, ?, ?, ?, 1)""",
                         ("ab_test_a", rule_a, 0.5, f"ab_test:{symbol}", symbol))
 
                 if rule_b:
                     conn.execute("""INSERT OR IGNORE INTO self_rules
-                        (rule_type, rule_text, confidence, source, category)
-                        VALUES (?, ?, ?, ?, ?)""",
+                        (rule_type, rule_text, confidence, source, category, active)
+                        VALUES (?, ?, ?, ?, ?, 1)""",
                         ("ab_test_b", rule_b, 0.5, f"ab_test:{symbol}", symbol))
 
                 logging.info(f"[Learning] A/B тест для {symbol}: A={rule_a[:50]}")
