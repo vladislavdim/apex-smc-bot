@@ -9,6 +9,19 @@ import json
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# ── WAL патч — решает "database is locked" для всех 50+ connect в bot.py ──
+_orig_connect_bot = sqlite3.connect
+def _wal_connect_bot(db, timeout=15, **kw):
+    conn = _orig_connect_bot(db, timeout=timeout, **kw)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+sqlite3.connect = _wal_connect_bot
+
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -2011,20 +2024,25 @@ def get_dxy_signal():
     if time.time() - dxy_cache_time < 3600 and dxy_cache:
         return dxy_cache
     try:
-        # DXY через Yahoo Finance RSS
         r = requests.get(
             "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=5d",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
         data = r.json()
-        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-        closes = [c for c in closes if c is not None]
+        # Безопасный доступ — result может быть None если Yahoo не отвечает
+        chart = data.get("chart", {}) or {}
+        results = chart.get("result") or []
+        if not results or not isinstance(results, list):
+            logging.warning(f"DXY: нет result в ответе Yahoo")
+            return None
+        quote = results[0].get("indicators", {}).get("quote", [{}])
+        closes_raw = quote[0].get("close", []) if quote else []
+        closes = [c for c in closes_raw if c is not None]
         if len(closes) < 2:
             return None
 
         change = (closes[-1] - closes[-3]) / closes[-3] * 100 if len(closes) >= 3 else 0
-
         dxy_cache = {
             "value": round(closes[-1], 2),
             "change": round(change, 2),
@@ -2032,7 +2050,8 @@ def get_dxy_signal():
         }
         dxy_cache_time = time.time()
         return dxy_cache
-    except:
+    except Exception as e:
+        logging.warning(f"DXY: {e}")
         return None
 
 # ===== ECONOMIC CALENDAR =====
@@ -6608,7 +6627,7 @@ async def handle_callback(callback: CallbackQuery):
             conn.close()
 
             # Данные из brain_builder (если доступен)
-            brain = get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}
+            brain = (get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}) or {}
             if brain.get("knowledge_count", 0) > knowledge_count:
                 knowledge_count = brain.get("knowledge_count", 0)
             if brain.get("pattern_count", 0) > pattern_count:
@@ -7104,7 +7123,7 @@ async def handle_callback(callback: CallbackQuery):
         try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: __import__('brain_builder').learn_macro_trends())
-            brain = get_brain_summary()
+            brain = get_brain_summary() or {}
             macro = brain.get("macro_summary", "Нет данных")[:500]
             macro_time = brain.get("macro_time", "")
             await callback.message.edit_text(
@@ -7130,7 +7149,7 @@ async def handle_callback(callback: CallbackQuery):
         )
         await run_brain_builder_async()
         await autonomous_learning_cycle()
-        brain = get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}
+        brain = (get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}) or {}
         conn = sqlite3.connect("brain.db")
         rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
         conn.close()
