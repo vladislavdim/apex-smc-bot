@@ -42,6 +42,12 @@ except NameError:
         def __getattr__(self, n): return lambda *a, **k: ""
     _brain_router = _DummyRouter()
 
+# Groq токены — определяются в market.py, fallback на случай если не экспортировались
+try: _GROQ_DAILY_LIMIT
+except NameError: _GROQ_DAILY_LIMIT = 480_000
+try: _groq_tokens_used
+except NameError: _groq_tokens_used = 0
+
 # ===== KEYBOARDS =====
 
 def main_menu():
@@ -3301,7 +3307,7 @@ def main():
 
         async def health(request):
             # Включаем статистику токенов в health endpoint
-            token_pct = round(_groq_tokens_used / (1000 * 100)) if _GROQ_DAILY_LIMIT == int(os.environ.get('GROQ_DAILY_LIMIT', 0)) else 0
+            token_pct = round(_groq_tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT > 0 else 0
             return web.Response(text=f"APEX OK | tokens: {_groq_tokens_used}/{_GROQ_DAILY_LIMIT} ({token_pct}%)")
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
