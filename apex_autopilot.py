@@ -34,12 +34,21 @@ GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
 
 # ─── Groq вызов с retry и правильными моделями ────────────────
 # Актуальные модели Groq на март 2026:
-_GROQ_MODELS = ["llama-3.1-8b-instant", "llama3-8b-8192", "mixtral-8x7b-32768"]
+_GROQ_MODELS = ["llama-3.1-8b-instant", "llama3-8b-8192", "llama-3.3-70b-versatile"]
+# Глобальный кулдаун для autopilot — не спамим Groq
+_AP_LAST_GROQ_CALL = 0
+_AP_GROQ_COOLDOWN = 25  # секунд между вызовами из autopilot
 
 def _groq(prompt: str, max_tokens: int = 800) -> str:
+    global _AP_LAST_GROQ_CALL
     key = os.environ.get("GROQ_API_KEY", "")
     if not key:
         return ""
+    # Кулдаун — не вызываем Groq слишком часто
+    elapsed = time.time() - _AP_LAST_GROQ_CALL
+    if elapsed < _AP_GROQ_COOLDOWN:
+        time.sleep(_AP_GROQ_COOLDOWN - elapsed)
+    _AP_LAST_GROQ_CALL = time.time()
     for model in _GROQ_MODELS:
         for attempt in range(3):
             try:
@@ -347,7 +356,12 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
         if not response:
             return
 
+        # Groq иногда даёт текст перед JSON — извлекаем только JSON блок
         clean = re.sub(r'```json|```', '', response).strip()
+        # Пробуем найти { ... } в ответе
+        json_match = re.search(r'[{].*[}]', clean, re.DOTALL)
+        if json_match:
+            clean = json_match.group(0)
         try:
             data = json.loads(clean)
         except Exception:
