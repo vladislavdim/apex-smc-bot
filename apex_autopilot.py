@@ -28,27 +28,60 @@ from datetime import datetime, timedelta
 # ── WAL патч ──
 
 DB_PATH     = "brain.db"
+
+def _ensure_db_schema():
+    """Гарантируем актуальную схему БД — запускается при импорте."""
+    try:
+        conn = __import__("sqlite3").connect(DB_PATH, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        for col, defval in [
+            ("active",          "INTEGER DEFAULT 1"),
+            ("confirmed_by",    "INTEGER DEFAULT 0"),
+            ("contradicted_by", "INTEGER DEFAULT 0"),
+            ("updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        ]:
+            try: conn.execute(f"ALTER TABLE self_rules ADD COLUMN {col} {defval}")
+            except: pass
+        # Активируем старые записи
+        try: conn.execute("UPDATE self_rules SET active=1 WHERE active IS NULL")
+        except: pass
+        # signal_stats миграция
+        for col, defval in [
+            ("tp1_hits", "INTEGER DEFAULT 0"), ("tp2_hits", "INTEGER DEFAULT 0"),
+            ("tp3_hits", "INTEGER DEFAULT 0"), ("sl_hits",  "INTEGER DEFAULT 0"),
+            ("expired",  "INTEGER DEFAULT 0"), ("avg_rr",   "REAL DEFAULT 0.0"),
+        ]:
+            try: conn.execute(f"ALTER TABLE signal_stats ADD COLUMN {col} {defval}")
+            except: pass
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        pass
+
+_ensure_db_schema()
 EXT_FILE    = "groq_extensions.py"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
 
 # ─── Groq вызов с retry и правильными моделями ────────────────
 # Актуальные модели Groq на март 2026:
-_GROQ_MODELS = ["llama-3.1-8b-instant", "llama3-8b-8192", "llama-3.3-70b-versatile"]
+_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile"]
 # Глобальный кулдаун для autopilot — не спамим Groq
 _AP_LAST_GROQ_CALL = 0
-_AP_GROQ_COOLDOWN = 25  # секунд между вызовами из autopilot
+_AP_GROQ_COOLDOWN = 30  # секунд между вызовами из autopilot
+_AP_GROQ_LOCK = __import__("threading").Lock()  # защита от параллельных вызовов
 
 def _groq(prompt: str, max_tokens: int = 800) -> str:
     global _AP_LAST_GROQ_CALL
     key = os.environ.get("GROQ_API_KEY", "")
     if not key:
         return ""
-    # Кулдаун — не вызываем Groq слишком часто
-    elapsed = time.time() - _AP_LAST_GROQ_CALL
-    if elapsed < _AP_GROQ_COOLDOWN:
-        time.sleep(_AP_GROQ_COOLDOWN - elapsed)
-    _AP_LAST_GROQ_CALL = time.time()
+    # Lock + кулдаун — строго один вызов за раз
+    with _AP_GROQ_LOCK:
+        elapsed = time.time() - _AP_LAST_GROQ_CALL
+        if elapsed < _AP_GROQ_COOLDOWN:
+            time.sleep(_AP_GROQ_COOLDOWN - elapsed)
+        _AP_LAST_GROQ_CALL = time.time()
     for model in _GROQ_MODELS:
         for attempt in range(3):
             try:
@@ -352,21 +385,27 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
   "priority": 1-10
 }}"""
 
-        response = _groq(prompt, max_tokens=600)
+        response = _groq(prompt, max_tokens=1000)
         if not response:
             return
 
-        # Groq иногда даёт текст перед JSON — извлекаем только JSON блок
         clean = re.sub(r'```json|```', '', response).strip()
-        # Пробуем найти { ... } в ответе
-        json_match = re.search(r'[{].*[}]', clean, re.DOTALL)
-        if json_match:
-            clean = json_match.group(0)
+        # Находим начало JSON объекта
+        start = clean.find('{')
+        end = clean.rfind('}')
+        if start >= 0 and end > start:
+            clean = clean[start:end+1]
         try:
             data = json.loads(clean)
         except Exception:
-            logging.warning(f"[Autopilot] monitor_open_trades: JSON parse error: {clean[:100]}")
-            return
+            # Groq обрезал JSON — пробуем восстановить минимально
+            try:
+                # Берём только первые поля до обрыва
+                partial = clean[:clean.rfind('",') + 2] + '"_truncated": true}'
+                data = json.loads(partial)
+            except Exception:
+                logging.warning(f"[Autopilot] monitor_open_trades: JSON parse error: {clean[:80]}")
+                return
         if not isinstance(data, dict):
             return
 
