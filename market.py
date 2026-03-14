@@ -112,9 +112,9 @@ try:
     )
     _LEARNING_OK = True
     logging.info("learning.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _LEARNING_OK = False
-    logging.warning(f"learning.py не найден: {e}")
+    logging.warning(f"learning.py не загружен: {e}")
     _learn_min_confluence = lambda s: 2
     _learn_should_skip = lambda s, d: (False, "")
     _learn_signal_ctx = lambda s: ""
@@ -193,9 +193,9 @@ try:
     from brain_router import router as _brain_router
     _ROUTER_OK = True
     logging.info("brain_router.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _ROUTER_OK = False
-    logging.warning(f"brain_router.py не найден: {e}")
+    logging.warning(f"brain_router.py не загружен: {e}")
     class _DummyRouter:
         def candles(self, s, i="1h", l=200): return []
         def signal_context(self, *a, **k): return ""
@@ -223,9 +223,9 @@ try:
     )
     _AUTOPILOT_OK = True
     logging.info("apex_autopilot.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _AUTOPILOT_OK = False
-    logging.warning(f"apex_autopilot.py не найден: {e}")
+    logging.warning(f"apex_autopilot.py не загружен: {e}")
     _autopilot_fast   = lambda: None
     _autopilot_deep   = lambda: None
     _autopilot_on_close = lambda *a, **kw: None
