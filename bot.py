@@ -33,6 +33,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ── Импортируем всю рыночную логику из market.py ──
 from market import *
 
+# Путь к базе данных
+import os as _os_bot
+DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
+
 # Fallback флаги — на случай если market.py не экспортировал их
 try: _LEARNING_OK
 except NameError: _LEARNING_OK = False
