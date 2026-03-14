@@ -2527,6 +2527,8 @@ async def auto_scan_job():
             try:
                 channel_text = _format_channel_signal(sd)
                 await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
+                # Дублируем в дополнительный канал
+                await bot.send_message(-1003122576951, channel_text, parse_mode="HTML")
             except Exception as ce:
                 logging.warning(f"Channel send error: {ce}")
             await asyncio.sleep(1)
