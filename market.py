@@ -1343,37 +1343,31 @@ SYMBOL_ALIASES = {
 
 def get_candles(symbol, interval="1h", limit=200):
     """
-    Свечи: кэш →
-      1. Binance Futures REST (без ключа, работает с Render) — PRIMARY для всех TF
-      2. Binance Spot REST   (без ключа) — fallback
-      3. Binance API клиент  (с ключом)  — если есть BINANCE_API_KEY
-      4. CryptoCompare       — дополнительный
-      5. CoinGecko           — последний резерв
-      Bybit убран — даёт HTTP 403 с серверов Render
+    Свечи с ротацией источников как у Groq ключей:
+    Router (Gate.io → KuCoin → Bybit → MEXC → Kraken → CryptoCompare) → старые fallback
     """
     global candle_cache
     cache_key = f"{symbol}_{interval}"
 
-    # Кэш (TTL зависит от TF)
     cache_ttl = 60 if interval in ("1m", "3m", "5m") else 180 if interval in ("15m", "30m") else 300 if interval in ("1h", "2h") else 600
     if cache_key in candle_cache:
         cached, ts = candle_cache[cache_key]
         if time.time() - ts < cache_ttl and len(cached) >= 20:
             return cached
 
+    # 1. Brain Router — Gate.io, KuCoin, Bybit, MEXC, Kraken, CryptoCompare (ротация)
+    if _ROUTER_OK:
+        try:
+            rc = _brain_router.candles(symbol, interval, limit)
+            if rc and len(rc) >= 20:
+                candle_cache[cache_key] = (rc, time.time())
+                return rc
+        except Exception as e:
+            logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
+
     bi = BINANCE_INTERVALS.get(interval, interval)
 
-    # 0. CryptoCompare — стабильно с любого IP, покрывает все ТФ включая 1m/5m
-    try:
-        cc = get_cryptocompare_candles(symbol, interval, limit)
-        if cc and len(cc) >= 20:
-            logging.info(f"Свечи CryptoCompare: {symbol} {interval} {len(cc)}шт")
-            candle_cache[cache_key] = (cc, time.time())
-            return cc
-    except Exception as e:
-        logging.warning(f"CryptoCompare candles {symbol} {interval}: {e}")
-
-    # 1. Binance Futures REST — fallback
+    # 2. Binance Futures REST — fallback (заблокирован на Render но оставляем)
     try:
         r = requests.get(
             f"{BINANCE_F}/fapi/v1/klines",
@@ -1388,13 +1382,12 @@ def get_candles(symbol, interval="1h", limit=200):
                             "low": float(c[3]), "close": float(c[4]),
                             "volume": float(c[5])} for c in data]
                 if len(candles) >= 20:
-                    logging.info(f"Свечи Binance Futures: {symbol} {interval} {len(candles)}шт")
                     candle_cache[cache_key] = (candles, time.time())
                     return candles
     except Exception as e:
-        logging.warning(f"Binance Futures {symbol} {interval}: {e}")
+        logging.debug(f"Binance Futures {symbol} {interval}: {e}")
 
-    # 2. Binance Spot REST
+    # 3. Binance Spot REST
     try:
         r = requests.get(
             f"{BINANCE}/api/v3/klines",
@@ -1409,107 +1402,10 @@ def get_candles(symbol, interval="1h", limit=200):
                             "low": float(c[3]), "close": float(c[4]),
                             "volume": float(c[5])} for c in data]
                 if len(candles) >= 20:
-                    logging.info(f"Свечи Binance Spot: {symbol} {interval} {len(candles)}шт")
                     candle_cache[cache_key] = (candles, time.time())
                     return candles
     except Exception as e:
-        logging.warning(f"Binance Spot {symbol} {interval}: {e}")
-
-    # 3. Binance API клиент (авторизованный, если есть ключ)
-    try:
-        candles = get_full_history_binance(symbol, interval, limit)
-        if candles and len(candles) >= 20:
-            logging.info(f"Свечи Binance API: {symbol} {interval} {len(candles)}шт")
-            candle_cache[cache_key] = (candles, time.time())
-            return candles
-    except Exception as e:
-        logging.warning(f"Binance API client {symbol} {interval}: {e}")
-
-    # 4. CryptoCompare
-    try:
-        cc_candles = get_cryptocompare_candles(symbol, interval, limit)
-        if cc_candles and len(cc_candles) >= 20:
-            logging.info(f"Свечи CryptoCompare: {symbol} {interval} {len(cc_candles)}шт")
-            candle_cache[cache_key] = (cc_candles, time.time())
-            return cc_candles
-    except Exception as e:
-        logging.warning(f"CryptoCompare {symbol} {interval}: {e}")
-
-    # 4.5 TwelveData — если есть ключ
-    if TWELVEDATA_KEY:
-        try:
-            td = get_twelvedata_candles(symbol, interval, limit)
-            if td and len(td) >= 20:
-                logging.info(f"TwelveData: {symbol} {interval} {len(td)}св")
-                candle_cache[cache_key] = (td, time.time())
-                return td
-        except Exception as e:
-            logging.debug(f"TwelveData candles {symbol}: {e}")
-
-    # 5.5 KuCoin — работает с Render без блокировок
-    try:
-        base = symbol.replace("USDT", "")
-        kc_map = {"1m":"1min","5m":"5min","15m":"15min","30m":"30min",
-                  "1h":"1hour","4h":"4hour","1d":"1day","1w":"1week"}
-        kc_interval = kc_map.get(interval, "1hour")
-        r = requests.get(
-            f"https://api.kucoin.com/api/v1/market/candles",
-            params={"symbol": f"{base}-USDT", "type": kc_interval},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json().get("data", [])
-            if isinstance(data, list) and len(data) > 5:
-                # KuCoin: [time, open, close, high, low, volume, turnover]
-                candles = [{
-                    "open": float(d[1]), "high": float(d[3]),
-                    "low": float(d[4]), "close": float(d[2]),
-                    "volume": float(d[5])
-                } for d in reversed(data[-limit:])]
-                if len(candles) >= 20:
-                    logging.info(f"Свечи KuCoin: {symbol} {interval} {len(candles)}шт")
-                    candle_cache[cache_key] = (candles, time.time())
-                    return candles
-    except Exception as e:
-        logging.debug(f"KuCoin {symbol} {interval}: {e}")
-
-    # 5. CoinGecko — последний резерв
-    cg_id = COINGECKO_IDS.get(symbol)
-    if cg_id:
-        try:
-            days_map = {"1m": 1, "5m": 1, "15m": 1, "30m": 1,
-                        "1h": 7, "4h": 30, "1d": 90, "1w": 365, "1M": 365}
-            days = days_map.get(interval, 7)
-            r = requests.get(
-                f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc",
-                params={"vs_currency": "usd", "days": days},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=12
-            )
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list) and len(data) > 5:
-                    candles = [{"open": float(c[1]), "high": float(c[2]),
-                                "low": float(c[3]), "close": float(c[4]),
-                                "volume": 0.0} for c in data[-limit:]]
-                    if len(candles) >= 20:
-                        logging.info(f"Свечи CoinGecko: {symbol} {interval} {len(candles)}шт")
-                        candle_cache[cache_key] = (candles, time.time())
-                        return candles
-        except Exception as e:
-            logging.warning(f"CoinGecko {symbol} {interval}: {e}")
-
-    # 6. Brain Router — синтетические свечи + workarounds из brain.db
-    if _ROUTER_OK:
-        try:
-            rc = _brain_router.candles(symbol, interval, limit)
-            if rc and len(rc) >= 10:
-                logging.info(f"Свечи BrainRouter: {symbol} {interval} {len(rc)}шт")
-                candle_cache[cache_key] = (rc, time.time())
-                return rc
-        except Exception as e:
-            logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
+        logging.debug(f"Binance Spot {symbol} {interval}: {e}")
 
     logging.warning(f"Нет свечей для {symbol} {interval}")
     return []
