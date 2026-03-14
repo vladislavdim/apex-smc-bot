@@ -235,6 +235,12 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 SIGNAL_CHANNEL = int(os.environ.get("SIGNAL_CHANNEL_ID", "-1003122576951"))  # TG канал сигналов
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_KEYS = [
+    os.environ.get("GROQ_API_KEY", ""),
+    os.environ.get("GROQ_API_KEY_2", ""),
+    os.environ.get("GROQ_API_KEY_3", ""),
+]
+_groq_key_index = 0
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
 MOBULA_KEY     = os.environ.get("MOBULA_API_KEY", "")
@@ -4281,9 +4287,10 @@ def ask_groq(prompt, max_tokens=800):
     - Retry при rate limit (до 3 попыток)
     - Fallback на модели с отдельными лимитами
     - Сокращает промпт если он слишком большой
+    - Ротация ключей для обхода лимитов
     """
+    global _last_ai_call, _groq_key_index
     # Глобальный кулдаун — не спамим Groq
-    global _last_ai_call
     elapsed = time.time() - _last_ai_call
     if elapsed < AI_COOLDOWN:
         time.sleep(AI_COOLDOWN - elapsed)
@@ -4299,10 +4306,15 @@ def ask_groq(prompt, max_tokens=800):
         "llama-3.3-70b-versatile",     # резерв тяжёлый
     ]
 
-    for attempt in range(3):
-        model = models[min(attempt, len(models) - 1)]
+    for attempt in range(len(GROQ_KEYS) * 3):
+        model = models[min(attempt % 3, len(models) - 1)]
+        key_index = (attempt // 3) % len(GROQ_KEYS)
+        key = GROQ_KEYS[key_index]
+        if not key:
+            continue
         try:
-            r = groq_client.chat.completions.create(
+            client = Groq(api_key=key)
+            r = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
@@ -4313,16 +4325,15 @@ def ask_groq(prompt, max_tokens=800):
         except Exception as e:
             err_str = str(e).lower()
             if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
-                wait = 15 * (attempt + 1)  # 15, 30, 45 сек
-                logging.warning(f"Groq rate limit (попытка {attempt+1}), жду {wait}с...")
-                time.sleep(wait)
+                logging.warning(f"Groq rate limit (ключ {key_index+1}), пробую следующий...")
+                time.sleep(2)
                 continue
             elif "model" in err_str and "not found" in err_str:
                 logging.warning(f"Модель {model} недоступна, пробую следующую")
                 continue
             else:
-                logging.error(f"Groq error (attempt {attempt+1}): {e}")
-                if attempt < 2:
+                logging.error(f"Groq error (ключ {key_index+1}, попытка {attempt+1}): {e}")
+                if attempt < len(GROQ_KEYS) * 3 - 1:
                     time.sleep(5)
                     continue
                 return None

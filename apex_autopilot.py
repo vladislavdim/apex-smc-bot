@@ -71,49 +71,62 @@ _AP_LAST_GROQ_CALL = 0
 _AP_GROQ_COOLDOWN = 30  # секунд между вызовами из autopilot
 _AP_GROQ_LOCK = __import__("threading").Lock()  # защита от параллельных вызовов
 
+# Ротация ключей для обхода лимитов
+GROQ_KEYS = [
+    os.environ.get("GROQ_API_KEY", ""),
+    os.environ.get("GROQ_API_KEY_2", ""),
+    os.environ.get("GROQ_API_KEY_3", ""),
+]
+_ap_groq_key_index = 0
+
 def _groq(prompt: str, max_tokens: int = 800) -> str:
-    global _AP_LAST_GROQ_CALL
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
-        return ""
+    global _AP_LAST_GROQ_CALL, _ap_groq_key_index
     # Lock + кулдаун — строго один вызов за раз
     with _AP_GROQ_LOCK:
         elapsed = time.time() - _AP_LAST_GROQ_CALL
         if elapsed < _AP_GROQ_COOLDOWN:
             time.sleep(_AP_GROQ_COOLDOWN - elapsed)
         _AP_LAST_GROQ_CALL = time.time()
-    for model in _GROQ_MODELS:
-        for attempt in range(3):
-            try:
-                from groq import Groq
-                client = Groq(api_key=key)
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                return resp.choices[0].message.content.strip()
-            except Exception as e:
-                err = str(e)
-                if "429" in err:
-                    # Парсим точное время ожидания из ошибки
-                    wait = 15.0
-                    try:
-                        m = re.search(r"try again in ([\d.]+)s", err)
-                        if m:
-                            wait = float(m.group(1)) + 1.5
-                    except Exception:
-                        pass
-                    logging.warning(f"[Autopilot] Groq rate limit ({model}), жду {wait:.0f}с...")
-                    time.sleep(wait)
+    
+    for attempt in range(len(GROQ_KEYS) * 3):
+        model = _GROQ_MODELS[attempt % len(_GROQ_MODELS)]
+        key_index = (attempt // len(_GROQ_MODELS)) % len(GROQ_KEYS)
+        key = GROQ_KEYS[key_index]
+        if not key:
+            continue
+        try:
+            from groq import Groq
+            client = Groq(api_key=key)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            err = str(e)
+            if "429" in err:
+                # Парсим точное время ожидания из ошибки
+                wait = 15.0
+                try:
+                    m = re.search(r"try again in ([\d.]+)s", err)
+                    if m:
+                        wait = float(m.group(1)) + 1.5
+                except Exception:
+                    pass
+                logging.warning(f"[Autopilot] Groq rate limit (ключ {key_index+1}), жду {wait:.0f}с...")
+                time.sleep(wait)
+                continue
+            elif any(x in err for x in ["decommissioned", "not exist", "model_not_found", "does not exist"]):
+                logging.warning(f"[Autopilot] Модель {model} недоступна, пробую следующую")
+                break  # следующая модель
+            else:
+                logging.error(f"[Autopilot] Groq error (ключ {key_index+1}): {e}")
+                if attempt < len(GROQ_KEYS) * 3 - 1:
+                    time.sleep(5)
                     continue
-                elif any(x in err for x in ["decommissioned", "not exist", "model_not_found", "does not exist"]):
-                    logging.warning(f"[Autopilot] Модель {model} недоступна, пробую следующую")
-                    break  # следующая модель
-                else:
-                    logging.error(f"[Autopilot] Groq error: {e}")
-                    return ""
+                return ""
     return ""
 
 
