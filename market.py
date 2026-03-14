@@ -1371,6 +1371,34 @@ def get_candles(symbol, interval="1h", limit=200):
         except Exception as e:
             logging.debug(f"TwelveData candles {symbol}: {e}")
 
+    # 5.5 KuCoin — работает с Render без блокировок
+    try:
+        base = symbol.replace("USDT", "")
+        kc_map = {"1m":"1min","5m":"5min","15m":"15min","30m":"30min",
+                  "1h":"1hour","4h":"4hour","1d":"1day","1w":"1week"}
+        kc_interval = kc_map.get(interval, "1hour")
+        r = requests.get(
+            f"https://api.kucoin.com/api/v1/market/candles",
+            params={"symbol": f"{base}-USDT", "type": kc_interval},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if isinstance(data, list) and len(data) > 5:
+                # KuCoin: [time, open, close, high, low, volume, turnover]
+                candles = [{
+                    "open": float(d[1]), "high": float(d[3]),
+                    "low": float(d[4]), "close": float(d[2]),
+                    "volume": float(d[5])
+                } for d in reversed(data[-limit:])]
+                if len(candles) >= 20:
+                    logging.info(f"Свечи KuCoin: {symbol} {interval} {len(candles)}шт")
+                    candle_cache[cache_key] = (candles, time.time())
+                    return candles
+    except Exception as e:
+        logging.debug(f"KuCoin {symbol} {interval}: {e}")
+
     # 5. CoinGecko — последний резерв
     cg_id = COINGECKO_IDS.get(symbol)
     if cg_id:
