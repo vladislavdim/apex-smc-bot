@@ -862,24 +862,26 @@ def run_brain_builder(full=False):
 def get_brain_summary():
     """Возвращает текущее состояние мозга для отображения в боте"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
-        # Создаём таблицы если их нет (защита от NoneType)
-        init_brain_db()
-        knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
-        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+        knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()
+        knowledge_count = knowledge_count[0] if knowledge_count else 0
+        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()
+        rules_count = rules_count[0] if rules_count else 0
         top_rules = conn.execute(
             "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 10"
         ).fetchall()
         latest_macro = conn.execute(
             "SELECT groq_summary, created_at FROM market_context ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        coin_count = conn.execute("SELECT COUNT(*) FROM coin_rules").fetchone()[0]
-        pattern_count = conn.execute("SELECT COUNT(*) FROM smc_patterns").fetchone()[0]
+        coin_count = conn.execute("SELECT COUNT(*) FROM coin_rules").fetchone()
+        coin_count = coin_count[0] if coin_count else 0
+        pattern_count = conn.execute("SELECT COUNT(*) FROM smc_patterns").fetchone()
+        pattern_count = pattern_count[0] if pattern_count else 0
         conn.close()
 
         rules_text = "\n".join([
-            f"[{r[0]}] {r[1][:70]} — {r[2]:.0%}"
+            f"[{r[0] or '?'}] {(r[1] or '')[:70]} — {float(r[2] or 0):.0%}"
             for r in top_rules
         ]) or "Пока нет правил"
 
