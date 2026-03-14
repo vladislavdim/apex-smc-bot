@@ -17,8 +17,8 @@ try:
     patches = apply_all_patches()
     logging.info("🎯 Emergency patches applied successfully")
     
-except ImportError:
-    logging.warning("⚠️ Emergency fix module not found")
+except ImportError as e:
+    logging.warning(f"⚠️ Emergency fix module not found: {e}")
     patches = {}
 
 # WAL патч — решает "database is locked"
@@ -57,6 +57,76 @@ try: _GROQ_DAILY_LIMIT
 except NameError: _GROQ_DAILY_LIMIT = 480_000
 try: _groq_tokens_used
 except NameError: _groq_tokens_used = 0
+
+# ===== DATABASE HELPERS =====
+
+def get_binance_klines(symbol, interval, limit=200):
+    """Надежное получение свечей с Binance с retry логикой"""
+    import requests
+    import time
+    
+    binance_intervals = {
+        "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "1h", "4h": "4h", "1d": "1d"
+    }
+    binance_interval = binance_intervals.get(interval, "1h")
+    
+    for retry in range(3):
+        try:
+            r = requests.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": symbol,
+                    "interval": binance_interval,
+                    "limit": limit
+                },
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            data = r.json()
+            if not isinstance(data, list):
+                logging.warning(f"Binance invalid response type for {symbol}: {type(data)}")
+                if retry < 2:
+                    time.sleep(2)
+                    continue
+                return []
+            if len(data) == 0:
+                logging.warning(f"Binance empty candles for {symbol} (retry {retry+1})")
+                if retry < 2:
+                    time.sleep(2)
+                    continue
+                return []
+            
+            # Проверка на валидность данных свечей
+            candles = []
+            for c in data:
+                try:
+                    if len(c) >= 5:
+                        candles.append({
+                            "open": float(c[0]),
+                            "high": float(c[1]),
+                            "low": float(c[2]),
+                            "close": float(c[3]),
+                            "volume": float(c[4])
+                        })
+                except (ValueError, TypeError, IndexError) as candle_error:
+                    logging.warning(f"Invalid candle data: {candle_error}")
+                    continue
+            
+            if candles:
+                return candles
+            else:
+                logging.warning(f"Binance no valid candles for {symbol}")
+                return []
+        except Exception as e:
+            logging.warning(f"Binance klines error (retry {retry+1}): {e}")
+            if retry < 2:
+                time.sleep(2)
+                continue
+            return []
+    
+    logging.error(f"Binance klines failed after 3 retries for {symbol}")
+    return []
 
 # ===== KEYBOARDS =====
 
@@ -189,8 +259,8 @@ async def cmd_risk(message: types.Message):
                 f"Изменить риск: /setrisk 2",
                 parse_mode="HTML"
             )
-        except:
-            await message.answer("Использование: /risk 1000 (размер депозита в $)")
+        except Exception as e:
+            await message.answer(f"Ошибка депозита: {e}")
     else:
         deposit = mem["deposit"]
         if deposit > 0:
@@ -220,8 +290,8 @@ async def cmd_setrisk(message: types.Message):
                 await message.answer(f"✅ Риск на сделку: <b>{risk}%</b>", parse_mode="HTML")
             else:
                 await message.answer("Риск должен быть от 0.1% до 10%")
-        except:
-            await message.answer("Использование: /setrisk 2")
+        except Exception as e:
+            await message.answer(f"Ошибка риска: {e}")
 
 @dp.message(Command("alert"))
 async def cmd_alert(message: types.Message):
@@ -231,22 +301,39 @@ async def cmd_alert(message: types.Message):
         try:
             level = float(args[2])
             prices = get_live_prices()
+            if not prices or not isinstance(prices, dict):
+                await message.answer("Ошибка получения цен")
+                return
             current = prices.get(symbol, {}).get("price", 0)
             direction = "above" if level > current else "below"
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            conn.execute(
-                "INSERT INTO alerts VALUES (NULL,?,?,?,?,0,CURRENT_TIMESTAMP)",
-                (message.from_user.id, symbol, level, direction)
-            )
-            conn.commit()
-            conn.close()
+            
+            # Retry логика для базы данных
+            for retry in range(3):
+                try:
+                    conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA busy_timeout=30000")
+                    conn.execute(
+                        "INSERT INTO alerts VALUES (NULL,?,?,?,?,0,CURRENT_TIMESTAMP)",
+                        (message.from_user.id, symbol, level, direction)
+                    )
+                    conn.commit()
+                    conn.close()
+                    break
+                except Exception as db_error:
+                    if retry < 2:
+                        logging.warning(f"DB retry {retry+1}: {db_error}")
+                        await asyncio.sleep(1)
+                        continue
+                    else:
+                        raise db_error
             arrow = "⬆️" if direction == "above" else "⬇️"
             await message.answer(
                 f"🔔 Алерт установлен!\n{arrow} <b>{symbol}</b> → <code>{level}</code>\nТекущая цена: <code>{current:.4f}</code>",
                 parse_mode="HTML"
             )
-        except:
-            await message.answer("Использование: /alert BTCUSDT 70000")
+        except Exception as e:
+            await message.answer(f"Ошибка алерта: {e}")
     else:
         await message.answer(
             "🔔 <b>Алерты на пробой уровня</b>\n\nКогда цена достигает твоего уровня — пишу сразу.\n\nУстановить: /alert BTCUSDT 70000",
@@ -302,6 +389,9 @@ async def cmd_journal(message: types.Message):
         # Добавляем сделку
         try:
             parts = args[1].split()
+            if len(parts) < 5:
+                await message.answer("Использование: /journal BTC LONG 65000 68000 win взял на OB")
+                return
             symbol = parts[0].upper()
             direction = parts[1].upper()
             entry = float(parts[2])
