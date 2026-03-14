@@ -3181,9 +3181,9 @@ try:
     )
     BRAIN_BUILDER_AVAILABLE = True
     logging.info("brain_builder.py подключён ✅")
-except ImportError:
+except Exception as _bbe:
     BRAIN_BUILDER_AVAILABLE = False
-    logging.warning("brain_builder.py не найден — мозг работает в базовом режиме")
+    logging.warning(f"brain_builder.py не загружен: {_bbe}")
 
     def run_brain_builder(full=False):
         return {}
