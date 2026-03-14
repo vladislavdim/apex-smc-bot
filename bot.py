@@ -417,7 +417,9 @@ async def cmd_journal(message: types.Message):
                 f"{symbol} {direction}: {entry} → {exit_price} ({pnl:+.2f}%)",
                 parse_mode="HTML"
             )
-        except:
+        except Exception as e:
+            import logging
+            logging.error(e)
             await message.answer(
                 "Формат: /journal BTC LONG 65000 67000 win [заметка]\n"
                 "Пример: /journal ETH SHORT 3200 3050 win взял на OB"
@@ -544,7 +546,9 @@ def _groq_write_extension(user_request: str, message=None) -> dict:
                 if '"changes":' in line and "Groq" not in line.split('"changes":')[0]:
                     description = line.split('"changes":')[1].strip().strip('"').strip("'").rstrip('",')
                     break
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.error(e)
             pass
 
         # 5. Пушим на GitHub
@@ -744,7 +748,9 @@ async def handle_callback(callback: CallbackQuery):
         page = int(parts[2]) if len(parts) > 2 else 0
         try:
             await callback.message.edit_reply_markup(reply_markup=pairs_keyboard(action, page))
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.error(e)
             pass
 
     elif data == "noop":
@@ -810,7 +816,8 @@ async def handle_callback(callback: CallbackQuery):
             if accum_lines:
                 accum_block = "\n🗺 <b>Тепловая карта накоплений:</b>\n" + "\n".join(accum_lines[:5]) + "\n"
         except Exception as _e:
-            logging.debug(f"accum heatmap: {_e}")
+            import logging
+            logging.error(_e)
 
         # Крупная ликвидность — зоны перед пампом
         liq_block = ""
@@ -832,7 +839,8 @@ async def handle_callback(callback: CallbackQuery):
             if liq_lines:
                 liq_block = "\n🐋 <b>Крупная ликвидность (4h):</b>\n" + "\n".join(liq_lines) + "\n"
         except Exception as _e:
-            logging.debug(f"liq block: {_e}")
+            import logging
+            logging.error(_e)
 
         # Groq анализ рынка с учётом накоплений
         comment = ask_groq(
@@ -875,7 +883,9 @@ async def handle_callback(callback: CallbackQuery):
                 if sig:
                     signals.append(sig)
                 await asyncio.sleep(0.1)
-            except:
+            except Exception as e:
+                import logging
+                logging.error(e)
                 pass
 
         if not signals:
@@ -1072,7 +1082,9 @@ async def handle_callback(callback: CallbackQuery):
                 "SELECT error_type, count FROM error_patterns ORDER BY count DESC LIMIT 3"
             ).fetchall()
             conn.close()
-        except:
+        except Exception as e:
+            import logging
+            logging.error(e)
             total = wins = losses = pending = errors_count = 0
             top = []
             patterns = []
@@ -1122,14 +1134,18 @@ async def handle_callback(callback: CallbackQuery):
             # pattern_count — из signal_log
             try:
                 pattern_count = conn.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.error(e)
                 pattern_count = 0
             # coin_count — правила по монетам
             try:
                 coin_count = conn.execute(
                     "SELECT COUNT(DISTINCT symbol) FROM signal_log WHERE symbol IS NOT NULL"
                 ).fetchone()[0]
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.error(e)
                 coin_count = 0
             conn.close()
 
@@ -1143,6 +1159,8 @@ async def handle_callback(callback: CallbackQuery):
             macro_time = brain.get("macro_time", "")
             bb_rules = brain.get("top_rules", "")
         except Exception as e:
+            import logging
+            logging.error(e)
             rule_count = obs_count = model_count = avoid_count = 0
             knowledge_count = pattern_count = coin_count = 0
             top_rules = []
@@ -2692,7 +2710,9 @@ def full_scan_raw(symbol, timeframe="1h"):
                 ).fetchone()
                 if _row:
                     return None  # уже есть открытая сделка — не дублируем
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.error(e)
             pass
 
         mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])
