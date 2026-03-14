@@ -3154,6 +3154,11 @@ async def run_brain_builder_full_async():
 
 
 async def on_startup(app):
+    # Логирование конфигурации при старте
+    logging.info(f"WEBHOOK_URL = {os.environ.get('WEBHOOK_URL', 'НЕТ')}")
+    logging.info(f"TOKEN exists = {bool(os.environ.get('TELEGRAM_TOKEN'))}")
+    logging.info(f"ADMIN_ID = {os.environ.get('ADMIN_ID')}")
+
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
     # Применяем миграции learning.py (signal_stats, self_rules, confirmed_by и др.)
@@ -3183,12 +3188,11 @@ async def on_startup(app):
             loop = asyncio.get_running_loop()
             report = await loop.run_in_executor(None, _learn_weekly_report)
             if report and ADMIN_ID:
-                text = f"📊 <b>Еженедельный отчёт APEX</b>\n" + "━"*24 + f"\n\n{report[:1500]}"
-                await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+                await bot.send_message(ADMIN_ID, report, parse_mode="HTML")
         except Exception as e:
-            logging.error(f"weekly_report_job: {e}")
+            logging.warning(f"Weekly report error: {e}")
 
-    scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0)
+    scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0, timezone="UTC")
 
     # Пересмотр правил — каждые 3 дня
     async def _review_rules_job():
