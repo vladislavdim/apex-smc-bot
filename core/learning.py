@@ -17,10 +17,14 @@ from datetime import datetime, timedelta
 # ── WAL патч ──
 
 import os as _os
-DB_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "brain.db")
-# Если файл в корне рядом с bot.py — используем текущую директорию
-if not _os.path.exists(_os.path.dirname(DB_PATH)):
-    DB_PATH = "brain.db"
+# learning.py может лежать в core/ или в корне — всегда ищем brain.db рядом с bot.py
+_THIS_DIR = _os.path.dirname(_os.path.abspath(__file__))
+_PARENT_DIR = _os.path.dirname(_THIS_DIR)
+# Пробуем: корень репо (если в core/), потом текущую папку
+if _os.path.exists(_os.path.join(_PARENT_DIR, "brain.db")) or _os.path.exists(_os.path.join(_PARENT_DIR, "bot.py")):
+    DB_PATH = _os.path.join(_PARENT_DIR, "brain.db")
+else:
+    DB_PATH = _os.path.join(_THIS_DIR, "brain.db")
 
 # ═══════════════════════════════════════════════════════════════
 # ИНИЦИАЛИЗАЦИЯ
