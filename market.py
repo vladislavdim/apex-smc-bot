@@ -112,9 +112,9 @@ try:
     )
     _LEARNING_OK = True
     logging.info("learning.py загружен успешно")
-except Exception as e:
+except ImportError as e:
     _LEARNING_OK = False
-    logging.warning(f"learning.py не загружен: {e}")
+    logging.warning(f"learning.py не найден: {e}")
     _learn_min_confluence = lambda s: 2
     _learn_should_skip = lambda s, d: (False, "")
     _learn_signal_ctx = lambda s: ""
@@ -193,9 +193,9 @@ try:
     from brain_router import router as _brain_router
     _ROUTER_OK = True
     logging.info("brain_router.py загружен успешно")
-except Exception as e:
+except ImportError as e:
     _ROUTER_OK = False
-    logging.warning(f"brain_router.py не загружен: {e}")
+    logging.warning(f"brain_router.py не найден: {e}")
     class _DummyRouter:
         def candles(self, s, i="1h", l=200): return []
         def signal_context(self, *a, **k): return ""
@@ -223,9 +223,9 @@ try:
     )
     _AUTOPILOT_OK = True
     logging.info("apex_autopilot.py загружен успешно")
-except Exception as e:
+except ImportError as e:
     _AUTOPILOT_OK = False
-    logging.warning(f"apex_autopilot.py не загружен: {e}")
+    logging.warning(f"apex_autopilot.py не найден: {e}")
     _autopilot_fast   = lambda: None
     _autopilot_deep   = lambda: None
     _autopilot_on_close = lambda *a, **kw: None
@@ -4347,12 +4347,15 @@ def ask_groq(prompt, max_tokens=800):
         "llama-3.1-8b-instant",        # резерв тяжёлый
     ]
 
-    for attempt in range(len(GROQ_KEYS) * 3):
-        model = models[min(attempt % 3, len(models) - 1)]
-        key_index = (attempt // 3) % len(GROQ_KEYS)
-        key = GROQ_KEYS[key_index]
-        if not key:
-            continue
+    active_keys = [k for k in GROQ_KEYS if k]
+    if not active_keys:
+        logging.error("Groq: нет активных ключей")
+        return None
+
+    for attempt in range(len(active_keys) * 2):
+        key_index = attempt % len(active_keys)
+        key = active_keys[key_index]
+        model = models[min(attempt % len(models), len(models) - 1)]
         try:
             client = Groq(api_key=key)
             r = client.chat.completions.create(
@@ -4361,25 +4364,25 @@ def ask_groq(prompt, max_tokens=800):
                 max_tokens=max_tokens,
                 timeout=30,
             )
-            _track_tokens(len(prompt) // 4 + max_tokens)  # приблизительный подсчёт
+            _track_tokens(len(prompt) // 4 + max_tokens)
             return r.choices[0].message.content
         except Exception as e:
             err_str = str(e).lower()
             if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
-                logging.warning(f"Groq rate limit (ключ {key_index+1}), пробую следующий...")
-                time.sleep(2)
+                logging.warning(f"Groq rate limit (ключ {key_index+1}), переключаю на следующий...")
+                time.sleep(1)
                 continue
             elif "model" in err_str and "not found" in err_str:
                 logging.warning(f"Модель {model} недоступна, пробую следующую")
                 continue
             else:
                 logging.error(f"Groq error (ключ {key_index+1}, попытка {attempt+1}): {e}")
-                if attempt < len(GROQ_KEYS) * 3 - 1:
-                    time.sleep(5)
+                if attempt < len(active_keys) * 2 - 1:
+                    time.sleep(3)
                     continue
                 return None
 
-    logging.error("Groq: все попытки исчерпаны")
+    logging.error("Groq: все ключи исчерпаны")
     return None
 
 # ===== APEX BRAIN v2 — АВТОНОМНОЕ САМООБУЧЕНИЕ =====
