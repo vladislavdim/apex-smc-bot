@@ -267,10 +267,14 @@ def _record_source(symbol: str, interval: str, source: str,
         logging.debug(f"[Router] _record_source: {e}")
 
 def _get_best_sources(symbol: str, interval: str) -> list:
-    """Возвращает список источников отсортированных по надёжности для этой пары/TF"""
+    """Возвращает список источников отсортированных по надёжности для этой пары/TF.
+    Ротация как у Groq ключей: упал первый -> второй -> третий.
+    Gate.io, KuCoin, Bybit идут первыми — не блокируются с Render."""
     defaults = [
-        "cryptocompare", "binance_futures", "binance_spot",
-        "twelvedata", "coingecko", "mexc", "kraken", "synthetic"
+        "gateio", "kucoin", "bybit",
+        "mexc", "kraken", "cryptocompare",
+        "binance_futures", "binance_spot",
+        "twelvedata", "coingecko", "synthetic"
     ]
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -405,6 +409,141 @@ def _fetch_mexc(symbol: str, interval: str, limit: int) -> list:
              "low": float(c[3]), "close": float(c[4]),
              "volume": float(c[5])} for c in data]
 
+def _fetch_gateio(symbol: str, interval: str, limit: int) -> list:
+    """Gate.io — работает без геоблока с Render"""
+    gate_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m",
+                "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"7d"}
+    gate_int = gate_map.get(interval, "1h")
+    # Gate.io использует формат BTC_USDT
+    base = symbol.replace("USDT","").replace("BUSD","").replace("PERP","")
+    gate_symbol = f"{base}_USDT"
+    r = requests.get("https://api.gateio.ws/api/v4/spot/candlesticks",
+        params={"currency_pair": gate_symbol, "interval": gate_int, "limit": limit},
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        timeout=12)
+    data = r.json()
+    if not isinstance(data, list) or len(data) < 5:
+        raise ValueError(f"Gate empty {symbol}")
+    # Gate.io формат: [timestamp, volume, close, high, low, open, ...]
+    candles = []
+    for c in data:
+        try:
+            candles.append({
+                "open": float(c[5]),
+                "high": float(c[3]),
+                "low": float(c[4]),
+                "close": float(c[2]),
+                "volume": float(c[1])
+            })
+        except (IndexError, ValueError):
+            continue
+    if len(candles) < 5:
+        raise ValueError(f"Gate parse error {symbol}")
+    return candles[-limit:]
+
+def _fetch_kucoin(symbol: str, interval: str, limit: int) -> list:
+    """KuCoin — хорошая доступность с Render"""
+    kc_map = {"1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min",
+              "1h":"1hour","2h":"2hour","4h":"4hour","6h":"6hour",
+              "8h":"8hour","12h":"12hour","1d":"1day","1w":"1week"}
+    kc_int = kc_map.get(interval, "1hour")
+    base = symbol.replace("USDT","").replace("BUSD","").replace("PERP","")
+    kc_symbol = f"{base}-USDT"
+    # KuCoin требует startAt/endAt в секундах
+    end_ts = int(time.time())
+    tf_seconds = {"1min":60,"3min":180,"5min":300,"15min":900,"30min":1800,
+                  "1hour":3600,"2hour":7200,"4hour":14400,"6hour":21600,
+                  "8hour":28800,"12hour":43200,"1day":86400,"1week":604800}
+    secs = tf_seconds.get(kc_int, 3600)
+    start_ts = end_ts - secs * (limit + 5)
+    r = requests.get("https://api.kucoin.com/api/v1/market/candles",
+        params={"symbol": kc_symbol, "type": kc_int,
+                "startAt": start_ts, "endAt": end_ts},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=12)
+    data = r.json()
+    items = data.get("data", [])
+    if not isinstance(items, list) or len(items) < 5:
+        raise ValueError(f"KuCoin empty {symbol}")
+    # KuCoin возвращает в обратном порядке: [timestamp, open, close, high, low, volume, turnover]
+    candles = []
+    for c in reversed(items):
+        try:
+            candles.append({
+                "open": float(c[1]),
+                "high": float(c[3]),
+                "low": float(c[4]),
+                "close": float(c[2]),
+                "volume": float(c[5])
+            })
+        except (IndexError, ValueError):
+            continue
+    if len(candles) < 5:
+        raise ValueError(f"KuCoin parse error {symbol}")
+    return candles[-limit:]
+
+def _fetch_bybit(symbol: str, interval: str, limit: int) -> list:
+    """Bybit — доступен с Render, большой объём данных"""
+    by_map = {"1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
+              "1h":"60","2h":"120","4h":"240","6h":"360",
+              "12h":"720","1d":"D","1w":"W","1M":"M"}
+    by_int = by_map.get(interval, "60")
+    r = requests.get("https://api.bybit.com/v5/market/kline",
+        params={"category":"linear","symbol": symbol,
+                "interval": by_int, "limit": min(limit, 200)},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=12)
+    data = r.json()
+    items = data.get("result", {}).get("list", [])
+    if not isinstance(items, list) or len(items) < 5:
+        raise ValueError(f"Bybit empty {symbol}")
+    # Bybit: [startTime, open, high, low, close, volume, turnover] — обратный порядок
+    candles = []
+    for c in reversed(items):
+        try:
+            candles.append({
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
+                "volume": float(c[5])
+            })
+        except (IndexError, ValueError):
+            continue
+    if len(candles) < 5:
+        raise ValueError(f"Bybit parse error {symbol}")
+    return candles[-limit:]
+
+def _fetch_kraken(symbol: str, interval: str, limit: int) -> list:
+    """Kraken — европейская биржа, хорошая доступность"""
+    kr_map = {"1m":1,"5m":5,"15m":15,"30m":30,"1h":60,"4h":240,"1d":1440,"1w":10080}
+    kr_int = kr_map.get(interval, 60)
+    base = symbol.replace("USDT","").replace("BUSD","").replace("PERP","")
+    # Kraken использует XBT для BTC
+    if base == "BTC":
+        base = "XBT"
+    kr_symbol = f"{base}USD"
+    r = requests.get("https://api.kraken.com/0/public/OHLC",
+        params={"pair": kr_symbol, "interval": kr_int},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=12)
+    data = r.json()
+    if data.get("error"):
+        raise ValueError(f"Kraken error: {data['error']}")
+    result_data = data.get("result", {})
+    # Kraken возвращает под ключом пары
+    pair_key = next((k for k in result_data if k != "last"), None)
+    if not pair_key:
+        raise ValueError(f"Kraken no data {symbol}")
+    items = result_data[pair_key]
+    if not isinstance(items, list) or len(items) < 5:
+        raise ValueError(f"Kraken empty {symbol}")
+    # Kraken: [time, open, high, low, close, vwap, volume, count]
+    candles = [{"open": float(c[1]), "high": float(c[2]),
+                "low": float(c[3]), "close": float(c[4]),
+                "volume": float(c[6])} for c in items]
+    return candles[-limit:]
+
 def _build_synthetic_tf(symbol: str, target_tf: str, limit: int) -> list:
     """Строим старший TF из более мелкого — например 4h из 1h"""
     tf_build_map = {
@@ -451,12 +590,16 @@ def _smart_fetch(symbol: str, interval: str, limit: int) -> list:
 
     sources_order = _get_best_sources(symbol, interval)
     fetchers = {
+        "gateio": _fetch_gateio,
+        "kucoin": _fetch_kucoin,
+        "bybit": _fetch_bybit,
+        "mexc": _fetch_mexc,
+        "kraken": _fetch_kraken,
         "cryptocompare": _fetch_cryptocompare,
         "binance_futures": _fetch_binance_futures,
         "binance_spot": _fetch_binance_spot,
         "twelvedata": _fetch_twelvedata,
         "coingecko": _fetch_coingecko,
-        "mexc": _fetch_mexc,
     }
 
     errors = []
