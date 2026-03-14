@@ -778,14 +778,7 @@ def get_binance_client():
     global _binance_client
     if _binance_client:
         return _binance_client
-    if BINANCE_API_KEY and BINANCE_API_SECRET:
-        try:
-            from binance.client import Client
-            _binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-            logging.info("Binance API client инициализирован ✅")
-            return _binance_client
-        except Exception as e:
-            logging.warning(f"Binance Client init failed: {e}")
+    # python-binance заблокирован на Render (geo restriction) — используем только REST
     return None
 
 
@@ -836,6 +829,26 @@ def get_top_pairs(limit=100):
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
     ]
 
+    # Фильтр мусорных пар — стейблы, обёртки, токены без ликвидности
+    BAD_SUFFIXES = ("DOWNUSDT", "UPUSDT", "BULLUSDT", "BEARUSDT")
+    BAD_CONTAINS = ("USDC", "BUSD", "TUSD", "USDP", "USDE", "USDD", "PYUSD", "RLSD",
+                    "WBETH", "WSTETH", "STETH", "CBETH", "RETH", "BETH",
+                    "AETHUSDT", "XDAI", "WBTC", "HBTC", "SBTC",
+                    "NFLXX", "TRXS", "SPLD", "VINC", "BGBUS", "KCS",
+                    "WFIU", "XTUS", "JLPU", "RLUSD", "MANTLE")
+
+    def is_valid_pair(symbol):
+        if not symbol.endswith("USDT"):
+            return False
+        if any(symbol.endswith(s) for s in BAD_SUFFIXES):
+            return False
+        base = symbol.replace("USDT", "")
+        if any(bad in base for bad in BAD_CONTAINS):
+            return False
+        if len(base) > 10:  # слишком длинный тикер — обычно мусор
+            return False
+        return True
+
     # 0. CryptoCompare — работает с Render без блокировок
     try:
         r = requests.get(
@@ -847,7 +860,8 @@ def get_top_pairs(limit=100):
         if r.status_code == 200:
             items = r.json().get("Data", [])
             cc_pairs = [i["CoinInfo"]["Name"] + "USDT" for i in items
-                        if i.get("CoinInfo", {}).get("Name") and i["CoinInfo"]["Name"] != "USDT"]
+                        if i.get("CoinInfo", {}).get("Name") and i["CoinInfo"]["Name"] != "USDT"
+                        and is_valid_pair(i["CoinInfo"]["Name"] + "USDT")]
             if len(cc_pairs) >= 10:
                 combined = list(dict.fromkeys(FORCED + cc_pairs))[:limit]
                 pairs_cache = combined
@@ -868,7 +882,7 @@ def get_top_pairs(limit=100):
             data = r.json()
             if isinstance(data, list):
                 data.sort(key=lambda x: float(x.get("quoteVolume", 0) or 0), reverse=True)
-                top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
+                top = [t["symbol"] for t in data if is_valid_pair(str(t.get("symbol","")))][:limit]
                 if top:
                     combined = list(dict.fromkeys(FORCED + top))[:limit]
                     pairs_cache = combined
@@ -889,7 +903,7 @@ def get_top_pairs(limit=100):
             data = r.json()
             if isinstance(data, list):
                 data.sort(key=lambda x: float(x.get("quoteVolume", 0) or 0), reverse=True)
-                top = [t["symbol"] for t in data if str(t.get("symbol","")).endswith("USDT")][:limit]
+                top = [t["symbol"] for t in data if is_valid_pair(str(t.get("symbol","")))][:limit]
                 if top:
                     combined = list(dict.fromkeys(FORCED + top))[:limit]
                     pairs_cache = combined
