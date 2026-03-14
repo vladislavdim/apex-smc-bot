@@ -77,7 +77,7 @@ def pairs_keyboard(action="scan", page=0):
     """Клавиатура монет с пагинацией — топ-50 из Bybit"""
     all_pairs = get_top_pairs(50)
     page_size = 20  # монет на странице
-    total_pages = (len(all_pairs) + page_size - 1) // page_size
+    total_pages = - (-len(all_pairs) // page_size)(len(all_pairs) + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
 
     start = page * page_size
