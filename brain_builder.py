@@ -202,8 +202,8 @@ def save_self_rule(category, rule, confidence=0.5, source="brain_builder"):
             )
         else:
             conn.execute(
-                "INSERT INTO self_rules VALUES (NULL,?,?,?,0,0,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
-                (category, rule[:300], confidence, source)
+                "INSERT INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active, created_at, updated_at) VALUES (?,?,?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (category, rule[:300], "auto", rule[:300], confidence, source)
             )
         conn.commit()
         conn.close()
@@ -882,17 +882,25 @@ def get_brain_summary():
         macro_time = latest_macro[1][:16] if latest_macro else ""
 
         return {
-            "knowledge_count": knowledge_count,
-            "rules_count": rules_count,
-            "coin_count": coin_count,
-            "pattern_count": pattern_count,
-            "top_rules": rules_text,
-            "macro_summary": macro_text,
-            "macro_time": macro_time,
+            "knowledge_count": knowledge_count or 0,
+            "rules_count": rules_count or 0,
+            "coin_count": coin_count or 0,
+            "pattern_count": pattern_count or 0,
+            "top_rules": rules_text or "Пока нет правил",
+            "macro_summary": macro_text or "Нет данных",
+            "macro_time": macro_time or "",
         }
     except Exception as e:
         logging.error(f"get_brain_summary: {e}")
-        return {}
+        return {
+            "knowledge_count": 0,
+            "rules_count": 0,
+            "coin_count": 0,
+            "pattern_count": 0,
+            "top_rules": "Ошибка загрузки",
+            "macro_summary": "Нет данных",
+            "macro_time": "",
+        }
 
 
 # ──────────────────────────────────────────────

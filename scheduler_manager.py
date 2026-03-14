@@ -202,6 +202,8 @@ class SchedulerManager:
             # Проверяем количество одновременных запусков
             with task.lock:
                 if len(task.current_runs) >= task.max_concurrent:
+                    logging.warning(f"Task {task.name} already running ({len(task.current_runs)} runs)")
+                    return None
                     return f"Task {task.name} already running ({len(task.current_runs)} runs)"
                 
                 task.current_runs.add(run_id)

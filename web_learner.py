@@ -52,15 +52,19 @@ def init_web_learner_db():
 # GROQ ВЫЗОВЫ
 # ═══════════════════════════════════════════════════════════════
 
-def _groq(prompt: str, max_tokens: int = 800) -> str:
+def _groq(prompt: str, max_tokens_val: int = 800) -> str:
     if not GROQ_API_KEY:
         return ""
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": max_tokens, "temperature": 0.3},
+            json={
+                "model": "llama-3.1-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens_val,
+                "temperature": 0.3,
+            },
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             timeout=30
         )
         data = r.json()
