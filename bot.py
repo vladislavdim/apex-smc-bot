@@ -30,7 +30,7 @@ try: _SMC_ENGINE_OK
 except NameError: _SMC_ENGINE_OK = False
 try: _EXT_OK
 except NameError: _EXT_OK = False
-try: _ROUTER_OK
+try: _brain_router
 except NameError: _ROUTER_OK = False
 try: _AUTOPILOT_OK
 except NameError: _AUTOPILOT_OK = False
