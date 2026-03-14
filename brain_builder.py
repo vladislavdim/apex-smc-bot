@@ -863,6 +863,9 @@ def get_brain_summary():
     """Возвращает текущее состояние мозга для отображения в боте"""
     try:
         conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        # Создаём таблицы если их нет (защита от NoneType)
+        init_brain_db()
         knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
         rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
         top_rules = conn.execute(
