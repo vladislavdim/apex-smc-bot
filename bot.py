@@ -3501,6 +3501,8 @@ def main():
                 allowed_updates=dp.resolve_used_update_types()
             )
 
+        asyncio.run(polling_main())
+
 
 if __name__ == "__main__":
     main()
