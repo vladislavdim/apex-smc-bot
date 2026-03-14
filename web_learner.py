@@ -59,7 +59,7 @@ def _groq(prompt: str, max_tokens_val: int = 800) -> str:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             json={
-                "model": "llama-3.1-70b-versatile",
+                "model": "llama-3.1-8b-instant",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": max_tokens_val,
                 "temperature": 0.3,
