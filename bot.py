@@ -3481,75 +3481,61 @@ def main():
         logging.info(f"Запуск в webhook режиме на порту {port}")
         web.run_app(app, host="0.0.0.0", port=port)
     else:
-        # Polling режим — fallback если нет WEBHOOK_URL
+        # Polling режим
+        async def safe_delete_webhook():
+            for i in range(5):
+                try:
+                    await bot.delete_webhook(drop_pending_updates=True)
+                    logging.info("Webhook удалён")
+                    return
+                except Exception as e:
+                    logging.warning(f"delete_webhook попытка {i+1}: {e}")
+                    await asyncio.sleep(2)
+
         async def polling_main():
             init_db()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
-                   import asyncio
-import logging
-import threading
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+                    init_brain_db()
+                except Exception as e:
+                    logging.error(f"init_brain_db: {e}")
 
-async def safe_delete_webhook(bot):
-    for i in range(5):
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            logging.info("Webhook удалён")
-            return
-        except Exception as e:
-            logging.warning(f"delete_webhook попытка {i+1}: {e}")
+            threading.Thread(target=get_top_pairs, daemon=True).start()
+
+            await safe_delete_webhook()
             await asyncio.sleep(2)
 
+            scheduler = AsyncIOScheduler(
+                job_defaults={
+                    "misfire_grace_time": 60,
+                    "coalesce": True,
+                    "max_instances": 1
+                }
+            )
 
-async def polling_main():
-    try:
-        init_brain_db()
-        # остальные операции, которые должны выполняться внутри try
-    except Exception as e:
-        import logging
-        logging.error(e)
+            scheduler.add_job(auto_scan_job, "interval", minutes=15)
+            scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+            scheduler.add_job(auto_research, "interval", hours=2)
+            scheduler.add_job(check_alerts, "interval", minutes=5)
+            scheduler.add_job(night_brain_tasks, "interval", hours=4)
+            scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
+            scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
 
-    threading.Thread(target=get_top_pairs, daemon=True).start()
+            scheduler.start()
 
-    # агрессивное удаление webhook
-    await safe_delete_webhook(bot)
+            asyncio.get_running_loop().call_later(
+                30,
+                lambda: asyncio.create_task(autonomous_learning_cycle())
+            )
 
-    await asyncio.sleep(2)
+            logging.info("APEX запущен в polling режиме")
 
-    scheduler = AsyncIOScheduler(
-        job_defaults={
-            "misfire_grace_time": 60,
-            "coalesce": True,
-            "max_instances": 1
-        }
-    )
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types()
+            )
 
-    scheduler.add_job(auto_scan_job, "interval", minutes=15)
-    scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
-    scheduler.add_job(auto_research, "interval", hours=2)
-    scheduler.add_job(check_alerts, "interval", minutes=5)
-    scheduler.add_job(night_brain_tasks, "interval", hours=4)
-    scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
-    scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
-
-    scheduler.start()
-
-    asyncio.get_running_loop().call_later(
-        30,
-        lambda: asyncio.create_task(autonomous_learning_cycle())
-    )
-
-    logging.info("APEX запущен в polling режиме")
-
-    await dp.start_polling(
-        bot,
-        allowed_updates=dp.resolve_used_update_types()
-    )
-
-
-def main():
-    asyncio.run(polling_main())
+        asyncio.run(polling_main())
 
 
 if __name__ == "__main__":
