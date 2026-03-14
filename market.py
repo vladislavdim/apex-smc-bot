@@ -55,7 +55,7 @@ try:
     )
     _SMC_ENGINE_OK = True
     logging.info("smc_engine.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _SMC_ENGINE_OK = False
     logging.warning(f"smc_engine.py не найден: {e} — ищем в: {_sys.path[:3]}")
     get_source_stats = lambda: "smc_engine.py не загружен — положи файл рядом с bot.py"
@@ -112,7 +112,7 @@ try:
     )
     _LEARNING_OK = True
     logging.info("learning.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _LEARNING_OK = False
     logging.warning(f"learning.py не найден: {e}")
     _learn_min_confluence = lambda s: 2
@@ -157,7 +157,7 @@ try:
     )
     _WEB_LEARNER_OK = True
     logging.info("web_learner.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _WEB_LEARNER_OK = False
     logging.warning(f"web_learner.py не найден: {e}")
     _web_learn_cycle = lambda: []
@@ -176,7 +176,7 @@ try:
     )
     _EXT_OK = True
     logging.info("groq_extensions.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _EXT_OK = False
     logging.warning(f"groq_extensions.py не найден: {e}")
     _ext_run_filters = lambda *a, **kw: (True, "")
@@ -193,7 +193,7 @@ try:
     from brain_router import router as _brain_router
     _ROUTER_OK = True
     logging.info("brain_router.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _ROUTER_OK = False
     logging.warning(f"brain_router.py не найден: {e}")
     class _DummyRouter:
@@ -223,7 +223,7 @@ try:
     )
     _AUTOPILOT_OK = True
     logging.info("apex_autopilot.py загружен успешно")
-except ImportError as e:
+except Exception as e:
     _AUTOPILOT_OK = False
     logging.warning(f"apex_autopilot.py не найден: {e}")
     _autopilot_fast   = lambda: None
