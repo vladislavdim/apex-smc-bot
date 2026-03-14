@@ -3479,65 +3479,27 @@ def main():
             init_db()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
-                   import asyncio
-import logging
-import threading
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-async def safe_delete_webhook(bot):
-    for i in range(5):
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            logging.info("Webhook удалён")
-            return
-        except Exception as e:
-            logging.warning(f"delete_webhook попытка {i+1}: {e}")
-            await asyncio.sleep(2)
-
-
-async def polling_main():
-    try:
-        init_brain_db()
-    except Exception:
-        pass
-
-    threading.Thread(target=get_top_pairs, daemon=True).start()
-
-    # агрессивное удаление webhook
-    await safe_delete_webhook(bot)
-
-    await asyncio.sleep(2)
-
-    scheduler = AsyncIOScheduler(
-        job_defaults={
-            "misfire_grace_time": 60,
-            "coalesce": True,
-            "max_instances": 1
-        }
-    )
-
-    scheduler.add_job(auto_scan_job, "interval", minutes=15)
-    scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
-    scheduler.add_job(auto_research, "interval", hours=2)
-    scheduler.add_job(check_alerts, "interval", minutes=5)
-    scheduler.add_job(night_brain_tasks, "interval", hours=4)
-    scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
-    scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
-
-    scheduler.start()
-
-    asyncio.get_running_loop().call_later(
-        30,
-        lambda: asyncio.create_task(autonomous_learning_cycle())
-    )
-
-    logging.info("APEX запущен в polling режиме")
-
-    await dp.start_polling(
-        bot,
-        allowed_updates=dp.resolve_used_update_types()
-    )
-
+                    init_brain_db()
+                except Exception as _ibe:
+                    logging.warning(f"init_brain_db: {_ibe}")
+            threading.Thread(target=get_top_pairs, daemon=True).start()
+            await safe_delete_webhook()
+            await asyncio.sleep(12)  # ждём завершения старого инстанса
+            scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
+            scheduler.add_job(auto_scan_job, "interval", minutes=15)
+            scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+            scheduler.add_job(auto_research, "interval", hours=2)
+            scheduler.add_job(check_alerts, "interval", minutes=5)
+            scheduler.add_job(night_brain_tasks, "interval", hours=4)
+            scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
+            scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
+            scheduler.start()
+            asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
+            logging.info("APEX запущен в polling режиме")
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types()
+            )
 
 def main():
     asyncio.run(polling_main())
