@@ -3191,6 +3191,16 @@ except ImportError:
     def get_brain_summary():
         try:
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""CREATE TABLE IF NOT EXISTS web_knowledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT, content TEXT, source TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS self_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT, rule TEXT, confidence REAL DEFAULT 0.5,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            conn.commit()
             kc = conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone()
             rc = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()
             conn.close()
@@ -3201,7 +3211,8 @@ except ImportError:
                 "macro_summary": "Нет данных",
                 "macro_time": ""
             }
-        except Exception:
+        except Exception as e:
+            logging.error(f"get_brain_summary: {e}")
             return {"knowledge_count": 0, "coin_count": 0, "pattern_count": 0,
                     "macro_summary": "Нет данных", "macro_time": ""}
 
@@ -3474,8 +3485,12 @@ def main():
 
             threading.Thread(target=get_top_pairs, daemon=True).start()
 
+            # Ждём пока старый инстанс умрёт — Render поднимает новый до завершения старого
+            logging.info("Ожидание завершения старого инстанса (12с)...")
+            await asyncio.sleep(12)
+
             await safe_delete_webhook()
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
             scheduler = AsyncIOScheduler(
                 job_defaults={
