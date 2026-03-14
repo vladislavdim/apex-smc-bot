@@ -30,15 +30,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Заменяем небезопасную отправку сообщений ПОСЛЕ импорта Bot
-try:
-    if 'safe_send_message' in patches:
-        original_send_message = Bot.send_message
-        Bot.send_message = patches['safe_send_message']
-        logging.info("📡 Telegram send_message patched")
-except:
-    pass
-
 # ── Импортируем всю рыночную логику из market.py ──
 from market import *
 
