@@ -3161,6 +3161,12 @@ async def on_startup(app):
 
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
+    if BRAIN_BUILDER_AVAILABLE:
+        try:
+            init_brain_db()
+            logging.info("init_brain_db() — таблицы мозга созданы")
+        except Exception as _ibe:
+            logging.warning(f"init_brain_db: {_ibe}")
     # Применяем миграции learning.py (signal_stats, self_rules, confirmed_by и др.)
     if _LEARNING_OK:
         try:
@@ -3315,6 +3321,14 @@ async def on_shutdown(app):
 
 
 def main():
+    # Файловый лок — предотвращает запуск двух инстансов
+    import fcntl
+    lock_file = open("/tmp/apex_bot.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        logging.error("Другой инстанс уже запущен — выходим")
+        return
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
     if WEBHOOK_URL:
@@ -3360,6 +3374,10 @@ def main():
         # Polling режим — fallback если нет WEBHOOK_URL
         async def polling_main():
             init_db()
+            if BRAIN_BUILDER_AVAILABLE:
+                try:
+                    init_brain_db()
+                except Exception: pass
             threading.Thread(target=get_top_pairs, daemon=True).start()
             try:
                 await bot.delete_webhook(drop_pending_updates=True)
