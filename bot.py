@@ -3485,8 +3485,10 @@ async def safe_delete_webhook(bot):
 async def polling_main():
     try:
         init_brain_db()
-    except Exception:
-        pass
+        # остальные операции, которые должны выполняться внутри try
+    except Exception as e:
+        import logging
+        logging.error(e)
 
     threading.Thread(target=get_top_pairs, daemon=True).start()
 
