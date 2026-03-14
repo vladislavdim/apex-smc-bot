@@ -43,8 +43,8 @@ except NameError:
     _brain_router = _DummyRouter()
 
 # Groq токены — определяются в market.py, fallback на случай если не экспортировались
-try: from market import _GROQ_DAILY_LIMIT
-except ImportError: _GROQ_DAILY_LIMIT = 480_000
+try: _GROQ_DAILY_LIMIT
+except NameError: _GROQ_DAILY_LIMIT = 480_000
 try: _groq_tokens_used
 except NameError: _groq_tokens_used = 0
 
@@ -77,7 +77,7 @@ def pairs_keyboard(action="scan", page=0):
     """Клавиатура монет с пагинацией — топ-50 из Bybit"""
     all_pairs = get_top_pairs(50)
     page_size = 20  # монет на странице
-    total_pages = - (-len(all_pairs) // page_size)(len(all_pairs) + page_size - 1) // page_size
+    total_pages = (len(all_pairs) + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
 
     start = page * page_size
@@ -1034,7 +1034,7 @@ async def handle_callback(callback: CallbackQuery):
             conn.close()
 
             # Данные из brain_builder (если доступен)
-            brain = (get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}) or {}
+            brain = (get_brain_summary() or {}) if BRAIN_BUILDER_AVAILABLE else {}
             if brain.get("knowledge_count", 0) > knowledge_count:
                 knowledge_count = brain.get("knowledge_count", 0)
             if brain.get("pattern_count", 0) > pattern_count:
@@ -1530,7 +1530,7 @@ async def handle_callback(callback: CallbackQuery):
         try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: __import__('brain_builder').learn_macro_trends())
-            brain = get_brain_summary() or {}
+            brain = (get_brain_summary() or {}) if callable(get_brain_summary) else {}
             macro = brain.get("macro_summary", "Нет данных")[:500]
             macro_time = brain.get("macro_time", "")
             await callback.message.edit_text(
@@ -1556,7 +1556,7 @@ async def handle_callback(callback: CallbackQuery):
         )
         await run_brain_builder_async()
         await autonomous_learning_cycle()
-        brain = (get_brain_summary() if BRAIN_BUILDER_AVAILABLE else {}) or {}
+        brain = (get_brain_summary() or {}) if BRAIN_BUILDER_AVAILABLE else {}
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
         rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
         conn.close()
