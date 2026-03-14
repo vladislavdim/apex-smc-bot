@@ -65,7 +65,7 @@ GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
 
 # ─── Groq вызов с retry и правильными моделями ────────────────
 # Актуальные модели Groq на март 2026:
-_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile"]
+_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.1-8b-instant", "llama-3.1-8b-instant"]
 # Глобальный кулдаун для autopilot — не спамим Groq
 _AP_LAST_GROQ_CALL = 0
 _AP_GROQ_COOLDOWN = 30  # секунд между вызовами из autopilot

@@ -4302,8 +4302,8 @@ def ask_groq(prompt, max_tokens=800):
 
     models = [
         "llama-3.1-8b-instant",        # основная — 500k TPD/день
-        "llama3-8b-8192",              # fallback — отдельный лимит
-        "llama-3.3-70b-versatile",     # резерв тяжёлый
+        "llama-3.1-8b-instant",        # fallback — отдельный лимит
+        "llama-3.1-8b-instant",        # резерв тяжёлый
     ]
 
     for attempt in range(len(GROQ_KEYS) * 3):
