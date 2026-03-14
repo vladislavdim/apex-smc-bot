@@ -70,8 +70,7 @@ def fix_missing_columns():
         ("ALTER TABLE signals ADD COLUMN regime TEXT DEFAULT 'UNKNOWN'",),
         ("ALTER TABLE signals ADD COLUMN learning_id INTEGER DEFAULT NULL",),
         
-        # Добавляем колонку id в таблицы где её нет
-        ("ALTER TABLE signal_learning ADD COLUMN id INTEGER PRIMARY KEY AUTOINCREMENT",),
+        # signal_learning уже имеет PRIMARY KEY на symbol, не добавляем id
     ]
     
     try:

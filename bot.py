@@ -17,12 +17,6 @@ try:
     patches = apply_all_patches()
     logging.info("🎯 Emergency patches applied successfully")
     
-    # Заменяем небезопасную отправку сообщений
-    if 'safe_send_message' in patches:
-        original_send_message = Bot.send_message
-        Bot.send_message = patches['safe_send_message']
-        logging.info("📡 Telegram send_message patched")
-    
 except ImportError:
     logging.warning("⚠️ Emergency fix module not found")
     patches = {}
@@ -35,6 +29,15 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# Заменяем небезопасную отправку сообщений ПОСЛЕ импорта Bot
+try:
+    if 'safe_send_message' in patches:
+        original_send_message = Bot.send_message
+        Bot.send_message = patches['safe_send_message']
+        logging.info("📡 Telegram send_message patched")
+except:
+    pass
 
 # ── Импортируем всю рыночную логику из market.py ──
 from market import *
