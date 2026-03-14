@@ -2972,18 +2972,24 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
         logging.warning(f"save_signal learning: {e}")
 
     try:
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        conn.execute(
-            """INSERT INTO signals
-               (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
-                timeframe, estimated_hours, grade, result, created_at, closed_at, learning_id, confluence, regime)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',CURRENT_TIMESTAMP,NULL,?,?,?)""",
-            (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade, learning_id, confluence, regime)
-        )
-        conn.commit()
-        sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
-        return sig_id, learning_id
+        # Используем безопасное подключение с emergency patch
+        from emergency_fix import safe_db_connection
+        
+        with safe_db_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO signals
+                (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
+                 timeframe, estimated_hours, grade, result, created_at, closed_at, 
+                 learning_id, confluence, regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 
+                        CURRENT_TIMESTAMP, NULL, ?, ?, ?)
+            """, (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, 
+                  timeframe, est_hours, grade, learning_id, confluence, regime))
+            
+            sig_id = cursor.lastrowid()
+            logging.info(f"Signal saved: {symbol} {direction} (ID: {sig_id})")
+            return sig_id, learning_id
+            
     except Exception as e:
         logging.error(f"Save signal error: {e}")
         return None, learning_id

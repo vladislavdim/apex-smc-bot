@@ -11,6 +11,22 @@ import json
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# EMERGENCY PATCHES - исправление критических ошибок
+try:
+    from emergency_fix import apply_all_patches
+    patches = apply_all_patches()
+    logging.info("🎯 Emergency patches applied successfully")
+    
+    # Заменяем небезопасную отправку сообщений
+    if 'safe_send_message' in patches:
+        original_send_message = Bot.send_message
+        Bot.send_message = patches['safe_send_message']
+        logging.info("📡 Telegram send_message patched")
+    
+except ImportError:
+    logging.warning("⚠️ Emergency fix module not found")
+    patches = {}
+
 # WAL патч — решает "database is locked"
 
 from groq import Groq
