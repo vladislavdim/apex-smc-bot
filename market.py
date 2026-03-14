@@ -477,6 +477,33 @@ def init_db():
         except Exception:
             pass
 
+    # Миграция signals — пересоздаём если нет колонки id (старые БД)
+    try:
+        cols = [row[1] for row in c.execute("PRAGMA table_info(signals)").fetchall()]
+        if "id" not in cols:
+            c.execute("ALTER TABLE signals RENAME TO signals_old")
+            c.execute("""CREATE TABLE signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT, direction TEXT, signal_type TEXT,
+                entry REAL, tp1 REAL, tp2 REAL, tp3 REAL, sl REAL,
+                timeframe TEXT, estimated_hours INTEGER, grade TEXT,
+                result TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT,
+                learning_id INTEGER DEFAULT NULL,
+                confluence INTEGER DEFAULT 0,
+                regime TEXT DEFAULT 'UNKNOWN')""")
+            c.execute("""INSERT INTO signals 
+                (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
+                 timeframe, estimated_hours, grade, result, created_at, closed_at)
+                SELECT symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
+                 timeframe, estimated_hours, grade, result, created_at, closed_at
+                FROM signals_old""")
+            c.execute("DROP TABLE signals_old")
+            logging.info("signals table migrated: added id column")
+    except Exception as e:
+        logging.error(f"signals migration: {e}")
+
     # Счётчик повторных ошибок
     c.execute("""CREATE TABLE IF NOT EXISTS error_patterns (
         error_type TEXT PRIMARY KEY,
