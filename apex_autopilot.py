@@ -477,159 +477,23 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
 def _write_fix_to_extensions(signal_id, symbol, result, fix_type,
                                fix_description, fix_code_hint, root_cause, confidence):
     """
-    Groq читает groq_extensions.py → пишет конкретный фикс → проверяет → деплоит.
+    ОТКЛЮЧЕНО: Groq не может изменять код файлов.
+    Только записывает анализ в мозги (observations).
     """
     try:
-        if not GITHUB_TOKEN or not GITHUB_REPO:
-            logging.warning("[Autopilot] GitHub не настроен — фикс не задеплоен")
-            return False
-
-        # Читаем текущий extensions из GitHub
-        r = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{EXT_FILE}",
-            headers={"Authorization": f"token {GITHUB_TOKEN}",
-                     "Accept": "application/vnd.github.v3+json"},
-            timeout=15
-        )
-        if r.status_code != 200:
-            logging.error(f"[Autopilot] GitHub read extensions: {r.status_code}")
-            return False
-
-        file_data = r.json()
-        current_code = base64.b64decode(file_data["content"]).decode("utf-8")
-        sha = file_data["sha"]
-
-        # Извлекаем текущую версию
-        current_version = "1.0.0"
-        for line in current_code.split("\n"):
-            if '"version":' in line and "GROQ_CHANGELOG" not in line:
-                try:
-                    current_version = line.split('"version":')[1].strip().strip('",').strip("'")
-                    break
-                except Exception:
-                    pass
-
-        # Увеличиваем версию
-        try:
-            parts = current_version.split(".")
-            parts[-1] = str(int(parts[-1]) + 1)
-            new_version = ".".join(parts)
-        except Exception:
-            new_version = current_version + ".1"
-
-        prompt = f"""Ты — разработчик торгового бота APEX. Исправь файл groq_extensions.py.
-
-ПРОБЛЕМА НАЙДЕНА:
-- Сделка #{signal_id} по {symbol} → {result}
-- Корневая причина: {root_cause}
-- Тип фикса: {fix_type}
-- Что нужно сделать: {fix_description}
-- Подсказка по коду: {fix_code_hint or 'нет'}
-- Уверенность: {confidence:.0%}
-
-ТЕКУЩИЙ КОД groq_extensions.py:
-```python
-{current_code[:5000]}
-```
-
-ЗАДАЧА:
-Внеси ОДНО конкретное изменение соответствующее типу фикса:
-- NEW_FILTER → добавь новую функцию-фильтр + добавь в ACTIVE_FILTERS
-- MODIFY_FILTER → измени существующий фильтр (порог, условие)
-- NEW_BOOST → добавь функцию-буст + добавь в CONFLUENCE_BOOSTERS
-- MODIFY_BOOST → измени существующий буст
-- NEW_RULE → только добавь в GROQ_CHANGELOG (правило уже в brain.db)
-
-ОБЯЗАТЕЛЬНО:
-1. Добавь запись в GROQ_CHANGELOG:
-   {{"date": "{datetime.now().strftime('%Y-%m-%d')}", "version": "{new_version}", "author": "Autopilot", "changes": "{fix_description[:80]}"}}
-2. Верни ТОЛЬКО полный Python файл без markdown
-3. Код должен быть синтаксически верным Python 3.11
-4. Не меняй ничего лишнего — только одно конкретное изменение"""
-
-        new_code = _groq(prompt, max_tokens=4000)
-        if not new_code:
-            return False
-
-        # Чистим от markdown
-        new_code = new_code.strip()
-        for prefix in ["```python", "```"]:
-            if new_code.startswith(prefix):
-                new_code = new_code[len(prefix):]
-        if new_code.endswith("```"):
-            new_code = new_code[:-3]
-        new_code = new_code.strip()
-
-        # Проверяем синтаксис — критично
-        try:
-            ast.parse(new_code)
-        except SyntaxError as se:
-            logging.error(f"[Autopilot] ❌ Синтаксическая ошибка в коде Groq: {se}")
-            # Записываем провал
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
-                VALUES (?,?,?,?)""",
-                ("fix_failed", f"Синтаксическая ошибка фикса для {symbol}",
-                 f"SyntaxError: {se}\nFix desc: {fix_description}", "autopilot"))
-            conn.commit()
-            conn.close()
-            return False
-
-        # Проверяем что основные функции на месте
-        # Расширенный список защищённых функций — Groq не может их удалить
-        required = [
-            "run_all_filters", "run_confluence_boosters",
-            "ACTIVE_FILTERS", "GROQ_CHANGELOG",
-            "filter_meme_coins_high_fg", "filter_low_confluence_sideways",
-            "filter_consecutive_losses", "boost_strong_volume", "boost_clean_structure",
-            "get_extensions_summary",
-        ]
-        missing = [r for r in required if r not in new_code]
-        if missing:
-            logging.error(f"[Autopilot] ❌ Groq удалил защищённые функции: {missing} — откат!")
-            return False
-
-        # Пушим на GitHub
-        encoded = base64.b64encode(new_code.encode("utf-8")).decode("utf-8")
-        r2 = requests.put(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{EXT_FILE}",
-            headers={"Authorization": f"token {GITHUB_TOKEN}",
-                     "Accept": "application/vnd.github.v3+json"},
-            json={
-                "message": f"🤖 Autopilot fix [{result}] {symbol}: {fix_description[:50]}",
-                "content": encoded,
-                "sha": sha
-            },
-            timeout=20
-        )
-
-        if r2.status_code in (200, 201):
-            commit = r2.json().get("commit", {}).get("sha", "")[:7]
-            logging.info(f"[Autopilot] 🚀 Фикс задеплоен! commit:{commit} | {fix_description[:60]}")
-
-            # Записываем успех
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
-                VALUES (?,?,?,?)""",
-                ("fix_deployed",
-                 f"🚀 Фикс задеплоен v{new_version} | {symbol} {result}",
-                 f"Причина: {root_cause}\nФикс: {fix_description}\nCommit: {commit}",
-                 "autopilot"))
-            conn.commit()
-            conn.close()
-            return True
-        else:
-            logging.error(f"[Autopilot] GitHub push error: {r2.status_code}")
-            return False
-
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""INSERT OR IGNORE INTO observations
+            (symbol, observation, context, outcome, confirmed)
+            VALUES (?,?,?,?,0)""",
+            (symbol, f"[{fix_type}] {fix_description[:200]}",
+             f"result={result} root_cause={root_cause[:100]}",
+             f"confidence={confidence}"))
+        conn.commit()
+        conn.close()
+        logging.info(f"[Autopilot] 📝 Анализ сохранён в мозги: {symbol} {fix_type}")
     except Exception as e:
-        logging.error(f"_write_fix_to_extensions: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════
-# 5. СИСТЕМНАЯ ДИАГНОСТИКА ОШИБОК
-# ═══════════════════════════════════════════════════════════════
+        logging.error(f"_write_fix_to_extensions observation: {e}")
+    return False  # Никогда не деплоим код
 
 def system_error_diagnosis():
     """
