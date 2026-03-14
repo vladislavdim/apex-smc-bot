@@ -275,6 +275,8 @@ def fetch_top_movers():
             timeout=12
         )
         coins = r.json()
+        if not isinstance(coins, list):
+            return [], []
         sorted_coins = sorted(coins, key=lambda x: x.get("price_change_percentage_24h", 0) or 0, reverse=True)
         gainers = [(c["symbol"].upper(), round(c.get("price_change_percentage_24h", 0), 2)) for c in sorted_coins[:5]]
         losers = [(c["symbol"].upper(), round(c.get("price_change_percentage_24h", 0), 2)) for c in sorted_coins[-5:]]

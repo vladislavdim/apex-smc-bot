@@ -2992,7 +2992,7 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
             """, (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, 
                   timeframe, est_hours, grade, learning_id, confluence, regime))
             
-            sig_id = cursor.lastrowid()
+            sig_id = cursor.lastrowid
             logging.info(f"Signal saved: {symbol} {direction} (ID: {sig_id})")
             return sig_id, learning_id
             

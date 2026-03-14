@@ -309,22 +309,26 @@ def _fetch_cryptocompare(symbol: str, interval: str, limit: int) -> list:
             params={"fsym": base, "tsym": "USD", "limit": limit, "aggregate": agg},
             headers={"User-Agent": "Mozilla/5.0"}, timeout=10
         )
-        raw = r.json()
-        data = raw.get("Data", {}).get("Data", []) or raw.get("Data", [])
     else:
         r = requests.get(
             f"https://min-api.cryptocompare.com/data/{ep}",
             params={"fsym": base, "tsym": "USD", "limit": limit, "aggregate": agg},
             headers={"User-Agent": "Mozilla/5.0"}, timeout=10
         )
-        raw = r.json()
-        data = raw.get("Data", {}).get("Data", []) or raw.get("Data", [])
+    raw = r.json()
+    if not isinstance(raw, dict):
+        raise ValueError(f"CC bad response for {symbol} {interval}")
+    data = raw.get("Data", {})
+    if isinstance(data, dict):
+        data = data.get("Data", [])
+    elif not isinstance(data, list):
+        data = []
     if not data:
         raise ValueError(f"CC empty for {symbol} {interval}")
     candles = [{"open": float(c["open"]), "high": float(c["high"]),
                 "low": float(c["low"]), "close": float(c["close"]),
                 "volume": float(c.get("volumeto", 0))}
-               for c in data if c.get("close", 0) > 0]
+               for c in data if isinstance(c, dict) and c.get("close", 0) > 0]
     return candles[-limit:]
 
 def _fetch_binance_futures(symbol: str, interval: str, limit: int) -> list:
