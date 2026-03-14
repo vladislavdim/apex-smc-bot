@@ -2899,61 +2899,33 @@ def github_push_patch(new_code, sha, commit_message):
 
 async def analyze_and_patch(error_text, error_source="runtime"):
     """
-    Авто-патч без разрешения — тихо чинит и деплоит.
-    Высокий риск — пропускает. Низкий/средний — применяет автоматически.
+    Анализирует ошибку и записывает вывод в мозги бота.
+    Авто-деплой ОТКЛЮЧЁН — только обучение.
     """
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return
-
     try:
-        current_code, sha = github_get_file()
-        if not current_code:
-            return
-
         prompt = f"""Ты senior Python разработчик. В боте произошла ошибка.
 
 ОШИБКА:
-{error_text[:800]}
+{error_text[:600]}
 
-КОД (первые 3000 символов):
-{current_code[:3000]}
+Кратко (1-2 предложения): что пошло не так и как это можно исправить вручную?"""
 
-Верни ТОЛЬКО JSON:
-{{"description": "что исправлено (1 предложение)", "search": "точный уникальный фрагмент для замены", "replace": "исправленный фрагмент", "risk": "low/medium/high"}}"""
-
-        response = ask_groq(prompt, max_tokens=800)
+        response = ask_groq(prompt, max_tokens=300)
         if not response:
             return
 
-        clean = response.strip().replace("```json", "").replace("```", "").strip()
-        start = clean.find("{")
-        end = clean.rfind("}") + 1
-        if start < 0 or end <= start:
-            return
-        patch_data = json.loads(clean[start:end])
-
-        search_text = patch_data.get("search", "")
-        replace_text = patch_data.get("replace", "")
-        description = patch_data.get("description", "auto-fix")
-        risk = patch_data.get("risk", "high")
-
-        # Высокий риск — не применяем автоматически
-        if risk == "high":
-            logging.warning(f"Auto-patch skipped (high risk): {description}")
-            return
-
-        if not search_text or search_text not in current_code:
-            return
-
-        new_code = current_code.replace(search_text, replace_text, 1)
-        success, commit_sha = github_push_patch(
-            new_code, sha,
-            f"🤖 APEX auto-fix: {description[:60]}"
-        )
-        if success:
-            logging.info(f"Auto-patch OK: {description} | {commit_sha}")
-        else:
-            logging.error(f"Auto-patch push failed: {commit_sha}")
+        # Записываем в мозги как наблюдение
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(
+                    "INSERT OR IGNORE INTO observations (category, content, source, created_at) VALUES (?,?,?,?)",
+                    ("error_analysis", f"[{error_source}] {error_text[:200]}\n→ {response}", "auto_analyze", datetime.now().isoformat())
+                )
+                conn.commit()
+            logging.info(f"analyze_and_patch: ошибка записана в мозги ({error_source})")
+        except Exception as db_e:
+            logging.error(f"analyze_and_patch DB: {db_e}")
 
     except Exception as e:
         logging.error(f"analyze_and_patch error: {e}")
