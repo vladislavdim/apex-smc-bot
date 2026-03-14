@@ -479,6 +479,11 @@ def init_db():
 
     # Миграция signals — пересоздаём если нет колонки id (старые БД)
     try:
+        # Сначала убираем signals_old если осталась от прошлой неудачной миграции
+        try:
+            c.execute("DROP TABLE IF EXISTS signals_old")
+        except Exception:
+            pass
         cols = [row[1] for row in c.execute("PRAGMA table_info(signals)").fetchall()]
         if "id" not in cols:
             c.execute("ALTER TABLE signals RENAME TO signals_old")
@@ -493,16 +498,39 @@ def init_db():
                 learning_id INTEGER DEFAULT NULL,
                 confluence INTEGER DEFAULT 0,
                 regime TEXT DEFAULT 'UNKNOWN')""")
-            c.execute("""INSERT INTO signals 
-                (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
-                 timeframe, estimated_hours, grade, result, created_at, closed_at)
-                SELECT symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
-                 timeframe, estimated_hours, grade, result, created_at, closed_at
-                FROM signals_old""")
+            # Копируем данные — только колонки которые точно есть
+            old_cols = [row[1] for row in c.execute("PRAGMA table_info(signals_old)").fetchall()]
+            copy_cols = [col for col in ["symbol","direction","signal_type","entry",
+                         "tp1","tp2","tp3","sl","timeframe","estimated_hours",
+                         "grade","result","created_at","closed_at"] if col in old_cols]
+            cols_str = ", ".join(copy_cols)
+            c.execute(f"INSERT INTO signals ({cols_str}) SELECT {cols_str} FROM signals_old")
             c.execute("DROP TABLE signals_old")
+            conn.commit()
             logging.info("signals table migrated: added id column")
+        else:
+            logging.info("signals table OK: id column exists")
     except Exception as e:
         logging.error(f"signals migration: {e}")
+        # Аварийный вариант — просто дропаем и создаём заново (теряем старые данные)
+        try:
+            c.execute("DROP TABLE IF EXISTS signals_old")
+            c.execute("DROP TABLE IF EXISTS signals")
+            c.execute("""CREATE TABLE signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT, direction TEXT, signal_type TEXT,
+                entry REAL, tp1 REAL, tp2 REAL, tp3 REAL, sl REAL,
+                timeframe TEXT, estimated_hours INTEGER, grade TEXT,
+                result TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT,
+                learning_id INTEGER DEFAULT NULL,
+                confluence INTEGER DEFAULT 0,
+                regime TEXT DEFAULT 'UNKNOWN')""")
+            conn.commit()
+            logging.warning("signals table recreated (emergency)")
+        except Exception as e2:
+            logging.error(f"signals emergency recreate: {e2}")
 
     # Счётчик повторных ошибок
     c.execute("""CREATE TABLE IF NOT EXISTS error_patterns (
