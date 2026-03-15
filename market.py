@@ -859,8 +859,8 @@ def get_top_pairs(limit=100):
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
         "BCHUSDT", "ICPUSDT", "ETCUSDT", "FILUSDT", "HBARUSDT",
         "STXUSDT", "LDOUSDT", "RENDERUSDT", "FETUSDT", "APEUSDT",
-        "FLOKIUSDT", "WIFUSDT", "AAVEUSDT", "CRVUSDT", "GRTUSDT",
-        "MKRUSDT", "SNXUSDT", "RUNEUSDT", "ALGOUSDT", "FTMUSDT",
+        "FLOKIUSDT", "WIFUSDT", "AAVEUSDT", "RUNEUSDT", "ALGOUSDT",
+        "FTMUSDT", "CRVUSDT", "GRTUSDT",
     ]
 
     # Фильтр мусорных пар — стейблы, обёртки, токены без ликвидности
