@@ -2785,7 +2785,7 @@ def full_scan_raw(symbol, timeframe="1h"):
             logging.error(e)
             pass
 
-        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])
+        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h", "1d"])
         if not mtf:
             return None
 
