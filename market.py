@@ -1276,7 +1276,7 @@ def get_candles(symbol, interval="1h", limit=200):
     if _ROUTER_OK:
         try:
             rc = _brain_router.candles(symbol, interval, limit)
-            if rc and len(rc) >= 10:
+            if rc and len(rc) >= 20:
                 candle_cache[cache_key] = (rc, time.time())
                 return rc
         except Exception as e:
@@ -2681,6 +2681,25 @@ def full_scan(symbol, timeframe="1h"):
 
                 # Streak: если серия потерь — повышаем порог
                 streak_threshold = _learn_streak_threshold()
+
+                # BTC корреляция — предупреждение если альт идёт против BTC
+                btc_corr = _learn_btc_corr(symbol)
+                if btc_corr.get("samples", 0) >= 5:
+                    beta = btc_corr.get("beta", 1.0)
+                    if beta > 1.3:
+                        confluence.append(f"⚠️ Высокая BTC корреляция (β={beta:.1f}) — риск выше")
+                        total_weight -= 3
+                    elif beta < 0.5:
+                        confluence.append(f"✅ Низкая BTC корреляция (β={beta:.1f}) — независимое движение")
+                        total_weight += 3
+
+                # День недели — лучшее/худшее время
+                best_hours = _learn_best_hours()
+                current_hour = __import__('datetime').datetime.utcnow().hour
+                if best_hours and current_hour in best_hours[:3]:
+                    confluence.append(f"✅ Лучший час для входа ({current_hour}:00 UTC) (+3)")
+                    total_weight += 3
+
             except Exception as _e:
                 logging.debug(f"learning confluence {symbol}: {_e}")
                 streak_threshold = 18
