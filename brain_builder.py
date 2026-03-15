@@ -301,6 +301,112 @@ def parse_rss(url, limit=5):
         return []
 
 
+def fetch_coingecko_trending():
+    """CoinGecko Trending — топ-7 поисковых монет за 24ч (без ключа)"""
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/search/trending",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return []
+        coins = r.json().get("coins", [])
+        result = []
+        for item in coins[:7]:
+            c = item.get("item", {})
+            result.append({
+                "symbol": c.get("symbol", "").upper(),
+                "name": c.get("name", ""),
+                "rank": c.get("market_cap_rank", 999),
+                "score": c.get("score", 0),
+            })
+        return result
+    except Exception as e:
+        logging.warning(f"CoinGecko Trending: {e}")
+        return []
+
+
+def fetch_blockchair_onchain():
+    """Blockchair — on-chain данные BTC и ETH (без ключа)"""
+    result = {}
+    try:
+        # BTC статистика
+        r = requests.get(
+            "https://api.blockchair.com/bitcoin/stats",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            result["btc"] = {
+                "transactions_24h": data.get("transactions_24h", 0),
+                "mempool_size": data.get("mempool_transactions", 0),
+                "mempool_bytes": data.get("mempool_size", 0),
+                "avg_fee_usd": round(data.get("average_transaction_fee_usd_24h", 0), 2),
+                "blocks_24h": data.get("blocks_24h", 0),
+            }
+            txs = result["btc"]["transactions_24h"]
+            activity_btc = "HIGH" if txs > 400000 else "MEDIUM" if txs > 250000 else "LOW"
+            result["btc"]["activity"] = activity_btc
+        time.sleep(1)
+    except Exception as e:
+        logging.debug(f"Blockchair BTC: {e}")
+
+    try:
+        # ETH статистика
+        r = requests.get(
+            "https://api.blockchair.com/ethereum/stats",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            result["eth"] = {
+                "transactions_24h": data.get("transactions_24h", 0),
+                "mempool_size": data.get("mempool_transactions", 0),
+                "avg_fee_usd": round(data.get("average_transaction_fee_usd_24h", 0), 2),
+            }
+            txs_eth = result["eth"]["transactions_24h"]
+            activity_eth = "HIGH" if txs_eth > 1200000 else "MEDIUM" if txs_eth > 800000 else "LOW"
+            result["eth"]["activity"] = activity_eth
+    except Exception as e:
+        logging.debug(f"Blockchair ETH: {e}")
+
+    return result
+
+
+def fetch_blockchain_info():
+    """Blockchain.info — Hash rate BTC, mempool, активность (без ключа)"""
+    result = {}
+    try:
+        # Статистика сети BTC
+        r = requests.get(
+            "https://blockchain.info/stats?format=json",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json()
+            hash_rate = round(data.get("hash_rate", 0) / 1e9, 1)  # EH/s
+            n_tx = data.get("n_tx", 0)
+            result = {
+                "hash_rate_eh": hash_rate,
+                "transactions_24h": n_tx,
+                "difficulty": data.get("difficulty", 0),
+                "avg_block_size": round(data.get("avg_block_size", 0) / 1000, 1),  # KB
+                "miners_revenue_usd": round(data.get("miners_revenue_usd", 0), 0),
+                "interpretation": (
+                    f"Hash rate BTC: {hash_rate} EH/s | "
+                    f"Транзакции 24ч: {n_tx:,} | "
+                    f"Доход майнеров: ${data.get('miners_revenue_usd', 0):,.0f}"
+                )
+            }
+    except Exception as e:
+        logging.debug(f"Blockchain.info: {e}")
+    return result
+
+
 def fetch_crypto_news():
     """Свежие новости с нескольких источников"""
     all_news = []
@@ -675,6 +781,33 @@ def learn_macro_trends():
     if eth_activity:
         macro_data.append(f"⛓️ {eth_activity.get('interpretation', '')}")
 
+    # Blockchair — on-chain активность BTC и ETH
+    blockchair = fetch_blockchair_onchain()
+    if blockchair.get("btc"):
+        b = blockchair["btc"]
+        macro_data.append(
+            f"🔗 BTC on-chain: {b['transactions_24h']:,} tx/24h | "
+            f"mempool: {b['mempool_size']:,} | "
+            f"комиссия: ${b['avg_fee_usd']} | активность: {b['activity']}"
+        )
+    if blockchair.get("eth"):
+        e = blockchair["eth"]
+        macro_data.append(
+            f"🔗 ETH on-chain: {e['transactions_24h']:,} tx/24h | "
+            f"комиссия: ${e['avg_fee_usd']} | активность: {e['activity']}"
+        )
+
+    # Blockchain.info — hash rate и здоровье сети BTC
+    chain_info = fetch_blockchain_info()
+    if chain_info:
+        macro_data.append(f"⛏️ {chain_info.get('interpretation', '')}")
+
+    # CoinGecko Trending — что люди ищут прямо сейчас
+    trending = fetch_coingecko_trending()
+    if trending:
+        trending_str = ", ".join([f"{c['symbol']}(#{c['rank']})" for c in trending[:5]])
+        macro_data.append(f"🔥 Trending CoinGecko: {trending_str}")
+
     if not macro_data:
         logging.warning("Нет макро данных для анализа")
         return
@@ -690,10 +823,11 @@ def learn_macro_trends():
 Проведи анализ:
 1. ФАЗА РЫНКА: накопление / распределение / рост / падение
 2. BTC ДОМИНАЦИЯ: что это значит для альтов прямо сейчас
-3. СТРАХ/ЖАДНОСТЬ: как это влияет на торговые решения
-4. DXY: прямо сейчас хорошо или плохо для крипты
-5. СИГНАЛЫ: на что обратить внимание в следующие 24 часа
-6. ПРАВИЛО ДНЯ: одно конкретное правило для трейдера
+3. ON-CHAIN СИГНАЛЫ: что говорит активность сети BTC/ETH (транзакции, хэшрейт, комиссии)
+4. ХАЙП/ТРЕНДЫ: trending монеты — это возможность или ловушка
+5. СТРАХ/ЖАДНОСТЬ + DXY: как влияют на торговые решения
+6. СИГНАЛЫ: на что обратить внимание в следующие 24 часа
+7. ПРАВИЛО ДНЯ: одно конкретное правило для трейдера
 
 Кратко и по делу, каждый пункт 1-2 предложения."""
 
@@ -726,15 +860,53 @@ def learn_macro_trends():
             "macro_groq"
         )
 
-        # Извлекаем правило дня
+        # Извлекаем правило дня (теперь 7й пункт)
         if "ПРАВИЛО" in analysis.upper() or "правило" in analysis.lower():
             lines = analysis.split("\n")
             for line in lines:
-                if "правило" in line.lower() or "6." in line:
-                    save_self_rule("market", line.replace("6.", "").strip(), 0.6, "macro_daily")
+                if "правило" in line.lower() or "7." in line:
+                    save_self_rule("market", line.replace("7.", "").strip(), 0.6, "macro_daily")
                     break
 
-        logging.info(f"  ✅ Макро анализ записан")
+        # Сохраняем trending монеты как отдельное знание
+        if trending:
+            trending_knowledge = "TRENDING монеты (CoinGecko): " + ", ".join(
+                [f"{c['symbol']}(ранк #{c['rank']})" for c in trending]
+            )
+            save_knowledge(
+                f"trending_{datetime.now().strftime('%Y%m%d_%H')}",
+                trending_knowledge,
+                "coingecko_trending"
+            )
+            # Если монета в топ-3 trending И в нашем списке — сохраняем правило
+            our_pairs = ["BTC","ETH","SOL","BNB","XRP","TON","DOGE","AVAX","LINK","ARB",
+                         "ADA","DOT","POL","LTC","ATOM","NEAR","INJ","SUI","APT","OP",
+                         "UNI","PEPE","SHIB","TRX","XLM","WLD","TIA","SEI","JUP","BONK"]
+            for c in trending[:3]:
+                if c["symbol"] in our_pairs:
+                    save_self_rule(
+                        "market",
+                        f"{c['symbol']} в топ-3 CoinGecko Trending — повышенный интерес рынка, следить за пробоями",
+                        0.55,
+                        "trending_signal"
+                    )
+
+        # Сохраняем on-chain данные как знание
+        if blockchair.get("btc"):
+            b = blockchair["btc"]
+            onchain_note = (
+                f"BTC on-chain активность: {b['activity']} | "
+                f"{b['transactions_24h']:,} tx за 24ч | "
+                f"mempool {b['mempool_size']:,} транзакций | "
+                f"{'сеть перегружена — осторожно с входами' if b['activity'] == 'HIGH' else 'сеть в норме'}"
+            )
+            save_knowledge(
+                f"onchain_btc_{datetime.now().strftime('%Y%m%d_%H')}",
+                onchain_note,
+                "blockchair"
+            )
+
+        logging.info(f"  ✅ Макро анализ записан (+ trending + on-chain)")
 
 
 # ──────────────────────────────────────────────
