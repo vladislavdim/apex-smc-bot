@@ -863,17 +863,21 @@ def get_top_pairs(limit=100):
                     "WBETH", "WSTETH", "STETH", "CBETH", "RETH", "BETH",
                     "AETHUSDT", "XDAI", "WBTC", "HBTC", "SBTC",
                     "NFLXX", "TRXS", "SPLD", "VINC", "BGBUS", "KCS",
-                    "WFIU", "XTUS", "JLPU", "RLUSD", "MANTLE")
+                    "WFIU", "XTUS", "JLPU", "RLUSD", "MANTLE",
+                    "HTXUS", "LEMX", "DHNUS", "TRXS", "BGBUS")
 
     def is_valid_pair(symbol):
         if not symbol.endswith("USDT"):
+            return False
+        # Двойной USDT — мусор типа AETHUSDTUSDT
+        if "USDTUSDT" in symbol:
             return False
         if any(symbol.endswith(s) for s in BAD_SUFFIXES):
             return False
         base = symbol.replace("USDT", "")
         if any(bad in base for bad in BAD_CONTAINS):
             return False
-        if len(base) > 10:  # слишком длинный тикер — обычно мусор
+        if len(base) > 12:  # слишком длинный тикер — обычно мусор
             return False
         return True
 
