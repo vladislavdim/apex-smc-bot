@@ -2653,6 +2653,7 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
 
 async def auto_scan_job():
     """Каждые 30 мин: скан 5m и 15m таймфреймов"""
+    logging.info("⚡ auto_scan_job ЗАПУЩЕН")
     closed = check_pending_signals()
     for c in closed:
         if c["is_win"]:
@@ -3397,26 +3398,12 @@ async def keepalive_heartbeat():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
         conn.execute("INSERT INTO heartbeat (ts) VALUES (CURRENT_TIMESTAMP)")
-        # Оставляем только последние 100 записей
         conn.execute("DELETE FROM heartbeat WHERE id NOT IN (SELECT id FROM heartbeat ORDER BY id DESC LIMIT 100)")
         conn.commit()
         conn.close()
         logging.debug("Heartbeat OK")
     except Exception as e:
         logging.error(f"Heartbeat: {e}")
-
-    scheduler.add_job(auto_scan_job, "interval", minutes=30)       # 5m + 15m скальп
-    scheduler.add_job(auto_scan_1h, "interval", hours=2)            # 1h свинг
-    scheduler.add_job(auto_scan_4h, "interval", hours=6)            # 4h среднесрок
-    scheduler.add_job(auto_scan_1d, "interval", hours=12)           # 1d долгосрок
-    scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
-    scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
-    scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)  # keepalive
-    scheduler.add_job(auto_research, "interval", hours=2)
-    scheduler.add_job(check_alerts, "interval", minutes=5)
-    scheduler.add_job(night_brain_tasks, "interval", hours=4)
-    scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
-    scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
     async def _self_diagnose_job():
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self_diagnose_and_grow)
