@@ -3244,26 +3244,55 @@ def setup_error_capture():
 # ===== MAIN =====
 
 async def restore_db_from_github():
-    """При старте скачиваем brain.db из GitHub"""
+    """При старте скачиваем brain.db из GitHub только если GitHub версия больше локальной"""
     try:
         gh_token = os.environ.get("GITHUB_TOKEN", "")
         gh_repo = os.environ.get("GITHUB_REPO", "")
         if not gh_token or not gh_repo:
             logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
             return
-        import base64
+        import base64, sqlite3 as _sq
         r = requests.get(
             f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
             headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
             timeout=10
         )
-        if r.status_code == 200:
+        if r.status_code != 200:
+            logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
+            return
+
+        github_size = r.json().get("size", 0)
+
+        # Проверяем локальную БД
+        local_size = 0
+        local_knowledge = 0
+        if os.path.exists("brain.db"):
+            local_size = os.path.getsize("brain.db")
+            try:
+                _conn = _sq.connect("brain.db", timeout=5)
+                local_knowledge = _conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+                _conn.close()
+            except Exception:
+                local_knowledge = 0
+
+        # Восстанавливаем из GitHub только если локальная БД пустая
+        # или GitHub БД значительно больше
+        should_restore = (
+            local_knowledge == 0 and local_size < 100_000
+        ) or (
+            github_size > local_size * 2 and github_size > 500_000
+        )
+
+        if should_restore:
             content = base64.b64decode(r.json()["content"])
+            if len(content) < 100_000:
+                logging.warning(f"GitHub brain.db слишком маленькая ({len(content)//1024}KB) — пропускаем")
+                return
             with open("brain.db", "wb") as f:
                 f.write(content)
             logging.info(f"brain.db восстановлен из GitHub ({len(content)//1024}KB)")
         else:
-            logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
+            logging.info(f"brain.db локальная актуальна (local={local_size//1024}KB знаний={local_knowledge}) — пропускаем")
     except Exception as e:
         logging.warning(f"restore_db_from_github: {e}")
 
