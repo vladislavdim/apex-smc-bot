@@ -3386,11 +3386,30 @@ async def on_startup(app):
             logging.error(f"review_rules_job: {e}")
 
     scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
+
+async def keepalive_heartbeat():
+    """Каждые 10 минут пишет heartbeat в БД — не даёт Render усыплять сервис"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""CREATE TABLE IF NOT EXISTS heartbeat (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute("INSERT INTO heartbeat (ts) VALUES (CURRENT_TIMESTAMP)")
+        # Оставляем только последние 100 записей
+        conn.execute("DELETE FROM heartbeat WHERE id NOT IN (SELECT id FROM heartbeat ORDER BY id DESC LIMIT 100)")
+        conn.commit()
+        conn.close()
+        logging.debug("Heartbeat OK")
+    except Exception as e:
+        logging.error(f"Heartbeat: {e}")
+
     scheduler.add_job(auto_scan_job, "interval", minutes=30)       # 5m + 15m скальп
     scheduler.add_job(auto_scan_1h, "interval", hours=2)            # 1h свинг
     scheduler.add_job(auto_scan_4h, "interval", hours=6)            # 4h среднесрок
     scheduler.add_job(auto_scan_1d, "interval", hours=12)           # 1d долгосрок
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+    scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)  # keepalive
     scheduler.add_job(auto_research, "interval", hours=2)
     scheduler.add_job(check_alerts, "interval", minutes=5)
     scheduler.add_job(night_brain_tasks, "interval", hours=4)
@@ -3578,6 +3597,7 @@ def main():
             scheduler.add_job(auto_scan_1h, "interval", hours=2)
             scheduler.add_job(auto_scan_4h, "interval", hours=6)
             scheduler.add_job(auto_scan_1d, "interval", hours=12)
+            scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
