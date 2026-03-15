@@ -3514,7 +3514,7 @@ async def keepalive_heartbeat():
     scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
 
     # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
-    scheduler.add_job(run_brain_builder_async, "interval", hours=3, jitter=600)
+    scheduler.add_job(run_brain_builder_async, "interval", hours=2, jitter=600)
     scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
 
     # Web Learner — автономный поиск знаний каждые 4 часа
@@ -3525,7 +3525,7 @@ async def keepalive_heartbeat():
             if results:
                 logging.info(f"[WebLearner] Изучено тем: {len(results)}")
             await backup_db_to_github()
-    scheduler.add_job(_run_web_learner, "interval", hours=4, jitter=900)
+    scheduler.add_job(_run_web_learner, "interval", hours=2, jitter=900)
     scheduler.add_job(_run_web_learner, "date",
         run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
 
@@ -3662,7 +3662,7 @@ def main():
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
-            scheduler.add_job(night_brain_tasks, "interval", hours=4)
+            scheduler.add_job(night_brain_tasks, "interval", hours=1)
             scheduler.add_job(backup_db_to_github, "interval", hours=1)
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
