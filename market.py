@@ -249,16 +249,12 @@ ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit(
 ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else 0
 SIGNAL_CHANNEL = int(os.environ.get("SIGNAL_CHANNEL_ID", "-1003122576951"))  # TG канал сигналов
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
-# Автоподгрузка любого количества ключей — просто добавляй GROQ_API_KEY_N в Render
-GROQ_KEYS = [k for k in [
+GROQ_KEYS = [
     os.environ.get("GROQ_API_KEY", ""),
-    *[os.environ.get(f"GROQ_API_KEY_{i}", "") for i in range(2, 20)]
-] if k]
-if not GROQ_KEYS:
-    GROQ_KEYS = [""]
+    os.environ.get("GROQ_API_KEY_2", ""),
+    os.environ.get("GROQ_API_KEY_3", ""),
+]
 _groq_key_index = 0
-import logging as _log
-_log.info(f"Groq ключей загружено: {len(GROQ_KEYS)}")
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
 MOBULA_KEY     = os.environ.get("MOBULA_API_KEY", "")
@@ -4978,12 +4974,9 @@ async def autonomous_learning_cycle():
 
         logging.info(f"Автономное обучение: изучено {len(chosen)} тем, правил: {rule_count}")
 
-        if new_insights and ADMIN_ID:
-            await bot.send_message(
-                ADMIN_ID,
-                f"🧠 <b>APEX учится</b>\n\n" + "\n".join(new_insights),
-                parse_mode="HTML"
-            )
+        # Уведомление отключено — только лог
+        if new_insights:
+            logging.info(f"[Обучение] {len(new_insights)} новых знаний")
 
     except Exception as e:
         logging.error(f"autonomous_learning_cycle: {e}")
@@ -5243,10 +5236,8 @@ async def night_brain_tasks():
             if comparison:
                 msg += f"\n<b>Вывод:</b>\n{comparison[:200]}"
 
-            try:
-                await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
-            except:
-                pass
+            # Уведомление отключено — только лог
+            logging.info(f"[NightBrain] {msg[:100]}")
 
         logging.info(f"Ночная задача выполнена. Новых правил: {new_rules}, всего: {rules_after}")
 
