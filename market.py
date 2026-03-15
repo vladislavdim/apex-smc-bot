@@ -973,35 +973,63 @@ def get_live_prices():
     if time.time() - last_price_update < 20 and price_cache:
         return price_cache
 
-    # 0. Brain Router — Gate.io/KuCoin/Bybit (работает на Render)
-    if _ROUTER_OK:
-        try:
-            ALL_PAIRS = [
-                "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT",
-                "AVAXUSDT","LINKUSDT","TONUSDT","ADAUSDT","DOTUSDT","LTCUSDT",
-                "ATOMUSDT","NEARUSDT","INJUSDT","SUIUSDT","APTUSDT","OPUSDT",
-                "UNIUSDT","PEPEUSDT","SHIBUSDT","ARBUSDT","POLUSDT","BONKUSDT",
-                "JUPUSDT","SEIUSDT","TIAUSDT","WIFUSDT","FETUSDT","RNDRUSDT"
-            ]
+    # 0. KuCoin allTickers — работает на Render, все пары одним запросом
+    try:
+        r = requests.get(
+            "https://api.kucoin.com/api/v1/market/allTickers",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        tickers = r.json().get("data", {}).get("ticker", [])
+        if tickers:
             market = {}
-            for symbol in ALL_PAIRS:
-                try:
-                    rc = _brain_router.candles(symbol, "1h", 2)
-                    if rc and len(rc) >= 1:
-                        price = rc[-1]["close"]
-                        prev  = rc[-2]["close"] if len(rc) >= 2 else price
-                        change = round((price - prev) / prev * 100, 2) if prev else 0
-                        vol   = rc[-1].get("volume", 0)
-                        market[symbol] = {"price": price, "change": change, "volume": vol}
-                except Exception:
-                    pass
+            for t in tickers:
+                sym = t.get("symbol", "").replace("-", "")
+                if sym.endswith("USDT"):
+                    try:
+                        price = float(t.get("last") or 0)
+                        change = float(t.get("changeRate") or 0) * 100
+                        vol = float(t.get("volValue") or 0)
+                        if price > 0:
+                            market[sym] = {"price": price, "change": round(change, 2), "volume": vol}
+                    except Exception:
+                        pass
             if len(market) >= 10:
                 price_cache = market
                 last_price_update = time.time()
-                logging.info(f"Цены: BrainRouter ({len(market)} пар)")
+                logging.info(f"Цены: KuCoin ({len(market)} пар)")
                 return price_cache
-        except Exception as e:
-            logging.warning(f"BrainRouter prices: {e}")
+    except Exception as e:
+        logging.warning(f"KuCoin prices: {e}")
+
+    # 0b. Gate.io tickers — второй быстрый источник
+    try:
+        r = requests.get(
+            "https://api.gateio.ws/api/v4/spot/tickers",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        tickers = r.json()
+        if isinstance(tickers, list) and len(tickers) > 0:
+            market = {}
+            for t in tickers:
+                sym = t.get("currency_pair", "").replace("_", "")
+                if sym.endswith("USDT"):
+                    try:
+                        price = float(t.get("last") or 0)
+                        change = float(t.get("change_percentage") or 0)
+                        vol = float(t.get("quote_volume") or 0)
+                        if price > 0:
+                            market[sym] = {"price": price, "change": round(change, 2), "volume": vol}
+                    except Exception:
+                        pass
+            if len(market) >= 10:
+                price_cache = market
+                last_price_update = time.time()
+                logging.info(f"Цены: Gate.io ({len(market)} пар)")
+                return price_cache
+    except Exception as e:
+        logging.warning(f"Gate.io prices: {e}")
 
     # 1. Binance Futures
     try:
