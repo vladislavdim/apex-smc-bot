@@ -1532,3 +1532,342 @@ def detect_inducement(candles: list, direction: str) -> dict | None:
                         "weight": 18 if vol_spike > 1.5 else 10,
                     }
     return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# RSI / MACD DIVERGENCE
+# ═══════════════════════════════════════════════════════════════
+
+def detect_rsi_macd_divergence(candles: list, direction: str) -> dict:
+    """
+    RSI и MACD дивергенция — расхождение цены и индикаторов.
+    Bullish divergence: цена делает новый лоу, RSI/MACD нет → разворот вверх.
+    Bearish divergence: цена делает новый хай, RSI/MACD нет → разворот вниз.
+    """
+    if len(candles) < 30:
+        return {"found": False, "score": 0, "signals": []}
+
+    closes = [c["close"] for c in candles]
+    signals = []
+    score = 0
+
+    # ── RSI (14) ──────────────────────────────────────────────
+    def calc_rsi(prices, period=14):
+        if len(prices) < period + 1:
+            return []
+        gains, losses = [], []
+        for i in range(1, len(prices)):
+            d = prices[i] - prices[i-1]
+            gains.append(max(d, 0))
+            losses.append(max(-d, 0))
+        rsi_vals = []
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period-1) + gains[i]) / period
+            avg_loss = (avg_loss * (period-1) + losses[i]) / period
+            rs = avg_gain / avg_loss if avg_loss > 0 else 100
+            rsi_vals.append(100 - 100 / (1 + rs))
+        return rsi_vals
+
+    rsi = calc_rsi(closes)
+    if len(rsi) >= 10:
+        # Bullish divergence: цена падает, RSI растёт
+        if direction == "BULLISH":
+            price_low_now  = closes[-1] < closes[-5]
+            rsi_low_now    = rsi[-1]  > rsi[-5]
+            if price_low_now and rsi_low_now:
+                score += 2
+                signals.append(f"📈 RSI Bullish Divergence — цена↓ RSI↑ (+8)")
+        # Bearish divergence: цена растёт, RSI падает
+        elif direction == "BEARISH":
+            price_high_now = closes[-1] > closes[-5]
+            rsi_high_now   = rsi[-1]  < rsi[-5]
+            if price_high_now and rsi_high_now:
+                score += 2
+                signals.append(f"📉 RSI Bearish Divergence — цена↑ RSI↓ (+8)")
+
+        # Перекупленность/перепроданность
+        last_rsi = rsi[-1]
+        if last_rsi < 30 and direction == "BULLISH":
+            score += 1
+            signals.append(f"💚 RSI перепродан ({last_rsi:.0f}) — хорошая точка для лонга (+5)")
+        elif last_rsi > 70 and direction == "BEARISH":
+            score += 1
+            signals.append(f"🔴 RSI перекуплен ({last_rsi:.0f}) — хорошая точка для шорта (+5)")
+
+    # ── MACD (12,26,9) ────────────────────────────────────────
+    def calc_ema(prices, period):
+        if len(prices) < period:
+            return []
+        k = 2 / (period + 1)
+        ema = [sum(prices[:period]) / period]
+        for p in prices[period:]:
+            ema.append(p * k + ema[-1] * (1 - k))
+        return ema
+
+    ema12 = calc_ema(closes, 12)
+    ema26 = calc_ema(closes, 26)
+    if len(ema12) > 0 and len(ema26) > 0:
+        min_len = min(len(ema12), len(ema26))
+        macd_line = [ema12[-min_len+i] - ema26[-min_len+i] for i in range(min_len)]
+        if len(macd_line) >= 9:
+            signal_line = calc_ema(macd_line, 9)
+            if len(signal_line) >= 3:
+                # MACD crossover — пересечение сигнальной линии
+                macd_now  = macd_line[-1]
+                macd_prev = macd_line[-2]
+                sig_now   = signal_line[-1]
+                sig_prev  = signal_line[-2]
+                # Bullish crossover: MACD пересекает сигнальную снизу вверх
+                if direction == "BULLISH" and macd_prev < sig_prev and macd_now > sig_now:
+                    score += 2
+                    signals.append(f"📈 MACD Bullish Crossover — подтверждение разворота (+8)")
+                # Bearish crossover
+                elif direction == "BEARISH" and macd_prev > sig_prev and macd_now < sig_now:
+                    score += 2
+                    signals.append(f"📉 MACD Bearish Crossover — подтверждение разворота (+8)")
+                # MACD дивергенция с ценой
+                if direction == "BULLISH" and closes[-1] < closes[-5] and macd_line[-1] > macd_line[-5]:
+                    score += 1
+                    signals.append(f"📈 MACD Bullish Divergence — цена↓ MACD↑ (+5)")
+                elif direction == "BEARISH" and closes[-1] > closes[-5] and macd_line[-1] < macd_line[-5]:
+                    score += 1
+                    signals.append(f"📉 MACD Bearish Divergence — цена↑ MACD↓ (+5)")
+
+    weight = score * 4  # score 1 = +4, score 4 = +16
+    return {
+        "found": score > 0,
+        "score": score,
+        "weight": weight,
+        "signals": signals,
+        "rsi": round(rsi[-1], 1) if rsi else 0,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# VWAP — СРЕДНЕВЗВЕШЕННАЯ ЦЕНА ПО ОБЪЁМУ
+# ═══════════════════════════════════════════════════════════════
+
+def calculate_vwap(candles: list) -> dict:
+    """
+    VWAP — Volume Weighted Average Price.
+    Институциональные игроки используют VWAP как точку входа.
+    Цена выше VWAP = бычий рынок, ниже = медвежий.
+    Отклонение ±2% от VWAP = зона интереса.
+    """
+    if len(candles) < 10:
+        return {"vwap": 0, "signal": "NEUTRAL", "deviation_pct": 0}
+
+    # Берём последние 50 свечей (один торговый день примерно)
+    candles_slice = candles[-50:]
+    total_vol = 0
+    total_pv  = 0
+
+    for c in candles_slice:
+        typical_price = (c["high"] + c["low"] + c["close"]) / 3
+        vol = c.get("volume", 0)
+        total_pv  += typical_price * vol
+        total_vol += vol
+
+    if total_vol == 0:
+        return {"vwap": 0, "signal": "NEUTRAL", "deviation_pct": 0}
+
+    vwap = total_pv / total_vol
+    current = candles[-1]["close"]
+    deviation_pct = (current - vwap) / vwap * 100
+
+    # Стандартное отклонение для полос
+    variances = []
+    for c in candles_slice:
+        tp = (c["high"] + c["low"] + c["close"]) / 3
+        vol = c.get("volume", 0)
+        variances.append(vol * (tp - vwap) ** 2)
+    std_dev = (sum(variances) / total_vol) ** 0.5 if total_vol > 0 else 0
+
+    upper_band = vwap + 2 * std_dev
+    lower_band = vwap - 2 * std_dev
+
+    # Сигнал
+    if current > upper_band:
+        signal = "BEARISH"  # перекуплен выше VWAP+2σ
+        desc = f"Цена выше VWAP+2σ — перекуплен, возможен откат"
+    elif current < lower_band:
+        signal = "BULLISH"  # перепродан ниже VWAP-2σ
+        desc = f"Цена ниже VWAP-2σ — перепродан, возможен отскок"
+    elif current > vwap:
+        signal = "BULLISH"
+        desc = f"Цена выше VWAP — бычий контроль"
+    else:
+        signal = "BEARISH"
+        desc = f"Цена ниже VWAP — медвежий контроль"
+
+    # Близко к VWAP — зона интереса (±0.5%)
+    near_vwap = abs(deviation_pct) < 0.5
+
+    return {
+        "vwap": round(vwap, 4),
+        "current": round(current, 4),
+        "deviation_pct": round(deviation_pct, 2),
+        "upper_band": round(upper_band, 4),
+        "lower_band": round(lower_band, 4),
+        "signal": signal,
+        "desc": desc,
+        "near_vwap": near_vwap,
+        "std_dev": round(std_dev, 4),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# HEATMAP УРОВНЕЙ — ГДЕ СКОНЦЕНТРИРОВАНЫ СТОПЫ
+# ═══════════════════════════════════════════════════════════════
+
+def get_liquidity_heatmap(candles: list) -> dict:
+    """
+    Heatmap ликвидности — где сконцентрированы стопы и ликвидность.
+    Логика: свинг хаи = стопы шортистов (buy stops выше)
+            свинг лои = стопы лонгистов (sell stops ниже)
+    Чем больше свечей тестировали уровень — тем больше там ликвидности.
+    """
+    if len(candles) < 30:
+        return {"levels": [], "nearest_buy_stops": None, "nearest_sell_stops": None}
+
+    current = candles[-1]["close"]
+    levels = {}
+
+    # Считаем сколько раз цена тестировала каждый уровень
+    for c in candles[-100:]:
+        # Округляем до значимых цифр
+        if current >= 1000:
+            h_level = round(c["high"] / 100) * 100
+            l_level = round(c["low"]  / 100) * 100
+        elif current >= 100:
+            h_level = round(c["high"] / 10) * 10
+            l_level = round(c["low"]  / 10) * 10
+        elif current >= 1:
+            h_level = round(c["high"], 2)
+            l_level = round(c["low"],  2)
+        else:
+            h_level = round(c["high"], 5)
+            l_level = round(c["low"],  5)
+
+        levels[h_level] = levels.get(h_level, 0) + 1
+        levels[l_level] = levels.get(l_level, 0) + 1
+
+    # Сортируем по количеству касаний
+    sorted_levels = sorted(levels.items(), key=lambda x: x[1], reverse=True)
+
+    # Топ-10 уровней с наибольшей ликвидностью
+    top_levels = []
+    for price, touches in sorted_levels[:10]:
+        level_type = "buy_stops" if price > current else "sell_stops"
+        dist_pct = abs(price - current) / current * 100
+        top_levels.append({
+            "price": price,
+            "touches": touches,
+            "type": level_type,
+            "dist_pct": round(dist_pct, 2),
+            "strength": "HIGH" if touches >= 5 else "MEDIUM" if touches >= 3 else "LOW",
+        })
+
+    # Ближайшие buy stops (выше цены) и sell stops (ниже цены)
+    buy_stops  = [l for l in top_levels if l["type"] == "buy_stops"]
+    sell_stops = [l for l in top_levels if l["type"] == "sell_stops"]
+
+    nearest_buy  = min(buy_stops,  key=lambda x: x["dist_pct"]) if buy_stops  else None
+    nearest_sell = min(sell_stops, key=lambda x: x["dist_pct"]) if sell_stops else None
+
+    return {
+        "levels": top_levels,
+        "nearest_buy_stops":  nearest_buy,
+        "nearest_sell_stops": nearest_sell,
+        "current": current,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# BREAKER BLOCK — ПРОБИТЫЙ OB КОТОРЫЙ СТАЛ НОВЫМ УРОВНЕМ
+# ═══════════════════════════════════════════════════════════════
+
+def detect_breaker_block(candles: list, direction: str) -> dict | None:
+    """
+    Breaker Block — Order Block который был пробит и стал новым уровнем.
+    Логика SMC: когда цена пробивает OB, он превращается в Breaker.
+    Bullish Breaker: медвежий OB пробит снизу вверх → теперь поддержка.
+    Bearish Breaker: бычий OB пробит сверху вниз → теперь сопротивление.
+    """
+    if len(candles) < 30:
+        return None
+
+    current = candles[-1]["close"]
+
+    if direction == "BULLISH":
+        # Ищем медвежий OB который цена пробила снизу вверх
+        for i in range(len(candles) - 20, len(candles) - 5):
+            if i < 0:
+                continue
+            c = candles[i]
+            # Медвежья свеча (потенциальный Bear OB)
+            if c["close"] >= c["open"]:
+                continue
+            ob_top    = c["open"]
+            ob_bottom = c["close"]
+            # Проверяем пробой — цена прошла выше этого OB
+            broke_above = any(
+                candles[j]["close"] > ob_top
+                for j in range(i + 1, min(i + 10, len(candles)))
+            )
+            if not broke_above:
+                continue
+            # Breaker должен быть ниже текущей цены (как поддержка)
+            if ob_top >= current:
+                continue
+            dist_pct = (current - ob_top) / current * 100
+            # Цена недалеко от Breaker (в пределах 3%)
+            if dist_pct > 3.0:
+                continue
+            return {
+                "type": "BULLISH_BREAKER",
+                "top": round(ob_top, 6),
+                "bottom": round(ob_bottom, 6),
+                "dist_pct": round(dist_pct, 2),
+                "strength": "HIGH" if dist_pct < 1.0 else "MEDIUM",
+                "weight": 12 if dist_pct < 1.0 else 8,
+                "desc": f"Bullish Breaker {ob_bottom:.4f}–{ob_top:.4f} (поддержка, {dist_pct:.1f}% ниже)",
+            }
+
+    elif direction == "BEARISH":
+        # Ищем бычий OB который цена пробила сверху вниз
+        for i in range(len(candles) - 20, len(candles) - 5):
+            if i < 0:
+                continue
+            c = candles[i]
+            # Бычья свеча (потенциальный Bull OB)
+            if c["close"] <= c["open"]:
+                continue
+            ob_top    = c["close"]
+            ob_bottom = c["open"]
+            # Проверяем пробой — цена ушла ниже этого OB
+            broke_below = any(
+                candles[j]["close"] < ob_bottom
+                for j in range(i + 1, min(i + 10, len(candles)))
+            )
+            if not broke_below:
+                continue
+            # Breaker должен быть выше текущей цены (как сопротивление)
+            if ob_bottom <= current:
+                continue
+            dist_pct = (ob_bottom - current) / current * 100
+            if dist_pct > 3.0:
+                continue
+            return {
+                "type": "BEARISH_BREAKER",
+                "top": round(ob_top, 6),
+                "bottom": round(ob_bottom, 6),
+                "dist_pct": round(dist_pct, 2),
+                "strength": "HIGH" if dist_pct < 1.0 else "MEDIUM",
+                "weight": 12 if dist_pct < 1.0 else 8,
+                "desc": f"Bearish Breaker {ob_bottom:.4f}–{ob_top:.4f} (сопротивление, {dist_pct:.1f}% выше)",
+            }
+
+    return None
