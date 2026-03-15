@@ -3486,6 +3486,8 @@ def main():
                     init_brain_db()
                 except Exception as _ibe:
                     logging.warning(f"init_brain_db: {_ibe}")
+            # Health сервер — держит бота живым для UptimeRobot
+            threading.Thread(target=run_server, daemon=True).start()
             threading.Thread(target=get_top_pairs, daemon=True).start()
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
@@ -3495,6 +3497,7 @@ def main():
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", hours=4)
+            scheduler.add_job(backup_db_to_github, "interval", hours=1)
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=2, jitter=300)
             scheduler.start()
