@@ -319,6 +319,116 @@ def fetch_crypto_news():
     return all_news[:15]
 
 
+
+
+def fetch_cryptopanic_news():
+    """Новости с CryptoPanic — с сентиментом (bullish/bearish/important)"""
+    api_key = os.environ.get("CRYPTOPANIC_API_KEY", "")
+    if not api_key:
+        return []
+    try:
+        r = requests.get(
+            "https://cryptopanic.com/api/v1/posts/",
+            params={"auth_token": api_key, "filter": "important", "public": "true", "kind": "news"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return []
+        items = r.json().get("results", [])
+        news = []
+        for item in items[:10]:
+            votes = item.get("votes", {})
+            sentiment = "BULLISH" if votes.get("positive", 0) > votes.get("negative", 0) else "BEARISH" if votes.get("negative", 0) > votes.get("positive", 0) else "NEUTRAL"
+            currencies = [c["code"] for c in item.get("currencies", [])]
+            news.append({
+                "title": item.get("title", ""),
+                "sentiment": sentiment,
+                "currencies": currencies,
+                "positive": votes.get("positive", 0),
+                "negative": votes.get("negative", 0),
+            })
+        return news
+    except Exception as e:
+        logging.warning(f"CryptoPanic: {e}")
+        return []
+
+
+def fetch_fred_macro():
+    """Макро данные из FRED (ФРС США) — DXY, ставка, инфляция"""
+    api_key = os.environ.get("FRED_API_KEY", "")
+    if not api_key:
+        return {}
+    indicators = {
+        "FEDFUNDS": "Ставка ФРС",
+        "CPIAUCSL": "Инфляция CPI",
+        "DGS10": "Доходность 10-летних облигаций США",
+        "DTWEXBGS": "Индекс доллара DXY",
+    }
+    result = {}
+    for series_id, name in indicators.items():
+        try:
+            r = requests.get(
+                "https://api.stlouisfed.org/fred/series/observations",
+                params={
+                    "series_id": series_id,
+                    "api_key": api_key,
+                    "file_type": "json",
+                    "limit": 2,
+                    "sort_order": "desc"
+                },
+                timeout=10
+            )
+            if r.status_code == 200:
+                obs = r.json().get("observations", [])
+                if obs:
+                    latest = obs[0]
+                    prev = obs[1] if len(obs) > 1 else obs[0]
+                    try:
+                        val = float(latest["value"])
+                        prev_val = float(prev["value"])
+                        change = round(val - prev_val, 3)
+                        result[series_id] = {
+                            "name": name,
+                            "value": val,
+                            "change": change,
+                            "date": latest["date"]
+                        }
+                    except:
+                        pass
+            time.sleep(0.3)
+        except Exception as e:
+            logging.debug(f"FRED {series_id}: {e}")
+    return result
+
+
+def fetch_etherscan_activity():
+    """On-chain активность Ethereum — газ, транзакции"""
+    api_key = os.environ.get("ETHERSCAN_API_KEY", "")
+    if not api_key:
+        return {}
+    try:
+        # Текущая цена газа
+        r = requests.get(
+            "https://api.etherscan.io/api",
+            params={"module": "gastracker", "action": "gasoracle", "apikey": api_key},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json().get("result", {})
+            safe_gas = int(data.get("SafeGasPrice", 0))
+            fast_gas = int(data.get("FastGasPrice", 0))
+            # Интерпретация: высокий газ = высокая on-chain активность
+            activity = "HIGH" if fast_gas > 50 else "MEDIUM" if fast_gas > 20 else "LOW"
+            return {
+                "safe_gas": safe_gas,
+                "fast_gas": fast_gas,
+                "activity": activity,
+                "interpretation": f"On-chain активность ETH: {activity} (газ {fast_gas} gwei)"
+            }
+    except Exception as e:
+        logging.warning(f"Etherscan: {e}")
+    return {}
+
 def fetch_prices_snapshot():
     """Быстрый снимок цен топ-монет"""
     try:
@@ -552,6 +662,18 @@ def learn_macro_trends():
         macro_data.append(f"Топ-растущие: {', '.join([f'{s}+{c}%' for s,c in gainers[:3]])}")
     if losers:
         macro_data.append(f"Топ-падающие: {', '.join([f'{s}{c}%' for s,c in losers[:3]])}")
+
+    # FRED макро данные
+    fred_data = fetch_fred_macro()
+    if fred_data:
+        for sid, info in fred_data.items():
+            chg = f"+{info['change']}" if info['change'] > 0 else str(info['change'])
+            macro_data.append(f"📊 {info['name']}: {info['value']} ({chg}) [{info['date']}]")
+
+    # Etherscan on-chain активность
+    eth_activity = fetch_etherscan_activity()
+    if eth_activity:
+        macro_data.append(f"⛓️ {eth_activity.get('interpretation', '')}")
 
     if not macro_data:
         logging.warning("Нет макро данных для анализа")
