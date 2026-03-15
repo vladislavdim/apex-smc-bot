@@ -973,6 +973,36 @@ def get_live_prices():
     if time.time() - last_price_update < 20 and price_cache:
         return price_cache
 
+    # 0. Brain Router — Gate.io/KuCoin/Bybit (работает на Render)
+    if _ROUTER_OK:
+        try:
+            ALL_PAIRS = [
+                "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT",
+                "AVAXUSDT","LINKUSDT","TONUSDT","ADAUSDT","DOTUSDT","LTCUSDT",
+                "ATOMUSDT","NEARUSDT","INJUSDT","SUIUSDT","APTUSDT","OPUSDT",
+                "UNIUSDT","PEPEUSDT","SHIBUSDT","ARBUSDT","POLUSDT","BONKUSDT",
+                "JUPUSDT","SEIUSDT","TIAUSDT","WIFUSDT","FETUSDT","RNDRUSDT"
+            ]
+            market = {}
+            for symbol in ALL_PAIRS:
+                try:
+                    rc = _brain_router.candles(symbol, "1h", 2)
+                    if rc and len(rc) >= 1:
+                        price = rc[-1]["close"]
+                        prev  = rc[-2]["close"] if len(rc) >= 2 else price
+                        change = round((price - prev) / prev * 100, 2) if prev else 0
+                        vol   = rc[-1].get("volume", 0)
+                        market[symbol] = {"price": price, "change": change, "volume": vol}
+                except Exception:
+                    pass
+            if len(market) >= 10:
+                price_cache = market
+                last_price_update = time.time()
+                logging.info(f"Цены: BrainRouter ({len(market)} пар)")
+                return price_cache
+        except Exception as e:
+            logging.warning(f"BrainRouter prices: {e}")
+
     # 1. Binance Futures
     try:
         r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=10)
