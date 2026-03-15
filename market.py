@@ -52,7 +52,7 @@ try:
         find_ob_fvg_chain, check_volume_on_structure,
         calculate_cvd, detect_whale_candles, get_volume_profile,
         find_supply_demand, detect_wyckoff_phase, check_multi_coin_correlation,
-        get_fibonacci_levels, get_session_volume_profile,
+        get_fibonacci_levels, get_session_volume_profile, detect_mm_accumulation,
         detect_smart_money_divergence, detect_inducement,
     )
     _SMC_ENGINE_OK = True
@@ -75,6 +75,7 @@ except Exception as e:
     get_volume_profile = lambda c: {"poc": 0, "high_volume_zones": [], "current_zone": "UNKNOWN"}
     get_fibonacci_levels = lambda c, d: {}
     get_session_volume_profile = lambda c: {}
+    detect_mm_accumulation = lambda c: {"score": 0, "signal": "NEUTRAL", "signals": [], "pre_pump": False}
     detect_smart_money_divergence = lambda c, o, f, d: {"score": 0, "signals": []}
     detect_inducement = lambda c, d: None
     find_supply_demand = lambda c, d: None
@@ -2694,21 +2695,26 @@ def full_scan(symbol, timeframe="1h"):
                     confluence.append(f"📍 Fibonacci {fib['nearest_ratio']:.3f} уровень — зона интереса (+7)")
                     total_weight += 7
 
-                # Session Volume Profile — сессионный анализ
-                session_vp = get_session_volume_profile(candles)
-                sig = session_vp.get("signal", "NEUTRAL")
-                if (sig == "REVERSAL_UP" and direction == "BULLISH"):
-                    confluence.append(f"✅ Азия продаёт → Лондон покупает — разворот вверх (+12)")
-                    total_weight += 12
-                elif (sig == "REVERSAL_DOWN" and direction == "BEARISH"):
-                    confluence.append(f"✅ Азия покупает → Лондон продаёт — разворот вниз (+12)")
-                    total_weight += 12
-                elif (sig == "TREND_UP" and direction == "BULLISH"):
-                    confluence.append(f"✅ Лондон+NY BULLISH — тренд подтверждён (+8)")
-                    total_weight += 8
-                elif (sig == "TREND_DOWN" and direction == "BEARISH"):
-                    confluence.append(f"✅ Лондон+NY BEARISH — тренд подтверждён (+8)")
-                    total_weight += 8
+                # Market Maker Accumulation Detector
+                mm_acc = detect_mm_accumulation(candles)
+                mm_sig = mm_acc.get("signal", "NEUTRAL")
+                mm_score = mm_acc.get("score", 0)
+                if mm_sig == "STRONG_ACCUMULATION":
+                    confluence.append(f"✅ MM Накопление СИЛЬНОЕ (score {mm_score}/4) — фондовый паттерн (+15)")
+                    total_weight += 15
+                    for s in mm_acc.get("signals", []):
+                        confluence.append(f"  {s}")
+                elif mm_sig == "ACCUMULATION":
+                    confluence.append(f"✅ MM Накопление (score {mm_score}/4) — вероятен выход (+10)")
+                    total_weight += 10
+                    for s in mm_acc.get("signals", []):
+                        confluence.append(f"  {s}")
+                elif mm_sig == "WEAK_ACCUMULATION":
+                    confluence.append(f"📦 MM Слабое накопление (score {mm_score}/4) (+5)")
+                    total_weight += 5
+                if mm_acc.get("pre_pump"):
+                    confluence.append(f"🚀 PRE-PUMP паттерн подтверждён — объём↑ диапазон↓ лои↑ (+10)")
+                    total_weight += 10
 
                 # Smart Money Divergence
                 smd = detect_smart_money_divergence(candles, ob, fvg, direction)
