@@ -3508,8 +3508,17 @@ async def on_shutdown(app):
 
 def main():
     # Файловый лок — предотвращает запуск двух инстансов
-    import fcntl
-    lock_file = open("/tmp/apex_bot.lock", "w")
+    # Удаляем старый lock от предыдущего контейнера Render перед созданием нового
+    import fcntl, os as _os_lock
+    _lock_path = "/tmp/apex_bot.lock"
+    try:
+        _os_lock.remove(_lock_path)
+        logging.info("Старый lock файл удалён — перезапуск контейнера")
+    except FileNotFoundError:
+        pass
+    except Exception as _le:
+        logging.warning(f"Не смог удалить lock: {_le}")
+    lock_file = open(_lock_path, "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
