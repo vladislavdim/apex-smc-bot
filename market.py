@@ -869,7 +869,7 @@ def get_top_pairs(limit=100):
                     "WBETH", "WSTETH", "STETH", "CBETH", "RETH", "BETH",
                     "AETHUSDT", "XDAI", "WBTC", "HBTC", "SBTC",
                     "NFLXX", "TRXS", "SPLD", "VINC", "BGBUS", "KCS",
-                    "WFIU", "XTUS", "JLPU", "RLUSD", "MANTLE",
+                    "WFIU", "WFIUSDT", "XTUS", "JLPU", "RLUSD", "MANTLE",
                     "HTXUS", "LEMX", "DHNUS", "TRXS", "BGBUS")
 
     def is_valid_pair(symbol):
@@ -2952,28 +2952,33 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
     except Exception as e:
         logging.warning(f"save_signal learning: {e}")
 
-    try:
-        # Используем безопасное подключение с emergency patch
-        from emergency_fix import safe_db_connection
-        
-        with safe_db_connection() as conn:
+    for _attempt in range(5):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
             cursor = conn.execute("""
                 INSERT INTO signals
                 (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
-                 timeframe, estimated_hours, grade, result, created_at, closed_at, 
+                 timeframe, estimated_hours, grade, result, created_at, closed_at,
                  learning_id, confluence, regime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
                         CURRENT_TIMESTAMP, NULL, ?, ?, ?)
-            """, (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, 
+            """, (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
                   timeframe, est_hours, grade, learning_id, confluence, regime))
-            
+            conn.commit()
             sig_id = cursor.lastrowid
+            conn.close()
             logging.info(f"Signal saved: {symbol} {direction} (ID: {sig_id})")
             return sig_id, learning_id
-            
-    except Exception as e:
-        logging.error(f"Save signal error: {e}")
-        return None, learning_id
+        except Exception as e:
+            if "locked" in str(e).lower() and _attempt < 4:
+                logging.warning(f"save_signal locked, retry {_attempt+1}...")
+                time.sleep(1 + _attempt)
+                continue
+            logging.error(f"save_signal: {e}")
+            break
+    return None, learning_id
 
 # ===== САМООБУЧЕНИЕ =====
 
