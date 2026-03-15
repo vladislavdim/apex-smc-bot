@@ -3329,6 +3329,20 @@ async def run_brain_builder_full_async():
         logging.error(f"run_brain_builder_full_async: {e}")
 
 
+
+async def keepalive_heartbeat():
+    """Каждые 10 минут — не даёт Render усыплять сервис"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE IF NOT EXISTS heartbeat (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("INSERT INTO heartbeat (ts) VALUES (CURRENT_TIMESTAMP)")
+        conn.execute("DELETE FROM heartbeat WHERE id NOT IN (SELECT id FROM heartbeat ORDER BY id DESC LIMIT 100)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Heartbeat: {e}")
+
 async def on_startup(app):
     # Логирование конфигурации при старте
     logging.info(f"WEBHOOK_URL = {os.environ.get('WEBHOOK_URL', 'НЕТ')}")
@@ -3409,6 +3423,7 @@ async def keepalive_heartbeat():
     scheduler.add_job(auto_scan_4h, "interval", hours=6)            # 4h среднесрок
     scheduler.add_job(auto_scan_1d, "interval", hours=12)           # 1d долгосрок
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+    scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
     scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)  # keepalive
     scheduler.add_job(auto_research, "interval", hours=2)
     scheduler.add_job(check_alerts, "interval", minutes=5)
