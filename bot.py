@@ -2612,66 +2612,110 @@ def _format_channel_signal(sd: dict) -> str:
     return "\n".join(lines)
 
 
-async def auto_scan_job():
-    """Каждые 15 мин: SMC сканирование топ-100 пар — присылаем только МЕГА ТОП (3/3 ТФ)"""
-    closed = check_pending_signals()
-    for c in closed:
-        if c["is_win"] and ADMIN_ID:
-            tp_icons = {"tp1": "🎯", "tp2": "🎯🎯", "tp3": "🎯🎯🎯"}
-            icon = tp_icons.get(c["result"], "✅")
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"{icon} <b>{c['symbol']}</b> — {c['result'].upper()}!\n"
-                    f"⏱ Закрыто за {c['hours']}ч | {c.get('grade', '-')}",
-                    parse_mode="HTML"
-                )
-            except:
-                pass
+async def _send_signal(sd):
+    """Отправляет сигнал всем админам и в каналы"""
+    if not ADMIN_IDS:
+        return
+    now_ts = time.time()
+    cache_key = f"{sd['symbol']}:{sd['direction']}:{sd.get('timeframe','1h')}"
+    last_sent = _sent_signal_cache.get(cache_key, 0)
+    if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+        return  # уже слали этот сигнал недавно
+    # Проверяем — нет ли открытого сигнала по этой паре+таймфрейм
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        pending = conn.execute(
+            "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result='pending'",
+            (sd["symbol"], sd.get("timeframe", "1h"))
+        ).fetchone()
+        conn.close()
+        if pending:
+            return  # уже есть открытая сделка по этой паре+ТФ
+    except Exception as e:
+        logging.error(f"_send_signal DB check: {e}")
 
-    pairs = get_top_pairs(100)
-    mega_signals = []
+    _sent_signal_cache[cache_key] = now_ts
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, sd["text"], parse_mode="HTML")
+        except Exception as e:
+            logging.warning(f"send_signal admin {admin_id}: {e}")
+    try:
+        channel_text = _format_channel_signal(sd)
+        await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
+        await bot.send_message(-1003122576951, channel_text, parse_mode="HTML")
+    except Exception as ce:
+        logging.warning(f"Channel send error: {ce}")
 
-    # Сканируем все пары — ищем только МЕГА ТОП
+
+async def _scan_tf(timeframe: str, pairs_limit: int = 50):
+    """Сканирует топ пары на одном таймфрейме, возвращает сигналы"""
+    pairs = get_top_pairs(pairs_limit)
+    signals = []
     for symbol in pairs:
         try:
-            sig_data = full_scan_raw(symbol, "1h")
+            sig_data = full_scan_raw(symbol, timeframe)
             if sig_data and sig_data.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА"):
-                # Не дублируем символ
-                existing = [s for s in mega_signals if s["symbol"] == symbol]
-                if not existing:
-                    mega_signals.append(sig_data)
-            await asyncio.sleep(0.2)
+                sig_data["timeframe"] = timeframe
+                signals.append(sig_data)
+            await asyncio.sleep(0.3)
         except:
             pass
+    return signals
 
-    logging.info(f"Скан 15мин: {len(pairs)} пар | 🔥🔥🔥 МЕГА ТОП: {len(mega_signals)}")
 
-    if not ADMIN_ID:
-        return
+async def auto_scan_job():
+    """Каждые 30 мин: скан 5m и 15m таймфреймов"""
+    closed = check_pending_signals()
+    for c in closed:
+        if c["is_win"]:
+            tp_icons = {"tp1": "🎯", "tp2": "🎯🎯", "tp3": "🎯🎯🎯"}
+            icon = tp_icons.get(c["result"], "✅")
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"{icon} <b>{c['symbol']}</b> — {c['result'].upper()}!\n"
+                        f"⏱ Закрыто за {c['hours']}ч | {c.get('grade', '-')}",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
 
-    # Отправляем только МЕГА ТОП — без спама
-    now_ts = time.time()
-    for sd in mega_signals[:5]:
-        try:
-            cache_key = f"{sd['symbol']}:{sd['direction']}"
-            last_sent = _sent_signal_cache.get(cache_key, 0)
-            if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
-                continue  # уже слали этот сигнал недавно
-            _sent_signal_cache[cache_key] = now_ts
-            # Отправляем в личку админу
-            await bot.send_message(ADMIN_ID, sd["text"], parse_mode="HTML")
-            # Дублируем в Telegram канал
-            try:
-                channel_text = _format_channel_signal(sd)
-                await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
-                # Дублируем в дополнительный канал
-                await bot.send_message(-1003122576951, channel_text, parse_mode="HTML")
-            except Exception as ce:
-                logging.warning(f"Channel send error: {ce}")
+    # 5m и 15m — быстрые скальп сигналы
+    for tf in ["5m", "15m"]:
+        signals = await _scan_tf(tf, pairs_limit=30)
+        logging.info(f"Скан {tf}: сигналов {len(signals)}")
+        for sd in signals[:3]:
+            await _send_signal(sd)
             await asyncio.sleep(1)
-        except:
-            pass
+
+
+async def auto_scan_1h():
+    """Каждые 2 часа: скан 1h таймфрейма"""
+    signals = await _scan_tf("1h", pairs_limit=50)
+    logging.info(f"Скан 1h: сигналов {len(signals)}")
+    for sd in signals[:3]:
+        await _send_signal(sd)
+        await asyncio.sleep(1)
+
+
+async def auto_scan_4h():
+    """Каждые 6 часов: скан 4h таймфрейма"""
+    signals = await _scan_tf("4h", pairs_limit=50)
+    logging.info(f"Скан 4h: сигналов {len(signals)}")
+    for sd in signals[:3]:
+        await _send_signal(sd)
+        await asyncio.sleep(1)
+
+
+async def auto_scan_1d():
+    """Каждые 12 часов: скан 1d таймфрейма"""
+    signals = await _scan_tf("1d", pairs_limit=30)
+    logging.info(f"Скан 1d: сигналов {len(signals)}")
+    for sd in signals[:3]:
+        await _send_signal(sd)
+        await asyncio.sleep(1)
 
 
 async def auto_accumulation_scan():
@@ -3342,7 +3386,10 @@ async def on_startup(app):
             logging.error(f"review_rules_job: {e}")
 
     scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
-    scheduler.add_job(auto_scan_job, "interval", minutes=15)
+    scheduler.add_job(auto_scan_job, "interval", minutes=30)       # 5m + 15m скальп
+    scheduler.add_job(auto_scan_1h, "interval", hours=2)            # 1h свинг
+    scheduler.add_job(auto_scan_4h, "interval", hours=6)            # 4h среднесрок
+    scheduler.add_job(auto_scan_1d, "interval", hours=12)           # 1d долгосрок
     scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
     scheduler.add_job(auto_research, "interval", hours=2)
     scheduler.add_job(check_alerts, "interval", minutes=5)
@@ -3527,7 +3574,10 @@ def main():
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
-            scheduler.add_job(auto_scan_job, "interval", minutes=15)
+            scheduler.add_job(auto_scan_job, "interval", minutes=30)
+            scheduler.add_job(auto_scan_1h, "interval", hours=2)
+            scheduler.add_job(auto_scan_4h, "interval", hours=6)
+            scheduler.add_job(auto_scan_1d, "interval", hours=12)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
