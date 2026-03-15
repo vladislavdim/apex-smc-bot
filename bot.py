@@ -2830,6 +2830,50 @@ def full_scan_raw(symbol, timeframe="1h"):
         except Exception as _mm_e:
             pass
 
+        # RSI/MACD Divergence
+        try:
+            rmd = detect_rsi_macd_divergence(candles, direction)
+            if rmd["found"]:
+                for s in rmd["signals"]:
+                    confluence.append(s)
+        except Exception:
+            pass
+
+        # VWAP
+        try:
+            vwap_data = calculate_vwap(candles)
+            if vwap_data["vwap"] > 0:
+                if vwap_data["near_vwap"]:
+                    confluence.append(f"📍 Цена у VWAP {vwap_data['vwap']:.4f} — зона интереса")
+                elif vwap_data["signal"] == direction:
+                    confluence.append(f"✅ VWAP: {vwap_data['desc']} (+5)")
+                else:
+                    confluence.append(f"⚠️ VWAP: {vwap_data['desc']}")
+        except Exception:
+            pass
+
+        # Heatmap ликвидности
+        try:
+            heatmap = get_liquidity_heatmap(candles)
+            if direction == "BULLISH" and heatmap.get("nearest_buy_stops"):
+                lvl = heatmap["nearest_buy_stops"]
+                if lvl["strength"] == "HIGH":
+                    confluence.append(f"🎯 Buy Stops +{lvl['dist_pct']:.1f}% выше ({lvl['touches']} касаний) — цель")
+            elif direction == "BEARISH" and heatmap.get("nearest_sell_stops"):
+                lvl = heatmap["nearest_sell_stops"]
+                if lvl["strength"] == "HIGH":
+                    confluence.append(f"🎯 Sell Stops -{lvl['dist_pct']:.1f}% ниже ({lvl['touches']} касаний) — цель")
+        except Exception:
+            pass
+
+        # Breaker Block
+        try:
+            breaker = detect_breaker_block(candles, direction)
+            if breaker:
+                confluence.append(f"✅ {breaker['desc']} (+{breaker['weight']})")
+        except Exception:
+            pass
+
         if len(confluence) < 2:
             return None
 
