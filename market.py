@@ -1276,7 +1276,7 @@ def get_candles(symbol, interval="1h", limit=200):
     if _ROUTER_OK:
         try:
             rc = _brain_router.candles(symbol, interval, limit)
-            if rc and len(rc) >= 20:
+            if rc and len(rc) >= 10:
                 candle_cache[cache_key] = (rc, time.time())
                 return rc
         except Exception as e:
