@@ -744,6 +744,12 @@ async def handle_callback(callback: CallbackQuery):
         _brain_router = getattr(_market_module, '_brain_router', _brain_router)
     if _AUTOPILOT_OK:
         _autopilot_status = getattr(_market_module, '_autopilot_status', lambda: "")
+    # Обновляем EXT флаг
+    global _EXT_OK, _ext_summary, _ext_session
+    _EXT_OK = getattr(_market_module, '_EXT_OK', False)
+    if _EXT_OK:
+        _ext_summary = getattr(_market_module, '_ext_summary', lambda: {})
+        _ext_session = getattr(_market_module, '_ext_session', lambda: {})
     try:
         await callback.answer()
     except Exception:
