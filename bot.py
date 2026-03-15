@@ -750,6 +750,14 @@ async def handle_callback(callback: CallbackQuery):
     if _EXT_OK:
         _ext_summary = getattr(_market_module, '_ext_summary', lambda: {})
         _ext_session = getattr(_market_module, '_ext_session', lambda: {})
+    # Обновляем WEB LEARNER функции
+    global _web_knowledge_summary, _web_learn_cycle, _web_groq_agenda, _web_self_improve
+    _WEB_LEARNER_OK = getattr(_market_module, '_WEB_LEARNER_OK', False)
+    if _WEB_LEARNER_OK:
+        _web_knowledge_summary = getattr(_market_module, '_web_knowledge_summary', lambda: "")
+        _web_learn_cycle = getattr(_market_module, '_web_learn_cycle', lambda: [])
+        _web_groq_agenda = getattr(_market_module, '_web_groq_agenda', lambda: [])
+        _web_self_improve = getattr(_market_module, '_web_self_improve', lambda: [])
     try:
         await callback.answer()
     except Exception:
