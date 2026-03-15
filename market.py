@@ -2954,7 +2954,7 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
 
     for _attempt in range(5):
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=15000")
             cursor = conn.execute("""
