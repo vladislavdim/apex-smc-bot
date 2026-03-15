@@ -2906,7 +2906,7 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"{'━'*26}"
         )
 
-        return {"symbol": symbol, "grade": mtf["grade"], "text": text, "direction": direction}
+        return {"symbol": symbol, "grade": mtf["grade"], "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
 
     except Exception as e:
         logging.error(f"full_scan_raw error {symbol}: {e}")
