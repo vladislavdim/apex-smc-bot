@@ -140,7 +140,7 @@ def live_market_analysis() -> dict:
     Вызывается каждые 15 минут.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
 
         # Последние сигналы
         recent_signals = conn.execute("""
@@ -241,7 +241,7 @@ def live_market_analysis() -> dict:
             return {}
 
         # Сохраняем наблюдение
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
             VALUES (?,?,?,?)""",
             ("live_analysis",
@@ -270,7 +270,7 @@ def monitor_open_trades():
     Вызывается каждые 15 минут.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         open_trades = conn.execute("""
             SELECT id, symbol, direction, entry, sl, tp1, tp2, tp3,
                    timeframe, confluence, created_at
@@ -299,7 +299,7 @@ def monitor_open_trades():
             max_h = MAX_HOURS.get(tf, 48)
 
             if hours_open > max_h:
-                conn = sqlite3.connect(DB_PATH)
+                conn = sqlite3.connect(DB_PATH, timeout=30)
                 conn.execute("""UPDATE signal_log SET result='expired', closed_at=CURRENT_TIMESTAMP
                     WHERE id=? AND result='PENDING'""", (tid,))
                 conn.commit()
@@ -325,7 +325,7 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
     Если LOSS — Groq сам пишет фикс в groq_extensions.py.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
 
         # Полные данные сделки
         row = conn.execute("""
@@ -431,7 +431,7 @@ def _analyze_after_close(signal_id, symbol, direction, result, hours_open, confl
         priority = int(data.get("priority", 5))
 
         # Сохраняем разбор
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
             VALUES (?,?,?,?)""",
             ("deep_analysis",
@@ -481,7 +481,7 @@ def _write_fix_to_extensions(signal_id, symbol, result, fix_type,
     Только записывает анализ в мозги (observations).
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.execute("""INSERT OR IGNORE INTO observations
             (symbol, observation, context, outcome, confirmed)
             VALUES (?,?,?,?,0)""",
@@ -501,7 +501,7 @@ def system_error_diagnosis():
     Если находит системную проблему — пишет фикс.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
 
         # Потери за последние 48 часов
         losses = conn.execute("""
@@ -589,7 +589,7 @@ def system_error_diagnosis():
         requires_deploy = data.get("requires_deploy", False)
 
         # Сохраняем диагноз
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.execute("""INSERT INTO brain_log (event_type, title, description, source)
             VALUES (?,?,?,?)""",
             ("system_diagnosis",
@@ -632,7 +632,7 @@ def verify_recent_fixes():
     Сравнивает WR до и после каждого деплоя.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
 
         # Последние задеплоенные фиксы
         fixes = conn.execute("""
@@ -738,7 +738,7 @@ def on_trade_closed(signal_id: int, symbol: str, direction: str,
 def get_autopilot_status() -> str:
     """Статус автопилота для отображения в боте"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
 
         # Последний live анализ
         last_live = conn.execute("""
