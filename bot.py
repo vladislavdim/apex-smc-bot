@@ -2810,6 +2810,26 @@ def full_scan_raw(symbol, timeframe="1h"):
             if match:
                 confluence.append(f"✅ OrderBook: {ob_data['bias']}")
 
+        # MM Accumulation Detector
+        try:
+            mm_acc = detect_mm_accumulation(candles)
+            mm_sig = mm_acc.get("signal", "NEUTRAL")
+            mm_score = mm_acc.get("score", 0)
+            if mm_sig == "STRONG_ACCUMULATION":
+                confluence.append(f"✅ MM Накопление СИЛЬНОЕ (score {mm_score}/4) — фондовый паттерн (+15)")
+                for s in mm_acc.get("signals", []):
+                    confluence.append(f"  {s}")
+            elif mm_sig == "ACCUMULATION":
+                confluence.append(f"✅ MM Накопление (score {mm_score}/4) — вероятен выход (+10)")
+                for s in mm_acc.get("signals", []):
+                    confluence.append(f"  {s}")
+            elif mm_sig == "WEAK_ACCUMULATION":
+                confluence.append(f"📦 MM Слабое накопление (score {mm_score}/4)")
+            if mm_acc.get("pre_pump"):
+                confluence.append(f"🚀 PRE-PUMP: объём↑ диапазон↓ лои↑")
+        except Exception as _mm_e:
+            pass
+
         if len(confluence) < 2:
             return None
 
