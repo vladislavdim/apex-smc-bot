@@ -2621,19 +2621,6 @@ async def _send_signal(sd):
     last_sent = _sent_signal_cache.get(cache_key, 0)
     if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
         return  # уже слали этот сигнал недавно
-    # Проверяем — нет ли открытого сигнала по этой паре+таймфрейм
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        pending = conn.execute(
-            "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result='pending'",
-            (sd["symbol"], sd.get("timeframe", "1h"))
-        ).fetchone()
-        conn.close()
-        if pending:
-            return  # уже есть открытая сделка по этой паре+ТФ
-    except Exception as e:
-        logging.error(f"_send_signal DB check: {e}")
-
     _sent_signal_cache[cache_key] = now_ts
     for admin_id in ADMIN_IDS:
         try:
