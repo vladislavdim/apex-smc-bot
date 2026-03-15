@@ -52,6 +52,8 @@ try:
         find_ob_fvg_chain, check_volume_on_structure,
         calculate_cvd, detect_whale_candles, get_volume_profile,
         find_supply_demand, detect_wyckoff_phase, check_multi_coin_correlation,
+        get_fibonacci_levels, get_session_volume_profile,
+        detect_smart_money_divergence, detect_inducement,
     )
     _SMC_ENGINE_OK = True
     logging.info("smc_engine.py загружен успешно")
@@ -71,6 +73,10 @@ except Exception as e:
     calculate_cvd = lambda c: {"cvd": 0, "trend": "NEUTRAL", "divergence": None, "signal": "NEUTRAL", "buy_pressure_pct": 50}
     detect_whale_candles = lambda c: {"found": False, "spike": 0, "type": "NONE", "strength": 0}
     get_volume_profile = lambda c: {"poc": 0, "high_volume_zones": [], "current_zone": "UNKNOWN"}
+    get_fibonacci_levels = lambda c, d: {}
+    get_session_volume_profile = lambda c: {}
+    detect_smart_money_divergence = lambda c, o, f, d: {"score": 0, "signals": []}
+    detect_inducement = lambda c, d: None
     find_supply_demand = lambda c, d: None
     detect_wyckoff_phase = lambda c: {"phase": "UNKNOWN", "score": 0, "signals": []}
     check_multi_coin_correlation = lambda s, d, fn: {"confirmed": 0, "total": 0, "score": 0, "strong": False}
@@ -842,6 +848,95 @@ pairs_cache_time = 0
 price_cache = {}
 last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# OPEN INTEREST + FUNDING RATE + LIQUIDATION DATA
+# ═══════════════════════════════════════════════════════════════
+
+def get_open_interest(symbol: str) -> dict:
+    """Open Interest с Binance Futures — накопление позиций крупных игроков"""
+    try:
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/openInterest",
+            params={"symbol": symbol},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            data = r.json()
+            oi = float(data.get("openInterest", 0))
+            return {"oi": oi, "symbol": symbol, "ok": True}
+    except Exception as e:
+        logging.debug(f"OI {symbol}: {e}")
+    return {"oi": 0, "ok": False}
+
+
+def get_funding_rate(symbol: str) -> dict:
+    """Funding Rate с Binance Futures — перегрев рынка"""
+    try:
+        r = requests.get(
+            f"{BINANCE_F}/fapi/v1/premiumIndex",
+            params={"symbol": symbol},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            data = r.json()
+            fr = float(data.get("lastFundingRate", 0))
+            # Интерпретация
+            if fr > 0.001:
+                signal = "BEARISH"  # Лонги перегреты — скоро выбьют
+                desc = f"Funding +{fr*100:.3f}% — лонги перегреты"
+            elif fr < -0.001:
+                signal = "BULLISH"  # Шорты перегреты — скоро выбьют
+                desc = f"Funding {fr*100:.3f}% — шорты перегреты"
+            else:
+                signal = "NEUTRAL"
+                desc = f"Funding {fr*100:.3f}% — нейтрально"
+            return {"rate": fr, "signal": signal, "desc": desc, "ok": True}
+    except Exception as e:
+        logging.debug(f"Funding {symbol}: {e}")
+    return {"rate": 0, "signal": "NEUTRAL", "desc": "", "ok": False}
+
+
+def get_liquidation_ratio(symbol: str) -> dict:
+    """Long/Short ratio — соотношение лонгов и шортов"""
+    try:
+        r = requests.get(
+            "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+            params={"symbol": symbol, "period": "1h", "limit": 3},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data and len(data) > 0:
+                latest = data[0]
+                long_pct  = float(latest.get("longAccount", 0.5))
+                short_pct = float(latest.get("shortAccount", 0.5))
+                ratio = long_pct / short_pct if short_pct > 0 else 1.0
+                if ratio > 1.5:
+                    signal = "BEARISH"  # Слишком много лонгов — будут выбивать
+                    desc = f"L/S={ratio:.2f} — толпа в лонгах (контрариан BEARISH)"
+                elif ratio < 0.67:
+                    signal = "BULLISH"  # Слишком много шортов — будут выбивать
+                    desc = f"L/S={ratio:.2f} — толпа в шортах (контрариан BULLISH)"
+                else:
+                    signal = "NEUTRAL"
+                    desc = f"L/S={ratio:.2f} — сбалансировано"
+                return {
+                    "long_pct": long_pct,
+                    "short_pct": short_pct,
+                    "ratio": ratio,
+                    "signal": signal,
+                    "desc": desc,
+                    "ok": True,
+                }
+    except Exception as e:
+        logging.debug(f"LiqRatio {symbol}: {e}")
+    return {"ratio": 1.0, "signal": "NEUTRAL", "desc": "", "ok": False}
 
 def get_top_pairs(limit=100):
     """Фиксированный список топ-50 монет — только проверенные пары с ликвидностью"""
@@ -2588,6 +2683,45 @@ def full_scan(symbol, timeframe="1h"):
             try:
                 highs_l, lows_l = find_swings(candles)
 
+                # Fibonacci — золотая зона 0.618-0.786
+                fib = get_fibonacci_levels(candles, direction)
+                if fib.get("in_golden_zone"):
+                    confluence.append(f"✅ Fibonacci золотая зона {fib['nearest_ratio']:.3f} — точный вход (+15)")
+                    total_weight += 15
+                elif fib.get("nearest_ratio") in (0.382, 0.5):
+                    confluence.append(f"📍 Fibonacci {fib['nearest_ratio']:.3f} уровень — зона интереса (+7)")
+                    total_weight += 7
+
+                # Session Volume Profile — сессионный анализ
+                session_vp = get_session_volume_profile(candles)
+                sig = session_vp.get("signal", "NEUTRAL")
+                if (sig == "REVERSAL_UP" and direction == "BULLISH"):
+                    confluence.append(f"✅ Азия продаёт → Лондон покупает — разворот вверх (+12)")
+                    total_weight += 12
+                elif (sig == "REVERSAL_DOWN" and direction == "BEARISH"):
+                    confluence.append(f"✅ Азия покупает → Лондон продаёт — разворот вниз (+12)")
+                    total_weight += 12
+                elif (sig == "TREND_UP" and direction == "BULLISH"):
+                    confluence.append(f"✅ Лондон+NY BULLISH — тренд подтверждён (+8)")
+                    total_weight += 8
+                elif (sig == "TREND_DOWN" and direction == "BEARISH"):
+                    confluence.append(f"✅ Лондон+NY BEARISH — тренд подтверждён (+8)")
+                    total_weight += 8
+
+                # Smart Money Divergence
+                smd = detect_smart_money_divergence(candles, ob, fvg, direction)
+                if smd["score"] != 0:
+                    total_weight += smd["score"]
+                    for sig_text in smd["signals"]:
+                        confluence.append(sig_text)
+
+                # Inducement — ложный пробой
+                ind = detect_inducement(candles, direction)
+                if ind:
+                    w = ind["weight"]
+                    confluence.append(f"✅ Inducement {ind['type']} (wick {ind['wick_size']:.0%}, объём x{ind['vol_spike']:.1f}) (+{w})")
+                    total_weight += w
+
                 # Liquidity Sweep — сильный сигнал разворота
                 sweep = detect_liquidity_sweep(candles, highs_l, lows_l)
                 if sweep and sweep["direction"] == direction:
@@ -2625,6 +2759,29 @@ def full_scan(symbol, timeframe="1h"):
                     confluence.append(f"📍 Имбаланс {nearest['type']}: {nearest['bottom']:.4f}–{nearest['top']:.4f}")
             except Exception as _e:
                 logging.debug(f"new_smc_confluence {symbol}: {_e}")
+
+        # ── OI + Funding Rate + Liquidation ────────────────────
+        try:
+            oi_data = get_open_interest(symbol)
+            fr_data = get_funding_rate(symbol)
+            liq_data = get_liquidation_ratio(symbol)
+
+            if fr_data["ok"] and fr_data["signal"] != "NEUTRAL":
+                if fr_data["signal"] == direction[:4] or fr_data["signal"] == direction:
+                    pass  # совпадает — нейтрально
+                else:
+                    confluence.append(f"⚠️ {fr_data['desc']} — противоречие направлению")
+                    total_weight -= 5
+
+            if liq_data["ok"] and liq_data["signal"] != "NEUTRAL":
+                if liq_data["signal"] == direction:
+                    confluence.append(f"✅ {liq_data['desc']} (+8)")
+                    total_weight += 8
+                else:
+                    confluence.append(f"⚠️ {liq_data['desc']}")
+                    total_weight -= 3
+        except Exception as _oi_e:
+            logging.debug(f"OI/FR/Liq {symbol}: {_oi_e}")
 
         # ── CVD + Whale Detection ────────────────────────────────
         whale_desc = ""
