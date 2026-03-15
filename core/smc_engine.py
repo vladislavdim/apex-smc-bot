@@ -1325,75 +1325,99 @@ def get_fibonacci_levels(candles: list, direction: str) -> dict:
 
 def get_session_volume_profile(candles: list) -> dict:
     """
-    Объёмный профиль по торговым сессиям (Азия / Лондон / NY).
-    Позволяет видеть где формируется реальное направление.
+    Заглушка для обратной совместимости — заменена на detect_mm_accumulation.
     """
-    from datetime import datetime, timezone
-    if len(candles) < 24:
-        return {}
+    return {"signal": "NEUTRAL", "asia_bias": "NEUTRAL", "london_bias": "NEUTRAL", "ny_bias": "NEUTRAL"}
 
-    sessions = {"asia": [], "london": [], "ny": []}
 
-    # Примерно последние 48 часовых свечей
-    for c in candles[-48:]:
-        try:
-            ts = c.get("timestamp") or c.get("open_time")
-            if ts:
-                hour = datetime.fromtimestamp(int(ts) / 1000 if ts > 1e10 else int(ts), tz=timezone.utc).hour
-            else:
-                # Нет timestamp — просто пропускаем
-                continue
-        except:
-            continue
+def detect_mm_accumulation(candles: list) -> dict:
+    """
+    Market Maker Accumulation Detector — комбинированный детектор накопления ММ.
 
-        vol = c.get("volume", 0)
-        is_bull = c["close"] >= c["open"]
+    Объединяет два алгоритма:
+    1. Accumulation Score — узкий диапазон + объём + волатильность
+    2. Pre-Pump Scanner — volume spike + tight range + higher lows
 
-        if 0 <= hour < 8:
-            sessions["asia"].append({"vol": vol, "bull": is_bull, "c": c})
-        elif 8 <= hour < 16:
-            sessions["london"].append({"vol": vol, "bull": is_bull, "c": c})
-        else:
-            sessions["ny"].append({"vol": vol, "bull": is_bull, "c": c})
+    Возвращает score 0-4 и описание сигнала.
+    Score >= 2 — вероятность накопления высокая.
+    Score >= 3 — очень сильный сигнал (фондовый паттерн).
+    """
+    if len(candles) < 20:
+        return {"score": 0, "signal": "NEUTRAL", "signals": [], "pre_pump": False}
 
-    result = {}
-    for name, candles_s in sessions.items():
-        if not candles_s:
-            result[name] = {"bias": "NEUTRAL", "vol": 0}
-            continue
-        buy_vol  = sum(x["vol"] for x in candles_s if x["bull"])
-        sell_vol = sum(x["vol"] for x in candles_s if not x["bull"])
-        total    = buy_vol + sell_vol
-        bias = "BULLISH" if buy_vol > sell_vol * 1.2 else "BEARISH" if sell_vol > buy_vol * 1.2 else "NEUTRAL"
-        result[name] = {
-            "bias": bias,
-            "buy_vol": round(buy_vol, 2),
-            "sell_vol": round(sell_vol, 2),
-            "ratio": round(buy_vol / total * 100) if total > 0 else 50,
-        }
+    signals = []
+    score = 0
 
-    # Сигнал: если Азия продаёт а Лондон покупает — разворот вверх
-    asia_bias   = result.get("asia", {}).get("bias", "NEUTRAL")
-    london_bias = result.get("london", {}).get("bias", "NEUTRAL")
-    ny_bias     = result.get("ny", {}).get("bias", "NEUTRAL")
+    # ── 1. ACCUMULATION SCORE ──────────────────────────────────
+    last10 = candles[-10:]
+    highs10 = [c["high"] for c in last10]
+    lows10  = [c["low"]  for c in last10]
+    range10 = max(highs10) - min(lows10)
+    avg_candle_range = sum(c["high"] - c["low"] for c in last10) / 10
 
-    reversal_up   = asia_bias == "BEARISH" and london_bias == "BULLISH"
-    reversal_down = asia_bias == "BULLISH" and london_bias == "BEARISH"
-    trend_up      = london_bias == "BULLISH" and ny_bias == "BULLISH"
-    trend_down    = london_bias == "BEARISH" and ny_bias == "BEARISH"
+    # Узкий диапазон — цена зажата (range меньше 5 средних свечей)
+    if range10 < avg_candle_range * 5:
+        score += 1
+        signals.append("📦 Узкий диапазон — цена зажата")
 
-    result["signal"] = (
-        "REVERSAL_UP"   if reversal_up   else
-        "REVERSAL_DOWN" if reversal_down else
-        "TREND_UP"      if trend_up      else
-        "TREND_DOWN"    if trend_down    else
-        "NEUTRAL"
-    )
-    result["asia_bias"]   = asia_bias
-    result["london_bias"] = london_bias
-    result["ny_bias"]     = ny_bias
+    # Объём растёт на последних 3 свечах при боковике
+    vols = [c["volume"] for c in candles[-20:]]
+    avg_vol = sum(vols[:-3]) / max(len(vols) - 3, 1)
+    recent_vol = sum(vols[-3:]) / 3
+    if recent_vol > avg_vol * 1.3 and range10 < avg_candle_range * 6:
+        score += 1
+        signals.append(f"📈 Объём растёт x{recent_vol/avg_vol:.1f} при боковике — накопление")
 
-    return result
+    # Волатильность падает (последние 5 свечей уже последних 10)
+    range5 = max(highs10[-5:]) - min(lows10[-5:])
+    if range5 < range10 * 0.55:
+        score += 1
+        signals.append("🔇 Волатильность сжимается — пружина перед выстрелом")
+
+    # ── 2. PRE-PUMP SCANNER ────────────────────────────────────
+    lookback = 20
+    vol_lb   = [c["volume"] for c in candles[-lookback:]]
+    range_lb = [c["high"] - c["low"] for c in candles[-lookback:]]
+    avg_vol_lb   = sum(vol_lb)   / len(vol_lb)
+    avg_range_lb = sum(range_lb) / len(range_lb)
+
+    last = candles[-1]
+    last_vol   = last["volume"]
+    last_range = last["high"] - last["low"]
+
+    volume_spike = last_vol > avg_vol_lb * 2.0
+    tight_range  = last_range < avg_range_lb * 0.6
+    lows5 = [c["low"] for c in candles[-5:]]
+    higher_lows  = lows5[-1] > lows5[0]
+
+    pre_pump = volume_spike and tight_range and higher_lows
+    if pre_pump:
+        score += 1
+        signals.append("🚀 PRE-PUMP паттерн: объём↑ + диапазон↓ + лои↑")
+
+    # Дополнительно: wick rejection снизу (MM защищает уровень)
+    wicks_down = [c["open"] - c["low"] for c in candles[-5:] if c["close"] >= c["open"]]
+    if wicks_down and sum(wicks_down) / len(wicks_down) > avg_candle_range * 0.4:
+        signals.append("🪝 Wick rejection снизу — MM защищает уровень")
+
+    # ── ИТОГОВЫЙ СИГНАЛ ───────────────────────────────────────
+    if score >= 3:
+        signal = "STRONG_ACCUMULATION"
+    elif score >= 2:
+        signal = "ACCUMULATION"
+    elif score >= 1:
+        signal = "WEAK_ACCUMULATION"
+    else:
+        signal = "NEUTRAL"
+
+    return {
+        "score": score,
+        "signal": signal,
+        "signals": signals,
+        "pre_pump": pre_pump,
+        "range10": round(range10, 6),
+        "vol_ratio": round(recent_vol / avg_vol, 2) if avg_vol > 0 else 1.0,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
