@@ -1765,3 +1765,161 @@ def groq_ab_test_rules():
 
     except Exception as e:
         logging.error(f"groq_ab_test_rules: {e}")
+
+
+def get_winner_patterns(min_samples=3):
+    """Анализирует историю сделок и находит лучшие комбинации"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        rows = conn.execute(
+            "SELECT direction, regime, timeframe, entry_hour, confluence, result, symbol, created_at "
+            "FROM pattern_history WHERE result IN ('tp1','tp2','tp3','sl')"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        logging.warning("get_winner_patterns: %s", e)
+        return {}
+
+    if len(rows) < min_samples:
+        return {}
+
+    from collections import defaultdict
+    import datetime as _dt
+
+    combos  = defaultdict(lambda: {"win": 0, "loss": 0})
+    hours   = defaultdict(lambda: {"win": 0, "loss": 0})
+    days    = defaultdict(lambda: {"win": 0, "loss": 0})
+    symbols = defaultdict(lambda: {"win": 0, "loss": 0})
+
+    for row in rows:
+        direction, regime, tf, hour, conf, result, symbol, created_at = row
+        is_win = result in ("tp1", "tp2", "tp3")
+        key = str(direction) + "|" + str(regime) + "|" + str(tf)
+        combos[key]["win" if is_win else "loss"] += 1
+        if hour is not None:
+            hours[int(hour)]["win" if is_win else "loss"] += 1
+        if symbol:
+            symbols[symbol]["win" if is_win else "loss"] += 1
+        if created_at:
+            try:
+                dow = _dt.datetime.fromisoformat(created_at).weekday()
+                days[dow]["win" if is_win else "loss"] += 1
+            except Exception:
+                pass
+
+    def calc(d):
+        total = d["win"] + d["loss"]
+        if total < min_samples:
+            return 0, 0
+        return round(d["win"] / total * 100, 1), total
+
+    best_combos = []
+    bad_combos = []
+    for k, v in combos.items():
+        wr, total = calc(v)
+        if wr >= 60:
+            best_combos.append({"key": k, "wr": wr, "total": total})
+        elif 0 < wr <= 30:
+            bad_combos.append({"key": k, "wr": wr, "total": total})
+
+    best_combos.sort(key=lambda x: x["wr"], reverse=True)
+    bad_combos.sort(key=lambda x: x["wr"])
+
+    day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    best_days = sorted(
+        [(day_names[d], wr, total) for d, v in days.items() for wr, total in [calc(v)] if total >= min_samples],
+        key=lambda x: x[1], reverse=True
+    )
+    best_hours = sorted(
+        [(h, wr, total) for h, v in hours.items() for wr, total in [calc(v)] if total >= min_samples],
+        key=lambda x: x[1], reverse=True
+    )[:5]
+    top_symbols = sorted(
+        [(s, wr, total) for s, v in symbols.items() for wr, total in [calc(v)] if total >= min_samples],
+        key=lambda x: x[1], reverse=True
+    )[:10]
+
+    result_dict = {
+        "best_combos": best_combos[:5],
+        "bad_combos":  bad_combos[:5],
+        "best_hours":  best_hours,
+        "best_days":   best_days,
+        "top_symbols": top_symbols,
+        "total_analyzed": len(rows),
+    }
+    _save_winner_rules(result_dict)
+    return result_dict
+
+
+def _save_winner_rules(patterns):
+    """Сохраняет паттерны победителей в self_rules"""
+    if not patterns:
+        return
+    try:
+        from datetime import datetime as _dt2
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        for combo in patterns.get("best_combos", []):
+            parts = combo["key"].split("|")
+            if len(parts) == 3:
+                rule = "Входить %s режим %s %s — WR %.1f%% за %d сд." % (
+                    parts[0], parts[1], parts[2], combo["wr"], combo["total"])
+                conn.execute(
+                    "INSERT OR IGNORE INTO self_rules (category, rule, confidence, source, created_at) VALUES (?,?,?,?,?)",
+                    ("winner_pattern", rule, combo["wr"] / 100, "pattern_analysis", _dt2.now().isoformat())
+                )
+        for combo in patterns.get("bad_combos", []):
+            parts = combo["key"].split("|")
+            if len(parts) == 3:
+                rule = "AVOID %s режим %s %s — WR %.1f%% за %d сд." % (
+                    parts[0], parts[1], parts[2], combo["wr"], combo["total"])
+                conn.execute(
+                    "INSERT OR IGNORE INTO self_rules (category, rule, confidence, source, created_at) VALUES (?,?,?,?,?)",
+                    ("anti_pattern", rule, combo["wr"] / 100, "pattern_analysis", _dt2.now().isoformat())
+                )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.warning("_save_winner_rules: %s", e)
+
+
+def get_winner_patterns_text():
+    """Форматированный вывод для кнопки в боте"""
+    patterns = get_winner_patterns(min_samples=3)
+    if not patterns or patterns.get("total_analyzed", 0) < 3:
+        return "Недостаточно данных — нужно минимум 3 закрытые сделки."
+
+    lines = ["<b>Паттерн победителей</b> (%d сделок)" % patterns["total_analyzed"], ""]
+
+    if patterns["best_combos"]:
+        lines.append("<b>Лучшие комбинации:</b>")
+        for c in patterns["best_combos"]:
+            p = c["key"].split("|")
+            lines.append("  %s | %s | %s — %.1f%% WR (%d сд.)" % (p[0], p[1], p[2], c["wr"], c["total"]))
+
+    if patterns["bad_combos"]:
+        lines.append("")
+        lines.append("<b>Избегать:</b>")
+        for c in patterns["bad_combos"]:
+            p = c["key"].split("|")
+            lines.append("  %s | %s | %s — %.1f%% WR (%d сд.)" % (p[0], p[1], p[2], c["wr"], c["total"]))
+
+    if patterns["best_hours"]:
+        lines.append("")
+        lines.append("<b>Лучшие часы (UTC):</b>")
+        for h, wr, total in patterns["best_hours"][:3]:
+            lines.append("  %02d:00 — %.0f%% (%d сд.)" % (h, wr, total))
+
+    if patterns["best_days"]:
+        lines.append("")
+        lines.append("<b>Лучшие дни:</b>")
+        for day, wr, total in patterns["best_days"][:3]:
+            lines.append("  %s — %.0f%% (%d сд.)" % (day, wr, total))
+
+    if patterns["top_symbols"]:
+        lines.append("")
+        lines.append("<b>Топ монеты:</b>")
+        for sym, wr, total in patterns["top_symbols"][:5]:
+            lines.append("  %s — %.0f%% (%d сд.)" % (sym, wr, total))
+
+    sep = chr(10)
+    return sep.join(lines)
