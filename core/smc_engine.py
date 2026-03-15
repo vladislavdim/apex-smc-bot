@@ -1265,3 +1265,246 @@ def check_multi_coin_correlation(symbol: str, direction: str, get_candles_fn) ->
         "score": int(ratio * 10),  # макс +10 к confluence
         "strong": ratio >= 0.6
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# FIBONACCI LEVELS
+# ═══════════════════════════════════════════════════════════════
+
+def get_fibonacci_levels(candles: list, direction: str) -> dict:
+    """
+    Fibonacci уровни от последнего значимого движения.
+    Золотая зона 0.618-0.786 — лучшая точка входа по SMC.
+    """
+    if len(candles) < 20:
+        return {}
+    highs, lows = find_swings(candles, lookback=10)
+    if not highs or not lows:
+        return {}
+
+    if direction == "BULLISH":
+        # Ретрейсмент от хая к лою (ищем вход на откате)
+        swing_high = max(highs, key=lambda x: x[1])[1]
+        swing_low  = min(lows,  key=lambda x: x[1])[1]
+    else:
+        swing_high = max(highs, key=lambda x: x[1])[1]
+        swing_low  = min(lows,  key=lambda x: x[1])[1]
+
+    diff = swing_high - swing_low
+    if diff <= 0:
+        return {}
+
+    ratios = [0.236, 0.382, 0.5, 0.618, 0.786]
+    levels = {}
+    for r in ratios:
+        levels[r] = round(swing_high - diff * r, 6)
+
+    current = candles[-1]["close"]
+    golden_low  = levels[0.618]
+    golden_high = levels[0.786] if direction == "BULLISH" else levels[0.382]
+
+    in_golden = (min(golden_low, golden_high) <= current <= max(golden_low, golden_high))
+    nearest = min(levels.values(), key=lambda x: abs(x - current))
+    nearest_ratio = min(levels, key=lambda r: abs(levels[r] - current))
+
+    return {
+        "levels": levels,
+        "swing_high": swing_high,
+        "swing_low": swing_low,
+        "current": current,
+        "in_golden_zone": in_golden,
+        "nearest_level": nearest,
+        "nearest_ratio": nearest_ratio,
+        "golden_zone": (golden_low, golden_high),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# SESSION VOLUME PROFILE
+# ═══════════════════════════════════════════════════════════════
+
+def get_session_volume_profile(candles: list) -> dict:
+    """
+    Объёмный профиль по торговым сессиям (Азия / Лондон / NY).
+    Позволяет видеть где формируется реальное направление.
+    """
+    from datetime import datetime, timezone
+    if len(candles) < 24:
+        return {}
+
+    sessions = {"asia": [], "london": [], "ny": []}
+
+    # Примерно последние 48 часовых свечей
+    for c in candles[-48:]:
+        try:
+            ts = c.get("timestamp") or c.get("open_time")
+            if ts:
+                hour = datetime.fromtimestamp(int(ts) / 1000 if ts > 1e10 else int(ts), tz=timezone.utc).hour
+            else:
+                # Нет timestamp — просто пропускаем
+                continue
+        except:
+            continue
+
+        vol = c.get("volume", 0)
+        is_bull = c["close"] >= c["open"]
+
+        if 0 <= hour < 8:
+            sessions["asia"].append({"vol": vol, "bull": is_bull, "c": c})
+        elif 8 <= hour < 16:
+            sessions["london"].append({"vol": vol, "bull": is_bull, "c": c})
+        else:
+            sessions["ny"].append({"vol": vol, "bull": is_bull, "c": c})
+
+    result = {}
+    for name, candles_s in sessions.items():
+        if not candles_s:
+            result[name] = {"bias": "NEUTRAL", "vol": 0}
+            continue
+        buy_vol  = sum(x["vol"] for x in candles_s if x["bull"])
+        sell_vol = sum(x["vol"] for x in candles_s if not x["bull"])
+        total    = buy_vol + sell_vol
+        bias = "BULLISH" if buy_vol > sell_vol * 1.2 else "BEARISH" if sell_vol > buy_vol * 1.2 else "NEUTRAL"
+        result[name] = {
+            "bias": bias,
+            "buy_vol": round(buy_vol, 2),
+            "sell_vol": round(sell_vol, 2),
+            "ratio": round(buy_vol / total * 100) if total > 0 else 50,
+        }
+
+    # Сигнал: если Азия продаёт а Лондон покупает — разворот вверх
+    asia_bias   = result.get("asia", {}).get("bias", "NEUTRAL")
+    london_bias = result.get("london", {}).get("bias", "NEUTRAL")
+    ny_bias     = result.get("ny", {}).get("bias", "NEUTRAL")
+
+    reversal_up   = asia_bias == "BEARISH" and london_bias == "BULLISH"
+    reversal_down = asia_bias == "BULLISH" and london_bias == "BEARISH"
+    trend_up      = london_bias == "BULLISH" and ny_bias == "BULLISH"
+    trend_down    = london_bias == "BEARISH" and ny_bias == "BEARISH"
+
+    result["signal"] = (
+        "REVERSAL_UP"   if reversal_up   else
+        "REVERSAL_DOWN" if reversal_down else
+        "TREND_UP"      if trend_up      else
+        "TREND_DOWN"    if trend_down    else
+        "NEUTRAL"
+    )
+    result["asia_bias"]   = asia_bias
+    result["london_bias"] = london_bias
+    result["ny_bias"]     = ny_bias
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# SMART MONEY DIVERGENCE
+# ═══════════════════════════════════════════════════════════════
+
+def detect_smart_money_divergence(candles: list, ob: dict, fvg: dict, direction: str) -> dict:
+    """
+    Расхождение между Smart Money индикаторами и направлением сигнала.
+    Если OB/FVG противоречат направлению — сигнал слабее.
+    """
+    if len(candles) < 10:
+        return {"score": 0, "signals": []}
+
+    score  = 0
+    signals = []
+    price  = candles[-1]["close"]
+
+    # OB против направления
+    if ob:
+        if direction == "BULLISH" and price < ob.get("bottom", price):
+            score -= 8
+            signals.append("⚠️ Цена ниже OB — медвежья структура")
+        elif direction == "BEARISH" and price > ob.get("top", price):
+            score -= 8
+            signals.append("⚠️ Цена выше OB — бычья структура")
+
+    # FVG против направления
+    if fvg:
+        fvg_mid = (fvg.get("top", 0) + fvg.get("bottom", 0)) / 2
+        if direction == "BULLISH" and price < fvg.get("bottom", price):
+            score -= 5
+            signals.append("⚠️ Цена под FVG — не заполнен")
+        elif direction == "BEARISH" and price > fvg.get("top", price):
+            score -= 5
+            signals.append("⚠️ Цена над FVG — не заполнен")
+
+    # Новый хай/лоу без объёма
+    last_5 = candles[-5:]
+    avg_vol = sum(c.get("volume", 0) for c in candles[-20:-5]) / 15 if len(candles) >= 20 else 1
+    last_vol = candles[-1].get("volume", 0)
+
+    if direction == "BULLISH":
+        if candles[-1]["high"] == max(c["high"] for c in last_5) and last_vol < avg_vol * 0.6:
+            score -= 7
+            signals.append("⚠️ Новый хай на слабом объёме")
+    else:
+        if candles[-1]["low"] == min(c["low"] for c in last_5) and last_vol < avg_vol * 0.6:
+            score -= 7
+            signals.append("⚠️ Новый лоу на слабом объёме")
+
+    # Усиление в направлении сигнала
+    if last_vol > avg_vol * 1.5:
+        is_bull_candle = candles[-1]["close"] > candles[-1]["open"]
+        if (direction == "BULLISH" and is_bull_candle) or (direction == "BEARISH" and not is_bull_candle):
+            score += 8
+            signals.append("✅ Сильный объём подтверждает направление")
+
+    return {"score": score, "signals": signals}
+
+
+# ═══════════════════════════════════════════════════════════════
+# INDUCEMENT (ложный пробой с возвратом)
+# ═══════════════════════════════════════════════════════════════
+
+def detect_inducement(candles: list, direction: str) -> dict | None:
+    """
+    Inducement — ложный пробой уровня с быстрым возвратом.
+    Один из сильнейших SMC паттернов входа.
+    """
+    if len(candles) < 5:
+        return None
+
+    highs, lows = find_swings(candles[:-3], lookback=5)
+    if not highs or not lows:
+        return None
+
+    avg_vol = sum(c.get("volume", 0) for c in candles[-20:-3]) / 17 if len(candles) >= 20 else 1
+
+    if direction == "BULLISH" and lows:
+        key_level = lows[-1][1]
+        # Ищем свечу которая пробила лоу и вернулась
+        for i in range(len(candles)-3, len(candles)):
+            c = candles[i]
+            if c["low"] < key_level and c["close"] > key_level:
+                wick_size = (key_level - c["low"]) / (c["high"] - c["low"] + 0.0001)
+                vol_spike = c.get("volume", 0) / avg_vol if avg_vol > 0 else 1
+                if wick_size > 0.4:
+                    return {
+                        "type": "BULLISH_INDUCEMENT",
+                        "level": key_level,
+                        "wick_size": round(wick_size, 2),
+                        "vol_spike": round(vol_spike, 2),
+                        "strength": "STRONG" if vol_spike > 1.5 else "MEDIUM",
+                        "weight": 18 if vol_spike > 1.5 else 10,
+                    }
+
+    elif direction == "BEARISH" and highs:
+        key_level = highs[-1][1]
+        for i in range(len(candles)-3, len(candles)):
+            c = candles[i]
+            if c["high"] > key_level and c["close"] < key_level:
+                wick_size = (c["high"] - key_level) / (c["high"] - c["low"] + 0.0001)
+                vol_spike = c.get("volume", 0) / avg_vol if avg_vol > 0 else 1
+                if wick_size > 0.4:
+                    return {
+                        "type": "BEARISH_INDUCEMENT",
+                        "level": key_level,
+                        "wick_size": round(wick_size, 2),
+                        "vol_spike": round(vol_spike, 2),
+                        "strength": "STRONG" if vol_spike > 1.5 else "MEDIUM",
+                        "weight": 18 if vol_spike > 1.5 else 10,
+                    }
+    return None
