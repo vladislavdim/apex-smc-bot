@@ -232,7 +232,9 @@ except Exception as e:
     _autopilot_status = lambda: "Автопилот недоступен"
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
+_admin_raw = os.environ.get("ADMIN_ID", "0") or "0"
+ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit()]
+ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else 0
 SIGNAL_CHANNEL = int(os.environ.get("SIGNAL_CHANNEL_ID", "-1003122576951"))  # TG канал сигналов
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_KEYS = [
