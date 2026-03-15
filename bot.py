@@ -723,13 +723,27 @@ def scan_diagnostics(symbol):
 async def handle_callback(callback: CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
-    # Обновляем флаги из market модуля напрямую
+    # Обновляем флаги и функции из market модуля напрямую
     global _ROUTER_OK, _LEARNING_OK, _AUTOPILOT_OK, _WEB_LEARNER_OK
+    global _learn_grade_text, _learn_trade_analysis, _learn_self_diag
+    global _learn_latest_diag, _learn_get_strategy, _learn_build_strategy
+    global _brain_router, _autopilot_status
     import market as _market_module
     _ROUTER_OK = getattr(_market_module, '_ROUTER_OK', False)
     _LEARNING_OK = getattr(_market_module, '_LEARNING_OK', False)
     _AUTOPILOT_OK = getattr(_market_module, '_AUTOPILOT_OK', False)
     _WEB_LEARNER_OK = getattr(_market_module, '_WEB_LEARNER_OK', False)
+    if _LEARNING_OK:
+        _learn_grade_text = getattr(_market_module, '_learn_grade_text', lambda: "")
+        _learn_trade_analysis = getattr(_market_module, '_learn_trade_analysis', lambda n=5: "")
+        _learn_self_diag = getattr(_market_module, '_learn_self_diag', lambda: "")
+        _learn_latest_diag = getattr(_market_module, '_learn_latest_diag', lambda: "")
+        _learn_get_strategy = getattr(_market_module, '_learn_get_strategy', lambda: "")
+        _learn_build_strategy = getattr(_market_module, '_learn_build_strategy', lambda: "")
+    if _ROUTER_OK:
+        _brain_router = getattr(_market_module, '_brain_router', _brain_router)
+    if _AUTOPILOT_OK:
+        _autopilot_status = getattr(_market_module, '_autopilot_status', lambda: "")
     try:
         await callback.answer()
     except Exception:
