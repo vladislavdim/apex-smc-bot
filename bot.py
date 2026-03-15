@@ -2630,7 +2630,6 @@ async def _send_signal(sd):
     try:
         channel_text = _format_channel_signal(sd)
         await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
-        await bot.send_message(-1003122576951, channel_text, parse_mode="HTML")
     except Exception as ce:
         logging.warning(f"Channel send error: {ce}")
 
