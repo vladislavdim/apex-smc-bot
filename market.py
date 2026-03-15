@@ -53,6 +53,7 @@ try:
         calculate_cvd, detect_whale_candles, get_volume_profile,
         find_supply_demand, detect_wyckoff_phase, check_multi_coin_correlation,
         get_fibonacci_levels, get_session_volume_profile, detect_mm_accumulation,
+        detect_rsi_macd_divergence, calculate_vwap, get_liquidity_heatmap, detect_breaker_block,
         detect_smart_money_divergence, detect_inducement,
     )
     _SMC_ENGINE_OK = True
@@ -76,6 +77,10 @@ except Exception as e:
     get_fibonacci_levels = lambda c, d: {}
     get_session_volume_profile = lambda c: {}
     detect_mm_accumulation = lambda c: {"score": 0, "signal": "NEUTRAL", "signals": [], "pre_pump": False}
+    detect_rsi_macd_divergence = lambda c, d: {"found": False, "score": 0, "weight": 0, "signals": [], "rsi": 0}
+    calculate_vwap = lambda c: {"vwap": 0, "signal": "NEUTRAL", "deviation_pct": 0, "near_vwap": False}
+    get_liquidity_heatmap = lambda c: {"levels": [], "nearest_buy_stops": None, "nearest_sell_stops": None}
+    detect_breaker_block = lambda c, d: None
     detect_smart_money_divergence = lambda c, o, f, d: {"score": 0, "signals": []}
     detect_inducement = lambda c, d: None
     find_supply_demand = lambda c, d: None
@@ -2765,6 +2770,47 @@ def full_scan(symbol, timeframe="1h"):
                 if imb:
                     nearest = min(imb, key=lambda z: abs(z["top"] - price))
                     confluence.append(f"📍 Имбаланс {nearest['type']}: {nearest['bottom']:.4f}–{nearest['top']:.4f}")
+
+                # RSI/MACD Divergence
+                rmd = detect_rsi_macd_divergence(candles, direction)
+                if rmd["found"]:
+                    total_weight += rmd["weight"]
+                    for s in rmd["signals"]:
+                        confluence.append(s)
+
+                # VWAP — средневзвешенная цена по объёму
+                vwap_data = calculate_vwap(candles)
+                if vwap_data["vwap"] > 0:
+                    dev = vwap_data["deviation_pct"]
+                    if vwap_data["near_vwap"]:
+                        confluence.append(f"📍 Цена у VWAP {vwap_data['vwap']:.4f} — зона интереса")
+                    elif vwap_data["signal"] == direction:
+                        confluence.append(f"✅ VWAP: {vwap_data['desc']} (+5)")
+                        total_weight += 5
+                    else:
+                        confluence.append(f"⚠️ VWAP: {vwap_data['desc']} — против направления (-3)")
+                        total_weight -= 3
+
+                # Heatmap ликвидности — ближайшие стопы
+                heatmap = get_liquidity_heatmap(candles)
+                if direction == "BULLISH" and heatmap["nearest_buy_stops"]:
+                    lvl = heatmap["nearest_buy_stops"]
+                    if lvl["strength"] == "HIGH":
+                        confluence.append(f"🎯 Buy Stops выше на {lvl['dist_pct']:.1f}% ({lvl['touches']} касаний) — цель для пампа (+5)")
+                        total_weight += 5
+                elif direction == "BEARISH" and heatmap["nearest_sell_stops"]:
+                    lvl = heatmap["nearest_sell_stops"]
+                    if lvl["strength"] == "HIGH":
+                        confluence.append(f"🎯 Sell Stops ниже на {lvl['dist_pct']:.1f}% ({lvl['touches']} касаний) — цель для дампа (+5)")
+                        total_weight += 5
+
+                # Breaker Block — пробитый OB как новый уровень
+                breaker = detect_breaker_block(candles, direction)
+                if breaker:
+                    w = breaker["weight"]
+                    confluence.append(f"✅ {breaker['desc']} (+{w})")
+                    total_weight += w
+
             except Exception as _e:
                 logging.debug(f"new_smc_confluence {symbol}: {_e}")
 
