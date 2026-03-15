@@ -436,7 +436,7 @@ async def cmd_improve(message: types.Message):
     Только для ADMIN_ID.
     """
     user_id = message.from_user.id
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         await message.answer("⛔️ Только для администратора.")
         return
 
@@ -2090,7 +2090,7 @@ async def handle_callback(callback: CallbackQuery):
 @dp.message(Command("patch"))
 async def cmd_patch(message: types.Message):
     """Ручной запуск авто-патча — /patch [описание ошибки]"""
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     args = message.text.split(maxsplit=1)
     error_text = args[1].strip() if len(args) > 1 else "manual patch request"
