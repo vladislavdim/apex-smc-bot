@@ -723,6 +723,13 @@ def scan_diagnostics(symbol):
 async def handle_callback(callback: CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
+    # Обновляем флаги из market модуля напрямую
+    global _ROUTER_OK, _LEARNING_OK, _AUTOPILOT_OK, _WEB_LEARNER_OK
+    import market as _market_module
+    _ROUTER_OK = getattr(_market_module, '_ROUTER_OK', False)
+    _LEARNING_OK = getattr(_market_module, '_LEARNING_OK', False)
+    _AUTOPILOT_OK = getattr(_market_module, '_AUTOPILOT_OK', False)
+    _WEB_LEARNER_OK = getattr(_market_module, '_WEB_LEARNER_OK', False)
     try:
         await callback.answer()
     except Exception:
