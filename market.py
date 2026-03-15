@@ -1371,7 +1371,9 @@ def get_candles(symbol, interval="1h", limit=200):
     if _ROUTER_OK:
         try:
             rc = _brain_router.candles(symbol, interval, limit)
-            if rc and len(rc) >= 20:
+            # Минимум 3 свечи достаточно для проверки цены (check_pending_signals)
+            # Минимум 20 нужно только для SMC анализа — проверяем на вызове
+            if rc and len(rc) >= 3:
                 candle_cache[cache_key] = (rc, time.time())
                 return rc
         except Exception as e:
@@ -3040,6 +3042,15 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=15000")
+            # ── Защита от дублей: не сохраняем если уже есть pending сигнал по этой паре+ТФ ──
+            existing = conn.execute(
+                "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result='pending' LIMIT 1",
+                (symbol, timeframe)
+            ).fetchone()
+            if existing:
+                conn.close()
+                logging.info(f"save_signal_db: дубль {symbol} {timeframe} — пропущено (ID существует: {existing[0]})")
+                return None, learning_id
             cursor = conn.execute("""
                 INSERT INTO signals
                 (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
@@ -3095,9 +3106,20 @@ def check_pending_signals():
         for row in pending:
             sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at = row
             prices = get_live_prices()
-            if symbol not in prices:
+            current = None
+            if symbol in prices:
+                current = prices[symbol]["price"]
+            # Fallback на brain_router если live_prices недоступен
+            if current is None and _ROUTER_OK:
+                try:
+                    rc = _brain_router.candles(symbol, "1h", 3)
+                    if rc and len(rc) >= 1:
+                        current = rc[-1]["close"]
+                        logging.debug(f"check_pending_signals: {symbol} цена через router {current}")
+                except Exception as _re:
+                    logging.debug(f"check_pending_signals router fallback {symbol}: {_re}")
+            if current is None:
                 continue
-            current = prices[symbol]["price"]
             created = datetime.fromisoformat(created_at)
             hours_elapsed = (datetime.now() - created).total_seconds() / 3600
 
