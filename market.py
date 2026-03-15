@@ -844,13 +844,12 @@ last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
 def get_top_pairs(limit=100):
-    """Топ-N пар по объёму: Binance Futures → Binance Spot (Bybit убран — 403 на Render)"""
+    """Фиксированный список топ-50 монет — только проверенные пары с ликвидностью"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
-        return pairs_cache
+        return pairs_cache[:limit]
 
-    # Принудительные монеты — всегда в списке первыми
-    FORCED = [
+    FIXED_50 = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "TONUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
         "ADAUSDT", "DOTUSDT", "POLUSDT", "LTCUSDT", "ATOMUSDT",
@@ -859,106 +858,14 @@ def get_top_pairs(limit=100):
         "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
         "BCHUSDT", "ICPUSDT", "ETCUSDT", "FILUSDT", "HBARUSDT",
         "STXUSDT", "LDOUSDT", "RENDERUSDT", "FETUSDT", "APEUSDT",
-        "FLOKIUSDT", "WIFUSDT", "AAVEUSDT", "RUNEUSDT", "ALGOUSDT",
-        "FTMUSDT", "CRVUSDT", "GRTUSDT",
+        "FLOKIUSDT", "WIFUSDT", "AAVEUSDT", "CRVUSDT", "GRTUSDT",
+        "MKRUSDT", "SNXUSDT", "RUNEUSDT", "ALGOUSDT", "FTMUSDT",
     ]
 
-    # Фильтр мусорных пар — стейблы, обёртки, токены без ликвидности
-    BAD_SUFFIXES = ("DOWNUSDT", "UPUSDT", "BULLUSDT", "BEARUSDT")
-    BAD_CONTAINS = ("USDC", "BUSD", "TUSD", "USDP", "USDE", "USDD", "PYUSD", "RLSD",
-                    "WBETH", "WSTETH", "STETH", "CBETH", "RETH", "BETH",
-                    "AETHUSDT", "XDAI", "WBTC", "HBTC", "SBTC",
-                    "NFLXX", "TRXS", "SPLD", "VINC", "BGBUS", "KCS",
-                    "WFIU", "WFIUSDT", "XTUS", "JLPU", "RLUSD", "MANTLE",
-                    "HTXUS", "LEMX", "DHNUS", "TRXS", "BGBUS")
+    pairs_cache = FIXED_50[:limit]
+    pairs_cache_time = time.time()
+    return pairs_cache
 
-    def is_valid_pair(symbol):
-        if not symbol.endswith("USDT"):
-            return False
-        # Двойной USDT — мусор типа AETHUSDTUSDT
-        if "USDTUSDT" in symbol:
-            return False
-        if any(symbol.endswith(s) for s in BAD_SUFFIXES):
-            return False
-        base = symbol.replace("USDT", "")
-        if any(bad in base for bad in BAD_CONTAINS):
-            return False
-        if len(base) > 12:  # слишком длинный тикер — обычно мусор
-            return False
-        return True
-
-    # 0. CryptoCompare — работает с Render без блокировок
-    try:
-        r = requests.get(
-            "https://min-api.cryptocompare.com/data/top/mktcapfull",
-            params={"limit": limit, "tsym": "USD"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            items = r.json().get("Data", [])
-            cc_pairs = [i["CoinInfo"]["Name"] + "USDT" for i in items
-                        if i.get("CoinInfo", {}).get("Name") and i["CoinInfo"]["Name"] != "USDT"
-                        and is_valid_pair(i["CoinInfo"]["Name"] + "USDT")]
-            if len(cc_pairs) >= 10:
-                combined = list(dict.fromkeys(FORCED + cc_pairs))[:limit]
-                pairs_cache = combined
-                pairs_cache_time = time.time()
-                logging.info(f"Пары CryptoCompare: {len(combined)} шт")
-                return pairs_cache
-    except Exception as e:
-        logging.warning(f"CryptoCompare top pairs: {e}")
-
-    # 1. Binance Futures — основной источник
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/ticker/24hr",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                data.sort(key=lambda x: float(x.get("quoteVolume", 0) or 0), reverse=True)
-                top = [t["symbol"] for t in data if is_valid_pair(str(t.get("symbol","")))][:limit]
-                if top:
-                    combined = list(dict.fromkeys(FORCED + top))[:limit]
-                    pairs_cache = combined
-                    pairs_cache_time = time.time()
-                    logging.info(f"Пары Binance Futures: {len(combined)} шт, топ: {combined[:5]}")
-                    return pairs_cache
-    except Exception as e:
-        logging.warning(f"Binance Futures tickers: {e}")
-
-    # 2. Binance Spot — fallback
-    try:
-        r = requests.get(
-            f"{BINANCE}/api/v3/ticker/24hr",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                data.sort(key=lambda x: float(x.get("quoteVolume", 0) or 0), reverse=True)
-                top = [t["symbol"] for t in data if is_valid_pair(str(t.get("symbol","")))][:limit]
-                if top:
-                    combined = list(dict.fromkeys(FORCED + top))[:limit]
-                    pairs_cache = combined
-                    pairs_cache_time = time.time()
-                    logging.info(f"Пары Binance Spot: {len(combined)} шт")
-                    return pairs_cache
-    except Exception as e:
-        logging.warning(f"Binance Spot tickers: {e}")
-
-    logging.warning("get_top_pairs: используем fallback список")
-    fallback = pairs_cache if pairs_cache else FORCED
-    # Гарантируем что возвращаем list, а не None
-    return fallback if isinstance(fallback, list) else list(FORCED)
-
-# Обратная совместимость
-PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
-         "TONUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","ARBUSDT"]
 
 def get_live_prices():
     global price_cache, last_price_update
