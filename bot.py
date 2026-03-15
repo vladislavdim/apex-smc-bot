@@ -2788,11 +2788,11 @@ def full_scan_raw(symbol, timeframe="1h"):
         try:
             with sqlite3.connect(DB_PATH) as _chk:
                 _row = _chk.execute(
-                    "SELECT id FROM signals WHERE symbol=? AND result=\'pending\' LIMIT 1",
-                    (symbol,)
+                    "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result=\'pending\' LIMIT 1",
+                    (symbol, timeframe)
                 ).fetchone()
                 if _row:
-                    return None  # уже есть открытая сделка — не дублируем
+                    return None  # уже есть открытая сделка по этой паре+ТФ — не дублируем
         except Exception as e:
             import logging
             logging.error(e)
