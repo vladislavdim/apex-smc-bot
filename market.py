@@ -1753,7 +1753,7 @@ def multi_tf_analysis(symbol, timeframes=None):
 
     # ── Старый код как fallback ──────────────────────────────
     if timeframes is None:
-        timeframes = ["15m", "1h", "4h"]
+        timeframes = ["15m", "1h", "4h", "1d"]
     results = {}
     for tf in timeframes:
         results[tf] = smc_on_tf(symbol, tf)
