@@ -1365,35 +1365,43 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
 
 
 
-            # --- TP1: сильная зона ликвидности выше (HIGH strength) ---
+            # --- TP1: ближайшая зона ликвидности или swing high ---
             tp1_candidates = []
+            risk_val = abs(entry - sl) if sl else entry * 0.015
+
             sell_stops = heatmap.get("nearest_sell_stops")
             sell_stops_price = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
-            sell_stops_strength = sell_stops.get("strength", "") if isinstance(sell_stops, dict) else ""
-            # Приоритет — HIGH strength зона ликвидности
-            if sell_stops_price and sell_stops_price > entry * 1.01 and sell_stops_strength == "HIGH":
+            # Любая зона ликвидности выше входа
+            if sell_stops_price and sell_stops_price > entry * 1.005:
                 tp1_candidates.append(sell_stops_price)
-            # Swing highs выше входа — берём дальний (не ближайший)
-            tp_swings = sorted([h for h in highs if h > entry * 1.02])
-            if len(tp_swings) >= 2:
-                tp1_candidates.append(tp_swings[1])  # второй swing high — дальше
-            elif tp_swings:
+
+            # Swing highs выше входа — берём ближайший реальный
+            tp_swings = sorted([h for h in highs if h > entry * 1.005])
+            if tp_swings:
                 tp1_candidates.append(tp_swings[0])
-            # FVG как дополнительный кандидат
-            if fvg and fvg["top"] > entry * 1.02:
+
+            # FVG верхняя граница
+            if fvg and fvg["top"] > entry * 1.005:
                 tp1_candidates.append(fvg["top"])
-            # Если нет сильной зоны — математика от риска x3
-            risk_val = abs(entry - sl) if sl else entry * 0.02
-            tp1 = smart_round(min(tp1_candidates)) if tp1_candidates else smart_round(entry + risk_val * 3)
 
-            # --- TP2: следующая сильная зона после TP1 ---
+            # Минимальный TP1 — x2.5 от риска
+            min_tp1 = entry + risk_val * 2.5
+            if tp1_candidates:
+                tp1_raw = min(tp1_candidates)
+                # Если найденный уровень слишком близко — используем x2.5 от риска
+                tp1 = smart_round(max(tp1_raw, min_tp1))
+            else:
+                tp1 = smart_round(min_tp1)
+
+            # --- TP2: следующая зона после TP1 ---
             tp2_swings = sorted([h for h in highs if h > tp1 * 1.01])
-            all_stops = heatmap.get("all_sell_stops", [])
-            tp2_liq = [s["price"] for s in all_stops if isinstance(s, dict) and s.get("price", 0) > tp1 * 1.01 and s.get("strength") == "HIGH"] if all_stops else []
-            tp2_candidates = tp2_swings[:2] + tp2_liq[:1]
-            tp2 = smart_round(min(tp2_candidates)) if tp2_candidates else smart_round(entry + risk_val * 5)
+            tp2_candidates = []
+            if tp2_swings:
+                tp2_candidates.append(tp2_swings[0])
+            # Если нет структуры — x4 от риска
+            tp2 = smart_round(min(tp2_candidates)) if tp2_candidates else smart_round(entry + risk_val * 4.5)
 
-            # TP3 = TP2 (убираем третий тейк — оставляем 2 точных)
+            # TP3 = TP2
             tp3 = tp2
 
         else:  # BEARISH
