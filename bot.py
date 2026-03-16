@@ -2950,7 +2950,7 @@ def full_scan_raw(symbol, timeframe="1h"):
         tp1   = levels["tp1"]
         tp2   = levels["tp2"]
         tp3   = levels["tp3"]
-        logging.debug(f"Уровни [{levels['source']}] {symbol} {direction}: entry={entry} sl={sl} tp1={tp1} RR={levels['rr']}")
+        pass  # logging.debug(f"Уровни [{levels['source']}] {symbol} {direction}: entry={entry} sl={sl} tp1={tp1} RR={levels['rr']}")
 
         est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
