@@ -4696,6 +4696,7 @@ def ask_groq(prompt, max_tokens=800):
         logging.error("Groq: нет активных ключей")
         return None
 
+    for attempt in range(len(active_keys) * len(models)):
         key_index = (_groq_key_index + attempt) % len(active_keys)
 
         key = active_keys[key_index]
