@@ -1315,7 +1315,10 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             raise ValueError("мало свечей")
 
         # Получаем структуру
-        highs, lows = find_swings(candles)
+        raw_highs, raw_lows = find_swings(candles)
+        # find_swings возвращает (idx, price) или просто price — нормализуем
+        highs = [h[1] if isinstance(h, (tuple, list)) else h for h in raw_highs]
+        lows  = [l[1] if isinstance(l, (tuple, list)) else l for l in raw_lows]
         ob   = find_ob(candles, direction)
         fvg  = find_fvg(candles, direction)
         heatmap = get_liquidity_heatmap(candles)
