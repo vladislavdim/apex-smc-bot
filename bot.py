@@ -3480,22 +3480,6 @@ async def on_startup(app):
             logging.error(f"review_rules_job: {e}")
 
     scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
-
-async def keepalive_heartbeat():
-    """Каждые 10 минут пишет heartbeat в БД — не даёт Render усыплять сервис"""
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""CREATE TABLE IF NOT EXISTS heartbeat (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        conn.execute("INSERT INTO heartbeat (ts) VALUES (CURRENT_TIMESTAMP)")
-        conn.execute("DELETE FROM heartbeat WHERE id NOT IN (SELECT id FROM heartbeat ORDER BY id DESC LIMIT 100)")
-        conn.commit()
-        conn.close()
-        logging.debug("Heartbeat OK")
-    except Exception as e:
-        logging.error(f"Heartbeat: {e}")
     async def _self_diagnose_job():
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self_diagnose_and_grow)
@@ -3586,7 +3570,6 @@ async def keepalive_heartbeat():
     # Первый цикл обучения — через 60 сек после старта
     asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))  # 5 мин после старта
     logging.info("APEX запущен!")
-
 
 async def on_startup_diagnose(app):
     """Первая самодиагностика через 8 мин после старта"""
