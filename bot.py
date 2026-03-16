@@ -2739,7 +2739,7 @@ async def auto_scan_1w():
 
 
 async def auto_scan_mega():
-    """Каждые 6 часов: скан мега-сделок на 100-200% на 4h и 1d таймфреймах"""
+    """Каждые 6 часов: скан мега-сделок на 100-200% на 4h, 1d и 1w таймфреймах"""
     try:
         from smc_engine import detect_mega_trade
     except ImportError:
@@ -2753,9 +2753,12 @@ async def auto_scan_mega():
         try:
             candles_4h = get_candles(symbol, "4h", 100)
             candles_1d = get_candles(symbol, "1d", 60)
+            candles_1w = get_candles(symbol, "1w", 50)
             if len(candles_4h) < 50 or len(candles_1d) < 30:
                 continue
-            result = detect_mega_trade(candles_4h, candles_1d, symbol)
+            # Используем недельные если доступны, иначе дневные
+            base_candles = candles_1w if len(candles_1w) >= 20 else candles_1d
+            result = detect_mega_trade(candles_4h, base_candles, symbol)
             if result and result["score"] >= 45:
                 found.append(result)
             await asyncio.sleep(0.5)
