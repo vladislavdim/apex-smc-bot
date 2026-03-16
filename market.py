@@ -1676,7 +1676,7 @@ def get_candles(symbol, interval="1h", limit=200):
     except Exception as e:
         logging.debug(f"Binance Spot {symbol} {interval}: {e}")
 
-    logging.warning(f"Нет свечей для {symbol} {interval}")
+    logging.debug(f"Нет свечей для {symbol} {interval}")
     return []
 
 
