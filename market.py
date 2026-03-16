@@ -1365,17 +1365,18 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
 
 
 
-            # --- TP1: ближайшая зона ликвидности или swing high ---
-            tp1_candidates = []
-            risk_val = abs(entry - sl) if sl else entry * 0.015
+            # --- TP1: по ATR и структуре ---
+            # ATR за 14 свечей — реальная волатильность пары
+            atr = sum(candles[i]["high"] - candles[i]["low"] for i in range(-14, 0)) / 14
+            risk_val = abs(entry - sl) if sl else atr
 
+            tp1_candidates = []
             sell_stops = heatmap.get("nearest_sell_stops")
             sell_stops_price = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
-            # Любая зона ликвидности выше входа
             if sell_stops_price and sell_stops_price > entry * 1.005:
                 tp1_candidates.append(sell_stops_price)
 
-            # Swing highs выше входа — берём ближайший реальный
+            # Swing highs выше входа
             tp_swings = sorted([h for h in highs if h > entry * 1.005])
             if tp_swings:
                 tp1_candidates.append(tp_swings[0])
@@ -1384,22 +1385,21 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if fvg and fvg["top"] > entry * 1.005:
                 tp1_candidates.append(fvg["top"])
 
-            # Минимальный TP1 — x2.5 от риска
-            min_tp1 = entry + risk_val * 2.5
+            # Минимальный TP1 — x2 ATR от входа
+            min_tp1 = entry + atr * 2.0
             if tp1_candidates:
                 tp1_raw = min(tp1_candidates)
-                # Если найденный уровень слишком близко — используем x2.5 от риска
                 tp1 = smart_round(max(tp1_raw, min_tp1))
             else:
                 tp1 = smart_round(min_tp1)
 
-            # --- TP2: следующая зона после TP1 ---
-            tp2_swings = sorted([h for h in highs if h > tp1 * 1.01])
-            tp2_candidates = []
+            # --- TP2: x3.5 ATR или следующая структура ---
+            tp2_swings = sorted([h for h in highs if h > tp1 * 1.005])
+            min_tp2 = entry + atr * 3.5
             if tp2_swings:
-                tp2_candidates.append(tp2_swings[0])
-            # Если нет структуры — x4 от риска
-            tp2 = smart_round(min(tp2_candidates)) if tp2_candidates else smart_round(entry + risk_val * 4.5)
+                tp2 = smart_round(max(tp2_swings[0], min_tp2))
+            else:
+                tp2 = smart_round(min_tp2)
 
             # TP3 = TP2
             tp3 = tp2
