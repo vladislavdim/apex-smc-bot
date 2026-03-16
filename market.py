@@ -249,11 +249,10 @@ ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit(
 ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else 0
 SIGNAL_CHANNEL = int(os.environ.get("SIGNAL_CHANNEL_ID", "-1003122576951"))  # TG канал сигналов
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_KEYS = [
+GROQ_KEYS = [k for k in [
     os.environ.get("GROQ_API_KEY", ""),
-    os.environ.get("GROQ_API_KEY_2", ""),
-    os.environ.get("GROQ_API_KEY_3", ""),
-]
+    *[os.environ.get(f"GROQ_API_KEY_{i}", "") for i in range(2, 20)]
+] if k]
 _groq_key_index = 0
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 TWELVEDATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
