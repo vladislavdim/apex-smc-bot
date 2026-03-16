@@ -2704,6 +2704,74 @@ async def auto_scan_1d():
         await _send_signal(sd)
         await asyncio.sleep(1)
 
+async def auto_scan_mega():
+    """Каждые 6 часов: скан мега-сделок на 100-200% на 4h и 1d таймфреймах"""
+    try:
+        from smc_engine import detect_mega_trade
+    except ImportError:
+        logging.warning("detect_mega_trade не найден в smc_engine")
+        return
+
+    pairs = get_top_pairs(50)
+    found = []
+
+    for symbol in pairs:
+        try:
+            candles_4h = get_candles(symbol, "4h", 100)
+            candles_1d = get_candles(symbol, "1d", 60)
+            if len(candles_4h) < 50 or len(candles_1d) < 30:
+                continue
+            result = detect_mega_trade(candles_4h, candles_1d, symbol)
+            if result and result["score"] >= 45:
+                found.append(result)
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logging.debug(f"auto_scan_mega {symbol}: {e}")
+
+    found.sort(key=lambda x: x["score"], reverse=True)
+    logging.info(f"Мега-скан: найдено {len(found)} сигналов")
+
+    for r in found[:3]:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            emoji     = "🟢" if direction == "BULLISH" else "🔴"
+            arrow     = "▲" if direction == "BULLISH" else "▼"
+
+            signals_text = "\n".join(r["signals"])
+
+            text = (
+                "💎 <b>МЕГА СДЕЛКА</b> [4h/1d]\n"
+                + emoji + " <b>" + symbol + "</b> — " + direction + "\n"
+                + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                + signals_text + "\n"
+                + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                + f"💰 <b>Вход:</b> <code>{r['entry']:.4f}</code>\n"
+                + f"🛑 <b>Стоп:</b> <code>{r['sl']:.4f}</code> (-{r['sl_pct']}%)\n"
+                + f"🎯 <b>TP1:</b> <code>{r['tp1']:.4f}</code> (+{r['tp1_pct']}%)\n"
+                + f"🎯 <b>TP2:</b> <code>{r['tp2']:.4f}</code> (+{r['tp2_pct']}%)\n"
+                + f"🎯 <b>TP3:</b> <code>{r['tp3']:.4f}</code> (+{r['tp3_pct']}%)\n"
+                + "⏱ <b>Горизонт:</b> 2-8 недель\n"
+                + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                + f"📊 Диапазон: {r['range_low']:.4f}–{r['range_high']:.4f} ({r['range_pct']}%)\n"
+                + f"📅 Дней в боковике: {r['days_in_range']}\n"
+                + f"🔥 Score: {r['score']}/100"
+            )
+
+            if ADMIN_ID:
+                await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+
+            # Сохраняем в БД как обычный сигнал с пометкой MEGA
+            save_signal_db(
+                symbol, direction, "MEGA",
+                r["entry"], r["tp1"], r["tp2"], r["tp3"], r["sl"],
+                "4h", 24 * 14, "💎 МЕГА",
+                confluence=r["score"], regime="MEGA"
+            )
+            await asyncio.sleep(2)
+        except Exception as e:
+            logging.error(f"auto_scan_mega send {r.get('symbol')}: {e}")
+
 
 async def auto_accumulation_scan():
     """Каждый час: сканируем все топ-50 на накопление перед пампом"""
@@ -3672,6 +3740,7 @@ def main():
             scheduler.add_job(auto_scan_1h, "interval", hours=1)
             scheduler.add_job(auto_scan_4h, "interval", hours=3)
             scheduler.add_job(auto_scan_1d, "interval", hours=6)
+            scheduler.add_job(auto_scan_mega, "interval", hours=6, jitter=1800)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
