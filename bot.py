@@ -2698,7 +2698,7 @@ async def auto_scan_job():
 
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
-    signals = await _scan_tf("1h", pairs_limit=50)
+    signals = await _scan_tf("1h", pairs_limit=30)
     logging.info(f"Скан 1h: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
     logging.info(f"Скан 1h: актуальных {len(valid)}/{len(signals)}")
@@ -2709,7 +2709,7 @@ async def auto_scan_1h():
 
 async def auto_scan_4h():
     """Каждые 30 минут: скан 4h таймфрейма"""
-    signals = await _scan_tf("4h", pairs_limit=50)
+    signals = await _scan_tf("4h", pairs_limit=25)
     logging.info(f"Скан 4h: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=3.0)]
     logging.info(f"Скан 4h: актуальных {len(valid)}/{len(signals)}")
@@ -2720,7 +2720,7 @@ async def auto_scan_4h():
 
 async def auto_scan_1d():
     """Каждый час: скан 1d таймфрейма"""
-    signals = await _scan_tf("1d", pairs_limit=50)
+    signals = await _scan_tf("1d", pairs_limit=20)
     logging.info(f"Скан 1d: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=5.0)]
     for sd in valid[:2]:
@@ -2730,7 +2730,7 @@ async def auto_scan_1d():
 
 async def auto_scan_1w():
     """Каждые 6 часов: скан недельного таймфрейма — долгосрочные сделки"""
-    signals = await _scan_tf("1w", pairs_limit=30)
+    signals = await _scan_tf("1w", pairs_limit=15)
     logging.info(f"Скан 1w: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=8.0)]
     for sd in valid[:2]:
