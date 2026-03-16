@@ -1429,7 +1429,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         # Проверяем что уровни логичны
         risk = abs(entry - sl)
         reward = abs(tp1 - entry)
-        if risk == 0 or reward / risk < 1.2:
+        if risk == 0 or reward / risk < 0.8:
             raise ValueError(f"плохой RR: {round(reward/risk,2) if risk else 0}")
 
         return {
