@@ -3704,11 +3704,12 @@ def main():
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
-            scheduler.add_job(auto_scan_job, "interval", minutes=10)
-            scheduler.add_job(auto_scan_1h, "interval", hours=1)
-            scheduler.add_job(auto_scan_4h, "interval", hours=3)
-            scheduler.add_job(auto_scan_1d, "interval", hours=6)
-            scheduler.add_job(auto_scan_mega, "interval", hours=6, jitter=1800)
+            scheduler.add_job(auto_scan_job, "interval", minutes=10)        # проверка закрытых
+            scheduler.add_job(auto_scan_1h, "interval", minutes=10)       # 1h — каждые 10 мин
+            scheduler.add_job(auto_scan_4h, "interval", minutes=30)       # 4h — каждые 30 мин
+            scheduler.add_job(auto_scan_1d, "interval", hours=1)          # 1d — каждый час
+            scheduler.add_job(auto_scan_1w, "interval", hours=6)          # 1w — каждые 6 часов
+            scheduler.add_job(auto_scan_mega, "interval", hours=6, jitter=1800)  # мега-сделки
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
