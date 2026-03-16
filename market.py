@@ -1365,28 +1365,36 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
 
 
 
-            # --- TP1: ближайшая зона ликвидности выше ---
+            # --- TP1: сильная зона ликвидности выше (HIGH strength) ---
             tp1_candidates = []
             sell_stops = heatmap.get("nearest_sell_stops")
             sell_stops_price = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
-            if sell_stops_price and sell_stops_price > entry * 1.005:
+            sell_stops_strength = sell_stops.get("strength", "") if isinstance(sell_stops, dict) else ""
+            # Приоритет — HIGH strength зона ликвидности
+            if sell_stops_price and sell_stops_price > entry * 1.01 and sell_stops_strength == "HIGH":
                 tp1_candidates.append(sell_stops_price)
-            # Swing highs выше входа
-            tp_swings = [h for h in highs if h > entry * 1.005]
-            if tp_swings:
-                tp1_candidates.append(min(tp_swings))
-            # FVG верхняя граница
-            if fvg and fvg["top"] > entry * 1.005:
+            # Swing highs выше входа — берём дальний (не ближайший)
+            tp_swings = sorted([h for h in highs if h > entry * 1.02])
+            if len(tp_swings) >= 2:
+                tp1_candidates.append(tp_swings[1])  # второй swing high — дальше
+            elif tp_swings:
+                tp1_candidates.append(tp_swings[0])
+            # FVG как дополнительный кандидат
+            if fvg and fvg["top"] > entry * 1.02:
                 tp1_candidates.append(fvg["top"])
-            tp1 = smart_round(min(tp1_candidates)) if tp1_candidates else smart_round(entry * 1.05)
+            # Если нет сильной зоны — математика от риска x3
+            risk_val = abs(entry - sl) if sl else entry * 0.02
+            tp1 = smart_round(min(tp1_candidates)) if tp1_candidates else smart_round(entry + risk_val * 3)
 
-            # --- TP2: следующий swing high или OB выше TP1 ---
-            tp2_swings = [h for h in highs if h > tp1 * 1.005]
-            tp2 = smart_round(min(tp2_swings)) if tp2_swings else smart_round(entry + (tp1 - entry) * 2)
+            # --- TP2: следующая сильная зона после TP1 ---
+            tp2_swings = sorted([h for h in highs if h > tp1 * 1.01])
+            all_stops = heatmap.get("all_sell_stops", [])
+            tp2_liq = [s["price"] for s in all_stops if isinstance(s, dict) and s.get("price", 0) > tp1 * 1.01 and s.get("strength") == "HIGH"] if all_stops else []
+            tp2_candidates = tp2_swings[:2] + tp2_liq[:1]
+            tp2 = smart_round(min(tp2_candidates)) if tp2_candidates else smart_round(entry + risk_val * 5)
 
-            # --- TP3: дальний swing high или x3 от TP1 расстояния ---
-            tp3_swings = [h for h in highs if h > tp2 * 1.005]
-            tp3 = smart_round(min(tp3_swings)) if tp3_swings else smart_round(entry + (tp1 - entry) * 4)
+            # TP3 = TP2 (убираем третий тейк — оставляем 2 точных)
+            tp3 = tp2
 
         else:  # BEARISH
             # --- ENTRY ---
@@ -1422,11 +1430,13 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 tp1_candidates.append(fvg["bottom"])
             tp1 = smart_round(max(tp1_candidates)) if tp1_candidates else smart_round(entry * 0.95)
 
-            tp2_swings = [l for l in lows if l < tp1 * 0.995]
-            tp2 = smart_round(max(tp2_swings)) if tp2_swings else smart_round(entry - (entry - tp1) * 2)
+            # TP2: следующая зона ликвидности ниже TP1
+            tp2_swings = sorted([l for l in lows if l < tp1 * 0.99], reverse=True)
+            risk_val_b = abs(entry - sl) if sl else entry * 0.02
+            tp2 = smart_round(max(tp2_swings[:2])) if len(tp2_swings) >= 2 else smart_round(entry - risk_val_b * 5)
 
-            tp3_swings = [l for l in lows if l < tp2 * 0.995]
-            tp3 = smart_round(max(tp3_swings)) if tp3_swings else smart_round(entry - (entry - tp1) * 4)
+            # TP3 = TP2 (убираем третий тейк)
+            tp3 = tp2
 
         # Если нет структуры выше/ниже для TP — используем математику для TP
         # но SL оставляем структурный
@@ -1443,13 +1453,13 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             tf_risk = {"5m": 0.010, "15m": 0.015, "1h": 0.025, "4h": 0.050, "1d": 0.100}
             math_risk = price * tf_risk.get(timeframe, 0.025)
             if direction == "BULLISH":
-                tp1 = smart_round(entry + max(risk * 2, math_risk * 2))
-                tp2 = smart_round(entry + max(risk * 3, math_risk * 3))
-                tp3 = smart_round(entry + max(risk * 5, math_risk * 5))
+                tp1 = smart_round(entry + max(risk * 3, math_risk * 3))
+                tp2 = smart_round(entry + max(risk * 5, math_risk * 5))
+                tp3 = tp2
             else:
-                tp1 = smart_round(entry - max(risk * 2, math_risk * 2))
-                tp2 = smart_round(entry - max(risk * 3, math_risk * 3))
-                tp3 = smart_round(entry - max(risk * 5, math_risk * 5))
+                tp1 = smart_round(entry - max(risk * 3, math_risk * 3))
+                tp2 = smart_round(entry - max(risk * 5, math_risk * 5))
+                tp3 = tp2
             reward = abs(tp1 - entry)
             rr = round(reward / risk, 2)
 
@@ -1473,14 +1483,14 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         entry = smart_round(price)
         if direction == "BULLISH":
             sl  = smart_round(entry - risk)
-            tp1 = smart_round(entry + risk * 2)
-            tp2 = smart_round(entry + risk * 3)
-            tp3 = smart_round(entry + risk * 5)
+            tp1 = smart_round(entry + risk * 3)
+            tp2 = smart_round(entry + risk * 5)
+            tp3 = tp2
         else:
             sl  = smart_round(entry + risk)
-            tp1 = smart_round(entry - risk * 2)
-            tp2 = smart_round(entry - risk * 3)
-            tp3 = smart_round(entry - risk * 5)
+            tp1 = smart_round(entry - risk * 3)
+            tp2 = smart_round(entry - risk * 5)
+            tp3 = tp2
         return {
             "entry": entry, "sl": sl,
             "tp1": tp1, "tp2": tp2, "tp3": tp3,
