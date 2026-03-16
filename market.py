@@ -1346,8 +1346,9 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 sl_candidates.append(ob["bottom"] * (1 - buf))
             # 3. Зона ликвидности (buy stops) ниже
             buy_stops = heatmap.get("nearest_buy_stops")
-            if buy_stops and buy_stops < entry:
-                sl_candidates.append(buy_stops * (1 - buf))
+            buy_stops_price = buy_stops["price"] if isinstance(buy_stops, dict) else buy_stops
+            if buy_stops_price and buy_stops_price < entry:
+                sl_candidates.append(buy_stops_price * (1 - buf))
             # 4. Fallback: ATR-based
             if not sl_candidates:
                 atr = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
@@ -1362,8 +1363,9 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             # --- TP1: ближайшая зона ликвидности выше ---
             tp1_candidates = []
             sell_stops = heatmap.get("nearest_sell_stops")
-            if sell_stops and sell_stops > entry * 1.005:
-                tp1_candidates.append(sell_stops)
+            sell_stops_price = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
+            if sell_stops_price and sell_stops_price > entry * 1.005:
+                tp1_candidates.append(sell_stops_price)
             # Swing highs выше входа
             tp_swings = [h for h in highs if h > entry * 1.005]
             if tp_swings:
@@ -1393,8 +1395,9 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if ob:
                 sl_candidates.append(ob["top"] * (1 + buf))
             sell_stops = heatmap.get("nearest_sell_stops")
-            if sell_stops and sell_stops > entry:
-                sl_candidates.append(sell_stops * (1 + buf))
+            sell_stops_price2 = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
+            if sell_stops_price2 and sell_stops_price2 > entry:
+                sl_candidates.append(sell_stops_price2 * (1 + buf))
             if not sl_candidates:
                 atr = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
                 sl_candidates.append(entry + atr * 1.5)
@@ -1407,8 +1410,9 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             # --- TP1: ближайшая зона ликвидности ниже ---
             tp1_candidates = []
             buy_stops = heatmap.get("nearest_buy_stops")
-            if buy_stops and buy_stops < entry * 0.995:
-                tp1_candidates.append(buy_stops)
+            buy_stops_price2 = buy_stops["price"] if isinstance(buy_stops, dict) else buy_stops
+            if buy_stops_price2 and buy_stops_price2 < entry * 0.995:
+                tp1_candidates.append(buy_stops_price2)
             tp_swings = [l for l in lows if l < entry * 0.995]
             if tp_swings:
                 tp1_candidates.append(max(tp_swings))
