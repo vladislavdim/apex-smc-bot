@@ -1346,21 +1346,18 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 # Только один — берём его
                 sl_candidates.append(sl_swing[0] * (1 - buf))
 
-            # OB низ как дополнительный кандидат
-            if ob:
-                sl_candidates.append(ob["bottom"] * (1 - buf))
-
-            # Зона ликвидности ниже
+            # Зона ликвидности ниже (только если > 1.5% от входа)
             buy_stops = heatmap.get("nearest_buy_stops")
             buy_stops_price = buy_stops["price"] if isinstance(buy_stops, dict) else buy_stops
-            if buy_stops_price and buy_stops_price < entry * 0.98:
+            if buy_stops_price and buy_stops_price < entry * 0.985:
                 sl_candidates.append(buy_stops_price * (1 - buf))
 
-            # Fallback: ATR * 2
+            # Fallback: ATR * 2 (только если совсем нет структуры)
             if not sl_candidates:
                 sl_candidates.append(entry - atr_sl * 2.0)
 
-            sl = smart_round(max(sl_candidates))
+            # Берём самый дальний кандидат (за реальной структурой)
+            sl = smart_round(min(sl_candidates))
 
 
 
