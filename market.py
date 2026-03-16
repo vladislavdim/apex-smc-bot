@@ -1361,12 +1361,10 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 sl_candidates.append(entry - atr_sl * 2.0)
 
             sl = smart_round(max(sl_candidates))
-
-            # Минимальный SL по таймфрейму
-            min_sl_pct = {"1w": 0.05, "1d": 0.04, "4h": 0.03, "1h": 0.02, "15m": 0.015}
-            min_sl = entry * (1 - min_sl_pct.get(timeframe, 0.02))
-            if sl > min_sl:
-                sl = smart_round(min_sl)
+            # Минимальный SL — не ближе 1% для защиты от шума
+            hard_min_sl = entry * 0.99
+            if sl > hard_min_sl:
+                sl = smart_round(hard_min_sl)
 
 
 
@@ -1383,7 +1381,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if sell_stops_price and sell_stops_price > entry * 1.005:
                 tp1_candidates.append(sell_stops_price)
 
-            # Swing highs выше входа — берём ближайший
+            # Swing highs выше входа
             tp_swings = sorted([h for h in highs if h > entry * 1.005])
             if tp_swings:
                 tp1_candidates.append(tp_swings[0])
@@ -1392,21 +1390,35 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if fvg and fvg["top"] > entry * 1.005:
                 tp1_candidates.append(fvg["top"])
 
-            # Минимальный TP1 = RR 1.5 (риск * 1.5)
-            min_tp1 = entry + risk_val * 1.5
-            if tp1_candidates:
-                tp1_raw = min(tp1_candidates)
-                tp1 = smart_round(max(tp1_raw, min_tp1))
-            else:
-                tp1 = smart_round(min_tp1)
+            # Психологические уровни — если нет структуры
+            if not tp1_candidates:
+                # Находим ближайший круглый уровень выше
+                magnitude = 10 ** (len(str(int(entry))) - 2)  # для BTC=1000, SOL=1, XRP=0.01
+                psych_tp1 = entry + magnitude
+                while psych_tp1 <= entry * 1.005:
+                    psych_tp1 += magnitude
+                tp1_candidates.append(smart_round(psych_tp1))
 
-            # --- TP2: следующий swing high или RR 2.5 ---
+            # Минимальный TP1 = RR 1.5
+            min_tp1 = entry + risk_val * 1.5
+            tp1_raw = min(tp1_candidates)
+            tp1 = smart_round(max(tp1_raw, min_tp1))
+
+            # --- TP2: следующий swing high или психологический уровень ---
             tp2_swings = sorted([h for h in highs if h > tp1 * 1.005])
-            min_tp2 = entry + risk_val * 2.5
+            tp2_candidates = []
             if tp2_swings:
-                tp2 = smart_round(max(tp2_swings[0], min_tp2))
-            else:
-                tp2 = smart_round(min_tp2)
+                tp2_candidates.append(tp2_swings[0])
+
+            # Следующий психологический уровень после TP1
+            magnitude2 = 10 ** (len(str(int(entry))) - 2)
+            psych_tp2 = tp1 + magnitude2
+            while psych_tp2 <= tp1 * 1.005:
+                psych_tp2 += magnitude2
+            tp2_candidates.append(smart_round(psych_tp2))
+
+            min_tp2 = entry + risk_val * 2.5
+            tp2 = smart_round(max(min(tp2_candidates), min_tp2))
 
             # TP3 = TP2
             tp3 = tp2
