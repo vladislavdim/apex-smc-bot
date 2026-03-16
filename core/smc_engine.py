@@ -1902,7 +1902,7 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
             new_low  = min(consolidation_low,  c["low"])
             new_range_pct = (new_high - new_low) / new_low * 100
             # Если добавление этой свечи расширяет диапазон больше 25% — стоп
-            if new_range_pct > 25 and days_in_range >= 5:
+            if new_range_pct > 35 and days_in_range >= 5:
                 break
             consolidation_high = new_high
             consolidation_low  = new_low
@@ -1917,8 +1917,8 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
         if days_in_range < 10:
             return None
 
-        # Диапазон не должен быть шире 30%
-        if range_pct > 30:
+        # Диапазон не должен быть шире 35%
+        if range_pct > 35:
             return None
 
         recent = recent_all[-days_in_range:]
@@ -1941,11 +1941,8 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
         mm = detect_mm_accumulation(candles_4h)
         mm_score = mm.get("score", 0) if mm else 0
 
-        # 6. Wyckoff фаза
-        wyckoff = detect_wyckoff_phase(candles_1d)
-        wyckoff_phase = wyckoff.get("phase", "") if wyckoff else ""
-        wyckoff_bullish = wyckoff_phase in ("ACCUMULATION", "MARKUP", "TRANSITION")
-        wyckoff_bearish = wyckoff_phase in ("DISTRIBUTION", "MARKDOWN")
+        # 6. Wyckoff фаза убран — даёт противоречивые сигналы
+        wyckoff_phase = ""
 
         # 7. Зоны ликвидности
         heatmap = get_liquidity_heatmap(candles_4h)
@@ -1974,16 +1971,6 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
             score += 10
             signals.append(f"📦 MM Накопление (score {mm_score}/4)")
 
-        # Wyckoff
-        if wyckoff_bullish:
-            score += 15
-            signals.append(f"📊 Wyckoff: {wyckoff_phase}")
-            direction = "BULLISH"
-        elif wyckoff_bearish:
-            score += 15
-            signals.append(f"📊 Wyckoff: {wyckoff_phase}")
-            direction = "BEARISH"
-
         # Breakout
         if breakout_up and vol_spike:
             score += 25
@@ -2008,17 +1995,19 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
 
         # Ликвидность
         liq_note = ""
-        if direction == "BULLISH" and nearest_sell:
-            liq_note = f"💧 Ликвидность выше: ${nearest_sell:.4f}"
+        nearest_sell_price = nearest_sell.get("price") if isinstance(nearest_sell, dict) else nearest_sell
+        nearest_buy_price = nearest_buy.get("price") if isinstance(nearest_buy, dict) else nearest_buy
+        if direction == "BULLISH" and nearest_sell_price:
+            liq_note = f"💧 Ликвидность выше: {nearest_sell_price:.4f}"
             signals.append(liq_note)
             score += 5
-        elif direction == "BEARISH" and nearest_buy:
-            liq_note = f"💧 Ликвидность ниже: ${nearest_buy:.4f}"
+        elif direction == "BEARISH" and nearest_buy_price:
+            liq_note = f"💧 Ликвидность ниже: {nearest_buy_price:.4f}"
             signals.append(liq_note)
             score += 5
 
         # Минимальный порог
-        if score < 45:
+        if score < 35:
             return None
 
         # Расчёт уровней
