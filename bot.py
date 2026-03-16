@@ -2893,7 +2893,7 @@ def full_scan_raw(symbol, timeframe="1h"):
             return None
 
         direction = mtf["direction"]
-        candles = get_candles(symbol, timeframe, 200)
+        candles = get_candles(symbol, timeframe, 100)
         if len(candles) < 20:
             return None
 
