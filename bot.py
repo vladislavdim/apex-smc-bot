@@ -2848,9 +2848,7 @@ def full_scan_raw(symbol, timeframe="1h"):
                 ).fetchone()
                 if _row:
                     return None  # уже есть открытая сделка по этой паре+ТФ — не дублируем
-        except Exception as e:
-            import logging
-            logging.error(e)
+        except Exception as _e:
             pass
 
         mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h", "1d"])
