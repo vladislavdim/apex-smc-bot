@@ -1871,3 +1871,195 @@ def detect_breaker_block(candles: list, direction: str) -> dict | None:
             }
 
     return None
+
+
+def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> dict | None:
+    """
+    Детектор мега-сделок на 100-200%:
+    - Долгий боковик (30+ свечей 1d в диапазоне < 15%)
+    - Сжатие объёма во время боковика
+    - Зоны ликвидности выше/ниже диапазона
+    - Wyckoff фаза C/D (спринг или UTAD пройден)
+    - MM Accumulation score 3+/4
+    - Breakout с объёмом x2.5+
+    """
+    try:
+        if len(candles_1d) < 30 or len(candles_4h) < 50:
+            return None
+
+        # 1. Определяем диапазон боковика на 1d
+        lookback = min(60, len(candles_1d))
+        recent = candles_1d[-lookback:]
+        highs = [c["high"] for c in recent]
+        lows  = [c["low"]  for c in recent]
+        closes = [c["close"] for c in recent]
+        vols  = [c.get("volume", 0) for c in recent]
+
+        range_high = max(highs)
+        range_low  = min(lows)
+        range_mid  = (range_high + range_low) / 2
+        range_pct  = (range_high - range_low) / range_low * 100
+        current    = closes[-1]
+
+        # Боковик должен быть < 20% диапазона
+        if range_pct > 20:
+            return None
+
+        # 2. Считаем дни в боковике
+        days_in_range = 0
+        for c in reversed(recent):
+            if range_low * 0.95 <= c["close"] <= range_high * 1.05:
+                days_in_range += 1
+            else:
+                break
+
+        if days_in_range < 20:
+            return None
+
+        # 3. Сжатие объёма — средний объём последних 10 свечей < среднего за 30
+        avg_vol_30 = sum(vols[-30:]) / 30 if len(vols) >= 30 else sum(vols) / len(vols)
+        avg_vol_10 = sum(vols[-10:]) / 10 if len(vols) >= 10 else avg_vol_30
+        vol_compression = avg_vol_10 < avg_vol_30 * 0.8
+
+        # 4. Breakout — последняя свеча пробивает диапазон
+        last_close = closes[-1]
+        last_vol   = vols[-1] if vols else 0
+        breakout_up   = last_close > range_high * 1.005
+        breakout_down = last_close < range_low  * 0.995
+        vol_spike = last_vol > avg_vol_30 * 2.0 if avg_vol_30 > 0 else False
+
+        # 5. MM Accumulation на 4h
+        mm = detect_mm_accumulation(candles_4h)
+        mm_score = mm.get("score", 0) if mm else 0
+
+        # 6. Wyckoff фаза
+        wyckoff = detect_wyckoff_phase(candles_1d)
+        wyckoff_phase = wyckoff.get("phase", "") if wyckoff else ""
+        wyckoff_bullish = wyckoff_phase in ("ACCUMULATION", "MARKUP", "TRANSITION")
+        wyckoff_bearish = wyckoff_phase in ("DISTRIBUTION", "MARKDOWN")
+
+        # 7. Зоны ликвидности
+        heatmap = get_liquidity_heatmap(candles_4h)
+        nearest_buy  = heatmap.get("nearest_buy_stops")
+        nearest_sell = heatmap.get("nearest_sell_stops")
+
+        # Оцениваем направление и силу сигнала
+        score = 0
+        signals = []
+        direction = None
+
+        # Боковик
+        score += 20
+        signals.append(f"📦 Боковик {days_in_range} дней (диапазон {range_pct:.1f}%)")
+
+        # Сжатие объёма
+        if vol_compression:
+            score += 15
+            signals.append(f"📉 Объём сжат до {round(avg_vol_10/avg_vol_30*100)}% от среднего")
+
+        # MM Accumulation
+        if mm_score >= 3:
+            score += 20
+            signals.append(f"🐋 MM Накопление СИЛЬНОЕ (score {mm_score}/4)")
+        elif mm_score >= 2:
+            score += 10
+            signals.append(f"📦 MM Накопление (score {mm_score}/4)")
+
+        # Wyckoff
+        if wyckoff_bullish:
+            score += 15
+            signals.append(f"📊 Wyckoff: {wyckoff_phase}")
+            direction = "BULLISH"
+        elif wyckoff_bearish:
+            score += 15
+            signals.append(f"📊 Wyckoff: {wyckoff_phase}")
+            direction = "BEARISH"
+
+        # Breakout
+        if breakout_up and vol_spike:
+            score += 25
+            signals.append(f"🚀 BREAKOUT вверх с объёмом x{round(last_vol/avg_vol_30, 1)}")
+            direction = "BULLISH"
+        elif breakout_down and vol_spike:
+            score += 25
+            signals.append(f"💥 BREAKOUT вниз с объёмом x{round(last_vol/avg_vol_30, 1)}")
+            direction = "BEARISH"
+        elif breakout_up:
+            score += 10
+            signals.append(f"⬆️ Пробой вверх (объём слабый)")
+            direction = "BULLISH"
+        elif breakout_down:
+            score += 10
+            signals.append(f"⬇️ Пробой вниз (объём слабый)")
+            direction = "BEARISH"
+
+        # Если нет направления — определяем по позиции в диапазоне
+        if not direction:
+            direction = "BULLISH" if current > range_mid else "BEARISH"
+
+        # Ликвидность
+        liq_note = ""
+        if direction == "BULLISH" and nearest_sell:
+            liq_note = f"💧 Ликвидность выше: ${nearest_sell:.4f}"
+            signals.append(liq_note)
+            score += 5
+        elif direction == "BEARISH" and nearest_buy:
+            liq_note = f"💧 Ликвидность ниже: ${nearest_buy:.4f}"
+            signals.append(liq_note)
+            score += 5
+
+        # Минимальный порог
+        if score < 45:
+            return None
+
+        # Расчёт уровней
+        range_size = range_high - range_low
+        entry = current
+
+        if direction == "BULLISH":
+            sl    = round(range_low * 0.97, 6)       # под нижней границей боковика -3%
+            tp1   = round(entry + range_size * 0.5, 6)  # +50% диапазона
+            tp2   = round(entry + range_size * 1.5, 6)  # +150% диапазона
+            tp3   = round(entry + range_size * 2.5, 6)  # +250% диапазона
+            sl_pct  = round((entry - sl) / entry * 100, 1)
+            tp1_pct = round((tp1 - entry) / entry * 100, 1)
+            tp2_pct = round((tp2 - entry) / entry * 100, 1)
+            tp3_pct = round((tp3 - entry) / entry * 100, 1)
+        else:
+            sl    = round(range_high * 1.03, 6)
+            tp1   = round(entry - range_size * 0.5, 6)
+            tp2   = round(entry - range_size * 1.5, 6)
+            tp3   = round(entry - range_size * 2.5, 6)
+            sl_pct  = round((sl - entry) / entry * 100, 1)
+            tp1_pct = round((entry - tp1) / entry * 100, 1)
+            tp2_pct = round((entry - tp2) / entry * 100, 1)
+            tp3_pct = round((entry - tp3) / entry * 100, 1)
+
+        return {
+            "symbol": symbol,
+            "direction": direction,
+            "score": score,
+            "signals": signals,
+            "days_in_range": days_in_range,
+            "range_pct": round(range_pct, 1),
+            "range_high": range_high,
+            "range_low": range_low,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "sl_pct": sl_pct,
+            "tp1_pct": tp1_pct,
+            "tp2_pct": tp2_pct,
+            "tp3_pct": tp3_pct,
+            "wyckoff": wyckoff_phase,
+            "mm_score": mm_score,
+            "vol_compression": vol_compression,
+            "breakout": breakout_up or breakout_down,
+        }
+
+    except Exception as e:
+        import logging
+        logging.debug(f"detect_mega_trade {symbol}: {e}")
+        return None
