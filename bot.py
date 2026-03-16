@@ -3741,17 +3741,17 @@ def main():
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
-            scheduler.add_job(auto_scan_job, "interval", minutes=10)        # проверка закрытых
-            scheduler.add_job(auto_scan_1h, "interval", minutes=10)       # 1h — каждые 10 мин
-            scheduler.add_job(auto_scan_4h, "interval", minutes=30)       # 4h — каждые 30 мин
-            scheduler.add_job(auto_scan_1d, "interval", hours=1)          # 1d — каждый час
+            scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
+            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60)       # 1h — каждые 10 мин
+            scheduler.add_job(auto_scan_4h, "interval", minutes=30, jitter=120)       # 4h — каждые 30 мин
+            scheduler.add_job(auto_scan_1d, "interval", hours=1, jitter=300)          # 1d — каждый час
             scheduler.add_job(auto_scan_1w, "interval", hours=6)          # 1w — каждые 6 часов
             scheduler.add_job(auto_scan_mega, "interval", hours=6, jitter=1800)  # мега-сделки
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
-            scheduler.add_job(night_brain_tasks, "interval", minutes=30)
+            scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
             scheduler.add_job(backup_db_to_github, "interval", hours=1)
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
