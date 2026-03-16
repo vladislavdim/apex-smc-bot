@@ -640,7 +640,7 @@ def _smart_fetch(symbol: str, interval: str, limit: int) -> list:
     if errors:
         _groq_analyze_candle_failure(symbol, interval, errors)
 
-    logging.error(f"[Router] Нет свечей {symbol} {interval} | ошибки: {errors}")
+    logging.debug(f"[Router] Нет свечей {symbol} {interval} | ошибки: {errors}")
     return []
 
 def _groq_analyze_candle_failure(symbol: str, interval: str, errors: list):
