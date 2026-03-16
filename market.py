@@ -4696,15 +4696,17 @@ def ask_groq(prompt, max_tokens=800):
         logging.error("Groq: нет активных ключей")
         return None
 
-    for attempt in range(len(active_keys) * len(models)):
-        key_index = attempt % len(active_keys)
+        key_index = (_groq_key_index + attempt) % len(active_keys)
+
         key = active_keys[key_index]
         model = models[(attempt // len(active_keys)) % len(models)]
 
-        # Пропускаем ключ если он в rate limit (блокировка 60 секунд)
         rl_time = _key_rate_limited.get(key_index, 0)
         if time.time() - rl_time < 60:
+            _groq_key_index = (key_index + 1) % len(active_keys)
             continue
+
+
 
         try:
             client = Groq(api_key=key)
@@ -4715,6 +4717,7 @@ def ask_groq(prompt, max_tokens=800):
                 timeout=30,
             )
             _track_tokens(len(prompt) // 4 + max_tokens)
+            _groq_key_index = (key_index + 1) % len(active_keys)
             return r.choices[0].message.content
         except Exception as e:
             err_str = str(e).lower()
