@@ -72,8 +72,11 @@ _AP_GROQ_COOLDOWN = 30  # секунд между вызовами из autopilo
 _AP_GROQ_LOCK = __import__("threading").Lock()  # защита от параллельных вызовов
 
 # Ротация ключей для обхода лимитов
-GROQ_KEYS = [k for k in [os.environ.get("GROQ_API_KEY", "")] + [os.environ.get(f"GROQ_API_KEY_{i}", "") for i in range(2, 20)] if k]
-logging.info(f"[Autopilot] Groq ключей загружено: {len(GROQ_KEYS)}")
+GROQ_KEYS = [
+    os.environ.get("GROQ_API_KEY", ""),
+    os.environ.get("GROQ_API_KEY_2", ""),
+    os.environ.get("GROQ_API_KEY_3", ""),
+]
 _ap_groq_key_index = 0
 
 def _groq(prompt: str, max_tokens: int = 800) -> str:
@@ -85,45 +88,42 @@ def _groq(prompt: str, max_tokens: int = 800) -> str:
             time.sleep(_AP_GROQ_COOLDOWN - elapsed)
         _AP_LAST_GROQ_CALL = time.time()
     
-    for attempt in range(len(GROQ_KEYS) * 3):
-        model = _GROQ_MODELS[attempt % len(_GROQ_MODELS)]
-        key_index = (attempt // len(_GROQ_MODELS)) % len(GROQ_KEYS)
-        key = GROQ_KEYS[key_index]
-        if not key:
-            continue
-        try:
-            from groq import Groq
-            client = Groq(api_key=key)
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=0.3,
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception as e:
-            err = str(e)
-            if "429" in err:
-                # Парсим точное время ожидания из ошибки
-                wait = 15.0
-                try:
-                    m = re.search(r"try again in ([\d.]+)s", err)
-                    if m:
-                        wait = float(m.group(1)) + 1.5
-                except Exception:
-                    pass
-                logging.warning(f"[Autopilot] Groq rate limit (ключ {key_index+1}), жду {wait:.0f}с...")
-                time.sleep(wait)
+    # Ротация: перебираем все ключи для каждой модели
+    for model in _GROQ_MODELS:
+        for key_index, key in enumerate(GROQ_KEYS):
+            if not key:
                 continue
-            elif any(x in err for x in ["decommissioned", "not exist", "model_not_found", "does not exist"]):
-                logging.warning(f"[Autopilot] Модель {model} недоступна, пробую следующую")
-                break  # следующая модель
-            else:
-                logging.error(f"[Autopilot] Groq error (ключ {key_index+1}): {e}")
-                if attempt < len(GROQ_KEYS) * 3 - 1:
-                    time.sleep(5)
+            try:
+                from groq import Groq
+                client = Groq(api_key=key)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                err = str(e)
+                if "429" in err:
+                    # Rate limit — сразу переключаемся на следующий ключ
+                    wait = 2.0  # минимальная задержка перед следующим ключом
+                    try:
+                        m = re.search(r"try again in ([\d.]+)s", err)
+                        if m:
+                            wait = min(float(m.group(1)) + 0.5, 5.0)
+                    except Exception:
+                        pass
+                    logging.warning(f"[Autopilot] Rate limit ключ {key_index+1}, переключаю на {key_index+2}...")
+                    time.sleep(wait)
+                    continue  # следующий ключ
+                elif any(x in err for x in ["decommissioned", "not exist", "model_not_found", "does not exist"]):
+                    logging.warning(f"[Autopilot] Модель {model} недоступна")
+                    break  # следующая модель
+                else:
+                    logging.error(f"[Autopilot] Groq error (ключ {key_index+1}): {e}")
+                    time.sleep(2)
                     continue
-                return ""
     return ""
 
 
