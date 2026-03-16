@@ -1353,12 +1353,18 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if not sl_candidates:
                 atr = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
                 sl_candidates.append(entry - atr * 1.5)
-
-            sl = smart_round(max(sl_candidates))  # самый близкий SL (наименьший риск)
-            # Минимальный SL — не меньше 0.8% от входа
-            min_sl = entry * 0.992
+            sl = smart_round(max(sl_candidates))
+            # Минимальный SL по таймфрейму
+            min_sl_pct = {"1w": 0.05, "1d": 0.04, "4h": 0.025, "1h": 0.015, "15m": 0.01}
+            min_sl = entry * (1 - min_sl_pct.get(timeframe, 0.015))
             if sl > min_sl:
                 sl = smart_round(min_sl)
+
+
+
+
+
+
 
             # --- TP1: ближайшая зона ликвидности выше ---
             tp1_candidates = []
@@ -1386,27 +1392,24 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         else:  # BEARISH
             # --- ENTRY ---
             entry = smart_round(ob["bottom"] if ob else price)
-
             # --- SL: за последний swing high или над OB ---
             sl_candidates = []
             sl_swing = [h for h in highs if h > entry * 1.001]
             if sl_swing:
                 sl_candidates.append(max(sl_swing[-3:]) * (1 + buf))
-            if ob:
+            if ob and ob["top"] > entry:
                 sl_candidates.append(ob["top"] * (1 + buf))
             sell_stops = heatmap.get("nearest_sell_stops")
             sell_stops_price2 = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
             if sell_stops_price2 and sell_stops_price2 > entry:
                 sl_candidates.append(sell_stops_price2 * (1 + buf))
+            if not sl_candidates or max(sl_candidates) < entry * 1.01:
+                recent_high = max(c["high"] for c in candles[-20:])
+                if recent_high > entry:
+                    sl_candidates.append(recent_high * (1 + buf))
             if not sl_candidates:
-                atr = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
-                sl_candidates.append(entry + atr * 1.5)
-
-            sl = smart_round(min(sl_candidates))
-            max_sl = entry * 1.008
-            if sl < max_sl:
-                sl = smart_round(max_sl)
-
+                sl_candidates.append(entry * 1.02)
+            sl = smart_round(max(sl_candidates))
             # --- TP1: ближайшая зона ликвидности ниже ---
             tp1_candidates = []
             buy_stops = heatmap.get("nearest_buy_stops")
