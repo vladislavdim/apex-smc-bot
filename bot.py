@@ -2945,44 +2945,14 @@ def full_scan_raw(symbol, timeframe="1h"):
         if len(confluence) < 2:
             return None
 
-        # Риск и минимальный TP по таймфрейму
-        # SL достаточно широкий чтобы не выбивался случайным движением
-        TF_RISK_MAP = {
-            "5m":  0.010,   # SL=1.0%, TP1=2.0%, TP3=5%
-            "15m": 0.015,   # SL=1.5%, TP1=3.0%, TP3=7.5%
-            "1h":  0.025,   # SL=2.5%, TP1=5.0%, TP3=12.5%
-            "4h":  0.050,   # SL=5.0%, TP1=10%,  TP3=25%
-            "1d":  0.100,   # SL=10%,  TP1=20%,  TP3=50%
-        }
-        MIN_TP1_PCT = {
-            "5m":  0.015,   # минимум 1.5%
-            "15m": 0.025,   # минимум 2.5%
-            "1h":  0.040,   # минимум 4%
-            "4h":  0.080,   # минимум 8%
-            "1d":  0.180,   # минимум 18%
-        }
-        risk_pct = TF_RISK_MAP.get(timeframe, 0.025)
-        risk = price * risk_pct
-        min_tp1 = price * MIN_TP1_PCT.get(timeframe, 0.030)
-
-        if direction == "BULLISH":
-            entry = ob["top"] if ob else price
-            sl = smart_round(entry - risk)
-            tp1 = smart_round(entry + risk * 2)
-            tp2 = smart_round(entry + risk * 3)
-            tp3 = smart_round(entry + risk * 5)
-            # Проверяем минимальный TP1
-            if tp1 - entry < min_tp1:
-                return None
-        else:
-            entry = ob["bottom"] if ob else price
-            sl = smart_round(entry + risk)
-            tp1 = smart_round(entry - risk * 2)
-            tp2 = smart_round(entry - risk * 3)
-            tp3 = smart_round(entry - risk * 5)
-            # Проверяем минимальный TP1
-            if entry - tp1 < min_tp1:
-                return None
+        # Расчёт уровней по реальной рыночной структуре (SMC)
+        levels = calc_smart_levels(candles, direction, price, timeframe)
+        entry = levels["entry"]
+        sl    = levels["sl"]
+        tp1   = levels["tp1"]
+        tp2   = levels["tp2"]
+        tp3   = levels["tp3"]
+        logging.debug(f"Уровни [{levels['source']}] {symbol} {direction}: entry={entry} sl={sl} tp1={tp1} RR={levels['rr']}")
 
         est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
