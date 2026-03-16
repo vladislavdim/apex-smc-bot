@@ -4666,30 +4666,26 @@ def _track_tokens(count: int):
 def _tokens_available() -> bool:
     return _groq_tokens_used < _GROQ_DAILY_LIMIT
 
+# Словарь блокировок ключей: {key_index: timestamp когда получил rate limit}
+_key_rate_limited: dict = {}
+
 def ask_groq(prompt, max_tokens=800):
     """
-    Умный запрос к Groq:
-    - Трекинг суточного лимита токенов
-    - Retry при rate limit (до 3 попыток)
-    - Fallback на модели с отдельными лимитами
-    - Сокращает промпт если он слишком большой
-    - Ротация ключей для обхода лимитов
+    Умный запрос к Groq с быстрой ротацией ключей:
+    - При rate limit сразу помечает ключ на 60с и берёт следующий
+    - Не ждёт — мгновенно переключается
+    - Использует все доступные ключи
     """
     global _last_ai_call, _groq_key_index
-    # Глобальный кулдаун — не спамим Groq
-    elapsed = time.time() - _last_ai_call
-    if elapsed < AI_COOLDOWN:
-        time.sleep(AI_COOLDOWN - elapsed)
-    _last_ai_call = time.time()
 
-    # Сокращаем промпт если больше 6000 символов — экономим токены
+    # Сокращаем промпт если больше 6000 символов
     if len(prompt) > 6000:
         prompt = prompt[:5000] + "\n[промпт сокращён для экономии токенов]"
 
     models = [
-        "llama-3.1-8b-instant",        # основная — 500k TPD/день
-        "llama-3.1-8b-instant",        # fallback — отдельный лимит
-        "llama-3.1-8b-instant",        # резерв тяжёлый
+        "llama-3.1-8b-instant",
+        "llama3-8b-8192",
+        "gemma2-9b-it",
     ]
 
     active_keys = [k for k in GROQ_KEYS if k]
@@ -4697,10 +4693,16 @@ def ask_groq(prompt, max_tokens=800):
         logging.error("Groq: нет активных ключей")
         return None
 
-    for attempt in range(len(active_keys) * 2):
+    for attempt in range(len(active_keys) * len(models)):
         key_index = attempt % len(active_keys)
         key = active_keys[key_index]
-        model = models[min(attempt % len(models), len(models) - 1)]
+        model = models[(attempt // len(active_keys)) % len(models)]
+
+        # Пропускаем ключ если он в rate limit (блокировка 60 секунд)
+        rl_time = _key_rate_limited.get(key_index, 0)
+        if time.time() - rl_time < 60:
+            continue
+
         try:
             client = Groq(api_key=key)
             r = client.chat.completions.create(
@@ -4714,20 +4716,19 @@ def ask_groq(prompt, max_tokens=800):
         except Exception as e:
             err_str = str(e).lower()
             if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
-                logging.warning(f"Groq rate limit (ключ {key_index+1}), переключаю на следующий...")
-                time.sleep(1)
-                continue
-            elif "model" in err_str and "not found" in err_str:
+                # Блокируем ключ на 60 секунд и СРАЗУ переходим к следующему
+                _key_rate_limited[key_index] = time.time()
+                logging.warning(f"Groq rate limit ключ {key_index+1} — блокирую на 60с, переключаю...")
+                continue  # сразу следующий ключ без sleep
+            elif "model" in err_str and ("not found" in err_str or "decommissioned" in err_str):
                 logging.warning(f"Модель {model} недоступна, пробую следующую")
                 continue
             else:
-                logging.error(f"Groq error (ключ {key_index+1}, попытка {attempt+1}): {e}")
-                if attempt < len(active_keys) * 2 - 1:
-                    time.sleep(3)
-                    continue
-                return None
+                logging.error(f"Groq error (ключ {key_index+1}): {e}")
+                time.sleep(1)
+                continue
 
-    logging.error("Groq: все ключи исчерпаны")
+    logging.error("Groq: все ключи временно исчерпаны")
     return None
 
 # ===== APEX BRAIN v2 — АВТОНОМНОЕ САМООБУЧЕНИЕ =====
@@ -4738,8 +4739,8 @@ _groq_cache = {}
 _groq_cache_time = {}
 GROQ_CACHE_TTL = 300  # 5 минут
 
-# Глобальный кулдаун между вызовами Groq — защита от 429
-AI_COOLDOWN = 20   # секунд между вызовами
+# Кулдаун убран — ротация ключей справляется без глобального ожидания
+AI_COOLDOWN = 0
 _last_ai_call = 0
 
 def ask_groq_cached(prompt, max_tokens=400, cache_key=None):
