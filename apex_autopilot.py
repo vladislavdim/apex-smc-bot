@@ -72,11 +72,8 @@ _AP_GROQ_COOLDOWN = 30  # секунд между вызовами из autopilo
 _AP_GROQ_LOCK = __import__("threading").Lock()  # защита от параллельных вызовов
 
 # Ротация ключей для обхода лимитов
-GROQ_KEYS = [
-    os.environ.get("GROQ_API_KEY", ""),
-    os.environ.get("GROQ_API_KEY_2", ""),
-    os.environ.get("GROQ_API_KEY_3", ""),
-]
+GROQ_KEYS = [k for k in [os.environ.get("GROQ_API_KEY", "")] + [os.environ.get(f"GROQ_API_KEY_{i}", "") for i in range(2, 20)] if k]
+logging.info(f"[Autopilot] Groq ключей загружено: {len(GROQ_KEYS)}")
 _ap_groq_key_index = 0
 
 def _groq(prompt: str, max_tokens: int = 800) -> str:
