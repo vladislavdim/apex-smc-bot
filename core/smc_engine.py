@@ -1887,34 +1887,43 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
         if len(candles_1d) < 30 or len(candles_4h) < 50:
             return None
 
-        # 1. Определяем диапазон боковика на 1d
-        lookback = min(60, len(candles_1d))
-        recent = candles_1d[-lookback:]
-        highs = [c["high"] for c in recent]
-        lows  = [c["low"]  for c in recent]
-        closes = [c["close"] for c in recent]
-        vols  = [c.get("volume", 0) for c in recent]
+        # 1. Определяем боковик — ищем последовательность свечей в узком диапазоне
+        # Берём последние 30 свечей и ищем максимальный период консолидации
+        recent_all = candles_1d[-60:] if len(candles_1d) >= 60 else candles_1d
+        current = recent_all[-1]["close"]
 
-        range_high = max(highs)
-        range_low  = min(lows)
+        # Считаем дни подряд в боковике от последней свечи
+        days_in_range = 0
+        consolidation_high = recent_all[-1]["high"]
+        consolidation_low  = recent_all[-1]["low"]
+
+        for c in reversed(recent_all):
+            new_high = max(consolidation_high, c["high"])
+            new_low  = min(consolidation_low,  c["low"])
+            new_range_pct = (new_high - new_low) / new_low * 100
+            # Если добавление этой свечи расширяет диапазон больше 25% — стоп
+            if new_range_pct > 25 and days_in_range >= 5:
+                break
+            consolidation_high = new_high
+            consolidation_low  = new_low
+            days_in_range += 1
+
+        range_high = consolidation_high
+        range_low  = consolidation_low
         range_mid  = (range_high + range_low) / 2
         range_pct  = (range_high - range_low) / range_low * 100
-        current    = closes[-1]
 
-        # Боковик должен быть < 35% диапазона
-        if range_pct > 35:
-            return None
-
-        # 2. Считаем дни в боковике
-        days_in_range = 0
-        for c in reversed(recent):
-            if range_low * 0.93 <= c["close"] <= range_high * 1.07:
-                days_in_range += 1
-            else:
-                break
-
+        # Нужно минимум 10 дней консолидации
         if days_in_range < 10:
             return None
+
+        # Диапазон не должен быть шире 30%
+        if range_pct > 30:
+            return None
+
+        recent = recent_all[-days_in_range:]
+        closes = [c["close"] for c in recent]
+        vols   = [c.get("volume", 0) for c in recent]
 
         # 3. Сжатие объёма — средний объём последних 10 свечей < среднего за 30
         avg_vol_30 = sum(vols[-30:]) / 30 if len(vols) >= 30 else sum(vols) / len(vols)
