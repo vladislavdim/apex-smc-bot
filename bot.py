@@ -2650,8 +2650,31 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
     return signals
 
 
+def _is_entry_still_valid(sig_data: dict, max_drift_pct: float = 2.0) -> bool:
+    """Проверяет актуальность цены входа. Если цена ушла >max_drift_pct% — сигнал устарел."""
+    try:
+        entry = sig_data.get("entry", 0)
+        if not entry:
+            return True
+        prices = get_live_prices()
+        symbol = sig_data.get("symbol", "")
+        current = prices.get(symbol, {}).get("price", 0)
+        if not current:
+            return True
+        direction = sig_data.get("direction", "BULLISH")
+        if direction == "BULLISH" and current > entry * (1 + max_drift_pct / 100):
+            logging.info(f"[Актуальность] {symbol} цена ушла вверх — сигнал устарел")
+            return False
+        if direction == "BEARISH" and current < entry * (1 - max_drift_pct / 100):
+            logging.info(f"[Актуальность] {symbol} цена ушла вниз — сигнал устарел")
+            return False
+        return True
+    except Exception:
+        return True
+
+
 async def auto_scan_job():
-    """Каждые 30 мин: скан 5m и 15m таймфреймов"""
+    """Каждые 10 мин: проверка закрытых сделок"""
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
     closed = check_pending_signals()
     for c in closed:
@@ -2669,40 +2692,51 @@ async def auto_scan_job():
                 except:
                     pass
 
-    # 5m и 15m — быстрые скальп сигналы
-    for tf in ["5m", "15m"]:
-        signals = await _scan_tf(tf, pairs_limit=30)
-        logging.info(f"Скан {tf}: сигналов {len(signals)}")
-        for sd in signals[:3]:
-            await _send_signal(sd)
-            await asyncio.sleep(1)
+    # 5m и 15m убраны — используем только 1h, 4h, 1d, 1w
+    pass
 
 
 async def auto_scan_1h():
-    """Каждые 2 часа: скан 1h таймфрейма"""
+    """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
     signals = await _scan_tf("1h", pairs_limit=50)
     logging.info(f"Скан 1h: сигналов {len(signals)}")
-    for sd in signals[:3]:
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
+    logging.info(f"Скан 1h: актуальных {len(valid)}/{len(signals)}")
+    for sd in valid[:3]:
         await _send_signal(sd)
         await asyncio.sleep(1)
 
 
 async def auto_scan_4h():
-    """Каждые 6 часов: скан 4h таймфрейма"""
+    """Каждые 30 минут: скан 4h таймфрейма"""
     signals = await _scan_tf("4h", pairs_limit=50)
     logging.info(f"Скан 4h: сигналов {len(signals)}")
-    for sd in signals[:3]:
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=3.0)]
+    logging.info(f"Скан 4h: актуальных {len(valid)}/{len(signals)}")
+    for sd in valid[:3]:
         await _send_signal(sd)
         await asyncio.sleep(1)
 
 
 async def auto_scan_1d():
-    """Каждые 12 часов: скан 1d таймфрейма"""
-    signals = await _scan_tf("1d", pairs_limit=30)
+    """Каждый час: скан 1d таймфрейма"""
+    signals = await _scan_tf("1d", pairs_limit=50)
     logging.info(f"Скан 1d: сигналов {len(signals)}")
-    for sd in signals[:3]:
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=5.0)]
+    for sd in valid[:2]:
         await _send_signal(sd)
         await asyncio.sleep(1)
+
+
+async def auto_scan_1w():
+    """Каждые 6 часов: скан недельного таймфрейма — долгосрочные сделки"""
+    signals = await _scan_tf("1w", pairs_limit=30)
+    logging.info(f"Скан 1w: сигналов {len(signals)}")
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=8.0)]
+    for sd in valid[:2]:
+        await _send_signal(sd)
+        await asyncio.sleep(1)
+
 
 async def auto_scan_mega():
     """Каждые 6 часов: скан мега-сделок на 100-200% на 4h и 1d таймфреймах"""
