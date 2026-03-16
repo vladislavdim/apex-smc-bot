@@ -1301,6 +1301,169 @@ def smart_round(p, direction_multiplier=1.0) -> float:
     if p >= 0.001: return round(p, 7)
     return round(p, 10)
 
+def calc_smart_levels(candles, direction, price, timeframe="1h"):
+    """
+    Расчёт SL/TP по реальной рыночной структуре (SMC):
+    - SL: за swing low/high + буфер 0.3%
+    - TP1: ближайшая зона ликвидности (скопление стопов)
+    - TP2: следующий OB или FVG
+    - TP3: дальний swing high/low или x2 диапазона
+    Fallback на математический расчёт если структуры нет.
+    """
+    try:
+        if not candles or len(candles) < 20:
+            raise ValueError("мало свечей")
+
+        # Получаем структуру
+        highs, lows = find_swings(candles)
+        ob   = find_ob(candles, direction)
+        fvg  = find_fvg(candles, direction)
+        heatmap = get_liquidity_heatmap(candles)
+
+        closes = [c["close"] for c in candles]
+        candle_highs = [c["high"] for c in candles]
+        candle_lows  = [c["low"]  for c in candles]
+
+        # Буфер зависит от таймфрейма
+        buf_map = {"5m": 0.002, "15m": 0.003, "1h": 0.004, "4h": 0.006, "1d": 0.010}
+        buf = buf_map.get(timeframe, 0.004)
+
+        if direction == "BULLISH":
+            # --- ENTRY ---
+            entry = smart_round(ob["top"] if ob else price)
+
+            # --- SL: за последний swing low или под OB ---
+            sl_candidates = []
+            # 1. Swing lows ниже цены входа
+            sl_swing = [l for l in lows if l < entry * 0.999]
+            if sl_swing:
+                sl_candidates.append(min(sl_swing[-3:]) * (1 - buf))
+            # 2. Низ OB
+            if ob:
+                sl_candidates.append(ob["bottom"] * (1 - buf))
+            # 3. Зона ликвидности (buy stops) ниже
+            buy_stops = heatmap.get("nearest_buy_stops")
+            if buy_stops and buy_stops < entry:
+                sl_candidates.append(buy_stops * (1 - buf))
+            # 4. Fallback: ATR-based
+            if not sl_candidates:
+                atr = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
+                sl_candidates.append(entry - atr * 1.5)
+
+            sl = smart_round(max(sl_candidates))  # самый близкий SL (наименьший риск)
+            # Минимальный SL — не меньше 0.8% от входа
+            min_sl = entry * 0.992
+            if sl > min_sl:
+                sl = smart_round(min_sl)
+
+            # --- TP1: ближайшая зона ликвидности выше ---
+            tp1_candidates = []
+            sell_stops = heatmap.get("nearest_sell_stops")
+            if sell_stops and sell_stops > entry * 1.005:
+                tp1_candidates.append(sell_stops)
+            # Swing highs выше входа
+            tp_swings = [h for h in highs if h > entry * 1.005]
+            if tp_swings:
+                tp1_candidates.append(min(tp_swings))
+            # FVG верхняя граница
+            if fvg and fvg["top"] > entry * 1.005:
+                tp1_candidates.append(fvg["top"])
+            tp1 = smart_round(min(tp1_candidates)) if tp1_candidates else smart_round(entry * 1.05)
+
+            # --- TP2: следующий swing high или OB выше TP1 ---
+            tp2_swings = [h for h in highs if h > tp1 * 1.005]
+            tp2 = smart_round(min(tp2_swings)) if tp2_swings else smart_round(entry + (tp1 - entry) * 2)
+
+            # --- TP3: дальний swing high или x3 от TP1 расстояния ---
+            tp3_swings = [h for h in highs if h > tp2 * 1.005]
+            tp3 = smart_round(min(tp3_swings)) if tp3_swings else smart_round(entry + (tp1 - entry) * 4)
+
+        else:  # BEARISH
+            # --- ENTRY ---
+            entry = smart_round(ob["bottom"] if ob else price)
+
+            # --- SL: за последний swing high или над OB ---
+            sl_candidates = []
+            sl_swing = [h for h in highs if h > entry * 1.001]
+            if sl_swing:
+                sl_candidates.append(max(sl_swing[-3:]) * (1 + buf))
+            if ob:
+                sl_candidates.append(ob["top"] * (1 + buf))
+            sell_stops = heatmap.get("nearest_sell_stops")
+            if sell_stops and sell_stops > entry:
+                sl_candidates.append(sell_stops * (1 + buf))
+            if not sl_candidates:
+                atr = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
+                sl_candidates.append(entry + atr * 1.5)
+
+            sl = smart_round(min(sl_candidates))
+            max_sl = entry * 1.008
+            if sl < max_sl:
+                sl = smart_round(max_sl)
+
+            # --- TP1: ближайшая зона ликвидности ниже ---
+            tp1_candidates = []
+            buy_stops = heatmap.get("nearest_buy_stops")
+            if buy_stops and buy_stops < entry * 0.995:
+                tp1_candidates.append(buy_stops)
+            tp_swings = [l for l in lows if l < entry * 0.995]
+            if tp_swings:
+                tp1_candidates.append(max(tp_swings))
+            if fvg and fvg["bottom"] < entry * 0.995:
+                tp1_candidates.append(fvg["bottom"])
+            tp1 = smart_round(max(tp1_candidates)) if tp1_candidates else smart_round(entry * 0.95)
+
+            tp2_swings = [l for l in lows if l < tp1 * 0.995]
+            tp2 = smart_round(max(tp2_swings)) if tp2_swings else smart_round(entry - (entry - tp1) * 2)
+
+            tp3_swings = [l for l in lows if l < tp2 * 0.995]
+            tp3 = smart_round(max(tp3_swings)) if tp3_swings else smart_round(entry - (entry - tp1) * 4)
+
+        # Проверяем что уровни логичны
+        risk = abs(entry - sl)
+        reward = abs(tp1 - entry)
+        if risk == 0 or reward / risk < 1.2:
+            raise ValueError(f"плохой RR: {round(reward/risk,2) if risk else 0}")
+
+        return {
+            "entry": entry, "sl": sl,
+            "tp1": tp1, "tp2": tp2, "tp3": tp3,
+            "sl_pct": round(abs(entry - sl) / entry * 100, 2),
+            "tp1_pct": round(abs(tp1 - entry) / entry * 100, 2),
+            "tp2_pct": round(abs(tp2 - entry) / entry * 100, 2),
+            "tp3_pct": round(abs(tp3 - entry) / entry * 100, 2),
+            "rr": round(reward / risk, 2),
+            "source": "structure"
+        }
+
+    except Exception as e:
+        logging.debug(f"calc_smart_levels fallback ({direction} {timeframe}): {e}")
+        # Fallback на математический расчёт
+        tf_risk = {"5m": 0.010, "15m": 0.015, "1h": 0.025, "4h": 0.050, "1d": 0.100}
+        risk_pct = tf_risk.get(timeframe, 0.025)
+        risk = price * risk_pct
+        entry = smart_round(price)
+        if direction == "BULLISH":
+            sl  = smart_round(entry - risk)
+            tp1 = smart_round(entry + risk * 2)
+            tp2 = smart_round(entry + risk * 3)
+            tp3 = smart_round(entry + risk * 5)
+        else:
+            sl  = smart_round(entry + risk)
+            tp1 = smart_round(entry - risk * 2)
+            tp2 = smart_round(entry - risk * 3)
+            tp3 = smart_round(entry - risk * 5)
+        return {
+            "entry": entry, "sl": sl,
+            "tp1": tp1, "tp2": tp2, "tp3": tp3,
+            "sl_pct": round(risk_pct * 100, 2),
+            "tp1_pct": round(risk_pct * 200, 2),
+            "tp2_pct": round(risk_pct * 300, 2),
+            "tp3_pct": round(risk_pct * 500, 2),
+            "rr": 2.0,
+            "source": "math"
+        }
+
 def format_market():
     market = get_live_prices()
     if not market:
