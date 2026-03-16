@@ -4555,8 +4555,10 @@ async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, h
                         )
         else:
             conn.execute(
-                "INSERT INTO error_patterns VALUES (?,1,CURRENT_TIMESTAMP,NULL,1)",
-                (error_type,)
+                """INSERT INTO error_patterns
+                   (pattern, symbol, timeframe, conditions, sl_count, last_seen, active, error_type, count, rule_added)
+                   VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,1,?,1,NULL)""",
+                (error_type, "", "", "{}", 1, error_type)
             )
 
         conn.commit()
