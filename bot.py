@@ -2864,12 +2864,12 @@ def scan_all_for_deals(limit=40):
         results = list(ex.map(scan_one, pairs))
 
     for r in results:
-        if r and r.get("grade") in ("🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
+        if r and r.get("grade") in ("СДЕЛКА", "СИЛЬНЫЙ СИГНАЛ", "МЕГА", "ПРИОРИТЕТ 1", "ПРЕМИУМ СИГНАЛ"):
             found.append(r)
 
     # Сортируем: лучшие первыми
-    grade_order = {"🔥🔥🔥 МЕГА ТОП": 0, "🔥🔥 ТОП СДЕЛКА": 1, "✅ ХОРОШАЯ": 2}
-    found.sort(key=lambda x: grade_order.get(x.get("grade",""), 3))
+    grade_order = {"ПРЕМИУМ СИГНАЛ": 0, "ПРИОРИТЕТ 1": 0, "МЕГА": 1, "СИЛЬНЫЙ СИГНАЛ": 2, "СДЕЛКА": 3}
+    found.sort(key=lambda x: grade_order.get(x.get("grade",""), 4))
     return found
 
 
@@ -2893,6 +2893,19 @@ def full_scan_raw(symbol, timeframe="1h"):
             return None
 
         direction = mtf["direction"]
+
+        # Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает
+        if symbol != "BTCUSDT":
+            try:
+                btc_mtf = multi_tf_analysis("BTCUSDT", ["1h", "4h"])
+                if btc_mtf:
+                    btc_dir = btc_mtf.get("direction")
+                    if direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",):
+                        return None  # не шортим альты когда BTC растёт на 1h
+                    if direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",):
+                        return None  # не лонгуем альты когда BTC падает на 1h
+            except Exception:
+                pass
         candles = get_candles(symbol, timeframe, 100)
         if len(candles) < 20:
             return None
@@ -2977,8 +2990,18 @@ def full_scan_raw(symbol, timeframe="1h"):
         except Exception:
             pass
 
-        if len(confluence) < 2:
+        # Минимальный порог confluence по таймфрейму
+        min_conf = {"1h": 4, "4h": 3, "1d": 3, "1w": 2}
+        if len(confluence) < min_conf.get(timeframe, 3):
             return None
+
+        # 1h — только 4/4 ТФ
+        if timeframe == "1h" and mtf.get("match_count", 0) < 4:
+            return None
+
+        # Только МЕГА ТОП и ТОП СДЕЛКА
+        if mtf.get("grade") not in ("МЕГА ТОП", "ТОП СДЕЛКА"):
+            return None  # market.py grade check — МЕГА ТОП или ТОП СДЕЛКА от multi_tf_analysis
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
@@ -2987,7 +3010,14 @@ def full_scan_raw(symbol, timeframe="1h"):
         tp1   = levels["tp1"]
         tp2   = levels["tp2"]
         tp3   = levels["tp3"]
-        pass  # logging.debug(f"Уровни [{levels['source']}] {symbol} {direction}: entry={entry} sl={sl} tp1={tp1} RR={levels['rr']}")
+        # Фильтр по RR — минимум 1.5
+        if levels.get("rr", 0) < 1.5:
+            return None
+
+        # Фильтр VWAP — не входим если перекуплен/перепродан
+        vwap_warning = any("перекуплен" in c or "перепродан" in c for c in confluence)
+        if vwap_warning and timeframe == "1h":
+            return None
 
         est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
@@ -3014,13 +3044,25 @@ def full_scan_raw(symbol, timeframe="1h"):
         TF_TIME_LABEL = {"15m": "2-6ч", "1h": "12-48ч", "4h": "2-7дн", "1d": "1-4нед"}
         tf_time_hint = TF_TIME_LABEL.get(timeframe, time_str)
 
+        # Название сигнала по таймфрейму
+        tf_signal_names = {
+            "1h":  ("🔥", "СДЕЛКА"),
+            "4h":  ("🔥🔥", "СИЛЬНЫЙ СИГНАЛ"),
+            "1d":  ("🔥🔥🔥", "МЕГА"),
+            "1w":  ("💰", "ПРИОРИТЕТ 1"),
+        }
+        sig_emoji, sig_name = tf_signal_names.get(timeframe, ("🔥", "СИГНАЛ"))
+        # Премиум если сильное MM накопление
+        if any("MM Накопление СИЛЬНОЕ" in c for c in confluence):
+            sig_emoji, sig_name = "💎", "ПРЕМИУМ СИГНАЛ"
+
         text = (
             f"{'━'*26}\n"
-            f"{mtf['grade_emoji']} <b>{mtf['grade']}</b> [{tf_label}]\n"
+            f"{sig_emoji} <b>{sig_name}</b> [{tf_label}]\n"
             f"{emoji} <b>{symbol}</b> — {direction}\n"
             f"{'━'*26}\n\n"
             f"📐 <b>Таймфреймы:</b>\n{mtf['tf_status']}\n"
-            f"{mtf['stars']}\n\n"
+            f"\n"
             f"💰 <b>Вход:</b> <code>{smart_price_fmt(entry)}</code>\n"
             f"🛑 <b>Стоп:</b> <code>{smart_price_fmt(sl)}</code>\n"
             f"🎯 <b>TP1:</b> <code>{smart_price_fmt(tp1)}</code> (+{tp1_pct:.1f}%)\n"
@@ -3032,7 +3074,7 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"{'━'*26}"
         )
 
-        return {"symbol": symbol, "grade": mtf["grade"], "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
+        return {"symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
 
     except Exception as e:
         logging.error(f"full_scan_raw error {symbol}: {e}")
