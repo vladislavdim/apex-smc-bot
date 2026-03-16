@@ -1361,20 +1361,11 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 sl_candidates.append(entry - atr_sl * 2.0)
 
             sl = smart_round(max(sl_candidates))
-            # Минимальный SL — не ближе 1% для защиты от шума
-            hard_min_sl = entry * 0.99
-            if sl > hard_min_sl:
-                sl = smart_round(hard_min_sl)
 
 
 
 
-
-
-
-            # --- TP1: зона ликвидности или swing high, минимум RR 1.5 ---
-            risk_val = abs(entry - sl)
-
+            # --- TP1: зона ликвидности или swing high ---
             tp1_candidates = []
             sell_stops = heatmap.get("nearest_sell_stops")
             sell_stops_price = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
@@ -1399,10 +1390,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                     psych_tp1 += magnitude
                 tp1_candidates.append(smart_round(psych_tp1))
 
-            # Минимальный TP1 = RR 1.5
-            min_tp1 = entry + risk_val * 1.5
-            tp1_raw = min(tp1_candidates)
-            tp1 = smart_round(max(tp1_raw, min_tp1))
+            # TP1 = ближайший структурный уровень
+            tp1 = smart_round(min(tp1_candidates))
 
             # --- TP2: следующий swing high или психологический уровень ---
             tp2_swings = sorted([h for h in highs if h > tp1 * 1.005])
@@ -1417,8 +1406,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 psych_tp2 += magnitude2
             tp2_candidates.append(smart_round(psych_tp2))
 
-            min_tp2 = entry + risk_val * 2.5
-            tp2 = smart_round(max(min(tp2_candidates), min_tp2))
+            # TP2 = следующий структурный уровень после TP1
+            tp2 = smart_round(min(tp2_candidates))
 
             # TP3 = TP2
             tp3 = tp2
