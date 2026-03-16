@@ -1426,11 +1426,30 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             tp3_swings = [l for l in lows if l < tp2 * 0.995]
             tp3 = smart_round(max(tp3_swings)) if tp3_swings else smart_round(entry - (entry - tp1) * 4)
 
-        # Проверяем что уровни логичны
+        # Если нет структуры выше/ниже для TP — используем математику для TP
+        # но SL оставляем структурный
         risk = abs(entry - sl)
         reward = abs(tp1 - entry)
-        if risk == 0 or reward / risk < 0.8:
-            raise ValueError(f"плохой RR: {round(reward/risk,2) if risk else 0}")
+
+        if risk == 0:
+            raise ValueError("risk == 0")
+
+        rr = round(reward / risk, 2)
+
+        # Если TP слишком близко — дополняем математикой
+        if rr < 0.8:
+            tf_risk = {"5m": 0.010, "15m": 0.015, "1h": 0.025, "4h": 0.050, "1d": 0.100}
+            math_risk = price * tf_risk.get(timeframe, 0.025)
+            if direction == "BULLISH":
+                tp1 = smart_round(entry + max(risk * 2, math_risk * 2))
+                tp2 = smart_round(entry + max(risk * 3, math_risk * 3))
+                tp3 = smart_round(entry + max(risk * 5, math_risk * 5))
+            else:
+                tp1 = smart_round(entry - max(risk * 2, math_risk * 2))
+                tp2 = smart_round(entry - max(risk * 3, math_risk * 3))
+                tp3 = smart_round(entry - max(risk * 5, math_risk * 5))
+            reward = abs(tp1 - entry)
+            rr = round(reward / risk, 2)
 
         return {
             "entry": entry, "sl": sl,
@@ -1439,7 +1458,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             "tp1_pct": round(abs(tp1 - entry) / entry * 100, 2),
             "tp2_pct": round(abs(tp2 - entry) / entry * 100, 2),
             "tp3_pct": round(abs(tp3 - entry) / entry * 100, 2),
-            "rr": round(reward / risk, 2),
+            "rr": rr,
             "source": "structure"
         }
 
