@@ -1901,19 +1901,19 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
         range_pct  = (range_high - range_low) / range_low * 100
         current    = closes[-1]
 
-        # Боковик должен быть < 20% диапазона
-        if range_pct > 20:
+        # Боковик должен быть < 35% диапазона
+        if range_pct > 35:
             return None
 
         # 2. Считаем дни в боковике
         days_in_range = 0
         for c in reversed(recent):
-            if range_low * 0.95 <= c["close"] <= range_high * 1.05:
+            if range_low * 0.93 <= c["close"] <= range_high * 1.07:
                 days_in_range += 1
             else:
                 break
 
-        if days_in_range < 20:
+        if days_in_range < 10:
             return None
 
         # 3. Сжатие объёма — средний объём последних 10 свечей < среднего за 30
