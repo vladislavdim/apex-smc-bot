@@ -6577,8 +6577,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir}\n"
                 f"ATR: {smart_round(atr)} До TP: {smart_round(distance_to_tp)} Расчёт: ~{est_hours}ч\n"
-                f"Свечи: {candles_str}\n"
-                f"Sweep: {logic}"
+                f"Свечи: {candles_str}"
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=80)
