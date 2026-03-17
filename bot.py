@@ -4,6 +4,8 @@ bot.py — Telegram хендлеры, команды, scheduler, запуск AP
 """
 import asyncio
 import logging
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
 import os
 import sqlite3
 import time
