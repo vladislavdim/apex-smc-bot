@@ -1812,7 +1812,10 @@ async def handle_callback(callback: CallbackQuery):
                 ])
             )
         except Exception as e:
-            await callback.message.edit_text(f"Ошибка: {e}")
+            if "message is not modified" in str(e):
+                await callback.answer("Очередь не изменилась", show_alert=False)
+            else:
+                await callback.message.edit_text(f"Ошибка: {e}")
 
     elif data == "menu_wins":
         try:
