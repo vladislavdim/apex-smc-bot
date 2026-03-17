@@ -2798,7 +2798,7 @@ async def auto_scan_swing():
                 f"{trend_icon} Логика: {r['logic']}\n"
                 f"\n"
                 f"⚡ Риск: {risk_label}\n"
-                f"⏱ Горизонт: 4-12ч"
+                f"⏱ Горизонт: ~{r.get('est_hours', 8)}ч"
             )
 
             sd = {
