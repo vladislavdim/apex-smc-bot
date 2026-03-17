@@ -65,7 +65,7 @@ COINGECKO_IDS = {
 # ──────────────────────────────────────────────────────────────
 def _init_router_db():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS router_source_map (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,7 +231,7 @@ def _groq(prompt: str, max_tokens: int = 300, system: str = "") -> str:
 def _record_source(symbol: str, interval: str, source: str,
                    success: bool, latency: float = 0.0, note: str = ""):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         row = conn.execute(
             "SELECT id, success_count, fail_count, avg_latency FROM router_source_map "
             "WHERE symbol=? AND interval=? AND source=?",
@@ -277,7 +277,7 @@ def _get_best_sources(symbol: str, interval: str) -> list:
         "twelvedata", "coingecko", "synthetic"
     ]
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         rows = conn.execute(
             "SELECT source, success_count, fail_count, avg_latency FROM router_source_map "
             "WHERE symbol=? AND interval=?",
@@ -665,7 +665,7 @@ def _groq_analyze_candle_failure(symbol: str, interval: str, errors: list):
         skip = data.get("skip_sources", [])
         note = data.get("note", "")
         # Записываем workaround в БД
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         conn.execute(
             "INSERT INTO router_workarounds "
             "(error_pattern, solution, source_skip, confidence) VALUES (?,?,?,?)",
@@ -771,7 +771,7 @@ def get_seasonality_context() -> dict:
     """Текущая сезонность BTC по месяцам"""
     try:
         month = datetime.now().month
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         row = conn.execute(
             "SELECT btc_avg_return, alt_avg_return, notes FROM router_seasonality WHERE month=?",
             (month,)
@@ -805,7 +805,7 @@ def get_session_context() -> dict:
 def get_pair_best_hours(symbol: str) -> dict:
     """Лучшие часы для сигналов по этой паре (из истории)"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         rows = conn.execute(
             "SELECT hour_utc, win_count, loss_count FROM router_market_memory "
             "WHERE symbol=? ORDER BY (win_count * 1.0 / (win_count+loss_count+0.1)) DESC LIMIT 3",
@@ -823,7 +823,7 @@ def record_signal_outcome(symbol: str, direction: str, tf: str,
                            result: str, hour_utc: int):
     """Запоминаем результат сигнала по часу — учим бота лучшему времени входа"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         row = conn.execute(
             "SELECT id, win_count, loss_count FROM router_market_memory "
             "WHERE symbol=? AND hour_utc=?", (symbol, hour_utc)
@@ -938,7 +938,7 @@ def detect_accumulation(symbol: str) -> dict:
 
 def _update_pair_intelligence(symbol: str, **kwargs):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         row = conn.execute(
             "SELECT symbol FROM router_pair_intelligence WHERE symbol=?", (symbol,)
         ).fetchone()
@@ -1013,7 +1013,7 @@ def detect_contradictions(symbol: str, direction: str,
     # Сохраняем в лог
     if conflicts or warnings:
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
             conn.execute(
                 "INSERT INTO router_contradiction_log (symbol, factors, verdict) VALUES (?,?,?)",
                 (symbol, json.dumps(conflicts + warnings), verdict)
@@ -1138,7 +1138,7 @@ def groq_learn_from_result(symbol: str, direction: str, grade: str,
             if "```" in resp:
                 resp = resp.split("```")[1].replace("json","").strip()
             data = json.loads(resp)
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
             conn.execute(
                 "INSERT INTO router_groq_insights (category, content, confidence) VALUES (?,?,?)",
                 (f"trade_lesson_{symbol}",
@@ -1162,7 +1162,7 @@ def groq_daily_strategy_review():
     if not GROQ_KEY:
         return
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         # Собираем статистику за 7 дней
         rows = conn.execute(
             "SELECT symbol, grade, tf, regime, result, COUNT(*) as cnt "
@@ -1196,7 +1196,7 @@ def groq_daily_strategy_review():
         strategy = _groq(prompt, max_tokens=400,
                         system="Ты опытный трейдер SMC. Пиши конкретные правила.")
         if strategy:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
             conn.execute(
                 "INSERT INTO router_groq_insights (category, content, confidence) VALUES (?,?,?)",
                 ("daily_strategy", strategy, 0.8)
@@ -1210,7 +1210,7 @@ def groq_daily_strategy_review():
 def get_daily_strategy() -> str:
     """Возвращает последнюю дневную стратегию"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         row = conn.execute(
             "SELECT content, created_at FROM router_groq_insights "
             "WHERE category='daily_strategy' ORDER BY created_at DESC LIMIT 1"
@@ -1225,7 +1225,7 @@ def get_daily_strategy() -> str:
 def get_groq_insights_summary() -> str:
     """Краткая сводка последних инсайтов Groq для меню Мозга"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         lessons = conn.execute(
             "SELECT content, created_at FROM router_groq_insights "
             "WHERE category LIKE 'trade_lesson_%' "
@@ -1258,7 +1258,7 @@ def get_groq_insights_summary() -> str:
 def get_source_reliability_text() -> str:
     """Таблица надёжности источников для меню"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         rows = conn.execute(
             "SELECT source, SUM(success_count), SUM(fail_count), AVG(avg_latency) "
             "FROM router_source_map GROUP BY source "
