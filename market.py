@@ -6474,46 +6474,56 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         entry = sl = tp = None
         logic = ""
 
-        # ── BULLISH SWEEP: пробой лоу вниз + закрытие выше ──
-        bullish_sweep = (
-            last["low"]  < last_swing_low and   # пробил лоу
-            last["close"] > last_swing_low and   # закрылся выше
-            (last_swing_low - last["low"]) > atr * 0.1  # хвост достаточный
-        )
+        # ── Проверяем последние 3 свечи на sweep ──
+        for lookback_i in range(1, 4):
+            check      = candles[-lookback_i]
+            check_prev = candles[-lookback_i - 1]
 
-        # ── BEARISH SWEEP: пробой хая вверх + закрытие ниже ──
-        bearish_sweep = (
-            last["high"]  > last_swing_high and  # пробил хай
-            last["close"] < last_swing_high and  # закрылся ниже
-            (last["high"] - last_swing_high) > atr * 0.1  # хвост достаточный
-        )
+            # Свинги без последних свечей чтобы не учитывать текущее движение
+            base_candles = candles[:-lookback_i] if lookback_i > 0 else candles
+            if len(base_candles) < 20:
+                continue
+            sh, sl_list = find_swings(base_candles, lookback=5)
+            if len(sh) < 2 or len(sl_list) < 2:
+                continue
 
-        # ── Подтверждение CHoCH — предыдущая свеча в противоположном направлении ──
-        if bullish_sweep:
-            # Предыдущая свеча должна быть медвежьей (давление вниз перед sweepom)
-            bearish_context = prev["close"] < prev["open"]
-            if not bearish_context:
-                return None
+            rec_h    = sorted(sh[-3:],      key=lambda x: x[0])
+            rec_l    = sorted(sl_list[-3:], key=lambda x: x[0])
+            chk_high = rec_h[-1][1]
+            chk_low  = rec_l[-1][1]
+            prv_high = rec_h[-2][1]  if len(rec_h) >= 2  else chk_high * 1.05
+            prv_low  = rec_l[-2][1]  if len(rec_l) >= 2  else chk_low  * 0.95
 
-            direction = "BULLISH"
-            entry = smart_round(last["close"])
-            sl    = smart_round(last["low"] - atr * 0.3)  # стоп под хвостом
-            tp    = smart_round(prev_swing_high)           # цель — предыдущий хай
-            logic = f"свип лоу ↓ + возврат в диапазон + импульс вверх"
+            # Bullish sweep
+            if (check["low"] < chk_low and
+                    check["close"] > chk_low and
+                    (chk_low - check["low"]) > atr * 0.1 and
+                    check_prev["close"] < check_prev["open"]):
+                direction = "BULLISH"
+                entry = smart_round(check["close"])
+                sl    = smart_round(check["low"] - atr * 0.3)
+                tp    = smart_round(prv_high)
+                logic = "свип лоу ↓ + возврат в диапазон + импульс вверх"
+                break
 
-        elif bearish_sweep:
-            # Предыдущая свеча должна быть бычьей
-            bullish_context = prev["close"] > prev["open"]
-            if not bullish_context:
-                return None
-
-            direction = "BEARISH"
-            entry = smart_round(last["close"])
-            sl    = smart_round(last["high"] + atr * 0.3)  # стоп над хвостом
-            tp    = smart_round(prev_swing_low)             # цель — предыдущий лоу
-            logic = f"свип хая ↑ + отклонение + импульс вниз"
+            # Bearish sweep
+            if (check["high"] > chk_high and
+                    check["close"] < chk_high and
+                    (check["high"] - chk_high) > atr * 0.1 and
+                    check_prev["close"] > check_prev["open"]):
+                direction = "BEARISH"
+                entry = smart_round(check["close"])
+                sl    = smart_round(check["high"] + atr * 0.3)
+                tp    = smart_round(prv_low)
+                logic = "свип хая ↑ + отклонение + импульс вниз"
+                break
 
         if not direction:
+            return None
+
+        # Если sweep был давно — цена могла уйти далеко от входа
+        current_price = candles[-1]["close"]
+        if abs(current_price - entry) > atr * 2:
             return None
 
         # ── Фильтр RR ──
