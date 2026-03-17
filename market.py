@@ -2335,14 +2335,16 @@ def get_fear_greed():
 
 def get_funding_rate(symbol):
     try:
+        # Gate.io futures — работает на Render
+        gate_sym = symbol.replace("USDT", "_USDT")
         r = requests.get(
-            f"{BINANCE_F}/fapi/v1/fundingRate",
-            params={"symbol": symbol, "limit": 1},
+            f"https://fx-api.gateio.ws/api/v4/futures/usdt/contracts/{gate_sym}",
             timeout=8
         )
         data = r.json()
-        if data:
-            return float(data[-1]["fundingRate"]) * 100
+        rate = data.get("funding_rate")
+        if rate is not None:
+            return float(rate) * 100
         return None
     except:
         return None
