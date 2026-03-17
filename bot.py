@@ -158,8 +158,8 @@ def tf_keyboard():
     ])
 
 def pairs_keyboard(action="scan", page=0):
-    """Клавиатура монет с пагинацией — топ-50 из Bybit"""
-    all_pairs = get_top_pairs(50)
+    """Клавиатура монет с пагинацией — топ-80"""
+    all_pairs = get_top_pairs(80)
     page_size = 20  # монет на странице
     total_pages = (len(all_pairs) + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
@@ -769,13 +769,13 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "menu_scan":
         try:
             await callback.message.edit_text(
-                "🔍 <b>Выбери монету</b> (топ-50 по объёму):",
+                "🔍 <b>Выбери монету</b> (топ-80 по объёму):",
                 parse_mode="HTML",
                 reply_markup=pairs_keyboard("scan", 0)
             )
         except Exception:
             await callback.message.answer(
-                "🔍 <b>Выбери монету</b> (топ-50 по объёму):",
+                "🔍 <b>Выбери монету</b> (топ-80 по объёму):",
                 parse_mode="HTML",
                 reply_markup=pairs_keyboard("scan", 0)
             )
@@ -911,7 +911,7 @@ async def handle_callback(callback: CallbackQuery):
         tf = data.replace("tf_", "")
         pairs = get_top_pairs(80)
         await callback.message.edit_text(
-            f"🔍 Сканирую топ-50 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
+            f"🔍 Сканирую топ-80 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
         )
         signals = []
         for symbol in pairs:
@@ -2042,7 +2042,7 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "menu_pump":
-        await callback.message.edit_text("📦 Сканирую топ-50 на накопление перед пампом...\n⏳ ~30 секунд")
+        await callback.message.edit_text("📦 Сканирую топ-80 на накопление перед пампом...\n⏳ ~30 секунд")
         pairs = await asyncio.get_running_loop().run_in_executor(None, get_top_pairs, 50)
         found = []
         for symbol in pairs:
@@ -2805,7 +2805,7 @@ async def auto_scan_mega():
 
 
 async def auto_accumulation_scan():
-    """Каждый час: сканируем все топ-50 на накопление перед пампом"""
+    """Каждый час: сканируем все топ-80 на накопление перед пампом"""
     pairs = get_top_pairs(80)
     found = []
 
