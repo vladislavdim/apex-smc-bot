@@ -3666,7 +3666,7 @@ async def recheck_timing_queue():
                 new_score = timing.get("score", 0)
                 logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: {old_score}/3 → {new_score}/3")
 
-                if timing["valid"] and new_score >= 2:
+                if timing["valid"] and new_score >= 3:
                     # Обновляем текст — добавляем пометку
                     updated_text = "\U0001F514 <b>\u0422\u0410\u0419\u041c\u0418\u041d\u0413 \u041f\u041e\u0414\u0422\u0412\u0415\u0420\u0416\u0414\u0401\u041d!</b>\n" + signal_text.replace(
                         f"⏰ <b>Тайминг:</b> ⏳",
