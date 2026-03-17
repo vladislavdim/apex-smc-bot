@@ -6562,24 +6562,42 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     f"L={smart_round(c['low'])} C={smart_round(c['close'])}"
                 )
 
-            groq_prompt = f"""Ты трейдер SMC. Проанализируй swing сетап кратко — 1-2 предложения максимум.
+            # Расчёт времени до TP через ATR
+            tf_hours = {"1h": 1, "4h": 4, "1d": 24, "1w": 168}
+            candle_hours = tf_hours.get(timeframe, 4)
+            distance_to_tp = abs(tp - entry)
+            est_candles = round(distance_to_tp / atr, 1) if atr > 0 else 3
+            est_hours = int(round(est_candles * candle_hours, 0))
+            est_hours = max(4, min(est_hours, 72))  # от 4ч до 72ч
 
-Пара: {symbol} | ТФ: {timeframe} | Направление: {direction}
-Цена: {smart_round(candles[-1]['close'])} | Вход: {entry} | SL: {sl} | TP: {tp}
-HTF тренд (1d): {htf_dir}
-Последние 5 свечей:
-{chr(10).join(last_candles_summary)}
+            candles_str = " | ".join(last_candles_summary)
+            groq_prompt = (
+                f"Ты трейдер SMC. Swing сетап. Ответь СТРОГО JSON без лишнего текста:\n"
+                f"{{\"logic\": \"логика входа макс 12 слов\", \"hours\": число_часов}}\n\n"
+                f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
+                f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir}\n"
+                f"ATR: {smart_round(atr)} До TP: {smart_round(distance_to_tp)} Расчёт: ~{est_hours}ч\n"
+                f"Свечи: {candles_str}\n"
+                f"Sweep: {logic}"
+            )
 
-Sweep: {logic}
-
-Опиши логику входа простыми словами. Только суть, без лишних слов. Макс 20 слов."""
-
-            groq_logic = ask_groq(groq_prompt, max_tokens=60)
-            if groq_logic and len(groq_logic) > 5:
-                logic = groq_logic.strip().replace("\n", " ")
+            groq_response = ask_groq(groq_prompt, max_tokens=80)
+            if groq_response and len(groq_response) > 5:
+                try:
+                    import json as _json
+                    clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
+                    parsed = _json.loads(clean)
+                    if parsed.get("logic"):
+                        logic = str(parsed["logic"]).strip()
+                    if parsed.get("hours"):
+                        est_hours = max(4, min(int(parsed["hours"]), 72))
+                except Exception:
+                    logic = groq_response.strip().replace("\n", " ")[:80]
         except Exception as ge:
             logging.debug(f"[SwingGroq] {symbol}: {ge}")
-            # Оставляем базовую логику если Groq недоступен
+            tf_hours = {"1h": 1, "4h": 4, "1d": 24}
+            est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 8
+            est_hours = max(4, min(est_hours, 72))
 
         return {
             "symbol":    symbol,
@@ -6593,6 +6611,7 @@ Sweep: {logic}
             "rr":        rr,
             "logic":     logic,
             "htf_dir":   htf_dir,
+            "est_hours": est_hours,
             "scan_type": "swing",
         }
 
