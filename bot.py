@@ -909,7 +909,7 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data.startswith("tf_"):
         tf = data.replace("tf_", "")
-        pairs = get_top_pairs(50)
+        pairs = get_top_pairs(80)
         await callback.message.edit_text(
             f"🔍 Сканирую топ-50 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
         )
@@ -2552,9 +2552,7 @@ def format_deep_scan_result(signals, accumulations, total_scanned):
                 f"{emoji} <b>{sym}</b> — {direction}\n"
                 f"💰 Вход: <code>{entry:.4f}</code>\n"
                 f"🛑 Стоп: <code>{sl:.4f}</code>\n"
-                f"🎯 TP1: <code>{tp1:.4f}</code>\n"
-                f"🎯 TP2: <code>{tp2:.4f}</code>\n"
-                f"🎯 TP3: <code>{tp3:.4f}</code>\n"
+                f"🎯 TP: <code>{tp1:.4f}</code>\n"
             )
 
     # Накопления (потенциальные памп кандидаты)
@@ -2598,9 +2596,7 @@ def _format_channel_signal(sd: dict) -> str:
         f"💎 <b>{symbol}</b> · {tf} · {regime}",
         f"",
         f"📥 Вход:  <code>{fmt(entry)}</code>",
-        f"🎯 TP1:   <code>{fmt(tp1)}</code>",
-        f"🎯 TP2:   <code>{fmt(tp2)}</code>",
-        f"🎯 TP3:   <code>{fmt(tp3)}</code>",
+        f"🎯 TP:    <code>{fmt(tp1)}</code>",
         f"🛑 SL:    <code>{fmt(sl)}</code>",
         f"",
         f"📊 Confluence: <b>{score}</b>/100 · Грейд: <b>{grade}</b>",
@@ -2698,7 +2694,7 @@ async def auto_scan_job():
 
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
-    signals = await _scan_tf("1h", pairs_limit=30)
+    signals = await _scan_tf("1h", pairs_limit=80)
     logging.info(f"Скан 1h: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
     logging.info(f"Скан 1h: актуальных {len(valid)}/{len(signals)}")
@@ -2709,7 +2705,7 @@ async def auto_scan_1h():
 
 async def auto_scan_4h():
     """Каждые 30 минут: скан 4h таймфрейма"""
-    signals = await _scan_tf("4h", pairs_limit=25)
+    signals = await _scan_tf("4h", pairs_limit=80)
     logging.info(f"Скан 4h: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=3.0)]
     logging.info(f"Скан 4h: актуальных {len(valid)}/{len(signals)}")
@@ -2746,7 +2742,7 @@ async def auto_scan_mega():
         logging.warning("detect_mega_trade не найден в smc_engine")
         return
 
-    pairs = get_top_pairs(50)
+    pairs = get_top_pairs(80)
     found = []
 
     for symbol in pairs:
@@ -2785,9 +2781,7 @@ async def auto_scan_mega():
                 + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 + f"💰 <b>Вход:</b> <code>{r['entry']:.4f}</code>\n"
                 + f"🛑 <b>Стоп:</b> <code>{r['sl']:.4f}</code> ({'−' if direction=='BULLISH' else '+'}{r['sl_pct']}%)\n"
-                + f"🎯 <b>TP1:</b> <code>{r['tp1']:.4f}</code> ({'▲' if direction=='BULLISH' else '▼'}+{r['tp1_pct']}%)\n"
-                + f"🎯 <b>TP2:</b> <code>{r['tp2']:.4f}</code> ({'▲' if direction=='BULLISH' else '▼'}+{r['tp2_pct']}%)\n"
-                + f"🎯 <b>TP3:</b> <code>{r['tp3']:.4f}</code> ({'▲' if direction=='BULLISH' else '▼'}+{r['tp3_pct']}%)\n"
+                + f"🎯 <b>TP:</b>  <code>{r['tp1']:.4f}</code> ({'▲' if direction=='BULLISH' else '▼'}+{r['tp1_pct']}%)\n"
                 + "⏱ <b>Горизонт:</b> 2-8 недель\n"
                 + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 + f"📊 Диапазон: {r['range_low']:.4f}–{r['range_high']:.4f} ({r['range_pct']}%)\n"
@@ -2812,7 +2806,7 @@ async def auto_scan_mega():
 
 async def auto_accumulation_scan():
     """Каждый час: сканируем все топ-50 на накопление перед пампом"""
-    pairs = get_top_pairs(50)
+    pairs = get_top_pairs(80)
     found = []
 
     for symbol in pairs:
@@ -2888,7 +2882,7 @@ def full_scan_raw(symbol, timeframe="1h"):
         except Exception as _e:
             pass
 
-        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h", "1d"])
+        mtf = multi_tf_analysis(symbol, ["1h", "4h", "1d", "1w"])  # 1d/1w — контекст для анализа
         if not mtf:
             return None
 
@@ -2999,6 +2993,10 @@ def full_scan_raw(symbol, timeframe="1h"):
         if timeframe == "1h" and mtf.get("match_count", 0) < 4:
             return None
 
+        # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
+        if timeframe not in ("1h", "4h"):
+            return None
+
         # Только МЕГА ТОП и ТОП СДЕЛКА
         if mtf.get("grade") not in ("МЕГА ТОП", "ТОП СДЕЛКА"):
             return None  # market.py grade check — МЕГА ТОП или ТОП СДЕЛКА от multi_tf_analysis
@@ -3065,9 +3063,7 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"\n"
             f"💰 <b>Вход:</b> <code>{smart_price_fmt(entry)}</code>\n"
             f"🛑 <b>Стоп:</b> <code>{smart_price_fmt(sl)}</code>\n"
-            f"🎯 <b>TP1:</b> <code>{smart_price_fmt(tp1)}</code> (+{tp1_pct:.1f}%)\n"
-            f"🎯 <b>TP2:</b> <code>{smart_price_fmt(tp2)}</code> (+{tp2_pct:.1f}%)\n"
-            f"🎯 <b>TP3:</b> <code>{smart_price_fmt(tp3)}</code> (+{tp3_pct:.1f}%)\n\n"
+            f"🎯 <b>TP:</b>  <code>{smart_price_fmt(tp1)}</code> (+{tp1_pct:.1f}%)\n\n"
             f"⏱ <b>Горизонт:</b> {tf_time_hint}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
             f"📋 <b>Confluence:</b>\n{conf_text}\n"
@@ -3859,9 +3855,9 @@ def main():
             scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
             scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60)       # 1h — каждые 10 мин
             scheduler.add_job(auto_scan_4h, "interval", minutes=30, jitter=120)       # 4h — каждые 30 мин
-            scheduler.add_job(auto_scan_1d, "interval", hours=1, jitter=300)          # 1d — каждый час
-            scheduler.add_job(auto_scan_1w, "interval", hours=6)          # 1w — каждые 6 часов
-            scheduler.add_job(auto_scan_mega, "interval", hours=6, jitter=1800)  # мега-сделки
+            # 1d и 1w — только контекст, сигналы не генерируем
+            # scheduler.add_job(auto_scan_1d, ...)
+            # scheduler.add_job(auto_scan_1w, ...)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
             scheduler.add_job(auto_research, "interval", hours=2)
