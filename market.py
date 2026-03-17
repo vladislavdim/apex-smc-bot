@@ -6430,3 +6430,127 @@ def ask_ai(user_id, user_name, user_message):
 APEX:"""
 
     return ask_groq(prompt, max_tokens=600)
+
+# ===== SWING SCANNER — торговля от экстремумов =====
+
+def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
+    """
+    Ловит swing сетапы: sweep экстремума → CHoCH → вход.
+    Логика: лоу пробит и закрылся выше (бычий sweep) → лонг
+            хай пробит и закрылся ниже (медвежий sweep) → шорт
+    """
+    try:
+        candles = get_candles(symbol, timeframe, 100)
+        if not candles or len(candles) < 20:
+            return None
+
+        closes  = [c["close"] for c in candles]
+        highs   = [c["high"]  for c in candles]
+        lows    = [c["low"]   for c in candles]
+        price   = closes[-1]
+        last    = candles[-1]
+        prev    = candles[-2]
+
+        # ATR для фильтра и стопа
+        atr = sum(highs[i] - lows[i] for i in range(-14, 0)) / 14
+
+        # ── Swing highs/lows (lookback=5) ──
+        swing_highs, swing_lows = find_swings(candles, lookback=5)
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return None
+
+        # Берём последние 3 свинга
+        recent_highs = sorted(swing_highs[-3:], key=lambda x: x[0])
+        recent_lows  = sorted(swing_lows[-3:],  key=lambda x: x[0])
+
+        last_swing_high = recent_highs[-1][1]
+        last_swing_low  = recent_lows[-1][1]
+
+        # Предыдущий свинг для цели
+        prev_swing_high = recent_highs[-2][1] if len(recent_highs) >= 2 else last_swing_high * 1.05
+        prev_swing_low  = recent_lows[-2][1]  if len(recent_lows)  >= 2 else last_swing_low  * 0.95
+
+        direction = None
+        entry = sl = tp = None
+        logic = ""
+
+        # ── BULLISH SWEEP: пробой лоу вниз + закрытие выше ──
+        bullish_sweep = (
+            last["low"]  < last_swing_low and   # пробил лоу
+            last["close"] > last_swing_low and   # закрылся выше
+            (last_swing_low - last["low"]) > atr * 0.1  # хвост достаточный
+        )
+
+        # ── BEARISH SWEEP: пробой хая вверх + закрытие ниже ──
+        bearish_sweep = (
+            last["high"]  > last_swing_high and  # пробил хай
+            last["close"] < last_swing_high and  # закрылся ниже
+            (last["high"] - last_swing_high) > atr * 0.1  # хвост достаточный
+        )
+
+        # ── Подтверждение CHoCH — предыдущая свеча в противоположном направлении ──
+        if bullish_sweep:
+            # Предыдущая свеча должна быть медвежьей (давление вниз перед sweepom)
+            bearish_context = prev["close"] < prev["open"]
+            if not bearish_context:
+                return None
+
+            direction = "BULLISH"
+            entry = smart_round(last["close"])
+            sl    = smart_round(last["low"] - atr * 0.3)  # стоп под хвостом
+            tp    = smart_round(prev_swing_high)           # цель — предыдущий хай
+            logic = f"свип лоу ↓ + возврат в диапазон + импульс вверх"
+
+        elif bearish_sweep:
+            # Предыдущая свеча должна быть бычьей
+            bullish_context = prev["close"] > prev["open"]
+            if not bullish_context:
+                return None
+
+            direction = "BEARISH"
+            entry = smart_round(last["close"])
+            sl    = smart_round(last["high"] + atr * 0.3)  # стоп над хвостом
+            tp    = smart_round(prev_swing_low)             # цель — предыдущий лоу
+            logic = f"свип хая ↑ + отклонение + импульс вниз"
+
+        if not direction:
+            return None
+
+        # ── Фильтр RR ──
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0 or reward / risk < 1.5:
+            return None
+
+        # ── Фильтр — цель должна быть реальной ──
+        if direction == "BULLISH" and tp <= entry:
+            return None
+        if direction == "BEARISH" and tp >= entry:
+            return None
+
+        # ── Контекст старших ТФ ──
+        tf_context = "1d" if timeframe == "4h" else "4h"
+        htf_dir = smc_on_tf(symbol, tf_context)
+
+        rr = round(reward / risk, 2)
+        sl_pct = round(abs(entry - sl) / entry * 100, 2)
+        tp_pct = round(abs(tp - entry) / entry * 100, 2)
+
+        return {
+            "symbol":    symbol,
+            "direction": direction,
+            "timeframe": timeframe,
+            "entry":     entry,
+            "sl":        sl,
+            "tp":        tp,
+            "sl_pct":    sl_pct,
+            "tp_pct":    tp_pct,
+            "rr":        rr,
+            "logic":     logic,
+            "htf_dir":   htf_dir,
+            "scan_type": "swing",
+        }
+
+    except Exception as e:
+        logging.debug(f"detect_swing_setup {symbol}: {e}")
+        return None
