@@ -2756,6 +2756,85 @@ async def auto_scan_4h():
         await asyncio.sleep(1)
 
 
+async def auto_scan_swing():
+    """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
+    pairs = get_top_pairs(80)
+    found = []
+    for symbol in pairs:
+        try:
+            r = detect_swing_setup(symbol, "4h")
+            if r:
+                found.append(r)
+            await asyncio.sleep(0.15)
+        except Exception as e:
+            logging.debug(f"swing scan {symbol}: {e}")
+
+    if not found:
+        logging.info("Swing scan 4h: сетапов нет")
+        return
+
+    # Сортируем по RR
+    found.sort(key=lambda x: x["rr"], reverse=True)
+    logging.info(f"Swing scan 4h: найдено {len(found)} сетапов")
+
+    for r in found[:2]:  # максимум 2 сигнала за раз
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+            trend_icon = "📈" if direction == "BULLISH" else "📉"
+            htf = r.get("htf_dir", "")
+            htf_text = f" | 1d: {htf}" if htf else ""
+
+            risk_label = "низкий" if r["rr"] >= 3 else "средний"
+            text = (
+                f"<b>{symbol}</b> — {dir_label}\n"
+                f"📊 Контекст: 4h{htf_text}\n"
+                f"\n"
+                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code>\n"
+                f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
+                f"\n"
+                f"{trend_icon} Логика: {r['logic']}\n"
+                f"\n"
+                f"⚡ Риск: {risk_label}\n"
+                f"⏱ Горизонт: 4-12ч"
+            )
+
+            sd = {
+                "symbol": symbol, "direction": direction,
+                "timeframe": "4h", "entry": r["entry"],
+                "sl": r["sl"], "tp1": r["tp"],
+                "tp2": r["tp"], "tp3": r["tp"],
+                "grade": "SWING", "text": text,
+                "confluence_score": int(r["rr"] * 20),
+                "regime": "SWING",
+                "scan_type": "swing",
+            }
+
+            # Проверяем cooldown
+            cache_key = f"{symbol}:SWING:{direction}:4h"
+            now_ts = time.time()
+            last_sent = _sent_signal_cache.get(cache_key, 0)
+            if now_ts - last_sent < 4 * 3600:
+                continue
+            _sent_signal_cache[cache_key] = now_ts
+
+            # Сохраняем в БД
+            save_signal_db(
+                symbol, direction, "SWING",
+                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                "4h", 12, "SWING",
+                confluence=int(r["rr"] * 20), regime="SWING"
+            )
+
+            await _send_signal(sd)
+            logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logging.error(f"[SwingScan] send {r.get('symbol')}: {e}")
+
 async def auto_scan_1d():
     """Каждый час: скан 1d таймфрейма"""
     signals = await _scan_tf("1d", pairs_limit=20)
@@ -3905,6 +3984,7 @@ def main():
             scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
             scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60)       # 1h — каждые 10 мин
             scheduler.add_job(auto_scan_4h, "interval", minutes=30, jitter=120)       # 4h — каждые 30 мин
+            scheduler.add_job(auto_scan_swing, "interval", minutes=30, jitter=90)    # swing 4h — каждые 30 мин
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
