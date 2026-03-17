@@ -6549,6 +6549,38 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp - entry) / entry * 100, 2)
 
+        # ── Groq анализирует реальную картину сетапа ──
+        try:
+            last_candles_summary = []
+            for c in candles[-5:]:
+                body = abs(c["close"] - c["open"])
+                wick_up = c["high"] - max(c["open"], c["close"])
+                wick_dn = min(c["open"], c["close"]) - c["low"]
+                color = "🟢" if c["close"] > c["open"] else "🔴"
+                last_candles_summary.append(
+                    f"{color} O={smart_round(c['open'])} H={smart_round(c['high'])} "
+                    f"L={smart_round(c['low'])} C={smart_round(c['close'])}"
+                )
+
+            groq_prompt = f"""Ты трейдер SMC. Проанализируй swing сетап кратко — 1-2 предложения максимум.
+
+Пара: {symbol} | ТФ: {timeframe} | Направление: {direction}
+Цена: {smart_round(candles[-1]['close'])} | Вход: {entry} | SL: {sl} | TP: {tp}
+HTF тренд (1d): {htf_dir}
+Последние 5 свечей:
+{chr(10).join(last_candles_summary)}
+
+Sweep: {logic}
+
+Опиши логику входа простыми словами. Только суть, без лишних слов. Макс 20 слов."""
+
+            groq_logic = ask_groq(groq_prompt, max_tokens=60)
+            if groq_logic and len(groq_logic) > 5:
+                logic = groq_logic.strip().replace("\n", " ")
+        except Exception as ge:
+            logging.debug(f"[SwingGroq] {symbol}: {ge}")
+            # Оставляем базовую логику если Groq недоступен
+
         return {
             "symbol":    symbol,
             "direction": direction,
