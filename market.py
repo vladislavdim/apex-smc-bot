@@ -6529,7 +6529,10 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # ── Фильтр RR ──
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
-        if risk == 0 or reward / risk < 1.5:
+        if risk == 0:
+            return None
+        rr_check = reward / risk
+        if rr_check < 1.5 or rr_check > 5.0:
             return None
 
         # ── Фильтр — цель должна быть реальной ──
