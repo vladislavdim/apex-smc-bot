@@ -305,7 +305,7 @@ def groq_decide_learning_agenda():
   ]
 }}"""
 
-        response = _groq(prompt, max_tokens=600)
+        response = _groq(prompt, max_tokens_val=600)
         if not response:
             return []
 
@@ -423,7 +423,7 @@ def groq_research_topic(topic: str, query: str) -> dict:
   "relevance": 0.0-1.0
 }}"""
 
-        response = _groq(prompt, max_tokens=700)
+        response = _groq(prompt, max_tokens_val=700)
         if not response:
             return {}
 
@@ -576,7 +576,7 @@ def get_daily_market_digest() -> str:
   "action": "что делать прямо сейчас"
 }}"""
 
-        response = _groq(prompt, max_tokens=500)
+        response = _groq(prompt, max_tokens_val=500)
         if not response:
             return ""
 
@@ -685,7 +685,7 @@ def groq_self_improve():
   "insight": "главный вывод"
 }}"""
 
-        response = _groq(prompt, max_tokens=600)
+        response = _groq(prompt, max_tokens_val=600)
         if not response:
             return []
 
