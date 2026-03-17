@@ -1363,6 +1363,7 @@ def detect_mm_accumulation(candles: list) -> dict:
     # Объём растёт на последних 3 свечах при боковике
     vols = [c["volume"] for c in candles[-20:]]
     avg_vol = sum(vols[:-3]) / max(len(vols) - 3, 1)
+    if avg_vol == 0: return {"score": 0, "signal": "NEUTRAL", "signals": [], "pre_pump": False}
     recent_vol = sum(vols[-3:]) / 3
     if recent_vol > avg_vol * 1.3 and range10 < avg_candle_range * 6:
         score += 1
