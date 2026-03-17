@@ -956,12 +956,12 @@ def get_liquidation_ratio(symbol: str) -> dict:
     return {"ratio": 1.0, "signal": "NEUTRAL", "desc": "", "ok": False}
 
 def get_top_pairs(limit=100):
-    """Фиксированный список топ-50 монет — только проверенные пары с ликвидностью"""
+    """Фиксированный список топ-80 монет — только проверенные пары с ликвидностью"""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache[:limit]
 
-    FIXED_50 = [
+    FIXED_80 = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "TONUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
         "ADAUSDT", "DOTUSDT", "POLUSDT", "LTCUSDT", "ATOMUSDT",
@@ -972,9 +972,15 @@ def get_top_pairs(limit=100):
         "STXUSDT", "LDOUSDT", "RENDERUSDT", "FETUSDT", "APEUSDT",
         "FLOKIUSDT", "WIFUSDT", "AAVEUSDT", "CRVUSDT", "GRTUSDT",
         "MKRUSDT", "SNXUSDT", "RUNEUSDT", "ALGOUSDT", "FTMUSDT",
+        "EIGENUSDT", "ENAUSDT", "PYTHUSDT", "ONDOUSDT", "ZROUSDT",
+        "TAOUSDT", "NOTUSDT", "CATIUSDT", "TURBOUSDT", "MEWUSDT",
+        "VIRTUALUSDT", "AIXBTUSDT", "AKTUSDT", "DYMUSDT", "ALTUSDT",
+        "PIXELUSDT", "RONINUSDT", "ZKUSDT", "STRKUSDT", "WUSDT",
+        "VANAUSDT", "PENGUUSDT", "KAITOUSDT", "BOMEUSDT", "POPCATUSDT",
+        "NEIROUSDT", "REZUSDT", "BBUSDT", "SATSUSDT", "IOUSDT",
     ]
 
-    pairs_cache = FIXED_50[:limit]
+    pairs_cache = FIXED_80[:limit]
     pairs_cache_time = time.time()
     return pairs_cache
 
