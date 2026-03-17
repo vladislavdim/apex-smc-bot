@@ -1319,10 +1319,11 @@ TIMING_EXPIRY_HOURS = {"1h": 4, "4h": 12, "1d": 48, "1w": 120}
 def save_to_timing_queue(symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, timing_score):
     """Сохраняет сигнал в очередь ожидания тайминга"""
     try:
+        import sqlite3 as _sq3
         from datetime import timedelta
         hours = TIMING_EXPIRY_HOURS.get(timeframe, 4)
         expires = (datetime.utcnow() + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-        conn = _get_conn()
+        conn = _sq3.connect("brain.db", timeout=10)
         existing = conn.execute(
             "SELECT id FROM timing_queue WHERE symbol=? AND direction=? AND timeframe=? AND status='waiting'",
             (symbol, direction, timeframe)
@@ -1346,7 +1347,8 @@ def save_to_timing_queue(symbol, direction, timeframe, entry, sl, tp1, tp2, tp3,
 def get_timing_queue():
     """Возвращает все активные сигналы из очереди"""
     try:
-        conn = _get_conn()
+        import sqlite3 as _sq3
+        conn = _sq3.connect("brain.db", timeout=10)
         rows = conn.execute("""
             SELECT id, symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, timing_score, expires_at
             FROM timing_queue WHERE status='waiting' ORDER BY created_at ASC
@@ -1361,7 +1363,8 @@ def get_timing_queue():
 def expire_timing_queue():
     """Помечает истёкшие сигналы как expired"""
     try:
-        conn = _get_conn()
+        import sqlite3 as _sq3
+        conn = _sq3.connect("brain.db", timeout=10)
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         expired = conn.execute(
             "SELECT id, symbol, timeframe FROM timing_queue WHERE status='waiting' AND expires_at < ?", (now,)
@@ -1380,7 +1383,8 @@ def expire_timing_queue():
 def remove_from_timing_queue(queue_id):
     """Помечает сигнал как отправленный"""
     try:
-        conn = _get_conn()
+        import sqlite3 as _sq3
+        conn = _sq3.connect("brain.db", timeout=10)
         conn.execute("UPDATE timing_queue SET status='sent' WHERE id=?", (queue_id,))
         conn.commit()
         conn.close()
