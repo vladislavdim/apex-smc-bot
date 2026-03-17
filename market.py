@@ -2360,7 +2360,7 @@ def get_dxy_signal():
         # Безопасный доступ — Yahoo иногда возвращает null в result
         results = (data.get("chart") or {}).get("result") or []
         if not results:
-            logging.warning("DXY: пустой ответ от Yahoo Finance")
+            logging.debug("DXY: пустой ответ от Yahoo Finance")
             return None
         quote = (results[0].get("indicators") or {}).get("quote") or [{}]
         closes_raw = (quote[0] if quote else {}).get("close") or []
@@ -2376,7 +2376,7 @@ def get_dxy_signal():
         dxy_cache_time = time.time()
         return dxy_cache
     except Exception as e:
-        logging.warning(f"DXY: {e}")
+        logging.debug(f"DXY: {e}")
         return None
 
 # ===== ECONOMIC CALENDAR =====
