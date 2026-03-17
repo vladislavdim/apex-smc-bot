@@ -3074,6 +3074,24 @@ def full_scan_raw(symbol, timeframe="1h"):
             f"{'━'*26}"
         )
 
+        # ── Тайминг входа — если плохой, сохраняем в очередь ──
+        timing = check_entry_timing(candles, direction, entry, timeframe)
+        timing_score = timing.get("score", 0)
+
+        # Добавляем тайминг в текст сигнала
+        timing_status = f"✅ Готов к входу ({timing_score}/3)" if timing["valid"] else f"⏳ {timing.get('wait','Ждать подтверждения')} ({timing_score}/3)"
+        text = text.rstrip() + "\n⏰ <b>Тайминг:</b> " + timing_status + "\n" + "━" * 26
+
+        if not timing["valid"]:
+            saved = save_to_timing_queue(
+                symbol, direction, timeframe,
+                entry, sl, tp1, tp2, tp3,
+                sig_name, text, timing_score
+            )
+            if saved:
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3)")
+            return None  # Ждём подтверждения тайминга
+
         return {"symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
 
     except Exception as e:
@@ -3573,6 +3591,60 @@ async def on_startup(app):
     else:
         logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
+
+async def recheck_timing_queue():
+    """Каждые 15 мин перепроверяет очередь тайминга"""
+    try:
+        expired_count = expire_timing_queue()
+        if expired_count > 0:
+            logging.info(f"[TimingQueue] Истекло {expired_count} сигналов")
+
+        queue = get_timing_queue()
+        if not queue:
+            return
+
+        logging.info(f"[TimingQueue] Перепроверяем {len(queue)} сигналов...")
+
+        for row in queue:
+            queue_id, symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, old_score, expires_at = row
+            try:
+                candles = get_candles(symbol, timeframe, 50)
+                if not candles:
+                    continue
+
+                current_price = candles[-1]["close"]
+                atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+
+                # Цена ушла далеко от зоны — удаляем
+                if abs(current_price - entry) > atr * 3:
+                    remove_from_timing_queue(queue_id)
+                    logging.info(f"[TimingQueue] {symbol} {direction} — цена ушла из зоны, удалён")
+                    continue
+
+                timing = check_entry_timing(candles, direction, entry, timeframe)
+                new_score = timing.get("score", 0)
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: {old_score}/3 → {new_score}/3")
+
+                if timing["valid"] and new_score >= 2:
+                    # Обновляем текст — добавляем пометку
+                    updated_text = "\U0001F514 <b>\u0422\u0410\u0419\u041c\u0418\u041d\u0413 \u041f\u041e\u0414\u0422\u0412\u0415\u0420\u0416\u0414\u0401\u041d!</b>\n" + signal_text.replace(
+                        f"⏰ <b>Тайминг:</b> ⏳",
+                        f"⏰ <b>Тайминг:</b> ✅ Готов к входу ({new_score}/3) —"
+                    )
+                    sd = {
+                        "symbol": symbol, "direction": direction, "timeframe": timeframe,
+                        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                        "grade": grade, "text": updated_text,
+                    }
+                    await _send_signal(sd)
+                    remove_from_timing_queue(queue_id)
+                    logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3)")
+
+            except Exception as e:
+                logging.debug(f"[TimingQueue] {symbol}: {e}")
+    except Exception as e:
+        logging.error(f"[TimingQueue] recheck error: {e}")
+
     scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
 
     # Еженедельный отчёт — каждое воскресенье в 08:00 UTC
@@ -3674,6 +3746,7 @@ async def on_startup(app):
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _autopilot_fast)
     scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
+    scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30)
 
     # Автопилот — глубокий цикл каждые 4 часа
     async def _run_autopilot_deep():
