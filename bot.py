@@ -2626,7 +2626,7 @@ async def _send_signal(sd):
         try:
             await bot.send_message(admin_id, sd["text"], parse_mode="HTML")
         except Exception as e:
-            logging.warning(f"send_signal admin {admin_id}: {e}")
+            logging.debug(f"send_signal admin {admin_id}: {e}")
     try:
         channel_text = _format_channel_signal(sd)
         await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
