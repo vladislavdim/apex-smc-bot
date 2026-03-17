@@ -6584,15 +6584,22 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             groq_response = ask_groq(groq_prompt, max_tokens=80)
             if groq_response and len(groq_response) > 5:
                 try:
-                    import json as _json
+                    import json as _json, re as _re
                     clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
+                    # Пробуем найти JSON в тексте если он не чистый
+                    json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                    if json_match:
+                        clean = json_match.group()
                     parsed = _json.loads(clean)
-                    if parsed.get("logic"):
+                    if parsed.get("logic") and len(str(parsed["logic"])) > 5:
                         logic = str(parsed["logic"]).strip()
-                    if parsed.get("hours"):
+                    if parsed.get("hours") and str(parsed["hours"]).isdigit():
                         est_hours = max(4, min(int(parsed["hours"]), 72))
                 except Exception:
-                    logic = groq_response.strip().replace("\n", " ")[:80]
+                    # Если JSON совсем не вышел — берём текст только если он осмысленный
+                    clean_text = groq_response.strip().replace("\n", " ")
+                    if len(clean_text) > 10 and not clean_text.upper() == clean_text:
+                        logic = clean_text[:80]
         except Exception as ge:
             logging.debug(f"[SwingGroq] {symbol}: {ge}")
             tf_hours = {"1h": 1, "4h": 4, "1d": 24}
