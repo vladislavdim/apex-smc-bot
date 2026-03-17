@@ -1148,7 +1148,7 @@ async def handle_callback(callback: CallbackQuery):
             f"{err_text}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🏆 Удачные сделки", callback_data="menu_wins"),
+                [InlineKeyboardButton(text="👁 Наблюдение", callback_data="menu_watchlist"),
                  InlineKeyboardButton(text="🔍 Ошибки", callback_data="menu_errors")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
@@ -1776,6 +1776,43 @@ async def handle_callback(callback: CallbackQuery):
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
             ])
         )
+
+    elif data == "menu_watchlist":
+        try:
+            import sqlite3 as _sq3
+            conn = _sq3.connect("brain.db", timeout=10)
+            rows = conn.execute(
+                "SELECT symbol, direction, timeframe, timing_score, created_at, expires_at FROM timing_queue WHERE status=\'waiting\' ORDER BY timing_score DESC, created_at DESC"
+            ).fetchall()
+            conn.close()
+
+            if not rows:
+                text = (
+                    "👁 <b>Наблюдение</b>\n\n"
+                    "Очередь пуста — нет пар ожидающих подтверждения\n\n"
+                    "<i>Здесь появятся пары у которых хороший сигнал но тайминг ещё не подтверждён (3/3)</i>"
+                )
+            else:
+                lines = ["👁 <b>Наблюдение</b> — ждут подтверждения\n"]
+                for r in rows:
+                    symbol, direction, tf, score, created, expires = r
+                    dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+                    bar = "🟩" * score + "⬜" * (3 - score)
+                    lines.append(f"<b>{symbol}</b> — {dir_label} [{tf}]")
+                    lines.append(f"  {bar} {score}/3 тайминг")
+                    lines.append("")
+                text = "\n".join(lines)
+                text += f"\n<i>Как только пара достигнет 3/3 — придёт сигнал автоматически</i>"
+
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist")],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_stats")]
+                ])
+            )
+        except Exception as e:
+            await callback.message.edit_text(f"Ошибка: {e}")
 
     elif data == "menu_wins":
         try:
@@ -2590,20 +2627,20 @@ def _format_channel_signal(sd: dict) -> str:
         if not p: return "—"
         return f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
 
+    dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+    trend_icon = "📈" if direction == "BULLISH" else "📉"
+    tf_time = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
+
     lines = [
-        f"{grade_icon} <b>APEX SIGNAL</b> | {dir_icon}",
+        f"<b>{symbol}</b> — {dir_label}",
+        f"📊 Контекст: {tf}",
         f"",
-        f"💎 <b>{symbol}</b> · {tf} · {regime}",
+        f"🎯 TP:   <code>{fmt(tp1)}</code>",
+        f"💰 Вход: <code>{fmt(entry)}</code>",
+        f"🛑 Стоп: <code>{fmt(sl)}</code>",
         f"",
-        f"📥 Вход:  <code>{fmt(entry)}</code>",
-        f"🎯 TP:    <code>{fmt(tp1)}</code>",
-        f"🛑 SL:    <code>{fmt(sl)}</code>",
-        f"",
-        f"📊 Confluence: <b>{score}</b>/100 · Грейд: <b>{grade}</b>",
-        f"",
-        f"⏱ {datetime.now().strftime('%d.%m %H:%M')} UTC",
-        f"",
-        f"<i>APEX SMC Bot · Сигнал сгенерирован AI</i>",
+        f"⚡ Риск: {'низкий' if score >= 60 else 'средний'}",
+        f"⏱ Горизонт: {tf_time}",
     ]
     return "\n".join(lines)
 
@@ -2773,20 +2810,20 @@ async def auto_scan_mega():
 
             signals_text = "\n".join(r["signals"])
 
+            push_dir = "↑" if direction == "BULLISH" else "↓"
             text = (
-                "💎 <b>МЕГА СДЕЛКА</b> [4h/1d]\n"
-                + emoji + " <b>" + symbol + "</b> — " + direction + "\n"
-                + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                + signals_text + "\n"
-                + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                + f"💰 <b>Вход:</b> <code>{r['entry']:.4f}</code>\n"
-                + f"🛑 <b>Стоп:</b> <code>{r['sl']:.4f}</code> ({'−' if direction=='BULLISH' else '+'}{r['sl_pct']}%)\n"
-                + f"🎯 <b>TP:</b>  <code>{r['tp1']:.4f}</code> ({'▲' if direction=='BULLISH' else '▼'}+{r['tp1_pct']}%)\n"
-                + "⏱ <b>Горизонт:</b> 2-8 недель\n"
-                + "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                + f"📊 Диапазон: {r['range_low']:.4f}–{r['range_high']:.4f} ({r['range_pct']}%)\n"
-                + f"📅 Дней в боковике: {r['days_in_range']}\n"
-                + f"🔥 Score: {r['score']}/100"
+                f"<b>{symbol}</b> — strong push {push_dir}\n"
+                f"📊 Контекст: 4h/1d\n"
+                f"\n"
+                f"🎯 TP:  <code>{r['tp1']:.4f}</code>\n"
+                f"💰 Вход: <code>{r['entry']:.4f}</code>\n"
+                f"🛑 Стоп: <code>{r['sl']:.4f}</code>\n"
+                f"\n"
+                f"{'📈' if direction == 'BULLISH' else '📉'} Логика: боковик {r['days_in_range']}д →\n"
+                f"давление → резкий выход {push_dir}\n"
+                f"\n"
+                f"⚡ Риск: низкий\n"
+                f"⏱ Горизонт: 1-2 дня"
             )
 
             if ADMIN_ID:
@@ -3053,31 +3090,35 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         if any("MM Накопление СИЛЬНОЕ" in c for c in confluence):
             sig_emoji, sig_name = "💎", "ПРЕМИУМ СИГНАЛ"
 
+        # Логика сигнала из confluence
+        logic_lines = [c for c in confluence if any(w in c.lower() for w in ["свип", "sweep", "импульс", "накопл", "ликвидн", "пробой", "давлен", "разворот", "обьём", "объём", "vwap", "ob ", "fvg", "структур"])]
+        logic_text = "\n".join(logic_lines[:3]) if logic_lines else conf_text.split("\n")[0] if conf_text else "структурный вход"
+
+        risk_level = "низкий" if levels.get("rr", 0) >= 3 else "средний" if levels.get("rr", 0) >= 2 else "высокий"
+
+        dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+        trend_icon = "📈" if direction == "BULLISH" else "📉"
+
         text = (
-            f"{'━'*26}\n"
-            f"{sig_emoji} <b>{sig_name}</b> [{tf_label}]\n"
-            f"{emoji} <b>{symbol}</b> — {direction}\n"
-            f"{'━'*26}\n\n"
-            f"📐 <b>Таймфреймы:</b>\n{mtf['tf_status']}\n"
+            f"<b>{symbol}</b> — {dir_label}\n"
+            f"📊 Контекст: {tf_label}\n"
             f"\n"
-            f"💰 <b>Вход:</b> <code>{smart_price_fmt(entry)}</code>\n"
-            f"🛑 <b>Стоп:</b> <code>{smart_price_fmt(sl)}</code>\n"
-            f"🎯 <b>TP:</b>  <code>{smart_price_fmt(tp1)}</code> (+{tp1_pct:.1f}%)\n\n"
-            f"⏱ <b>Горизонт:</b> {tf_time_hint}\n"
-            f"📊 <b>Точность:</b> {wr_str} | {confidence}\n\n"
-            f"📋 <b>Confluence:</b>\n{conf_text}\n"
-            f"{'━'*26}"
+            f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
+            f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
+            f"🛑 Стоп: <code>{smart_price_fmt(sl)}</code>\n"
+            f"\n"
+            f"{trend_icon} Логика:\n{logic_text}\n"
+            f"\n"
+            f"⚡ Риск: {risk_level}\n"
+            f"⏱ Горизонт: {tf_time_hint}"
         )
 
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
         timing_score = timing.get("score", 0)
 
-        # Добавляем тайминг в текст сигнала
-        timing_status = f"✅ Готов к входу ({timing_score}/3)" if timing["valid"] else f"⏳ {timing.get('wait','Ждать подтверждения')} ({timing_score}/3)"
-        text = text.rstrip() + "\n⏰ <b>Тайминг:</b> " + timing_status + "\n" + "━" * 26
-
-        if not timing["valid"]:
+        # Порог 3/3 — только подтверждённые входы
+        if timing_score < 3:
             saved = save_to_timing_queue(
                 symbol, direction, timeframe,
                 entry, sl, tp1, tp2, tp3,
