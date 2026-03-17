@@ -1610,9 +1610,24 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             # TP1 = ближайший структурный уровень
             tp1 = smart_round(min(tp1_candidates))
 
-            # TP2/TP3 = TP1 (один тейк)
-            tp2 = tp1
-            tp3 = tp1
+            # --- TP2: следующий swing high или психологический уровень ---
+            tp2_swings = sorted([h for h in highs if h > tp1 * 1.005])
+            tp2_candidates = []
+            if tp2_swings:
+                tp2_candidates.append(tp2_swings[0])
+
+            # Следующий психологический уровень после TP1
+            magnitude2 = 10 ** (len(str(int(entry))) - 2)
+            psych_tp2 = tp1 + magnitude2
+            while psych_tp2 <= tp1 * 1.005:
+                psych_tp2 += magnitude2
+            tp2_candidates.append(smart_round(psych_tp2))
+
+            # TP2 = следующий структурный уровень после TP1
+            tp2 = smart_round(min(tp2_candidates))
+
+            # TP3 = TP2
+            tp3 = tp2
 
         else:  # BEARISH
             # --- ENTRY ---
@@ -1661,9 +1676,13 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 tp1_candidates.append(fvg["bottom"])
             tp1 = smart_round(max(tp1_candidates)) if tp1_candidates else smart_round(entry * 0.95)
 
-            # TP2/TP3 = TP1 (один тейк)
-            tp2 = tp1
-            tp3 = tp1
+            # TP2: следующая зона ликвидности ниже TP1
+            tp2_swings = sorted([l for l in lows if l < tp1 * 0.99], reverse=True)
+            risk_val_b = abs(entry - sl) if sl else entry * 0.02
+            tp2 = smart_round(max(tp2_swings[:2])) if len(tp2_swings) >= 2 else smart_round(entry - risk_val_b * 5)
+
+            # TP3 = TP2 (убираем третий тейк)
+            tp3 = tp2
 
         # Если нет структуры выше/ниже для TP — используем математику для TP
         # но SL оставляем структурный
@@ -1681,12 +1700,12 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             math_risk = price * tf_risk.get(timeframe, 0.025)
             if direction == "BULLISH":
                 tp1 = smart_round(entry + max(risk * 3, math_risk * 3))
-                tp2 = tp1
-                tp3 = tp1
+                tp2 = smart_round(entry + max(risk * 5, math_risk * 5))
+                tp3 = tp2
             else:
                 tp1 = smart_round(entry - max(risk * 3, math_risk * 3))
-                tp2 = tp1
-                tp3 = tp1
+                tp2 = smart_round(entry - max(risk * 5, math_risk * 5))
+                tp3 = tp2
             reward = abs(tp1 - entry)
             rr = round(reward / risk, 2)
 
@@ -1711,13 +1730,13 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         if direction == "BULLISH":
             sl  = smart_round(entry - risk)
             tp1 = smart_round(entry + risk * 3)
-            tp2 = tp1
-            tp3 = tp1
+            tp2 = smart_round(entry + risk * 5)
+            tp3 = tp2
         else:
             sl  = smart_round(entry + risk)
             tp1 = smart_round(entry - risk * 3)
-            tp2 = tp1
-            tp3 = tp1
+            tp2 = smart_round(entry - risk * 5)
+            tp3 = tp2
         return {
             "entry": entry, "sl": sl,
             "tp1": tp1, "tp2": tp2, "tp3": tp3,
@@ -2834,14 +2853,14 @@ def analyze_trade_type(symbol, trade_type="swing"):
             entry = ob["top"] if ob else price
             sl = round(entry - risk, 6)
             tp1 = round(entry + risk * 2, 6)
-            tp2 = tp1
-            tp3 = tp1
+            tp2 = round(entry + risk * 3, 6)
+            tp3 = round(entry + risk * 5, 6)
         else:
             entry = ob["bottom"] if ob else price
             sl = round(entry + risk, 6)
             tp1 = round(entry - risk * 2, 6)
-            tp2 = tp1
-            tp3 = tp1
+            tp2 = round(entry - risk * 3, 6)
+            tp3 = round(entry - risk * 5, 6)
 
         # Исторический контекст
         hist = get_historical_context(symbol, "1d" if trade_type != "scalp" else "4h")
@@ -2889,9 +2908,7 @@ def analyze_trade_type(symbol, trade_type="swing"):
             f"📐 <b>Таймфреймы ({trade_type}):</b>\n{tf_status}\n"
             f"💰 <b>Вход:</b> <code>{fmt(entry)}</code>\n"
             f"🛑 <b>Стоп:</b> <code>{fmt(sl)}</code>\n"
-            f"🎯 <b>TP1:</b> <code>{fmt(tp1)}</code> (+2R)\n"
-            f"🎯 <b>TP2:</b> <code>{fmt(tp2)}</code> (+3R)\n"
-            f"🎯 <b>TP3:</b> <code>{fmt(tp3)}</code> (+5R)\n\n"
+            f"🎯 <b>TP:</b>  <code>{fmt(tp1)}</code>\n\n"
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"{long_trend}\n"
             f"{hist_block}"
@@ -3415,6 +3432,8 @@ def full_scan(symbol, timeframe="1h"):
 
         # Минимальный порог — учитывает серию потерь
         min_weight = max(streak_threshold, 18 if mtf["match_count"] >= 3 else 22)
+        # Ограничиваем скор максимум 100
+        total_weight = min(total_weight, 100)
         if total_weight < min_weight:
             return None
 
@@ -3558,9 +3577,7 @@ def full_scan(symbol, timeframe="1h"):
             f"{mtf['stars']}\n\n"
             f"💰 <b>Вход:</b> <code>{smart_price_fmt(entry)}</code>\n"
             f"🛑 <b>Стоп:</b> <code>{smart_price_fmt(sl)}</code>\n"
-            f"🎯 <b>TP1:</b> <code>{smart_price_fmt(tp1)}</code> (+2R)\n"
-            f"🎯 <b>TP2:</b> <code>{smart_price_fmt(tp2)}</code> (+3R)\n"
-            f"🎯 <b>TP3:</b> <code>{smart_price_fmt(tp3)}</code> (+5R)\n\n"
+            f"🎯 <b>TP:</b>  <code>{smart_price_fmt(tp1)}</code>\n\n"
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence_str}\n"
             f"⏰ <b>Тайминг входа:</b> {'✅ Готов к входу' if timing['valid'] else '⏳ ' + timing.get('wait','Ждать подтверждения')} ({timing_score}/3)\n"
