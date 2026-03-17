@@ -325,6 +325,18 @@ def init_db():
         closed_at TEXT,
         learning_id INTEGER DEFAULT NULL)""")
 
+    # timing_queue — сигналы ожидающие подтверждения тайминга
+    c.execute("""CREATE TABLE IF NOT EXISTS timing_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT, direction TEXT, timeframe TEXT,
+        entry REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
+        grade TEXT, signal_text TEXT,
+        timing_score INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        expires_at TEXT,
+        status TEXT DEFAULT 'waiting'
+    )""")
+
     # signal_log — детальный лог (используется learning.py и autopilot)
     c.execute("""CREATE TABLE IF NOT EXISTS signal_log (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1300,6 +1312,80 @@ def smart_round(p, direction_multiplier=1.0) -> float:
     if p >= 0.001: return round(p, 7)
     return round(p, 10)
 
+
+
+TIMING_EXPIRY_HOURS = {"1h": 4, "4h": 12, "1d": 48, "1w": 120}
+
+def save_to_timing_queue(symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, timing_score):
+    """Сохраняет сигнал в очередь ожидания тайминга"""
+    try:
+        from datetime import timedelta
+        hours = TIMING_EXPIRY_HOURS.get(timeframe, 4)
+        expires = (datetime.utcnow() + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        conn = _get_conn()
+        existing = conn.execute(
+            "SELECT id FROM timing_queue WHERE symbol=? AND direction=? AND timeframe=? AND status='waiting'",
+            (symbol, direction, timeframe)
+        ).fetchone()
+        if existing:
+            conn.close()
+            return False
+        conn.execute("""INSERT INTO timing_queue
+            (symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, timing_score, expires_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, timing_score, expires))
+        conn.commit()
+        conn.close()
+        logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3, истекает через {hours}ч)")
+        return True
+    except Exception as e:
+        logging.debug(f"save_to_timing_queue {symbol}: {e}")
+        return False
+
+
+def get_timing_queue():
+    """Возвращает все активные сигналы из очереди"""
+    try:
+        conn = _get_conn()
+        rows = conn.execute("""
+            SELECT id, symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, timing_score, expires_at
+            FROM timing_queue WHERE status='waiting' ORDER BY created_at ASC
+        """).fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logging.debug(f"get_timing_queue: {e}")
+        return []
+
+
+def expire_timing_queue():
+    """Помечает истёкшие сигналы как expired"""
+    try:
+        conn = _get_conn()
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        expired = conn.execute(
+            "SELECT id, symbol, timeframe FROM timing_queue WHERE status='waiting' AND expires_at < ?", (now,)
+        ).fetchall()
+        for row in expired:
+            conn.execute("UPDATE timing_queue SET status='expired' WHERE id=?", (row[0],))
+            logging.info(f"[TimingQueue] {row[1]} {row[2]} → истёк")
+        conn.commit()
+        conn.close()
+        return len(expired)
+    except Exception as e:
+        logging.debug(f"expire_timing_queue: {e}")
+        return 0
+
+
+def remove_from_timing_queue(queue_id):
+    """Помечает сигнал как отправленный"""
+    try:
+        conn = _get_conn()
+        conn.execute("UPDATE timing_queue SET status='sent' WHERE id=?", (queue_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.debug(f"remove_from_timing_queue: {e}")
 
 def check_entry_timing(candles, direction, entry_price, timeframe="1h"):
     """
