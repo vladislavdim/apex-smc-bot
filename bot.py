@@ -3023,9 +3023,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
         conf_score = len(confluence) * 15  # приблизительный score
-        if auto:
-            save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
-                           confluence=conf_score, regime="UNKNOWN")
+        # save_signal_db вызывается ниже — только после проверки тайминга
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
@@ -3088,6 +3086,11 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             if saved:
                 logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3)")
             return None  # Ждём подтверждения тайминга
+
+        # Тайминг ОК — сохраняем в БД только сейчас
+        if auto:
+            save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
+                           confluence=conf_score, regime="UNKNOWN")
 
         return {"symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
 
