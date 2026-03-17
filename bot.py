@@ -2867,7 +2867,7 @@ def scan_all_for_deals(limit=40):
     return found
 
 
-def full_scan_raw(symbol, timeframe="1h"):
+def full_scan_raw(symbol, timeframe="1h", auto=False):
     """Возвращает dict с текстом и grade для фильтрации"""
     try:
         # Проверяем есть ли уже открытый сигнал по этому символу в БД
@@ -3023,8 +3023,9 @@ def full_scan_raw(symbol, timeframe="1h"):
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
         conf_score = len(confluence) * 15  # приблизительный score
-        save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
-                       confluence=conf_score, regime="UNKNOWN")
+        if auto:
+            save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
+                           confluence=conf_score, regime="UNKNOWN")
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
