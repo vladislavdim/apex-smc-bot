@@ -3174,14 +3174,59 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         if any("MM Накопление СИЛЬНОЕ" in c for c in confluence):
             sig_emoji, sig_name = "💎", "ПРЕМИУМ СИГНАЛ"
 
-        # Логика сигнала из confluence
-        logic_lines = [c for c in confluence if any(w in c.lower() for w in ["свип", "sweep", "импульс", "накопл", "ликвидн", "пробой", "давлен", "разворот", "обьём", "объём", "vwap", "ob ", "fvg", "структур"])]
-        logic_text = "\n".join(logic_lines[:3]) if logic_lines else conf_text.split("\n")[0] if conf_text else "структурный вход"
-
         risk_level = "низкий" if levels.get("rr", 0) >= 3 else "средний" if levels.get("rr", 0) >= 2 else "высокий"
-
         dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
         trend_icon = "📈" if direction == "BULLISH" else "📉"
+
+        # ── Groq анализирует логику позиционного входа ──
+        groq_logic = ""
+        groq_time = tf_time_hint
+        try:
+            fg = get_fear_greed()
+            funding = get_funding_rate(symbol)
+            regime = get_market_regime(symbol)
+            fg_val = f"{fg['value']} ({fg['label']})" if fg else "N/A"
+            fund_val = f"{funding:+.4f}%" if funding is not None else "N/A"
+            regime_val = regime.get("mode", "?") if isinstance(regime, dict) else str(regime)
+            htf_1d = smc_on_tf(symbol, "1d")
+            htf_1w = smc_on_tf(symbol, "1w")
+            conf_short = "\n".join(confluence[:5]) if confluence else "нет данных"
+            groq_prompt = (
+                f"Ты трейдер SMC. Позиционный сигнал. Ответь СТРОГО JSON без лишнего:\n"
+                f'{{\"logic\": \"почему входим макс 15 слов\", \"hours\": число_часов_до_tp}}\n\n'
+                f"Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
+                f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
+                f"MTF: {mtf.get('match_count',0)}/4 | 1d: {htf_1d} | 1w: {htf_1w}\n"
+                f"RR: {levels.get('rr',0)} | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
+                f"Режим: {regime_val}\n"
+                f"Confluence:\n{conf_short}"
+            )
+            groq_response = ask_groq(groq_prompt, max_tokens=80)
+            if groq_response and len(groq_response) > 5:
+                try:
+                    import json as _json, re as _re
+                    clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
+                    json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                    if json_match:
+                        clean = json_match.group()
+                    parsed = _json.loads(clean)
+                    if parsed.get("logic") and len(str(parsed["logic"])) > 5:
+                        groq_logic = str(parsed["logic"]).strip()
+                    if parsed.get("hours"):
+                        hrs = int(parsed["hours"])
+                        groq_time = f"~{hrs}ч" if hrs < 24 else f"~{hrs//24}дн"
+                except Exception:
+                    clean_text = groq_response.strip().replace("\n", " ")
+                    if len(clean_text) > 10 and not clean_text.upper() == clean_text:
+                        groq_logic = clean_text[:80]
+        except Exception:
+            pass
+
+        # Fallback если Groq не ответил
+        if not groq_logic:
+            logic_lines = [c for c in confluence if any(w in c.lower() for w in
+                ["свип", "sweep", "импульс", "накопл", "ликвидн", "пробой", "ob ", "fvg"])]
+            groq_logic = "\n".join(logic_lines[:3]) if logic_lines else "структурный вход по SMC"
 
         text = (
             f"<b>{symbol}</b> — {dir_label}\n"
@@ -3191,10 +3236,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
             f"🛑 Стоп: <code>{smart_price_fmt(sl)}</code>\n"
             f"\n"
-            f"{trend_icon} Логика:\n{logic_text}\n"
+            f"{trend_icon} Логика:\n{groq_logic}\n"
             f"\n"
             f"⚡ Риск: {risk_level}\n"
-            f"⏱ Горизонт: {tf_time_hint}"
+            f"⏱ Горизонт: {groq_time}"
         )
 
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
