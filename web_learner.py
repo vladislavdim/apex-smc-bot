@@ -350,7 +350,7 @@ def groq_research_topic(topic: str, query: str) -> dict:
         # 1. Сначала RSS — работает стабильно с Render
         rss_items = get_rss_batch(limit_per_source=3)
         # Фильтруем по релевантности к теме
-        query_words = set(query.lower().split())
+        query_words = set((query or "").lower().split())
         relevant_rss = []
         for item in rss_items:
             item_text = (item["title"] + " " + item.get("text", "")).lower()
@@ -383,9 +383,9 @@ def groq_research_topic(topic: str, query: str) -> dict:
             texts = search_crypto_news(query)
 
         # 4. Базы знаний трейдеров — для SMC/технических тем
-        if not texts or topic.lower() in ("smc", "order block", "fvg", "liquidity", "wyckoff"):
+        if not texts or (topic or "").lower() in ("smc", "order block", "fvg", "liquidity", "wyckoff"):
             for key in TRADER_KNOWLEDGE_URLS:
-                if any(w in key for w in query.lower().split()):
+                if any(w in key for w in (query or "").lower().split()):
                     knowledge = get_trader_knowledge(key)
                     if knowledge:
                         texts.append({"url": TRADER_KNOWLEDGE_URLS[key], "text": knowledge[:1500]})
