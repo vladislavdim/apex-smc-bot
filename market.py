@@ -1300,6 +1300,131 @@ def smart_round(p, direction_multiplier=1.0) -> float:
     if p >= 0.001: return round(p, 7)
     return round(p, 10)
 
+
+def check_entry_timing(candles, direction, entry_price, timeframe="1h"):
+    """
+    Тайминг входа — проверяет 3 условия перед входом:
+    1. Sweep ликвидности (ложный пробой уровня)
+    2. Импульсная свеча (подтверждение направления)
+    3. Цена не ушла далеко от зоны входа
+
+    Возвращает dict:
+      - valid: bool — можно ли входить
+      - score: 0-3 — количество выполненных условий
+      - reasons: список причин
+      - wait: описание что ждать
+    """
+    if not candles or len(candles) < 5:
+        return {"valid": True, "score": 0, "reasons": [], "wait": ""}
+
+    reasons = []
+    warnings = []
+    score = 0
+
+    last  = candles[-1]
+    prev  = candles[-2]
+    prev2 = candles[-3]
+
+    current_price = last["close"]
+    atr = sum(c["high"] - c["low"] for c in candles[-14:]) / min(14, len(candles))
+    avg_vol = sum(c.get("volume", 0) for c in candles[-20:]) / 20 if len(candles) >= 20 else 1
+
+    # ── 1. SWEEP ЛИКВИДНОСТИ ──────────────────────────────────
+    # Бычий sweep: предыдущая свеча пробила лоу, текущая закрылась выше
+    if direction == "BULLISH":
+        # Проверяем последние 3 свечи на sweep
+        swept = False
+        for i in range(-3, 0):
+            c = candles[i]
+            c_prev = candles[i - 1]
+            # Свеча пробила лоу и закрылась выше — sweep
+            if c["low"] < c_prev["low"] and c["close"] > c_prev["low"]:
+                wick_size = (c["close"] - c["low"]) / (c["high"] - c["low"] + 0.000001)
+                if wick_size > 0.4:  # нижний хвост > 40% тела
+                    swept = True
+                    break
+        if swept:
+            score += 1
+            reasons.append("✅ Sweep ликвидности — ложный пробой вниз")
+        else:
+            warnings.append("⚠️ Нет sweep — ждать ложного пробоя лоу")
+
+    else:  # BEARISH
+        swept = False
+        for i in range(-3, 0):
+            c = candles[i]
+            c_prev = candles[i - 1]
+            if c["high"] > c_prev["high"] and c["close"] < c_prev["high"]:
+                wick_size = (c["high"] - c["close"]) / (c["high"] - c["low"] + 0.000001)
+                if wick_size > 0.4:
+                    swept = True
+                    break
+        if swept:
+            score += 1
+            reasons.append("✅ Sweep ликвидности — ложный пробой хая")
+        else:
+            warnings.append("⚠️ Нет sweep — ждать ложного пробоя хая")
+
+    # ── 2. ИМПУЛЬСНАЯ СВЕЧА ───────────────────────────────────
+    # Последняя закрытая свеча должна быть в направлении сигнала + объём выше среднего
+    candle_body = abs(last["close"] - last["open"])
+    candle_range = last["high"] - last["low"]
+    body_ratio = candle_body / candle_range if candle_range > 0 else 0
+    last_vol = last.get("volume", 0)
+
+    if direction == "BULLISH":
+        is_impulse = (last["close"] > last["open"] and  # бычья свеча
+                      body_ratio > 0.5 and               # тело > 50% диапазона
+                      candle_body > atr * 0.5)           # тело > половины ATR
+    else:
+        is_impulse = (last["close"] < last["open"] and
+                      body_ratio > 0.5 and
+                      candle_body > atr * 0.5)
+
+    if is_impulse:
+        score += 1
+        vol_note = f" (объём x{round(last_vol/avg_vol,1)})" if avg_vol > 0 else ""
+        reasons.append(f"✅ Импульсная свеча{vol_note}")
+    else:
+        warnings.append("⚠️ Нет импульса — ждать сильной свечи подтверждения")
+
+    # ── 3. ЦЕНА В ЗОНЕ ВХОДА ─────────────────────────────────
+    # Цена не должна уйти далеко от зоны входа (максимум 1.5 ATR)
+    drift = abs(current_price - entry_price)
+    max_drift = atr * 1.5
+
+    if drift <= max_drift:
+        score += 1
+        drift_pct = round(drift / entry_price * 100, 2)
+        reasons.append(f"✅ Цена в зоне входа (отклонение {drift_pct}%)")
+    else:
+        drift_pct = round(drift / entry_price * 100, 2)
+        warnings.append(f"⚠️ Цена ушла от зоны на {drift_pct}% — вход поздний")
+
+    # ── ИТОГ ─────────────────────────────────────────────────
+    # Валидный вход: минимум 2 из 3 условий
+    valid = score >= 2
+
+    wait_msg = ""
+    if not valid:
+        if score == 0:
+            wait_msg = "Ждать: sweep + импульс"
+        elif "sweep" in str(warnings):
+            wait_msg = "Ждать ложного пробоя уровня"
+        elif "импульс" in str(warnings):
+            wait_msg = "Ждать импульсной свечи подтверждения"
+        else:
+            wait_msg = "Ждать возврата цены в зону"
+
+    return {
+        "valid": valid,
+        "score": score,
+        "reasons": reasons,
+        "warnings": warnings,
+        "wait": wait_msg,
+        "swept": swept if direction == "BULLISH" else swept,
+    }
+
 def calc_smart_levels(candles, direction, price, timeframe="1h"):
     """
     Расчёт SL/TP по реальной рыночной структуре (SMC):
@@ -1357,7 +1482,12 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                 sl_candidates.append(entry - atr_sl * 2.0)
 
             # Берём самый дальний кандидат (за реальной структурой)
-            sl = smart_round(min(sl_candidates))
+            sl_raw = min(sl_candidates)
+
+            # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
+            max_sl_pct = {"1h": 0.08, "4h": 0.10, "1d": 0.15, "1w": 0.20}
+            max_sl = entry * (1 - max_sl_pct.get(timeframe, 0.08))
+            sl = smart_round(max(sl_raw, max_sl))
 
 
 
@@ -1412,24 +1542,37 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         else:  # BEARISH
             # --- ENTRY ---
             entry = smart_round(ob["bottom"] if ob else price)
-            # --- SL: за последний swing high или над OB ---
+            # --- SL: за ближайшей структурной зоной выше входа ---
+            atr_sl_b = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
             sl_candidates = []
-            sl_swing = [h for h in highs if h > entry * 1.001]
+
+            # Ближайший swing high выше входа
+            sl_swing = sorted([h for h in highs if h > entry * 1.001])
             if sl_swing:
-                sl_candidates.append(max(sl_swing[-3:]) * (1 + buf))
+                # Берём первый (ближайший) swing high
+                sl_candidates.append(sl_swing[0] * (1 + buf))
+
+            # OB top выше входа
             if ob and ob["top"] > entry:
                 sl_candidates.append(ob["top"] * (1 + buf))
+
+            # Sell stops выше входа (зона ликвидности)
             sell_stops = heatmap.get("nearest_sell_stops")
             sell_stops_price2 = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
-            if sell_stops_price2 and sell_stops_price2 > entry:
+            if sell_stops_price2 and sell_stops_price2 > entry * 1.005:
                 sl_candidates.append(sell_stops_price2 * (1 + buf))
-            if not sl_candidates or max(sl_candidates) < entry * 1.01:
-                recent_high = max(c["high"] for c in candles[-20:])
-                if recent_high > entry:
-                    sl_candidates.append(recent_high * (1 + buf))
+
+            # Fallback: ATR * 1.5
             if not sl_candidates:
-                sl_candidates.append(entry * 1.02)
-            sl = smart_round(max(sl_candidates))
+                sl_candidates.append(entry + atr_sl_b * 1.5)
+
+            # Берём ближайший кандидат (минимальный риск)
+            sl_raw = min(sl_candidates)
+
+            # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
+            max_sl_pct = {"1h": 0.08, "4h": 0.10, "1d": 0.15, "1w": 0.20}
+            max_sl = entry * (1 + max_sl_pct.get(timeframe, 0.08))
+            sl = smart_round(min(sl_raw, max_sl))
             # --- TP1: ближайшая зона ликвидности ниже ---
             tp1_candidates = []
             buy_stops = heatmap.get("nearest_buy_stops")
@@ -3246,6 +3389,25 @@ def full_scan(symbol, timeframe="1h"):
             logging.warning(f"full_scan {symbol}: entry = 0 после расчёта, пропускаем")
             return None
 
+        # ── 4.5 Тайминг входа — sweep + импульс + зона ──
+        timing = check_entry_timing(candles, direction, entry, timeframe)
+        timing_score = timing.get("score", 0)
+        timing_reasons = timing.get("reasons", [])
+        timing_warnings = timing.get("warnings", [])
+
+        # Добавляем тайминг в confluence
+        for r in timing_reasons:
+            confluence.append(r)
+            total_weight += 8  # каждое подтверждение тайминга добавляет вес
+
+        # Если тайминг плохой — добавляем предупреждение но не блокируем
+        if not timing["valid"]:
+            for w in timing_warnings:
+                confluence.append(w)
+            # Понижаем вес если нет ни одного подтверждения тайминга
+            if timing_score == 0:
+                total_weight -= 10
+
         # ── 5. Время отработки ──
         est_hours, confidence_str, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
@@ -3330,6 +3492,7 @@ def full_scan(symbol, timeframe="1h"):
             f"🎯 <b>TP3:</b> <code>{smart_price_fmt(tp3)}</code> (+5R)\n\n"
             f"⏱ <b>Время отработки:</b> {time_str}\n"
             f"📊 <b>Точность:</b> {wr_str} | {confidence_str}\n"
+            f"⏰ <b>Тайминг входа:</b> {'✅ Готов к входу' if timing['valid'] else '⏳ ' + timing.get('wait','Ждать подтверждения')} ({timing_score}/3)\n"
             f"🧠 <b>Режим рынка:</b> {regime.get('mode','?') if isinstance(regime,dict) else regime} ({regime.get('direction','') if isinstance(regime,dict) else ''})\n"
             f"{econ_warn}"
             f"❌ <b>Инвалидация:</b> {inv_text}\n\n"
