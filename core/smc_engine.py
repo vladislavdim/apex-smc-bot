@@ -2011,24 +2011,45 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
         if score < 35:
             return None
 
-        # Расчёт уровней
+        # Расчёт уровней по реальной структуре
         range_size = range_high - range_low
         entry = current
 
+        # ATR для fallback
+        atr = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14 if len(candles_4h) >= 14 else range_size * 0.02
+
         if direction == "BULLISH":
-            sl    = round(range_low * 0.97, 6)       # под нижней границей боковика -3%
-            tp1   = round(entry + range_size * 0.5, 6)  # +50% диапазона
-            tp2   = round(entry + range_size * 1.5, 6)  # +150% диапазона
-            tp3   = round(entry + range_size * 2.5, 6)  # +250% диапазона
+            # SL: под нижней границей боковика + буфер 2% (не весь диапазон)
+            sl = round(range_low * 0.98, 6)
+            # Ограничение: максимум 10% от входа
+            if (entry - sl) / entry > 0.10:
+                sl = round(entry * 0.90, 6)
+
+            # TP1: верхняя граница боковика (первая цель — пробой диапазона)
+            tp1 = round(range_high * 1.01, 6)
+            # TP2: +диапазон выше range_high (проекция движения)
+            tp2 = round(range_high + range_size * 0.8, 6)
+            # TP3: +2 диапазона (финальная цель)
+            tp3 = round(range_high + range_size * 1.8, 6)
+
             sl_pct  = round((entry - sl) / entry * 100, 1)
             tp1_pct = round((tp1 - entry) / entry * 100, 1)
             tp2_pct = round((tp2 - entry) / entry * 100, 1)
             tp3_pct = round((tp3 - entry) / entry * 100, 1)
         else:
-            sl    = round(range_high * 1.03, 6)
-            tp1   = round(entry - range_size * 0.5, 6)
-            tp2   = round(entry - range_size * 1.5, 6)
-            tp3   = round(entry - range_size * 2.5, 6)
+            # SL: над верхней границей боковика + буфер 2% (не весь диапазон)
+            sl = round(range_high * 1.02, 6)
+            # Ограничение: максимум 10% от входа
+            if (sl - entry) / entry > 0.10:
+                sl = round(entry * 1.10, 6)
+
+            # TP1: нижняя граница боковика (первая цель)
+            tp1 = round(range_low * 0.99, 6)
+            # TP2: -диапазон ниже range_low (проекция движения)
+            tp2 = round(range_low - range_size * 0.8, 6)
+            # TP3: -2 диапазона (финальная цель)
+            tp3 = round(range_low - range_size * 1.8, 6)
+
             sl_pct  = round((sl - entry) / entry * 100, 1)
             tp1_pct = round((entry - tp1) / entry * 100, 1)
             tp2_pct = round((entry - tp2) / entry * 100, 1)
