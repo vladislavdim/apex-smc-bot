@@ -2612,39 +2612,42 @@ def format_deep_scan_result(signals, accumulations, total_scanned):
 
 
 def _format_channel_signal(sd: dict) -> str:
-    """Красивое сообщение сигнала для Telegram канала."""
-    symbol   = sd.get("symbol", "???")
-    direction= sd.get("direction", "")
-    grade    = sd.get("grade", "")
-    entry    = sd.get("entry", 0)
-    tp1      = sd.get("tp1", 0)
-    tp2      = sd.get("tp2", 0)
-    tp3      = sd.get("tp3", 0)
-    sl       = sd.get("sl", 0)
-    tf       = sd.get("timeframe", "1h")
-    score    = sd.get("confluence_score", 0)
-    regime   = sd.get("regime", "")
+    """Сообщение для канала — такой же текст как в боте"""
+    text = sd.get("text", "")
+    if text:
+        return text
 
-    dir_icon = "🟢 LONG" if direction == "BULLISH" else "🔴 SHORT"
-    grade_icon = {"МЕГА ТОП": "🔥🔥🔥", "ТОП СДЕЛКА": "🔥🔥", "ХОРОШАЯ": "🔥"}.get(grade, "✅")
+    # Fallback
+    symbol    = sd.get("symbol", "???")
+    direction = sd.get("direction", "")
+    entry     = sd.get("entry", 0)
+    tp1       = sd.get("tp1", 0)
+    sl        = sd.get("sl", 0)
+    tf        = sd.get("timeframe", "1h")
+    score     = sd.get("confluence_score", 0)
+    scan_type = sd.get("scan_type", "")
 
     def fmt(p):
         if not p: return "—"
-        return f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
+        if p < 0.0001: return f"${p:.8f}"
+        if p < 0.01:   return f"${p:.6f}"
+        if p < 1:      return f"${p:.4f}"
+        return f"${p:,.2f}"
 
     dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-    trend_icon = "📈" if direction == "BULLISH" else "📉"
-    tf_time = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
+    label     = "🔄 [SWING]" if scan_type == "swing" else "📐 [ПОЗИЦИЯ]"
+    tf_time   = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
+    risk      = "низкий" if score >= 60 else "средний"
 
     lines = [
-        f"<b>{symbol}</b> — {dir_label}",
+        f"{label} | <b>{symbol}</b> — {dir_label}",
         f"📊 Контекст: {tf}",
         f"",
         f"🎯 TP:   <code>{fmt(tp1)}</code>",
         f"💰 Вход: <code>{fmt(entry)}</code>",
         f"🛑 Стоп: <code>{fmt(sl)}</code>",
         f"",
-        f"⚡ Риск: {'низкий' if score >= 60 else 'средний'}",
+        f"⚡ Риск: {risk}",
         f"⏱ Горизонт: {tf_time}",
     ]
     return "\n".join(lines)
