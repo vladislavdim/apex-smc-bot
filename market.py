@@ -2779,7 +2779,14 @@ async def realtime_pump_detector():
                 if vol_spike >= 3 and abs(price_change) >= 1.5:
                     direction = "🚀 ПАМП" if price_change > 0 else "💥 ДАМП"
                     p = candles[-1]["close"]
-                    ps = f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
+                    if p < 0.0001:
+                        ps = f"${p:.8f}"
+                    elif p < 0.01:
+                        ps = f"${p:.6f}"
+                    elif p < 1:
+                        ps = f"${p:.4f}"
+                    else:
+                        ps = f"${p:,.2f}"
 
                     pump_alerted.add(symbol)
                     # Снимаем алерт через 30 мин
