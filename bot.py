@@ -2788,7 +2788,7 @@ async def auto_scan_swing():
 
             risk_label = "низкий" if r["rr"] >= 3 else "средний"
             text = (
-                f"<b>{symbol}</b> — {dir_label}\n"
+                f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 4h{htf_text}\n"
                 f"\n"
                 f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code>\n"
@@ -3229,7 +3229,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             groq_logic = "\n".join(logic_lines[:3]) if logic_lines else "структурный вход по SMC"
 
         text = (
-            f"<b>{symbol}</b> — {dir_label}\n"
+            f"📐 <b>[ПОЗИЦИЯ]</b> | <b>{symbol}</b> — {dir_label}\n"
             f"📊 Контекст: {tf_label}\n"
             f"\n"
             f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
