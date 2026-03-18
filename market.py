@@ -1179,7 +1179,7 @@ def detect_accumulation(symbol):
         high_max = max(c["high"] for c in last_12)
         low_min = min(c["low"] for c in last_12)
         price_now = candles_1h[-1]["close"]
-        range_pct = (high_max - low_min) / low_min * 100
+        range_pct = (high_max - low_min) / low_min * 100 if low_min > 0 else 0
 
         if range_pct < 5:
             score += 25
@@ -1192,7 +1192,7 @@ def detect_accumulation(symbol):
         all_vols = [c["volume"] for c in candles_1h[:-3]]
         avg_vol = sum(all_vols) / len(all_vols) if all_vols else 1
         recent_vols = [c["volume"] for c in candles_1h[-3:]]
-        avg_recent = sum(recent_vols) / len(recent_vols)
+        avg_recent = sum(recent_vols) / len(recent_vols) if recent_vols else 0
 
         vol_ratio = avg_recent / avg_vol if avg_vol > 0 else 1
 
