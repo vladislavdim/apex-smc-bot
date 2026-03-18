@@ -29,6 +29,30 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+# Патч edit_text и edit_reply_markup — подавляем "message is not modified"
+import aiogram.types.message as _msg_module
+_orig_edit_text = _msg_module.Message.edit_text
+_orig_edit_markup = _msg_module.Message.edit_reply_markup
+
+async def _safe_edit_text(self, *args, **kwargs):
+    try:
+        return await _orig_edit_text(self, *args, **kwargs)
+    except Exception as e:
+        if "message is not modified" in str(e):
+            return None
+        raise
+
+async def _safe_edit_markup(self, *args, **kwargs):
+    try:
+        return await _orig_edit_markup(self, *args, **kwargs)
+    except Exception as e:
+        if "message is not modified" in str(e):
+            return None
+        raise
+
+_msg_module.Message.edit_text = _safe_edit_text
+_msg_module.Message.edit_reply_markup = _safe_edit_markup
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
