@@ -1111,10 +1111,16 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "menu_stats":
         try:
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            total = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            # Считаем только реально отправленные сигналы (не pending из очереди)
+            total = conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending' OR result IS NULL").fetchone()[0]
+            # Добавляем pending которые реально в работе (не в timing_queue)
+            real_pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+            total = total + real_pending  # Все записи в signals — это уже отправленные
             wins = conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone()[0]
             losses = conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone()[0]
             pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+            # Наблюдение — пары в очереди тайминга
+            watchlist = conn.execute("SELECT COUNT(*) FROM timing_queue WHERE status='waiting'").fetchone()[0]
             top = conn.execute(
                 "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
             ).fetchall()
@@ -1126,7 +1132,7 @@ async def handle_callback(callback: CallbackQuery):
         except Exception as e:
             import logging
             logging.error(e)
-            total = wins = losses = pending = errors_count = 0
+            total = wins = losses = pending = errors_count = watchlist = 0
             top = []
             patterns = []
 
@@ -1145,6 +1151,7 @@ async def handle_callback(callback: CallbackQuery):
             f"✅ Прибыльных: <b>{wins}</b>\n"
             f"❌ Убыточных: <b>{losses}</b>\n"
             f"⏳ В работе: <b>{pending}</b>\n"
+            f"👁 Наблюдение: <b>{watchlist}</b>\n"
             f"🎯 Win Rate: <b>{wr}%</b>\n\n"
             f"🏆 <b>Лучшие монеты:</b>\n{top_text}"
             f"{err_text}",
