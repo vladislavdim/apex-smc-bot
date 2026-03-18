@@ -1247,6 +1247,51 @@ def detect_accumulation(symbol):
         if not signals or score < 72:  # поднят порог с 30 до 72
             return None
 
+        # ── Groq считает цель роста индивидуально ──
+        pump_target = None
+        pump_target_pct = None
+        pump_logic = ""
+        try:
+            atr_1h = sum(c["high"] - c["low"] for c in candles_1h[-14:]) / 14
+            recent_highs_str = ", ".join([str(round(c["high"], 6)) for c in candles_1h[-12:]])
+            recent_lows_str  = ", ".join([str(round(c["low"],  6)) for c in candles_1h[-12:]])
+            groq_prompt = (
+                f"Ты трейдер SMC. Анализируй накопление и дай цель роста. Ответь СТРОГО JSON:\\n"
+                f'{{\"target\": число_цены, \"target_pct\": процент_роста_число, \"logic\": \"причина макс 10 слов\"}}\\n\\n'
+                f"Пара: {symbol}\\n"
+                f"Цена сейчас: {price_now}\\n"
+                f"Диапазон боковика: {round(low_min,6)} — {round(high_max,6)} ({range_pct:.1f}%)\\n"
+                f"ATR: {round(atr_1h,6)}\\n"
+                f"BB ширина: {bb_width:.1f}%\\n"
+                f"Объём ratio: {vol_ratio:.2f}\\n"
+                f"Максимумы 12ч: {recent_highs_str}\\n"
+                f"Минимумы 12ч: {recent_lows_str}\\n"
+                f"Признаки: {'; '.join(signals)}"
+            )
+            groq_resp = ask_groq(groq_prompt, max_tokens=100)
+            if groq_resp and len(groq_resp) > 5:
+                import json as _json, re as _re
+                clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
+                json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                if json_match:
+                    clean = json_match.group()
+                parsed = _json.loads(clean)
+                if parsed.get("target") and float(parsed["target"]) > price_now:
+                    pump_target = float(parsed["target"])
+                    pump_target_pct = float(parsed.get("target_pct", round((pump_target - price_now) / price_now * 100, 1)))
+                if parsed.get("logic"):
+                    pump_logic = str(parsed["logic"]).strip()
+        except Exception as ge:
+            logging.debug(f"[AccumGroq] {symbol}: {ge}")
+            # Fallback: верхняя граница боковика + ATR*2
+            try:
+                atr_fb = sum(c["high"] - c["low"] for c in candles_1h[-14:]) / 14
+                pump_target = round(high_max + atr_fb * 2, 6)
+                pump_target_pct = round((pump_target - price_now) / price_now * 100, 1)
+                pump_logic = "верхняя граница + ATR×2"
+            except Exception:
+                pass
+
         return {
             "symbol": symbol,
             "score": min(score, 100),
@@ -1254,7 +1299,12 @@ def detect_accumulation(symbol):
             "range_pct": range_pct,
             "vol_ratio": vol_ratio,
             "bb_width": bb_width,
-            "signals": signals
+            "signals": signals,
+            "pump_target": pump_target,
+            "pump_target_pct": pump_target_pct,
+            "pump_logic": pump_logic,
+            "high_max": high_max,
+            "low_min": low_min,
         }
 
     except Exception as e:
@@ -1280,16 +1330,34 @@ def format_accumulation(acc):
     p = acc["price"]
     ps = f"${p:,.4f}" if p < 1 else f"${p:,.3f}" if p < 100 else f"${p:,.2f}"
 
+    sep = "━" * 26
+    low_fmt  = smart_price_fmt(acc.get("low_min", p))
+    high_fmt = smart_price_fmt(acc.get("high_max", p))
+    range_block = f"📐 Диапазон: <code>{low_fmt}</code> — <code>{high_fmt}</code>\n"
+
+    target_block = ""
+    if acc.get("pump_target"):
+        pt = acc["pump_target"]
+        pt_pct = acc.get("pump_target_pct", 0)
+        pt_logic = acc.get("pump_logic", "")
+        pt_fmt = smart_price_fmt(pt)
+        target_block = (
+            f"\n🎯 <b>Цель памп:</b> <code>{pt_fmt}</code> (+{pt_pct:.1f}%)\n"
+            f"💡 <i>{pt_logic}</i>\n"
+        )
+
     return (
-        f"{'━'*26}\n"
+        f"{sep}\n"
         f"{grade}\n"
         f"📦 <b>{acc['symbol']}</b> | {grade_note}\n"
-        f"{'━'*26}\n\n"
+        f"{sep}\n\n"
         f"💰 Цена: <code>{ps}</code>\n"
-        f"📊 Скор накопления: <b>{score}/100</b>\n\n"
+        f"{range_block}"
+        f"📊 Скор накопления: <b>{score}/100</b>\n"
+        f"{target_block}\n"
         f"<b>Признаки:</b>\n{signals_text}\n\n"
-        f"💡 <i>Войти можно при пробое диапазона с объёмом</i>\n"
-        f"{'━'*26}"
+        f"💡 <i>Войти при пробое <code>{high_fmt}</code> с объёмом</i>\n"
+        f"{sep}"
     )
 
 def smart_price_fmt(p) -> str:
