@@ -289,6 +289,13 @@ def get_api_status_text():
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+@dp.errors()
+async def global_error_handler(event, exception):
+    if "message is not modified" in str(exception):
+        return True
+    logging.error(f"Unhandled error: {exception}")
+    return False
 logging.basicConfig(level=logging.INFO)
 groq_client = Groq(api_key=GROQ_KEY)
 
