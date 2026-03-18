@@ -532,7 +532,7 @@ def fetch_etherscan_activity():
                 "interpretation": f"On-chain активность ETH: {activity} (газ {fast_gas} gwei)"
             }
     except Exception as e:
-        logging.warning(f"Etherscan: {e}")
+        logging.debug(f"Etherscan: {e}")
     return {}
 
 def fetch_prices_snapshot():
