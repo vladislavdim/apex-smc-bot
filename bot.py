@@ -4037,9 +4037,9 @@ def main():
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
-            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60)       # 1h — каждые 10 мин
+            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин
             scheduler.add_job(auto_scan_4h, "interval", minutes=30, jitter=120)       # 4h — каждые 30 мин
-            scheduler.add_job(auto_scan_swing, "interval", minutes=10, jitter=30)    # swing 4h — каждые 10 мин
+            scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
