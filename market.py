@@ -1244,7 +1244,7 @@ def detect_accumulation(symbol):
         if not orderbook_confirmed:
             score = max(0, score - 15)
 
-        if not signals or score < 72:  # поднят порог с 30 до 72
+        if not signals or score < 55:  # поднят порог с 30 до 72
             return None
 
         # ── Groq считает цель роста индивидуально ──
@@ -1256,7 +1256,7 @@ def detect_accumulation(symbol):
             recent_highs_str = ", ".join([str(round(c["high"], 6)) for c in candles_1h[-12:]])
             recent_lows_str  = ", ".join([str(round(c["low"],  6)) for c in candles_1h[-12:]])
             groq_prompt = (
-                f"Ты трейдер SMC. Анализируй накопление и дай цель роста. Ответь СТРОГО JSON:\\n"
+                f"Ты трейдер SMC. Анализируй накопление после боковика и дай реальную цель памп минимум +10% от цены. Ответь СТРОГО JSON:\\n"
                 f'{{\"target\": число_цены, \"target_pct\": процент_роста_число, \"logic\": \"причина макс 10 слов\"}}\\n\\n'
                 f"Пара: {symbol}\\n"
                 f"Цена сейчас: {price_now}\\n"
