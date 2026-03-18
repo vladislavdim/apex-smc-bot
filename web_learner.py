@@ -103,7 +103,7 @@ def _fetch_url(url: str, timeout: int = 10) -> str:
 def search_duckduckgo(query: str, max_results: int = 3) -> list:
     """Поиск через DuckDuckGo HTML (без API)"""
     try:
-        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(str(query or ""))}"
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if r.status_code != 200:
             return []
@@ -126,8 +126,8 @@ def search_duckduckgo(query: str, max_results: int = 3) -> list:
 def search_crypto_news(query: str) -> list:
     """Поиск по крипто-новостным источникам"""
     sources = [
-        f"https://cointelegraph.com/search?query={requests.utils.quote(query)}",
-        f"https://cryptonews.com/search/?q={requests.utils.quote(query)}",
+        f"https://cointelegraph.com/search?query={requests.utils.quote(str(query or ""))}",
+        f"https://cryptonews.com/search/?q={requests.utils.quote(str(query or ""))}",
     ]
     results = []
     for url in sources:
