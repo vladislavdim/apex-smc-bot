@@ -965,26 +965,22 @@ def get_top_pairs(limit=100):
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache[:limit]
 
-    FIXED_80 = [
+    FIXED_60 = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "TONUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
         "ADAUSDT", "DOTUSDT", "POLUSDT", "LTCUSDT", "ATOMUSDT",
         "NEARUSDT", "INJUSDT", "SUIUSDT", "APTUSDT", "OPUSDT",
         "UNIUSDT", "PEPEUSDT", "SHIBUSDT", "TRXUSDT", "XLMUSDT",
-        "WLDUSDT", "TIAUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT",
-        "BCHUSDT", "ICPUSDT", "ETCUSDT", "FILUSDT", "HBARUSDT",
-        "STXUSDT", "LDOUSDT", "RENDERUSDT", "FETUSDT", "APEUSDT",
-        "FLOKIUSDT", "WIFUSDT", "AAVEUSDT", "CRVUSDT", "GRTUSDT",
-        "SNXUSDT", "RUNEUSDT", "ALGOUSDT", "FTMUSDT",
-        "EIGENUSDT", "ENAUSDT", "PYTHUSDT", "ONDOUSDT", "ZROUSDT",
-        "TAOUSDT", "NOTUSDT", "CATIUSDT", "TURBOUSDT", "MEWUSDT",
-        "VIRTUALUSDT", "AIXBTUSDT", "AKTUSDT", "DYMUSDT", "ALTUSDT",
-        "PIXELUSDT", "ZKUSDT", "STRKUSDT", "WUSDT",
-        "VANAUSDT", "PENGUUSDT", "KAITOUSDT", "BOMEUSDT", "POPCATUSDT",
-        "REZUSDT", "BBUSDT", "SATSUSDT", "IOUSDT",
+        "WLDUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT", "BCHUSDT",
+        "ICPUSDT", "ETCUSDT", "FILUSDT", "HBARUSDT", "STXUSDT",
+        "LDOUSDT", "RENDERUSDT", "FETUSDT", "APEUSDT", "FLOKIUSDT",
+        "WIFUSDT", "AAVEUSDT", "CRVUSDT", "GRTUSDT", "SNXUSDT",
+        "RUNEUSDT", "ENAUSDT", "TAOUSDT", "NOTUSDT", "CATIUSDT",
+        "VIRTUALUSDT", "DYMUSDT", "VANAUSDT", "PENGUUSDT", "BOMEUSDT",
+        "POPCATUSDT", "BBUSDT", "SATSUSDT", "WUSDT", "ONDOUSDT",
     ]
 
-    pairs_cache = FIXED_80[:limit]
+    pairs_cache = FIXED_60[:limit]
     pairs_cache_time = time.time()
     return pairs_cache
 
@@ -4944,28 +4940,56 @@ async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, h
 
 
 async def auto_add_rule(error_type, count):
-    """Когда ошибка повторяется 3+ раз — AI формулирует правило для стратегии"""
+    """Когда ошибка повторяется 3+ раз — AI ищет паттерн и формулирует правило"""
     try:
-        # Достаём последние 3 анализа этого типа
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+        
+        # Достаём последние 5 анализов этого типа
         rows = conn.execute(
-            "SELECT symbol, ai_analysis, ai_lesson FROM bot_errors WHERE error_type=? ORDER BY id DESC LIMIT 3",
+            "SELECT symbol, direction, ai_analysis, ai_lesson, market_context FROM bot_errors WHERE error_type=? ORDER BY id DESC LIMIT 5",
             (error_type,)
         ).fetchall()
-        conn.close()
+        
+        # Достаём ВСЕ типы ошибок для поиска паттернов
+        all_errors = conn.execute(
+            "SELECT error_type, count FROM error_patterns ORDER BY count DESC LIMIT 10"
+        ).fetchall()
+        
+        # Проверяем паттерн direction — все ошибки в одну сторону?
+        directions = [r[1] for r in rows if r[1]]
+        direction_pattern = ""
+        if directions and len(set(directions)) == 1:
+            direction_pattern = f"Все {count} ошибок в направлении {directions[0]}. "
+        
+        # Проверяем паттерн символов
+        symbols = [r[0] for r in rows]
+        symbol_pattern = f"Частые символы: {', '.join(set(symbols))}. " if symbols else ""
+        
+        # Контекст рынка
+        contexts = [r[4] for r in rows if r[4]]
+        market_pattern = contexts[0][:100] if contexts else ""
+        
+        all_errors_text = ", ".join([f"{ERROR_TYPES.get(e[0], e[0])}: {e[1]}x" for e in all_errors])
+        examples = "\n".join([f"- {r[0]} {r[1]}: {r[2][:80]}" for r in rows])
 
-        examples = "\n".join([f"- {r[0]}: {r[1][:100]}" for r in rows])
+        prompt = f"""Ты анализируешь паттерны ошибок торгового бота.
 
-        prompt = f"""Ошибка типа "{ERROR_TYPES[error_type]}" повторилась {count} раз.
+ГЛАВНАЯ ОШИБКА: "{ERROR_TYPES.get(error_type, error_type)}" повторилась {count} раз.
+ВСЕ ОШИБКИ БОТА: {all_errors_text}
 
-Примеры:
+ПАТТЕРН: {direction_pattern}{symbol_pattern}
+КОНТЕКСТ РЫНКА: {market_pattern}
+
+ПРИМЕРЫ ОШИБОК:
 {examples}
 
-Сформулируй ОДНО конкретное правило для стратегии которое предотвратит эту ошибку.
-Начни с "Не входить если..." или "Всегда проверять..." или "Обязательно..."
+Найди КОРНЕВУЮ ПРИЧИНУ паттерна ошибок (не симптом).
+Сформулируй ОДНО конкретное правило которое исправит корень проблемы.
+Начни с "Не входить если..." или "Фильтровать..." или "Проверять..."
 Максимум 1 предложение."""
 
-        rule = ask_groq(prompt, max_tokens=100)
+        rule = ask_groq(prompt, max_tokens=120)
+        conn.close()
         return rule.strip() if rule else None
     except:
         return None
@@ -6630,6 +6654,44 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         tf_context = "1d" if timeframe == "4h" else "4h"
         htf_dir = smc_on_tf(symbol, tf_context)
 
+        # ── Жёсткий фильтр: торгуем только по направлению 1d тренда ──
+        if htf_dir:
+            if direction == "BULLISH" and "BEARISH" in str(htf_dir).upper():
+                return None  # Не открываем лонг против медвежьего 1d
+            if direction == "BEARISH" and "BULLISH" in str(htf_dir).upper():
+                return None  # Не открываем шорт против бычьего 1d
+
+        # ── Дополнительно: проверяем 15m подтверждение ──
+        try:
+            candles_15m = get_candles(symbol, "15m", 20)
+            if candles_15m and len(candles_15m) >= 5:
+                last_15m = candles_15m[-1]
+                prev_15m = candles_15m[-2]
+                # Импульсная свеча на 15m
+                body_15m = abs(last_15m["close"] - last_15m["open"])
+                range_15m = last_15m["high"] - last_15m["low"] if last_15m["high"] != last_15m["low"] else 0.001
+                is_impulse_15m = body_15m / range_15m > 0.6
+
+                # Бонус +1 если 15m подтверждает направление
+                if direction == "BULLISH" and last_15m["close"] > last_15m["open"] and is_impulse_15m:
+                    pass  # Подтверждение есть
+                elif direction == "BEARISH" and last_15m["close"] < last_15m["open"] and is_impulse_15m:
+                    pass  # Подтверждение есть
+
+                # Проверяем 5m подтверждение
+                candles_5m = get_candles(symbol, "5m", 10)
+                if candles_5m and len(candles_5m) >= 3:
+                    last_5m = candles_5m[-1]
+                    body_5m = abs(last_5m["close"] - last_5m["open"])
+                    range_5m = last_5m["high"] - last_5m["low"] if last_5m["high"] != last_5m["low"] else 0.001
+                    is_impulse_5m = body_5m / range_5m > 0.6
+                    if direction == "BULLISH" and last_5m["close"] < last_5m["open"] and is_impulse_5m:
+                        return None  # 5m медвежья против лонга — пропускаем
+                    if direction == "BEARISH" and last_5m["close"] > last_5m["open"] and is_impulse_5m:
+                        return None  # 5m бычья против шорта — пропускаем
+        except Exception:
+            pass
+
         rr = round(reward / risk, 2)
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp - entry) / entry * 100, 2)
@@ -6653,7 +6715,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             distance_to_tp = abs(tp - entry)
             est_candles = round(distance_to_tp / atr, 1) if atr > 0 else 3
             est_hours = int(round(est_candles * candle_hours, 0))
-            est_hours = max(4, min(est_hours, 72))  # от 4ч до 72ч
+            # Минимум 12ч для 4h свечи (3 свечи), максимум 72ч
+            min_hours = 12 if timeframe == "4h" else 4
+            est_hours = max(min_hours, min(est_hours, 72))
 
             candles_str = " | ".join(last_candles_summary)
             groq_prompt = (
