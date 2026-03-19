@@ -185,7 +185,7 @@ def tf_keyboard():
 
 def pairs_keyboard(action="scan", page=0):
     """Клавиатура монет с пагинацией — топ-80"""
-    all_pairs = get_top_pairs(80)
+    all_pairs = get_top_pairs(60)
     page_size = 20  # монет на странице
     total_pages = (len(all_pairs) + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
@@ -795,13 +795,13 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "menu_scan":
         try:
             await callback.message.edit_text(
-                "🔍 <b>Выбери монету</b> (топ-80 по объёму):",
+                "🔍 <b>Выбери монету</b> (топ-60 по объёму):",
                 parse_mode="HTML",
                 reply_markup=pairs_keyboard("scan", 0)
             )
         except Exception:
             await callback.message.answer(
-                "🔍 <b>Выбери монету</b> (топ-80 по объёму):",
+                "🔍 <b>Выбери монету</b> (топ-60 по объёму):",
                 parse_mode="HTML",
                 reply_markup=pairs_keyboard("scan", 0)
             )
@@ -935,9 +935,9 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data.startswith("tf_"):
         tf = data.replace("tf_", "")
-        pairs = get_top_pairs(80)
+        pairs = get_top_pairs(60)
         await callback.message.edit_text(
-            f"🔍 Сканирую топ-80 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
+            f"🔍 Сканирую топ-60 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
         )
         signals = []
         for symbol in pairs:
@@ -2115,7 +2115,7 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "menu_pump":
-        await callback.message.edit_text("📦 Сканирую топ-80 на накопление перед пампом...\n⏳ ~30 секунд")
+        await callback.message.edit_text("📦 Сканирую топ-60 на накопление перед пампом...\n⏳ ~30 секунд")
         pairs = await asyncio.get_running_loop().run_in_executor(None, get_top_pairs, 50)
         found = []
         for symbol in pairs:
@@ -2792,7 +2792,7 @@ async def auto_scan_4h():
 
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
-    pairs = get_top_pairs(80)
+    pairs = get_top_pairs(60)
     found = []
     for symbol in pairs:
         try:
@@ -2897,7 +2897,7 @@ async def auto_scan_mega():
         logging.warning("detect_mega_trade не найден в smc_engine")
         return
 
-    pairs = get_top_pairs(80)
+    pairs = get_top_pairs(60)
     found = []
 
     for symbol in pairs:
@@ -2960,8 +2960,8 @@ async def auto_scan_mega():
 
 
 async def auto_accumulation_scan():
-    """Каждый час: сканируем все топ-80 на накопление перед пампом"""
-    pairs = get_top_pairs(80)
+    """Каждый час: сканируем все топ-60 на накопление перед пампом"""
+    pairs = get_top_pairs(60)
     found = []
 
     for symbol in pairs:
