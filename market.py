@@ -330,6 +330,10 @@ def init_db():
         learning_id INTEGER DEFAULT NULL)""")
 
     # timing_queue — сигналы ожидающие подтверждения тайминга
+    c.execute("""CREATE TABLE IF NOT EXISTS signal_cooldown (
+        cache_key TEXT PRIMARY KEY,
+        sent_at REAL
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS timing_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         symbol TEXT, direction TEXT, timeframe TEXT,
