@@ -2690,10 +2690,22 @@ async def _send_signal(sd):
         return
     now_ts = time.time()
     cache_key = f"{sd['symbol']}:{sd['direction']}:{sd.get('timeframe','1h')}"
-    last_sent = _sent_signal_cache.get(cache_key, 0)
-    if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
-        return  # уже слали этот сигнал недавно
-    _sent_signal_cache[cache_key] = now_ts
+    try:
+        import sqlite3 as _sq3
+        _cd = _sq3.connect("brain.db", timeout=10)
+        row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
+        last_sent = row[0] if row else 0
+        if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+            _cd.close()
+            return
+        _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
+        _cd.commit()
+        _cd.close()
+    except Exception:
+        last_sent = _sent_signal_cache.get(cache_key, 0)
+        if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+            return
+        _sent_signal_cache[cache_key] = now_ts
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, sd["text"], parse_mode="HTML")
@@ -2849,10 +2861,22 @@ async def auto_scan_swing():
             # Проверяем cooldown
             cache_key = f"{symbol}:SWING:{direction}:4h"
             now_ts = time.time()
-            last_sent = _sent_signal_cache.get(cache_key, 0)
-            if now_ts - last_sent < 4 * 3600:
-                continue
-            _sent_signal_cache[cache_key] = now_ts
+            try:
+                import sqlite3 as _sq3
+                _cd = _sq3.connect("brain.db", timeout=10)
+                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
+                last_sent = row[0] if row else 0
+                if now_ts - last_sent < 4 * 3600:
+                    _cd.close()
+                    continue
+                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
+                _cd.commit()
+                _cd.close()
+            except Exception:
+                last_sent = _sent_signal_cache.get(cache_key, 0)
+                if now_ts - last_sent < 4 * 3600:
+                    continue
+                _sent_signal_cache[cache_key] = now_ts
 
             # Сохраняем в БД
             save_signal_db(
