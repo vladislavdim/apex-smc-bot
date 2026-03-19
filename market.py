@@ -5328,9 +5328,9 @@ def learn_from_web(topic, save=True):
 
                 if save:
                     try:
-                    confidence = float(str(data.get("confidence", 0.5)).split()[0])
-                except (ValueError, TypeError):
-                    confidence = 0.5
+                        confidence = float(str(data.get("confidence", 0.5)).split()[0])
+                    except (ValueError, TypeError):
+                        confidence = 0.5
                     summary = (
                         f"[{topic}] "
                         f"Факты: {'; '.join(data.get('key_facts', [])[:3])}. "
