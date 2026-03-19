@@ -6665,23 +6665,19 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         choch_found = True
                         break
                 # Если CHoCH не найден — ждём (текущая свеча тоже считается)
-                if not choch_found and candles[-1]["close"] > last_swing_high:
+                local_high = max(c["high"] for c in candles[-(lookback_i+5):-lookback_i])
+                choch_bull = candles[-1]["close"] > local_high
+                if not choch_found and choch_bull:
                     choch_found = True
-                if not choch_found:
-                    return None  # Структура ещё не сломана
             elif direction == "BEARISH":
                 choch_found = False
                 for ci in range(-lookback_i + 1, 0):
-                    if ci == 0:
-                        break
-                    c = candles[ci]
-                    if c["close"] < last_swing_low:
-                        choch_found = True
-                        break
-                if not choch_found and candles[-1]["close"] < last_swing_low:
+                    if ci == 0: break
+                    if candles[ci]["close"] < last_swing_low:
+                        choch_found = True; break
+                local_low = min(c["low"] for c in candles[-(lookback_i+5):-lookback_i])
+                if not choch_found and candles[-1]["close"] < local_low:
                     choch_found = True
-                if not choch_found:
-                    return None  # Структура ещё не сломана
         except Exception:
             pass
 
