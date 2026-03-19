@@ -3003,14 +3003,19 @@ async def auto_scan_mega():
 
 
 async def auto_wyckoff_scan():
-    """Каждые 4ч: сканируем все пары на Wyckoff Spring паттерн"""
+    """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
     pairs = get_top_pairs(60)
     found = []
     for symbol in pairs:
         try:
+            # LONG — Accumulation Spring
             r = detect_wyckoff_spring(symbol)
             if r:
                 found.append(r)
+            # SHORT — Distribution UTAD
+            r2 = detect_wyckoff_distribution(symbol)
+            if r2:
+                found.append(r2)
             await asyncio.sleep(0.5)
         except Exception as e:
             logging.debug(f"wyckoff scan {symbol}: {e}")
@@ -3026,20 +3031,35 @@ async def auto_wyckoff_scan():
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
-            spring_txt = "Spring ✅" if r["spring"] else "Пробой ✅" if r["breakout"] else "Накопление"
+            is_long = r["direction"] == "BULLISH"
+            dir_label = "🟢LONG" if is_long else "🔴SHORT"
+            wyckoff_type = "Wyckoff Spring" if is_long else "Wyckoff Distribution"
+            phases_txt = r.get("phases", "")
+
+            if is_long:
+                key_signal = "Spring ✅" if r.get("spring") else "SOS ✅" if r.get("sos") else "Накопление"
+                trend_txt = f"📉 Даунтренд: -{r.get('drawdown_pct',0):.0f}% от пика"
+                range_txt = f"📦 Боковик: {r.get('acc_range',0):.1f}%"
+                tp_sign = "+"
+            else:
+                key_signal = "UTAD ✅" if r.get("utad") else "SOW ✅" if r.get("sow") else "Дистрибуция"
+                trend_txt = f"📈 Аптренд: +{r.get('pump_pct',0):.0f}% от основания"
+                range_txt = f"📦 Боковик у вершины: {r.get('dist_range',0):.1f}%"
+                tp_sign = "-"
 
             text = (
-                f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — 🟢LONG\n"
-                f"📊 Контекст: 1d | Wyckoff Spring\n"
+                f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — {dir_label}\n"
+                f"📊 Контекст: 1d | {wyckoff_type}\n"
                 f"\n"
-                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code> (+{r['tp_pct']}%)\n"
+                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code> ({tp_sign}{r['tp_pct']}%)\n"
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
-                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code> (-{r['sl_pct']}%)\n"
+                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
                 f"\n"
                 f"📈 Логика: {r['logic']}\n"
                 f"\n"
-                f"📉 Даунтренд: -{r['drawdown_pct']:.0f}% от пика\n"
-                f"📦 Боковик: {r['acc_range']:.1f}% | {spring_txt}\n"
+                f"{trend_txt}\n"
+                f"{range_txt} | {key_signal}\n"
+                f"🔄 Фазы: {phases_txt}\n"
                 f"⭐ Скор: {r['score']}/100 | RR: {r['rr']}\n"
                 f"\n"
                 f"⚡ Риск: средний\n"
