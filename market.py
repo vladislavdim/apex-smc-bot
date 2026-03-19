@@ -287,6 +287,8 @@ def get_api_status_text():
         lines.append("Без ключей: " + ", ".join(missing))
     return "\n".join(lines)
 
+from aiohttp import ClientSession as _ClientSession, ClientTimeout as _ClientTimeout
+_timeout = _ClientTimeout(total=30, connect=10)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -4588,7 +4590,10 @@ async def self_learn_from_signal(symbol, direction, entry, result, hours, timefr
                 data = json.loads(clean)
                 rule = data.get("rule", "")
                 category = data.get("category", "filter")
-                confidence = float(data.get("confidence", 0.5))
+                try:
+                    confidence = float(str(data.get("confidence", 0.5)).split()[0])
+                except (ValueError, TypeError):
+                    confidence = 0.5
 
                 if rule and len(rule) > 10:
                     if is_win:
@@ -5322,7 +5327,10 @@ def learn_from_web(topic, save=True):
                 data = json.loads(clean[start:end])
 
                 if save:
-                    confidence = float(data.get("confidence", 0.5))
+                    try:
+                    confidence = float(str(data.get("confidence", 0.5)).split()[0])
+                except (ValueError, TypeError):
+                    confidence = 0.5
                     summary = (
                         f"[{topic}] "
                         f"Факты: {'; '.join(data.get('key_facts', [])[:3])}. "
