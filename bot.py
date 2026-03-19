@@ -2666,7 +2666,7 @@ def _format_channel_signal(sd: dict) -> str:
         return f"${p:,.2f}"
 
     dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-    label     = "🔄 [SWING]" if scan_type == "swing" else "📐 [ПОЗИЦИЯ]"
+    label     = "🔄 [SWING]" if scan_type == "swing" else "🌊 [WYCKOFF]" if scan_type == "wyckoff" else "📐 [ПОЗИЦИЯ]"
     tf_time   = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
     risk      = "низкий" if score >= 60 else "средний"
 
@@ -2862,6 +2862,19 @@ async def auto_scan_swing():
                 "scan_type": "swing",
             }
 
+            # Блокируем если сделка уже открыта в БД
+            try:
+                import sqlite3 as _sq3
+                _chk = _sq3.connect("brain.db", timeout=10)
+                _open = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND direction=? AND result='pending' LIMIT 1",
+                    (symbol, direction)
+                ).fetchone()
+                _chk.close()
+                if _open:
+                    continue
+            except Exception:
+                pass
             # Проверяем cooldown
             cache_key = f"{symbol}:SWING:{direction}:4h"
             now_ts = time.time()
@@ -2987,6 +3000,108 @@ async def auto_scan_mega():
         except Exception as e:
             logging.error(f"auto_scan_mega send {r.get('symbol')}: {e}")
 
+
+
+async def auto_wyckoff_scan():
+    """Каждые 4ч: сканируем все пары на Wyckoff Spring паттерн"""
+    pairs = get_top_pairs(60)
+    found = []
+    for symbol in pairs:
+        try:
+            r = detect_wyckoff_spring(symbol)
+            if r:
+                found.append(r)
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logging.debug(f"wyckoff scan {symbol}: {e}")
+
+    if not found:
+        logging.info("Wyckoff scan: паттернов нет")
+        return
+
+    found.sort(key=lambda x: x["score"], reverse=True)
+    logging.info(f"Wyckoff scan: найдено {len(found)}")
+
+    for r in found[:2]:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            spring_txt = "Spring ✅" if r["spring"] else "Пробой ✅" if r["breakout"] else "Накопление"
+
+            text = (
+                f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — 🟢LONG\n"
+                f"📊 Контекст: 1d | Wyckoff Spring\n"
+                f"\n"
+                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code> (+{r['tp_pct']}%)\n"
+                f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code> (-{r['sl_pct']}%)\n"
+                f"\n"
+                f"📈 Логика: {r['logic']}\n"
+                f"\n"
+                f"📉 Даунтренд: -{r['drawdown_pct']:.0f}% от пика\n"
+                f"📦 Боковик: {r['acc_range']:.1f}% | {spring_txt}\n"
+                f"⭐ Скор: {r['score']}/100 | RR: {r['rr']}\n"
+                f"\n"
+                f"⚡ Риск: средний\n"
+                f"⏱ Горизонт: ~7-21 дней"
+            )
+
+            # Блокируем если сделка уже открыта
+            try:
+                import sqlite3 as _sq3
+                _chk = _sq3.connect("brain.db", timeout=10)
+                _open = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND direction=? AND result=\'pending\' LIMIT 1",
+                    (symbol, direction)
+                ).fetchone()
+                _chk.close()
+                if _open:
+                    continue
+            except Exception:
+                pass
+
+            # Cooldown 24ч
+            cache_key = f"{symbol}:WYCKOFF:{direction}:1d"
+            now_ts = time.time()
+            try:
+                import sqlite3 as _sq3
+                _cd = _sq3.connect("brain.db", timeout=10)
+                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
+                last_sent = row[0] if row else 0
+                if now_ts - last_sent < 24 * 3600:
+                    _cd.close()
+                    continue
+                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
+                _cd.commit()
+                _cd.close()
+            except Exception:
+                pass
+
+            sd = {
+                "symbol": symbol, "direction": direction,
+                "timeframe": "1d", "entry": r["entry"],
+                "sl": r["sl"], "tp1": r["tp"],
+                "tp2": r["tp"], "tp3": r["tp"],
+                "grade": "WYCKOFF", "text": text,
+                "confluence_score": r["score"],
+                "regime": "WYCKOFF",
+                "scan_type": "wyckoff",
+            }
+
+            save_signal_db(
+                symbol, direction, "WYCKOFF",
+                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                "1d", 168, "🌊 WYCKOFF",
+                confluence=r["score"], regime="WYCKOFF"
+            )
+
+            await _send_signal(sd)
+            logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
+            await backup_db_to_github()
+            await asyncio.sleep(2)
+
+        except Exception as e:
+            logging.error(f"[WyckoffScan] {r.get('symbol')}: {e}")
 
 async def auto_accumulation_scan():
     """Каждый час: сканируем все топ-60 на накопление перед пампом"""
@@ -4098,6 +4213,7 @@ def main():
             # scheduler.add_job(auto_scan_1w, ...)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+            scheduler.add_job(auto_wyckoff_scan, "interval", hours=4, jitter=600)     # Wyckoff Spring — каждые 4ч
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
