@@ -449,7 +449,10 @@ def groq_research_topic(topic: str, query: str) -> dict:
         # Торговые правила → в self_rules
         for rule_item in data.get("trading_rules", []):
             rule_text = rule_item.get("rule", "")
-            confidence = float(rule_item.get("confidence", 0.6))
+            try:
+                confidence = float(str(rule_item.get("confidence", 0.6)).split()[0])
+            except (ValueError, TypeError):
+                confidence = 0.6
             rule_type = (rule_item.get("type") or "PREFER").lower()
             if rule_text and confidence >= 0.6:
                 conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at, active)
@@ -699,7 +702,11 @@ def groq_self_improve():
         saved = 0
         for imp in improvements:
             rule_text = imp.get("rule_text")
-            if rule_text and float(imp.get("confidence", 0)) >= 0.65:
+            try:
+                    conf_val = float(str(imp.get("confidence", 0)).split()[0])
+                except (ValueError, TypeError):
+                    conf_val = 0.0
+                if rule_text and conf_val >= 0.65:
                 conn.execute("""INSERT OR IGNORE INTO self_rules
                     (rule_type, rule_text, confidence, source, created_at, active)
                     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
