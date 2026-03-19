@@ -703,10 +703,10 @@ def groq_self_improve():
         for imp in improvements:
             rule_text = imp.get("rule_text")
             try:
-                    conf_val = float(str(imp.get("confidence", 0)).split()[0])
-                except (ValueError, TypeError):
-                    conf_val = 0.0
-                if rule_text and conf_val >= 0.65:
+                conf_val = float(str(imp.get("confidence", 0)).split()[0])
+            except (ValueError, TypeError):
+                conf_val = 0.0
+            if rule_text and conf_val >= 0.65:
                 conn.execute("""INSERT OR IGNORE INTO self_rules
                     (rule_type, rule_text, confidence, source, created_at, active)
                     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
