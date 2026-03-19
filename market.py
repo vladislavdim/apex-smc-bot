@@ -6639,6 +6639,52 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if not direction:
             return None
 
+        # ── Фильтр объёма на sweep свече ──
+        # Sweep должен быть с повышенным объёмом (киты выбивают стопы)
+        try:
+            sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
+            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
+            sweep_vol = sweep_candle.get("volume", 0)
+            if avg_vol > 0 and sweep_vol < avg_vol * 0.8:
+                return None  # Объём слишком низкий — ложный sweep
+        except Exception:
+            pass
+
+        # ── CHoCH (Change of Character) — смена структуры после sweep ──
+        # После bullish sweep цена должна пробить предыдущий swing high
+        # После bearish sweep цена должна пробить предыдущий swing low
+        try:
+            if direction == "BULLISH":
+                # Ищем пробой предыдущего swing high после sweep свечи
+                choch_found = False
+                for ci in range(-lookback_i + 1, 0):
+                    if ci == 0:
+                        break
+                    c = candles[ci]
+                    if c["close"] > last_swing_high:
+                        choch_found = True
+                        break
+                # Если CHoCH не найден — ждём (текущая свеча тоже считается)
+                if not choch_found and candles[-1]["close"] > last_swing_high:
+                    choch_found = True
+                if not choch_found:
+                    return None  # Структура ещё не сломана
+            elif direction == "BEARISH":
+                choch_found = False
+                for ci in range(-lookback_i + 1, 0):
+                    if ci == 0:
+                        break
+                    c = candles[ci]
+                    if c["close"] < last_swing_low:
+                        choch_found = True
+                        break
+                if not choch_found and candles[-1]["close"] < last_swing_low:
+                    choch_found = True
+                if not choch_found:
+                    return None  # Структура ещё не сломана
+        except Exception:
+            pass
+
         # Если sweep был давно — цена могла уйти далеко от входа
         current_price = candles[-1]["close"]
         if abs(current_price - entry) > atr * 2:
