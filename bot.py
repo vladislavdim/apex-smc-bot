@@ -2716,6 +2716,10 @@ async def _send_signal(sd):
         await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
     except Exception as ce:
         logging.warning(f"Channel send error: {ce}")
+    try:
+        await backup_db_to_github()
+    except Exception:
+        pass
 
 
 async def _scan_tf(timeframe: str, pairs_limit: int = 50):
@@ -2888,6 +2892,7 @@ async def auto_scan_swing():
 
             await _send_signal(sd)
             logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
+            await backup_db_to_github()
             await asyncio.sleep(1)
 
         except Exception as e:
