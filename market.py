@@ -587,7 +587,7 @@ def init_db():
     # Миграция — добавляем колонки если их нет (для существующих БД)
     for col, typedef in [
         ("rule_type",       "TEXT"),
-        ("rule_text",       "TEXT"),
+        ("rule_text",       "TEXT UNIQUE"),
         ("source",          "TEXT"),
         ("category",        "TEXT"),
         ("rule",            "TEXT"),
