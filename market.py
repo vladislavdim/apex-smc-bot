@@ -3077,6 +3077,15 @@ def full_scan(symbol, timeframe="1h"):
         htf = get_higher_tf_context(symbol)
         fg_hist = get_fg_history()
 
+        # ── HTF фильтр: торгуем только по направлению 1d тренда ──
+        htf_1d = smc_on_tf(symbol, "1d")
+        if htf_1d:
+            if direction == "BULLISH" and "BEARISH" in str(htf_1d).upper():
+                logging.info(f"[HTF Filter] {symbol} LONG заблокирован — 1d BEARISH")
+                return None
+            if direction == "BEARISH" and "BULLISH" in str(htf_1d).upper():
+                logging.info(f"[HTF Filter] {symbol} SHORT заблокирован — 1d BULLISH")
+                return None
         # BTC корреляция — если BTC против нас, пропускаем
         btc_ok, btc_reason = btc_allows_signal(direction)
         if not btc_ok and symbol != "BTCUSDT":
