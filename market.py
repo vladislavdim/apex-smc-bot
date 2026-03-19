@@ -6828,3 +6828,526 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     except Exception as e:
         logging.debug(f"detect_swing_setup {symbol}: {e}")
         return None
+
+
+
+
+# ===== СТРАТЕГИЯ 3: WYCKOFF ACCUMULATION + DISTRIBUTION =====
+
+def _find_wyckoff_phases_accumulation(candles_1d, candles_4h):
+    """
+    Определяет фазы Wyckoff Accumulation:
+    PS  — Preliminary Support (первая поддержка на падении)
+    SC  — Selling Climax (паническая свеча с огромным объёмом = дно)
+    AR  — Automatic Rally (отскок от SC — кит выкупает)
+    ST  — Secondary Test (тест лоу SC с меньшим объёмом)
+    Spring — ложный пробой ниже ST/SC с возвратом
+    SOS — Sign of Strength (пробой AR с объёмом = подтверждение)
+    """
+    if len(candles_1d) < 40:
+        return {}
+
+    phases = {}
+    vols = [c["volume"] for c in candles_1d]
+    avg_vol = sum(vols) / len(vols) if vols else 1
+
+    # SC — Selling Climax: самая большая медвежья свеча с объёмом x3+
+    sc_idx = None
+    sc_vol_max = 0
+    for i in range(10, len(candles_1d) - 5):
+        c = candles_1d[i]
+        body = c["open"] - c["close"]  # медвежья = open > close
+        if body > 0 and c["volume"] > avg_vol * 2.5:
+            if c["volume"] > sc_vol_max:
+                sc_vol_max = c["volume"]
+                sc_idx = i
+
+    if sc_idx is None:
+        return {}
+
+    sc_candle = candles_1d[sc_idx]
+    phases["SC"] = {"idx": sc_idx, "price": sc_candle["low"], "vol": sc_vol_max}
+
+    # AR — Automatic Rally: первый сильный рост после SC
+    ar_idx = None
+    ar_high = 0
+    for i in range(sc_idx + 1, min(sc_idx + 15, len(candles_1d))):
+        c = candles_1d[i]
+        if c["close"] > c["open"] and c["high"] > ar_high:
+            ar_high = c["high"]
+            ar_idx = i
+
+    if ar_idx is None:
+        return {}
+
+    phases["AR"] = {"idx": ar_idx, "price": ar_high}
+
+    # ST — Secondary Test: тест лоу SC с меньшим объёмом
+    st_idx = None
+    for i in range(ar_idx + 1, min(ar_idx + 20, len(candles_1d))):
+        c = candles_1d[i]
+        near_sc_low = abs(c["low"] - sc_candle["low"]) / sc_candle["low"] < 0.05
+        lower_vol = c["volume"] < sc_vol_max * 0.6
+        if near_sc_low and lower_vol:
+            st_idx = i
+            break
+
+    if st_idx:
+        phases["ST"] = {"idx": st_idx, "price": candles_1d[st_idx]["low"]}
+
+    # Spring — ложный пробой ниже ST/SC на 4h
+    spring_level = phases.get("ST", phases["SC"])["price"]
+    spring_found = False
+    spring_price = None
+
+    for c in candles_4h[-30:]:
+        if c["low"] < spring_level and c["close"] > spring_level:
+            wick = (c["close"] - c["low"]) / (c["high"] - c["low"] + 0.000001)
+            if wick > 0.4:
+                spring_found = True
+                spring_price = c["low"]
+                phases["Spring"] = {"found": True, "price": spring_price}
+                break
+
+    if not spring_found:
+        phases["Spring"] = {"found": False}
+
+    # SOS — Sign of Strength: пробой AR уровня с объёмом
+    sos_found = False
+    for c in candles_4h[-10:]:
+        if c["close"] > ar_high:
+            vol_4h_avg = sum(x["volume"] for x in candles_4h[-20:-10]) / 10 if len(candles_4h) >= 20 else 1
+            if c["volume"] > vol_4h_avg * 1.5:
+                sos_found = True
+                phases["SOS"] = {"found": True, "price": c["close"]}
+                break
+
+    if not sos_found:
+        phases["SOS"] = {"found": False}
+
+    return phases
+
+
+def _find_wyckoff_phases_distribution(candles_1d, candles_4h):
+    """
+    Определяет фазы Wyckoff Distribution (для шортов):
+    PSY — Preliminary Supply (первое сопротивление на росте)
+    BC  — Buying Climax (эйфорийная свеча с объёмом = вершина)
+    AR  — Automatic Reaction (откат от BC)
+    ST  — Secondary Test (тест хая BC с меньшим объёмом)
+    UTAD — UpThrust After Distribution (ложный пробой вверх = финальная ловушка)
+    LPSY — Last Point of Supply (последний отскок перед падением)
+    """
+    if len(candles_1d) < 40:
+        return {}
+
+    phases = {}
+    vols = [c["volume"] for c in candles_1d]
+    avg_vol = sum(vols) / len(vols) if vols else 1
+
+    # BC — Buying Climax: самая большая бычья свеча с объёмом x3+
+    bc_idx = None
+    bc_vol_max = 0
+    for i in range(10, len(candles_1d) - 5):
+        c = candles_1d[i]
+        body = c["close"] - c["open"]  # бычья = close > open
+        if body > 0 and c["volume"] > avg_vol * 2.5:
+            if c["volume"] > bc_vol_max:
+                bc_vol_max = c["volume"]
+                bc_idx = i
+
+    if bc_idx is None:
+        return {}
+
+    bc_candle = candles_1d[bc_idx]
+    phases["BC"] = {"idx": bc_idx, "price": bc_candle["high"], "vol": bc_vol_max}
+
+    # AR — Automatic Reaction: первый сильный откат после BC
+    ar_idx = None
+    ar_low = float('inf')
+    for i in range(bc_idx + 1, min(bc_idx + 15, len(candles_1d))):
+        c = candles_1d[i]
+        if c["close"] < c["open"] and c["low"] < ar_low:
+            ar_low = c["low"]
+            ar_idx = i
+
+    if ar_idx is None:
+        return {}
+
+    phases["AR"] = {"idx": ar_idx, "price": ar_low}
+
+    # ST — Secondary Test: тест хая BC с меньшим объёмом
+    st_idx = None
+    for i in range(ar_idx + 1, min(ar_idx + 20, len(candles_1d))):
+        c = candles_1d[i]
+        near_bc_high = abs(c["high"] - bc_candle["high"]) / bc_candle["high"] < 0.05
+        lower_vol = c["volume"] < bc_vol_max * 0.6
+        if near_bc_high and lower_vol:
+            st_idx = i
+            break
+
+    if st_idx:
+        phases["ST"] = {"idx": st_idx, "price": candles_1d[st_idx]["high"]}
+
+    # UTAD — ложный пробой выше BC/ST на 4h (ловушка для покупателей)
+    utad_level = phases.get("ST", phases["BC"])["price"]
+    utad_found = False
+
+    for c in candles_4h[-30:]:
+        if c["high"] > utad_level and c["close"] < utad_level:
+            wick = (c["high"] - c["close"]) / (c["high"] - c["low"] + 0.000001)
+            if wick > 0.4:
+                utad_found = True
+                phases["UTAD"] = {"found": True, "price": c["high"]}
+                break
+
+    if not utad_found:
+        phases["UTAD"] = {"found": False}
+
+    # SOW — Sign of Weakness: пробой AR уровня вниз с объёмом
+    sow_found = False
+    for c in candles_4h[-10:]:
+        if c["close"] < ar_low:
+            vol_4h_avg = sum(x["volume"] for x in candles_4h[-20:-10]) / 10 if len(candles_4h) >= 20 else 1
+            if c["volume"] > vol_4h_avg * 1.5:
+                sow_found = True
+                phases["SOW"] = {"found": True, "price": c["close"]}
+                break
+
+    if not sow_found:
+        phases["SOW"] = {"found": False}
+
+    return phases
+
+
+def detect_wyckoff_spring(symbol: str) -> dict | None:
+    """
+    Wyckoff Accumulation Spring — LONG сигнал.
+    Полный анализ фаз: SC → AR → ST → Spring → SOS
+    Редкий сигнал +30-200%
+    """
+    try:
+        candles_1d = get_candles(symbol, "1d", 60)
+        candles_4h = get_candles(symbol, "4h", 120)
+
+        if not candles_1d or len(candles_1d) < 40:
+            return None
+        if not candles_4h or len(candles_4h) < 40:
+            return None
+
+        price_now = candles_1d[-1]["close"]
+        score = 0
+        signals = []
+
+        # ── 1. ДАУНТРЕНД 30+ дней ──
+        price_peak = max(c["high"] for c in candles_1d[-50:-15])
+        drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
+
+        if drawdown_pct >= 35:
+            score += 30
+            signals.append(f"✅ Глубокий даунтренд -{drawdown_pct:.0f}% от пика")
+        elif drawdown_pct >= 20:
+            score += 15
+            signals.append(f"⚡️ Коррекция -{drawdown_pct:.0f}% от пика")
+        else:
+            return None
+
+        # ── 2. БОКОВИК У ОСНОВАНИЯ (последние 20 дней) ──
+        accumulation_candles = candles_1d[-20:]
+        acc_high = max(c["high"] for c in accumulation_candles)
+        acc_low  = min(c["low"]  for c in accumulation_candles)
+        acc_range_pct = (acc_high - acc_low) / acc_low * 100 if acc_low > 0 else 0
+
+        if acc_range_pct < 15:
+            score += 20
+            signals.append(f"✅ Боковик {acc_range_pct:.1f}% за 20 дней")
+        elif acc_range_pct < 25:
+            score += 10
+            signals.append(f"⚡️ Диапазон {acc_range_pct:.1f}% за 20 дней")
+        else:
+            return None
+
+        # ── 3. ФАЗЫ WYCKOFF ──
+        phases = _find_wyckoff_phases_accumulation(candles_1d, candles_4h)
+
+        if not phases:
+            return None
+
+        # SC найден
+        if "SC" in phases:
+            score += 15
+            signals.append(f"✅ SC (Selling Climax) — паника с объёмом x{phases['SC']['vol']/sum(c['volume'] for c in candles_1d)/len(candles_1d):.1f}")
+
+        # AR найден
+        if "AR" in phases:
+            score += 10
+            signals.append(f"✅ AR (Automatic Rally) — кит выкупает")
+
+        # ST найден — тест с меньшим объёмом
+        if "ST" in phases:
+            score += 10
+            signals.append(f"✅ ST (Secondary Test) — объём падает на тесте")
+
+        # Spring найден — самый важный!
+        spring_found = phases.get("Spring", {}).get("found", False)
+        if spring_found:
+            score += 25
+            signals.append(f"🎯 SPRING! Ложный пробой лоу с возвратом")
+
+        # SOS найден — подтверждение разворота
+        sos_found = phases.get("SOS", {}).get("found", False)
+        if sos_found:
+            score += 20
+            signals.append(f"💪 SOS (Sign of Strength) — пробой AR с объёмом!")
+
+        # ── 4. ОБЪЁМ СЖИМАЕТСЯ В БОКОВИКЕ ──
+        all_vols = [c["volume"] for c in candles_1d[-50:-20]]
+        avg_vol_trend = sum(all_vols) / len(all_vols) if all_vols else 1
+        acc_vols = [c["volume"] for c in accumulation_candles]
+        avg_vol_acc = sum(acc_vols) / len(acc_vols) if acc_vols else 1
+        vol_compression = avg_vol_acc / avg_vol_trend if avg_vol_trend > 0 else 1
+
+        if vol_compression < 0.7:
+            score += 15
+            signals.append(f"✅ Объём сжался {vol_compression:.0%} (тихое накопление)")
+
+        # ── Минимальный порог ──
+        if score < 65:
+            return None
+        if not spring_found and not sos_found:
+            return None
+
+        # ── Вход/Стоп/TP ──
+        entry  = price_now
+        sl     = round(acc_low * 0.96, 8)  # Стоп под лоу боковика -4%
+        ar_price = phases.get("AR", {}).get("price", price_peak * 0.8)
+
+        # Groq считает цель
+        tp = None
+        logic = ""
+        try:
+            phase_summary = []
+            for ph in ["SC", "AR", "ST", "Spring", "SOS"]:
+                if ph in phases:
+                    phase_summary.append(ph)
+            groq_prompt = (
+                f"Ты эксперт Wyckoff. Дай цель роста после Spring. Ответь СТРОГО JSON:\n"
+                f'{{"target": число_цены, "target_pct": процент, "logic": "причина макс 10 слов"}}\n\n'
+                f"Пара: {symbol}\nЦена: {price_now}\n"
+                f"SC лоу: {phases['SC']['price']:.6f}\n"
+                f"AR хай: {ar_price:.6f}\n"
+                f"Пик до падения: {price_peak:.6f}\n"
+                f"Боковик: {acc_low:.6f}—{acc_high:.6f}\n"
+                f"Фазы: {', '.join(phase_summary)}\n"
+                f"Даунтренд: -{drawdown_pct:.0f}%"
+            )
+            groq_resp = ask_groq(groq_prompt, max_tokens=120)
+            if groq_resp:
+                import json as _j, re as _re
+                clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
+                m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                if m:
+                    parsed = _j.loads(m.group())
+                    if parsed.get("target") and float(parsed["target"]) > entry:
+                        tp = float(parsed["target"])
+                    if parsed.get("logic"):
+                        logic = str(parsed["logic"]).strip()
+        except Exception:
+            pass
+
+        if not tp:
+            # Fallback: AR уровень как минимальная цель
+            tp = round(max(ar_price, entry * 1.25), 8)
+        if not logic:
+            logic = f"Spring после SC+AR+ST — разворот Wyckoff"
+
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0 or reward / risk < 2.0:
+            return None
+
+        rr     = round(reward / risk, 2)
+        tp_pct = round((tp - entry) / entry * 100, 1)
+        sl_pct = round((entry - sl) / entry * 100, 1)
+
+        phase_names = [p for p in ["SC", "AR", "ST", "Spring", "SOS"] if p in phases and (p not in ["Spring","SOS"] or phases[p].get("found"))]
+
+        return {
+            "symbol": symbol, "direction": "BULLISH",
+            "timeframe": "1d", "entry": entry,
+            "sl": sl, "tp": tp,
+            "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
+            "logic": logic, "score": min(score, 100),
+            "drawdown_pct": drawdown_pct, "acc_range": acc_range_pct,
+            "spring": spring_found, "sos": sos_found,
+            "phases": " → ".join(phase_names),
+            "acc_low": acc_low, "acc_high": acc_high,
+            "scan_type": "wyckoff",
+        }
+
+    except Exception as e:
+        logging.debug(f"detect_wyckoff_spring {symbol}: {e}")
+        return None
+
+
+def detect_wyckoff_distribution(symbol: str) -> dict | None:
+    """
+    Wyckoff Distribution UTAD — SHORT сигнал.
+    Полный анализ фаз: BC → AR → ST → UTAD → SOW
+    Редкий сигнал -30-200%
+    """
+    try:
+        candles_1d = get_candles(symbol, "1d", 60)
+        candles_4h = get_candles(symbol, "4h", 120)
+
+        if not candles_1d or len(candles_1d) < 40:
+            return None
+        if not candles_4h or len(candles_4h) < 40:
+            return None
+
+        price_now = candles_1d[-1]["close"]
+        score = 0
+        signals = []
+
+        # ── 1. АПТРЕНД 30+ дней ──
+        price_bottom = min(c["low"] for c in candles_1d[-50:-15])
+        pump_pct = (price_now - price_bottom) / price_bottom * 100 if price_bottom > 0 else 0
+
+        if pump_pct >= 50:
+            score += 30
+            signals.append(f"✅ Аптренд +{pump_pct:.0f}% от основания")
+        elif pump_pct >= 30:
+            score += 15
+            signals.append(f"⚡️ Рост +{pump_pct:.0f}% от основания")
+        else:
+            return None
+
+        # ── 2. БОКОВИК У ВЕРШИНЫ (последние 20 дней) ──
+        distribution_candles = candles_1d[-20:]
+        dist_high = max(c["high"] for c in distribution_candles)
+        dist_low  = min(c["low"]  for c in distribution_candles)
+        dist_range_pct = (dist_high - dist_low) / dist_low * 100 if dist_low > 0 else 0
+
+        if dist_range_pct < 15:
+            score += 20
+            signals.append(f"✅ Боковик {dist_range_pct:.1f}% у вершины")
+        elif dist_range_pct < 25:
+            score += 10
+            signals.append(f"⚡️ Диапазон {dist_range_pct:.1f}% у вершины")
+        else:
+            return None
+
+        # ── 3. ФАЗЫ WYCKOFF DISTRIBUTION ──
+        phases = _find_wyckoff_phases_distribution(candles_1d, candles_4h)
+
+        if not phases:
+            return None
+
+        if "BC" in phases:
+            score += 15
+            signals.append(f"✅ BC (Buying Climax) — эйфория с объёмом")
+
+        if "AR" in phases:
+            score += 10
+            signals.append(f"✅ AR (Automatic Reaction) — первый откат")
+
+        if "ST" in phases:
+            score += 10
+            signals.append(f"✅ ST (Secondary Test) — объём падает на тесте вершины")
+
+        utad_found = phases.get("UTAD", {}).get("found", False)
+        if utad_found:
+            score += 25
+            signals.append(f"🎯 UTAD! Ложный пробой хая — ловушка для покупателей")
+
+        sow_found = phases.get("SOW", {}).get("found", False)
+        if sow_found:
+            score += 20
+            signals.append(f"💪 SOW (Sign of Weakness) — пробой AR вниз с объёмом!")
+
+        # ── 4. ОБЪЁМ СЖИМАЕТСЯ В БОКОВИКЕ ──
+        all_vols = [c["volume"] for c in candles_1d[-50:-20]]
+        avg_vol_trend = sum(all_vols) / len(all_vols) if all_vols else 1
+        dist_vols = [c["volume"] for c in distribution_candles]
+        avg_vol_dist = sum(dist_vols) / len(dist_vols) if dist_vols else 1
+        vol_compression = avg_vol_dist / avg_vol_trend if avg_vol_trend > 0 else 1
+
+        if vol_compression < 0.7:
+            score += 15
+            signals.append(f"✅ Объём сжался {vol_compression:.0%} (тихое распределение)")
+
+        if score < 65:
+            return None
+        if not utad_found and not sow_found:
+            return None
+
+        # ── Вход/Стоп/TP ──
+        entry = price_now
+        sl    = round(dist_high * 1.04, 8)  # Стоп над хаем боковика +4%
+        ar_price = phases.get("AR", {}).get("price", price_bottom * 1.2)
+
+        # Groq считает цель
+        tp = None
+        logic = ""
+        try:
+            phase_summary = []
+            for ph in ["BC", "AR", "ST", "UTAD", "SOW"]:
+                if ph in phases:
+                    phase_summary.append(ph)
+            groq_prompt = (
+                f"Ты эксперт Wyckoff Distribution. Дай цель падения после UTAD. Ответь СТРОГО JSON:\n"
+                f'{{"target": число_цены, "target_pct": процент_падения, "logic": "причина макс 10 слов"}}\n\n'
+                f"Пара: {symbol}\nЦена: {price_now}\n"
+                f"BC хай: {phases['BC']['price']:.6f}\n"
+                f"AR лоу: {ar_price:.6f}\n"
+                f"Основание до роста: {price_bottom:.6f}\n"
+                f"Боковик: {dist_low:.6f}—{dist_high:.6f}\n"
+                f"Фазы: {', '.join(phase_summary)}\n"
+                f"Рост: +{pump_pct:.0f}%"
+            )
+            groq_resp = ask_groq(groq_prompt, max_tokens=120)
+            if groq_resp:
+                import json as _j, re as _re
+                clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
+                m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                if m:
+                    parsed = _j.loads(m.group())
+                    if parsed.get("target") and float(parsed["target"]) < entry:
+                        tp = float(parsed["target"])
+                    if parsed.get("logic"):
+                        logic = str(parsed["logic"]).strip()
+        except Exception:
+            pass
+
+        if not tp:
+            tp = round(min(ar_price, entry * 0.75), 8)
+        if not logic:
+            logic = f"UTAD после BC+AR+ST — дистрибуция Wyckoff"
+
+        risk   = abs(sl - entry)
+        reward = abs(entry - tp)
+        if risk == 0 or reward / risk < 2.0:
+            return None
+
+        rr     = round(reward / risk, 2)
+        tp_pct = round((entry - tp) / entry * 100, 1)
+        sl_pct = round((sl - entry) / entry * 100, 1)
+
+        phase_names = [p for p in ["BC", "AR", "ST", "UTAD", "SOW"] if p in phases and (p not in ["UTAD","SOW"] or phases[p].get("found"))]
+
+        return {
+            "symbol": symbol, "direction": "BEARISH",
+            "timeframe": "1d", "entry": entry,
+            "sl": sl, "tp": tp,
+            "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
+            "logic": logic, "score": min(score, 100),
+            "pump_pct": pump_pct, "dist_range": dist_range_pct,
+            "utad": utad_found, "sow": sow_found,
+            "phases": " → ".join(phase_names),
+            "dist_low": dist_low, "dist_high": dist_high,
+            "scan_type": "wyckoff",
+        }
+
+    except Exception as e:
+        logging.debug(f"detect_wyckoff_distribution {symbol}: {e}")
+        return None
