@@ -1448,8 +1448,8 @@ def expire_timing_queue():
             "SELECT id, symbol, timeframe FROM timing_queue WHERE status='waiting' AND expires_at < ?", (now,)
         ).fetchall()
         for row in expired:
-            conn.execute("UPDATE timing_queue SET status='expired' WHERE id=?", (row[0],))
-            logging.info(f"[TimingQueue] {row[1]} {row[2]} → истёк")
+            conn.execute("DELETE FROM timing_queue WHERE id=?", (row[0],))
+            logging.debug(f"[TimingQueue] {row[1]} {row[2]} → удалён")
         conn.commit()
         conn.close()
         return len(expired)
