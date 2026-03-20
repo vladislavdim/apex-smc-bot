@@ -248,6 +248,10 @@ _admin_raw = os.environ.get("ADMIN_ID", "0") or "0"
 ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit()]
 ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else 0
 SIGNAL_CHANNEL = int(os.environ.get("SIGNAL_CHANNEL_ID", "-1003122576951"))  # TG канал сигналов
+SIGNAL_CHANNEL_MAIN = -1003614593530   # Все стратегии MTF+SWING+WYCKOFF
+SIGNAL_CHANNEL_SWING = -1003122576951  # Канал с ветками
+SWING_THREAD_ID = 262                  # Ветка Swing
+FAST_DEAL_THREAD_ID = 264              # Ветка Fast deal
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_KEYS = [k for k in [
     os.environ.get("GROQ_API_KEY", ""),
