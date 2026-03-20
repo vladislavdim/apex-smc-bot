@@ -2749,7 +2749,7 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
     for symbol in pairs:
         try:
             sig_data = full_scan_raw(symbol, timeframe, auto=True)
-            if sig_data and sig_data.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА"):
+            if sig_data:
                 sig_data["timeframe"] = timeframe
                 signals.append(sig_data)
             await asyncio.sleep(0.3)
