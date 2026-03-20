@@ -2686,7 +2686,7 @@ def _format_channel_signal(sd: dict) -> str:
         return f"${p:,.2f}"
 
     dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-    label     = "🔄 [SWING]" if scan_type == "swing" else "🌊 [WYCKOFF]" if scan_type == "wyckoff" else "📐 [MTF]"
+    label     = "🔄 [SWING]" if scan_type == "swing" else "🌊 [WYCKOFF]" if scan_type == "wyckoff" else "⚡ [FAST]" if scan_type == "fast" else "📐 [MTF]"
     tf_time   = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
     risk      = "низкий" if score >= 60 else "средний"
 
@@ -3147,6 +3147,115 @@ async def auto_wyckoff_scan():
 
         except Exception as e:
             logging.error(f"[WyckoffScan] {r.get('symbol')}: {e}")
+
+
+async def auto_fast_deal_scan():
+    """Каждые 5 мин: 5m скальпинг — только в активные сессии 08-12 и 16-20 UTC"""
+    from datetime import datetime as _dt
+    _hour = _dt.utcnow().hour
+    if not (8 <= _hour < 12 or 16 <= _hour < 20):
+        return
+
+    found = []
+    for symbol in FAST_PAIRS:
+        try:
+            r = detect_fast_deal(symbol)
+            if r:
+                found.append(r)
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            logging.debug(f"fast deal scan {symbol}: {e}")
+
+    if not found:
+        return
+
+    found.sort(key=lambda x: x["rr"], reverse=True)
+    logging.info(f"Fast Deal scan: найдено {len(found)}")
+
+    for r in found[:2]:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+
+            text = (
+                f"⚡ <b>[FAST]</b> | <b>{symbol}</b> — {dir_label}\n"
+                f"📊 Контекст: 5m | 1d: {r['direction_1d']}\n"
+                f"\n"
+                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code> (+{r['tp_pct']}%)\n"
+                f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code> (-{r['sl_pct']}%)\n"
+                f"\n"
+                f"📈 Логика: {r['logic']}\n"
+                f"\n"
+                f"🔍 Зона: {r['zone']}\n"
+                f"⭐ RR: {r['rr']} | Риск: низкий\n"
+                f"⏱ Горизонт: ~15-30 мин"
+            )
+
+            # Блокируем если сделка уже открыта
+            try:
+                import sqlite3 as _sq3
+                _chk = _sq3.connect("brain.db", timeout=10)
+                _open = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND direction=? AND result=\'pending\' AND signal_type=\'FAST\' LIMIT 1",
+                    (symbol, direction)
+                ).fetchone()
+                _chk.close()
+                if _open:
+                    continue
+            except Exception:
+                pass
+
+            # Cooldown 1ч для скальпинга
+            cache_key = f"{symbol}:FAST:{direction}:5m"
+            now_ts = time.time()
+            try:
+                import sqlite3 as _sq3
+                _cd = _sq3.connect("brain.db", timeout=10)
+                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
+                last_sent = row[0] if row else 0
+                if now_ts - last_sent < 1 * 3600:
+                    _cd.close()
+                    continue
+                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
+                _cd.commit()
+                _cd.close()
+            except Exception:
+                pass
+
+            # Сохраняем в БД
+            save_signal_db(
+                symbol, direction, "FAST",
+                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                "5m", 1, "⚡ FAST",
+                confluence=int(r["rr"] * 20), regime="FAST"
+            )
+
+            # Отправляем только в ветку Fast deal
+            try:
+                await bot.send_message(
+                    SIGNAL_CHANNEL_SWING,
+                    text,
+                    parse_mode="HTML",
+                    message_thread_id=FAST_DEAL_THREAD_ID
+                )
+                logging.info(f"[FastDeal] {symbol} {direction} RR={r['rr']} → отправлен")
+            except Exception as e:
+                logging.error(f"[FastDeal] send error: {e}")
+
+            # Также отправляем тебе в личку
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(admin_id, text, parse_mode="HTML")
+                except Exception:
+                    pass
+
+            await backup_db_to_github()
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logging.error(f"[FastDeal] {r.get('symbol')}: {e}")
 
 async def auto_accumulation_scan():
     """Каждый час: сканируем все топ-60 на накопление перед пампом"""
@@ -4258,6 +4367,7 @@ def main():
             # scheduler.add_job(auto_scan_1w, ...)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+            scheduler.add_job(auto_fast_deal_scan, "interval", minutes=5, jitter=30, max_instances=1, coalesce=True)  # Fast Deal 5m
             scheduler.add_job(auto_wyckoff_scan, "interval", hours=4, jitter=600)     # Wyckoff Spring — каждые 4ч
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
