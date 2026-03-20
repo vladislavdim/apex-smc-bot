@@ -7391,11 +7391,17 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not direction_1d or direction_1d not in ("BULLISH", "BEARISH"):
             return None
 
-        # BTC должен совпадать с 1d трендом
+        # BTC фильтр: для LONG BTC не должен падать
+        # Для SHORT BTC не должен агрессивно расти (>1% за последние 3 свечи 1h)
         if direction_1d == "BULLISH" and btc_trend == "BEARISH":
             return None
         if direction_1d == "BEARISH" and btc_trend == "BULLISH":
-            return None
+            try:
+                btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
+                if btc_change > 1.0:
+                    return None  # BTC растёт >1% — шорт альт опасен
+            except Exception:
+                pass
 
         direction = direction_1d
 
