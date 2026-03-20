@@ -2686,7 +2686,7 @@ def _format_channel_signal(sd: dict) -> str:
         return f"${p:,.2f}"
 
     dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-    label     = "🔄 [SWING]" if scan_type == "swing" else "🌊 [WYCKOFF]" if scan_type == "wyckoff" else "📐 [ПОЗИЦИЯ]"
+    label     = "🔄 [SWING]" if scan_type == "swing" else "🌊 [WYCKOFF]" if scan_type == "wyckoff" else "📐 [MTF]"
     tf_time   = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
     risk      = "низкий" if score >= 60 else "средний"
 
@@ -3447,7 +3447,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             groq_logic = "\n".join(logic_lines[:3]) if logic_lines else "структурный вход по SMC"
 
         text = (
-            f"📐 <b>[ПОЗИЦИЯ]</b> | <b>{symbol}</b> — {dir_label}\n"
+            f"📐 <b>[MTF]</b> | <b>{symbol}</b> — {dir_label}\n"
             f"📊 Контекст: {tf_label}\n"
             f"\n"
             f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
