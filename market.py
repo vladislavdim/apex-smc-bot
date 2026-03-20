@@ -7378,7 +7378,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         from datetime import datetime as _dt
         _hour = _dt.utcnow().hour
         # Только в активные сессии: Лондон 08-12 и NY 16-20 UTC
-        if not (8 <= _hour < 12 or 16 <= _hour < 20):
+        if not (8 <= _hour < 13 or 16 <= _hour < 21):
             return None
 
         # ── 1. BTC направление ──
