@@ -242,6 +242,8 @@ user_states = {}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     user_id = message.from_user.id
     name = message.from_user.first_name or "трейдер"
     update_user_memory(user_id, name=name)
@@ -255,14 +257,20 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     await message.answer("Главное меню 👇", reply_markup=main_menu())
 
 @dp.message(Command("scan"))
 async def cmd_scan(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     await message.answer("Выбери монету для скана:", reply_markup=pairs_keyboard("scan"))
 
 @dp.message(Command("backtest"))
 async def cmd_backtest(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     args = message.text.split()
     if len(args) == 3:
         symbol = args[1].upper()
@@ -276,6 +284,8 @@ async def cmd_backtest(message: types.Message):
 
 @dp.message(Command("risk"))
 async def cmd_risk(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     args = message.text.split()
     mem = get_user_memory(message.from_user.id)
     if len(args) == 2:
@@ -311,6 +321,8 @@ async def cmd_risk(message: types.Message):
 
 @dp.message(Command("setrisk"))
 async def cmd_setrisk(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     args = message.text.split()
     if len(args) == 2:
         try:
@@ -325,6 +337,8 @@ async def cmd_setrisk(message: types.Message):
 
 @dp.message(Command("alert"))
 async def cmd_alert(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     args = message.text.split()
     if len(args) == 3:
         symbol = args[1].upper()
@@ -372,6 +386,8 @@ async def cmd_alert(message: types.Message):
 
 @dp.message(Command("journal"))
 async def cmd_journal(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     args = message.text.split(maxsplit=1)
     user_id = message.from_user.id
 
@@ -457,6 +473,8 @@ async def cmd_journal(message: types.Message):
 
 @dp.message(Command("improve"))
 async def cmd_improve(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     """
     /improve <запрос> — Groq пишет улучшение в groq_extensions.py и деплоит.
     Только для ADMIN_ID.
@@ -613,6 +631,8 @@ def _groq_write_extension(user_request: str, message=None) -> dict:
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
     user_id = message.from_user.id
     mem = get_user_memory(user_id)
     try:
