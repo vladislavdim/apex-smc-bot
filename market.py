@@ -3085,8 +3085,18 @@ def full_scan(symbol, timeframe="1h"):
         htf = get_higher_tf_context(symbol)
         fg_hist = get_fg_history()
 
-        # ── HTF фильтр: торгуем только по направлению 1d тренда ──
+        # ── HTF фильтр: 1w → жёсткий, 1d → подтверждение ──
+        htf_1w = smc_on_tf(symbol, "1w")
         htf_1d = smc_on_tf(symbol, "1d")
+        # 1w жёсткий фильтр для MTF
+        if htf_1w:
+            if direction == "BULLISH" and "BEARISH" in str(htf_1w).upper():
+                logging.info(f"[1w Filter] {symbol} LONG заблокирован — 1w BEARISH")
+                return None
+            if direction == "BEARISH" and "BULLISH" in str(htf_1w).upper():
+                logging.info(f"[1w Filter] {symbol} SHORT заблокирован — 1w BULLISH")
+                return None
+        # 1d подтверждение
         if htf_1d:
             if direction == "BULLISH" and "BEARISH" in str(htf_1d).upper():
                 logging.info(f"[HTF Filter] {symbol} LONG заблокирован — 1d BEARISH")
@@ -6713,12 +6723,30 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         tf_context = "1d" if timeframe == "4h" else "4h"
         htf_dir = smc_on_tf(symbol, tf_context)
 
-        # ── Жёсткий фильтр: торгуем только по направлению 1d тренда ──
+        # ── Фильтр 1w + 1d для SWING ──
+        htf_1w_swing = smc_on_tf(symbol, "1w")
+        weekly_warning = ""
+
+        # 1w BEARISH + 1d BEARISH → только SHORT
+        if htf_1w_swing and "BEARISH" in str(htf_1w_swing).upper():
+            if direction == "BULLISH":
+                if htf_dir and "BEARISH" in str(htf_dir).upper():
+                    return None  # 1w BEARISH + 1d BEARISH → LONG заблокирован
+                else:
+                    # 1w BEARISH + 1d BULLISH → LONG с предупреждением
+                    weekly_warning = "⚠️ 1w BEARISH — осторожно с лонгом"
+
+        # 1w BULLISH + 1d BEARISH → SHORT заблокирован
+        if htf_1w_swing and "BULLISH" in str(htf_1w_swing).upper():
+            if direction == "BEARISH" and htf_dir and "BEARISH" in str(htf_dir).upper():
+                return None  # Не шортим при бычьей неделе
+
+        # Стандартный 1d фильтр
         if htf_dir:
             if direction == "BULLISH" and "BEARISH" in str(htf_dir).upper():
-                return None  # Не открываем лонг против медвежьего 1d
+                return None
             if direction == "BEARISH" and "BULLISH" in str(htf_dir).upper():
-                return None  # Не открываем шорт против бычьего 1d
+                return None
 
         # ── Дополнительно: проверяем 15m подтверждение ──
         try:
@@ -6783,7 +6811,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"Ты трейдер SMC. Swing сетап. Ответь СТРОГО JSON без лишнего текста:\n"
                 f"{{\"logic\": \"логика входа макс 12 слов\", \"hours\": число_часов}}\n\n"
                 f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
-                f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir}\n"
+                f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir} 1w: {htf_1w_swing}\n"
                 f"ATR: {smart_round(atr)} До TP: {smart_round(distance_to_tp)} Расчёт: ~{est_hours}ч\n"
                 f"Свечи: {candles_str}"
             )
@@ -6825,6 +6853,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "rr":        rr,
             "logic":     logic,
             "htf_dir":   htf_dir,
+            "htf_1w":    htf_1w_swing,
+            "weekly_warning": weekly_warning,
             "est_hours": est_hours,
             "scan_type": "swing",
         }
