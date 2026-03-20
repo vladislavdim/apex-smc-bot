@@ -4248,7 +4248,20 @@ def main():
                 allowed_updates=dp.resolve_used_update_types()
             )
 
-        asyncio.run(polling_main())
+        # Watchdog — перезапускаем polling если упал
+        max_restarts = 10
+        restart_count = 0
+        while restart_count < max_restarts:
+            try:
+                asyncio.run(polling_main())
+            except Exception as e:
+                restart_count += 1
+                logging.error(f"Polling упал ({restart_count}/{max_restarts}): {e}")
+                import time as _t
+                _t.sleep(10)
+                logging.info("Перезапускаем polling...")
+            else:
+                break
 
 
 if __name__ == "__main__":
