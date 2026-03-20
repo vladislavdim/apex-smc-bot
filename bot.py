@@ -2733,7 +2733,12 @@ async def _send_signal(sd):
             logging.debug(f"send_signal admin {admin_id}: {e}")
     try:
         channel_text = _format_channel_signal(sd)
-        await bot.send_message(SIGNAL_CHANNEL, channel_text, parse_mode="HTML")
+        scan_type = sd.get("scan_type", "")
+        # Отправляем в главный канал (все стратегии)
+        await bot.send_message(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+        # SWING также в ветку Swing второго канала
+        if scan_type == "swing":
+            await bot.send_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
     except Exception as ce:
         logging.warning(f"Channel send error: {ce}")
     try:
