@@ -7355,3 +7355,203 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
     except Exception as e:
         logging.debug(f"detect_wyckoff_distribution {symbol}: {e}")
         return None
+
+
+# ===== СТРАТЕГИЯ 4: FAST DEAL 5M СКАЛЬПИНГ =====
+
+FAST_PAIRS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ADAUSDT", "DOTUSDT"
+]
+
+def detect_fast_deal(symbol: str) -> dict | None:
+    """
+    SMC скальпинг на 5m:
+    1. BTC направление — синхронизация с рынком
+    2. 1d тренд — торгуем только по тренду
+    3. 4h OB/FVG — цена в зоне интереса
+    4. 1h импульсная свеча — подтверждение
+    5. 5m sweep + возврат — точный вход
+    Горизонт: 15-30 мин | Стоп: -0.5% | TP: +1%
+    """
+    try:
+        from datetime import datetime as _dt
+        _hour = _dt.utcnow().hour
+        # Только в активные сессии: Лондон 08-12 и NY 16-20 UTC
+        if not (8 <= _hour < 12 or 16 <= _hour < 20):
+            return None
+
+        # ── 1. BTC направление ──
+        btc_ok, btc_reason = btc_allows_signal("BULLISH")
+        btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
+        btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
+
+        # ── 2. 1d тренд ──
+        direction_1d = smc_on_tf(symbol, "1d")
+        if not direction_1d or direction_1d not in ("BULLISH", "BEARISH"):
+            return None
+
+        # BTC должен совпадать с 1d трендом
+        if direction_1d == "BULLISH" and btc_trend == "BEARISH":
+            return None
+        if direction_1d == "BEARISH" and btc_trend == "BULLISH":
+            return None
+
+        direction = direction_1d
+
+        # ── 3. 4h OB/FVG зона ──
+        candles_4h = get_candles(symbol, "4h", 50)
+        if not candles_4h or len(candles_4h) < 20:
+            return None
+
+        price_now = candles_4h[-1]["close"]
+        ob_4h  = find_ob(candles_4h, direction)
+        fvg_4h = find_fvg(candles_4h, direction)
+
+        # Проверяем что цена в зоне 4h OB или FVG
+        in_zone = False
+        zone_desc = ""
+        atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
+
+        if ob_4h:
+            zone_bottom = ob_4h["bottom"]
+            zone_top    = ob_4h["top"]
+            # Цена должна быть рядом с зоной (±ATR)
+            if direction == "BULLISH" and zone_bottom - atr_4h <= price_now <= zone_top + atr_4h:
+                in_zone = True
+                zone_desc = f"4h OB ${zone_bottom:.4f}–${zone_top:.4f}"
+            elif direction == "BEARISH" and zone_bottom - atr_4h <= price_now <= zone_top + atr_4h:
+                in_zone = True
+                zone_desc = f"4h OB ${zone_bottom:.4f}–${zone_top:.4f}"
+
+        if not in_zone and fvg_4h:
+            zone_bottom = fvg_4h["bottom"]
+            zone_top    = fvg_4h["top"]
+            if zone_bottom - atr_4h <= price_now <= zone_top + atr_4h:
+                in_zone = True
+                zone_desc = f"4h FVG ${zone_bottom:.4f}–${zone_top:.4f}"
+
+        if not in_zone:
+            return None
+
+        # ── 4. 1h импульсная свеча ──
+        candles_1h = get_candles(symbol, "1h", 10)
+        if not candles_1h or len(candles_1h) < 3:
+            return None
+
+        last_1h = candles_1h[-1]
+        body_1h = abs(last_1h["close"] - last_1h["open"])
+        range_1h = last_1h["high"] - last_1h["low"] if last_1h["high"] != last_1h["low"] else 0.001
+        is_impulse_1h = body_1h / range_1h > 0.5
+
+        if direction == "BULLISH" and not (last_1h["close"] > last_1h["open"] and is_impulse_1h):
+            return None
+        if direction == "BEARISH" and not (last_1h["close"] < last_1h["open"] and is_impulse_1h):
+            return None
+
+        # ── 5. 5m sweep + возврат ──
+        candles_5m = get_candles(symbol, "5m", 30)
+        if not candles_5m or len(candles_5m) < 10:
+            return None
+
+        atr_5m = sum(c["high"] - c["low"] for c in candles_5m[-14:]) / 14
+        sweep_found = False
+        entry = None
+        sl = None
+
+        # Ищем sweep на последних 5 свечах
+        for i in range(2, 6):
+            if i >= len(candles_5m):
+                break
+            c = candles_5m[-i]
+            c_prev = candles_5m[-i - 1]
+
+            if direction == "BULLISH":
+                # Sweep лоу + возврат
+                if c["low"] < c_prev["low"] and c["close"] > c_prev["low"]:
+                    wick = (c["close"] - c["low"]) / (c["high"] - c["low"] + 0.000001)
+                    if wick > 0.4:
+                        sweep_found = True
+                        entry = smart_round(candles_5m[-1]["close"])
+                        sl    = smart_round(c["low"] - atr_5m * 0.3)
+                        break
+            else:
+                # Sweep хая + возврат
+                if c["high"] > c_prev["high"] and c["close"] < c_prev["high"]:
+                    wick = (c["high"] - c["close"]) / (c["high"] - c["low"] + 0.000001)
+                    if wick > 0.4:
+                        sweep_found = True
+                        entry = smart_round(candles_5m[-1]["close"])
+                        sl    = smart_round(c["high"] + atr_5m * 0.3)
+                        break
+
+        if not sweep_found or not entry or not sl:
+            return None
+
+        # ── TP = +1% от входа (реалистично за 15-30 мин) ──
+        if direction == "BULLISH":
+            tp = smart_round(entry * 1.010)  # +1%
+        else:
+            tp = smart_round(entry * 0.990)  # -1%
+
+        # ── RR проверка ──
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0:
+            return None
+        rr = round(reward / risk, 2)
+        if rr < 1.5:
+            return None
+
+        sl_pct = round(abs(entry - sl) / entry * 100, 2)
+        tp_pct = round(abs(tp - entry) / entry * 100, 2)
+
+        # ── Groq анализирует ──
+        logic = ""
+        try:
+            groq_prompt = (
+                f"Ты SMC скальпер. Оцени 5m сигнал. Ответь СТРОГО JSON:\n"
+                f'{{"logic": "причина входа макс 8 слов", "valid": true/false}}\n\n'
+                f"Пара: {symbol} Направление: {direction}\n"
+                f"5m sweep: {'лоу' if direction == 'BULLISH' else 'хая'}\n"
+                f"4h зона: {zone_desc}\n"
+                f"1d тренд: {direction_1d}\n"
+                f"BTC тренд: {btc_trend}\n"
+                f"Вход: {entry} SL: {sl} TP: {tp} RR: {rr}"
+            )
+            groq_resp = ask_groq(groq_prompt, max_tokens=80)
+            if groq_resp:
+                import json as _j, re as _re
+                clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
+                m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                if m:
+                    parsed = _j.loads(m.group())
+                    if not parsed.get("valid", True):
+                        return None  # Groq отклонил сигнал
+                    if parsed.get("logic"):
+                        logic = str(parsed["logic"]).strip()
+        except Exception:
+            pass
+
+        if not logic:
+            logic = f"Sweep {'лоу' if direction == 'BULLISH' else 'хая'} 5m в зоне {zone_desc[:20]}"
+
+        return {
+            "symbol":    symbol,
+            "direction": direction,
+            "timeframe": "5m",
+            "entry":     entry,
+            "sl":        sl,
+            "tp":        tp,
+            "sl_pct":    sl_pct,
+            "tp_pct":    tp_pct,
+            "rr":        rr,
+            "logic":     logic,
+            "zone":      zone_desc,
+            "direction_1d": direction_1d,
+            "scan_type": "fast",
+        }
+
+    except Exception as e:
+        logging.debug(f"detect_fast_deal {symbol}: {e}")
+        return None
