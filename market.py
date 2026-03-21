@@ -406,7 +406,6 @@ def init_db():
         name TEXT, profile TEXT, preferences TEXT,
         coins_mentioned TEXT, deposit REAL DEFAULT 0,
         risk_percent REAL DEFAULT 1.0,
-        active INTEGER DEFAULT 1,
         total_messages INTEGER DEFAULT 0,
         first_seen TEXT, last_seen TEXT)""")
 
@@ -442,14 +441,6 @@ def init_db():
     # Миграция alerts — добавляем price_level если таблица создана со старой схемой (price)
     try:
         c.execute("ALTER TABLE alerts ADD COLUMN price_level REAL")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE alerts ADD COLUMN direction TEXT DEFAULT 'BOTH'")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE alerts ADD COLUMN triggered INTEGER DEFAULT 0")
     except Exception:
         pass  # колонка уже есть
 
@@ -3838,11 +3829,7 @@ def check_pending_signals():
                 elif current >= sl:
                     result = "sl"
 
-            # FAST сделки закрываем через 1ч, остальные через 72ч
-            _sig_type = conn2.execute("SELECT signal_type FROM signals WHERE id=?", (sig_id,)).fetchone()
-            _is_fast = _sig_type and _sig_type[0] == "FAST"
-            expire_hours = 1 if _is_fast else 72
-            if not result and hours_elapsed > expire_hours:
+            if not result and hours_elapsed > 72:
                 result = "expired"
 
             if result:
