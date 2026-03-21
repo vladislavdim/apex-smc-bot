@@ -2741,10 +2741,8 @@ async def _send_signal(sd):
             await bot.send_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
     except Exception as ce:
         logging.warning(f"Channel send error: {ce}")
-    try:
-        await backup_db_to_github()
-    except Exception:
-        pass
+    # backup только по расписанию (раз в час) — не после каждого сигнала
+    pass
 
 
 async def _scan_tf(timeframe: str, pairs_limit: int = 50):
