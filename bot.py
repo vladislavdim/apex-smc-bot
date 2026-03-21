@@ -2928,6 +2928,7 @@ async def auto_scan_swing():
 
             await _send_signal(sd)
             logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
+            await backup_db_to_github()
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -3139,6 +3140,7 @@ async def auto_wyckoff_scan():
 
             await _send_signal(sd)
             logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
+            await backup_db_to_github()
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -3247,6 +3249,7 @@ async def auto_fast_deal_scan():
                 except Exception:
                     pass
 
+            await backup_db_to_github()
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -4019,6 +4022,8 @@ async def run_brain_builder_async():
         stats = await loop.run_in_executor(None, run_brain_builder, False)
         if stats:
             logging.info(f"🧠 Brain Builder (быстрый): знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)}")
+        # Бэкап БД в GitHub после обучения
+        await backup_db_to_github()
     except Exception as e:
         logging.error(f"run_brain_builder_async: {e}")
 
@@ -4034,6 +4039,7 @@ async def run_brain_builder_full_async():
                 f"знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)} "
                 f"паттернов={stats.get('patterns',0)} монет={stats.get('coins',0)}"
             )
+        await backup_db_to_github()
     except Exception as e:
         logging.error(f"run_brain_builder_full_async: {e}")
 
@@ -4220,6 +4226,7 @@ async def recheck_timing_queue():
             results = await loop.run_in_executor(None, _web_learn_cycle)
             if results:
                 logging.info(f"[WebLearner] Изучено тем: {len(results)}")
+            await backup_db_to_github()
     scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300)
     scheduler.add_job(_run_web_learner, "date",
         run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
