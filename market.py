@@ -6569,6 +6569,40 @@ APEX:"""
 
 # ===== SWING SCANNER — торговля от экстремумов =====
 
+
+def find_equal_highs_lows(candles, lookback=20, tolerance=0.002):
+    """
+    Находит Equal Highs (EQH) и Equal Lows (EQL) — уровни ликвидности.
+    EQH = два одинаковых хая (±0.2%) = скопление стопов покупателей
+    EQL = два одинаковых лоя (±0.2%) = скопление стопов продавцов
+    """
+    recent = candles[-lookback:]
+    highs = [c["high"] for c in recent]
+    lows  = [c["low"]  for c in recent]
+
+    eqh_level = None
+    eql_level = None
+
+    # Ищем EQH — два хая в пределах tolerance
+    for i in range(len(highs)-1):
+        for j in range(i+1, len(highs)):
+            if abs(highs[i] - highs[j]) / highs[i] <= tolerance:
+                eqh_level = (highs[i] + highs[j]) / 2
+                break
+        if eqh_level:
+            break
+
+    # Ищем EQL — два лоя в пределах tolerance
+    for i in range(len(lows)-1):
+        for j in range(i+1, len(lows)):
+            if abs(lows[i] - lows[j]) / lows[i] <= tolerance:
+                eql_level = (lows[i] + lows[j]) / 2
+                break
+        if eql_level:
+            break
+
+    return eqh_level, eql_level
+
 def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     """
     Ловит swing сетапы: sweep экстремума → CHoCH → вход.
@@ -6654,6 +6688,37 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 logic = "свип хая ↑ + отклонение + импульс вниз"
                 break
 
+        # ── EQH/EQL как дополнительный триггер ──
+        # Если обычный sweep не найден — проверяем есть ли sweep EQH/EQL
+        if not direction:
+            try:
+                eqh_level, eql_level = find_equal_highs_lows(candles, lookback=30)
+                last_c = candles[-1]
+                prev_c = candles[-2]
+
+                # Bullish: sweep EQL (выбитие двойного лоя с возвратом)
+                if eql_level and last_c["low"] < eql_level and last_c["close"] > eql_level:
+                    wick = (last_c["close"] - last_c["low"]) / (last_c["high"] - last_c["low"] + 0.000001)
+                    if wick > 0.4:
+                        direction = "BULLISH"
+                        entry = smart_round(last_c["close"])
+                        sl    = smart_round(last_c["low"] - atr * 0.3)
+                        # TP = предыдущий хай свинга
+                        tp    = smart_round(last_swing_high)
+                        logic = f"EQL sweep — двойной лоу ${eql_level:.4f} выбит → разворот"
+
+                # Bearish: sweep EQH (выбитие двойного хая с возвратом)
+                elif eqh_level and last_c["high"] > eqh_level and last_c["close"] < eqh_level:
+                    wick = (last_c["high"] - last_c["close"]) / (last_c["high"] - last_c["low"] + 0.000001)
+                    if wick > 0.4:
+                        direction = "BEARISH"
+                        entry = smart_round(last_c["close"])
+                        sl    = smart_round(last_c["high"] + atr * 0.3)
+                        tp    = smart_round(last_swing_low)
+                        logic = f"EQH sweep — двойной хай ${eqh_level:.4f} выбит → разворот"
+            except Exception:
+                pass
+
         if not direction:
             return None
 
@@ -6663,7 +6728,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 0.8:
+            if avg_vol > 0 and sweep_vol < avg_vol * 0.6:
                 return None  # Объём слишком низкий — ложный sweep
         except Exception:
             pass
