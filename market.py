@@ -832,7 +832,7 @@ TF_LABELS = {
 TF_HOURS = {
     "1m": 0.1, "5m": 0.5, "15m": 4, "30m": 8,
     "1h": 12, "2h": 24, "4h": 48,
-    "1d": 120, "3d": 360, "1w": 720, "1M": 2880
+    "1d": 336, "3d": 360, "1w": 720, "1M": 2880
 }
 
 # ===== BINANCE API CLIENT (авторизованный) =====
@@ -2324,6 +2324,59 @@ def find_fvg(candles, direction):
             return {"top": candles[i-1]["low"], "bottom": candles[i+1]["high"]}
     return None
 
+def check_opposing_ob(candles, direction, entry, tp):
+    """Проверяет нет ли противоположного OB между entry и TP.
+    Возвращает скорректированный TP или None если блокирует."""
+    opposing_dir = "BEARISH" if direction == "BULLISH" else "BULLISH"
+    opp_ob = find_ob(candles, opposing_dir)
+    if not opp_ob:
+        return tp  # Нет противоположного OB — TP без изменений
+
+    if direction == "BULLISH":
+        # Bearish OB между entry и TP = сопротивление
+        if entry < opp_ob["bottom"] < tp:
+            new_tp = smart_round(opp_ob["bottom"] * 0.998)  # TP чуть ниже bearish OB
+            if new_tp > entry * 1.003:  # Минимум 0.3% профита
+                return new_tp
+            return None  # Слишком мало места — блокируем
+    else:
+        # Bullish OB между entry и TP (TP < entry для SHORT)
+        if tp < opp_ob["top"] < entry:
+            new_tp = smart_round(opp_ob["top"] * 1.002)  # TP чуть выше bullish OB
+            if new_tp < entry * 0.997:
+                return new_tp
+            return None
+    return tp
+
+
+def detect_engulfing(candles, direction):
+    """Проверяет наличие engulfing паттерна на последних 3 свечах."""
+    if not candles or len(candles) < 2:
+        return False
+    for i in range(-1, max(-4, -len(candles)), -1):
+        curr = candles[i]
+        prev = candles[i - 1] if abs(i - 1) <= len(candles) else None
+        if not prev:
+            continue
+        curr_body = abs(curr["close"] - curr["open"])
+        prev_body = abs(prev["close"] - prev["open"])
+        if prev_body == 0:
+            continue
+        if direction == "BULLISH":
+            if (curr["close"] > curr["open"] and  # текущая зелёная
+                prev["close"] < prev["open"] and  # предыдущая красная
+                curr_body > prev_body and  # тело больше
+                curr["close"] > prev["open"] and curr["open"] < prev["close"]):
+                return True
+        elif direction == "BEARISH":
+            if (curr["close"] < curr["open"] and
+                prev["close"] > prev["open"] and
+                curr_body > prev_body and
+                curr["close"] < prev["open"] and curr["open"] > prev["close"]):
+                return True
+    return False
+
+
 def smc_on_tf(symbol, interval):
     """SMC анализ на одном ТФ — если smc_engine загружен использует его, иначе fallback"""
     if _SMC_ENGINE_OK:
@@ -2575,22 +2628,42 @@ def get_whale_alerts():
 
 # ===== BTC КОРРЕЛЯЦИЯ — ФИЛЬТР =====
 def get_btc_1h_change():
-    """Изменение BTC за последний час."""
+    """Среднее изменение BTC за последние 3 свечи 1h (устойчивее к шуму)."""
     try:
-        candles = get_candles("BTCUSDT", "1h", 3)
-        if len(candles) < 2:
+        candles = get_candles("BTCUSDT", "1h", 5)
+        if not candles or len(candles) < 4:
             return 0.0
-        return round((candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 3)
+        # Среднее изменение за последние 3 свечи
+        changes = []
+        for i in range(-3, 0):
+            c0, c1 = candles[i - 1], candles[i]
+            changes.append((c1["close"] - c0["close"]) / c0["close"] * 100)
+        return round(sum(changes) / len(changes), 3)
     except Exception:
         return 0.0
 
-def btc_allows_signal(direction):
-    """Если BTC падает -1.5%+ за час — не даём лонги на альты."""
-    btc_change = get_btc_1h_change()
-    if direction == "BULLISH" and btc_change < -1.5:
-        return False, f"BTC падает {btc_change:.1f}%/ч — лонги опасны"
-    if direction == "BEARISH" and btc_change > 1.5:
-        return False, f"BTC растёт {btc_change:.1f}%/ч — шорты опасны"
+def get_btc_4h_change():
+    """Среднее изменение BTC за последние 3 свечи 4h (для WYCKOFF/долгих стратегий)."""
+    try:
+        candles = get_candles("BTCUSDT", "4h", 5)
+        if not candles or len(candles) < 4:
+            return 0.0
+        changes = []
+        for i in range(-3, 0):
+            c0, c1 = candles[i - 1], candles[i]
+            changes.append((c1["close"] - c0["close"]) / c0["close"] * 100)
+        return round(sum(changes) / len(changes), 3)
+    except Exception:
+        return 0.0
+
+def btc_allows_signal(direction, use_4h=False):
+    """Если BTC падает -0.8%+ (среднее за 3 свечи) — не даём лонги на альты."""
+    btc_change = get_btc_4h_change() if use_4h else get_btc_1h_change()
+    tf_label = "4h" if use_4h else "1h"
+    if direction == "BULLISH" and btc_change < -0.8:
+        return False, f"BTC падает {btc_change:.1f}%/{tf_label} — лонги опасны"
+    if direction == "BEARISH" and btc_change > 0.8:
+        return False, f"BTC растёт {btc_change:.1f}%/{tf_label} — шорты опасны"
     return True, ""
 
 
@@ -3033,7 +3106,7 @@ def full_scan(symbol, timeframe="1h"):
         if not isinstance(regime, dict):
             regime = {"mode": str(regime) if regime else "UNKNOWN",
                       "direction": "NONE", "confidence": 0}
-        if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
+        if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 75:
             return None
 
         # ── 0.5. Groq читает свои правила перед сигналом ──
@@ -3112,6 +3185,24 @@ def full_scan(symbol, timeframe="1h"):
             logging.info(f"[BTC Filter] {symbol} пропущен: {btc_reason}")
             return None
 
+        # ── CHoCH/MSS подтверждение на 15m ──
+        try:
+            _candles_15m = get_candles(symbol, "15m", 30)
+            if _candles_15m and len(_candles_15m) >= 10:
+                _sw_15m, _sl_15m = find_swings(_candles_15m, lookback=3)
+                _cl_15m = classify_swings(_sw_15m, _sl_15m)
+                _ev_15m = detect_events(_candles_15m, _cl_15m)
+                _has_choch_15m = any(
+                    e.get("direction") == direction and e.get("type") in ("CHoCH", "BOS")
+                    for e in _ev_15m
+                )
+                if not _has_choch_15m:
+                    # Нет CHoCH/BOS на 15m — добавляем penalty
+                    total_weight -= 8
+                    confluence.append(f"⚠️ Нет CHoCH/BOS на 15m (-8)")
+        except Exception:
+            pass
+
         # Старший ТФ — не входим в лонг у сопротивления
         if htf.get("near_resistance") and direction == "BULLISH":
             logging.info(f"[HTF Filter] {symbol} у сопротивления ({htf['dist_to_resistance']:.1f}% до него) — лонг пропущен")
@@ -3120,10 +3211,10 @@ def full_scan(symbol, timeframe="1h"):
             logging.info(f"[HTF Filter] {symbol} у поддержки — шорт пропущен")
             return None
 
-        # Мёртвая зона (22:00-02:00 UTC) — снижаем агрессивность
+        # Мёртвая зона (22:00-07:00 UTC) — снижаем агрессивность
         from datetime import datetime as _dt
         _hour = _dt.utcnow().hour
-        _dead_zone = (22 <= _hour or _hour <= 1)
+        _dead_zone = (22 <= _hour or _hour <= 6)
 
         # ── 3. Взвешенный confluence ──
         weights = get_confluence_weights(symbol)
@@ -3169,6 +3260,11 @@ def full_scan(symbol, timeframe="1h"):
 
         # Funding Rate
         if funding is not None:
+            # Hard block при экстремальном FR (>±0.2%)
+            if abs(funding) > 0.2:
+                if (direction == "BULLISH" and funding > 0.2) or (direction == "BEARISH" and funding < -0.2):
+                    logging.info(f"[FR Hard Block] {symbol} {direction}: FR {funding:+.4f}% экстремальный")
+                    return None
             if direction == "BULLISH" and funding < 0.05:
                 confluence.append(f"✅ Funding: {funding:+.4f}% — нейтральный")
                 total_weight += 8
@@ -3177,6 +3273,10 @@ def full_scan(symbol, timeframe="1h"):
                 total_weight += 8
             elif abs(funding) > 0.15:
                 confluence.append(f"⚠️ Funding: {funding:+.4f}% — перегрев, риск ликвидаций")
+        else:
+            # FR недоступен — penalty
+            confluence.append(f"⚠️ Funding Rate недоступен (-5)")
+            total_weight -= 5
 
         # Open Interest
         if oi:
@@ -3225,10 +3325,13 @@ def full_scan(symbol, timeframe="1h"):
                 confluence.append(f"✅ F&G улучшается {fg_hist['avg7']:.0f}→{fg_hist['current']} (+5)")
                 total_weight += 5
 
-        # Мёртвая зона — штраф
+        # Мёртвая зона — штраф + hard block при низком confluence
         if _dead_zone:
-            confluence.append(f"⚠️ Мёртвая зона (UTC {_hour}:xx) — ликвидность низкая (-10)")
-            total_weight -= 10
+            confluence.append(f"⚠️ Мёртвая зона (UTC {_hour}:xx) — ликвидность низкая (-15)")
+            total_weight -= 15
+            if total_weight < 70:
+                logging.info(f"full_scan {symbol}: dead zone + confluence {total_weight} < 70 — hard block")
+                return None
 
         # Supply/Demand зоны
         sd_zone = find_supply_demand(candles, direction)
@@ -3572,6 +3675,11 @@ def full_scan(symbol, timeframe="1h"):
             logging.warning(f"full_scan {symbol}: цена = 0, пропускаем")
             return None
 
+        # ── Engulfing pattern как дополнительное подтверждение ──
+        if detect_engulfing(candles, direction):
+            confluence.append(f"✅ Engulfing паттерн подтверждает {direction} (+5)")
+            total_weight += 5
+
         risk = price * 0.015
         if direction == "BULLISH":
             entry = ob["top"] if ob else price
@@ -3590,6 +3698,20 @@ def full_scan(symbol, timeframe="1h"):
         if not entry or entry == 0:
             logging.warning(f"full_scan {symbol}: entry = 0 после расчёта, пропускаем")
             return None
+
+        # ── 4.1 Минимальный RR фильтр ──
+        _mtf_risk = abs(entry - sl)
+        _mtf_reward = abs(tp1 - entry)
+        if _mtf_risk > 0 and _mtf_reward / _mtf_risk < 1.5:
+            logging.info(f"full_scan {symbol}: RR {_mtf_reward/_mtf_risk:.2f} < 1.5 — пропускаем")
+            return None
+
+        # ── 4.2 Проверка противоположного OB между entry и TP1 ──
+        _adj_tp1 = check_opposing_ob(candles, direction, entry, tp1)
+        if _adj_tp1 is None:
+            logging.info(f"full_scan {symbol}: противоположный OB блокирует TP1 — пропускаем")
+            return None
+        tp1 = _adj_tp1
 
         # ── 4.5 Тайминг входа — sweep + импульс + зона ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
@@ -3621,7 +3743,8 @@ def full_scan(symbol, timeframe="1h"):
         # ── 6. AI комментарий к сигналу — с учётом правил самообучения ──
         brain_ctx = get_brain_context(symbol, direction)
         signal_comment = generate_signal_comment(
-            symbol, direction, mtf, total_weight, regime, fg, funding, ob, fvg, brain_ctx
+            symbol, direction, mtf, total_weight, regime, fg, funding, ob, fvg, brain_ctx,
+            entry=entry, sl=sl, tp1=tp1
         )
 
         # ── 6.5 Groq инсайт — почему эта сделка интересна (async) ──
@@ -3729,14 +3852,14 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=15000")
-            # ── Защита от дублей: не сохраняем если уже есть pending сигнал по этой паре+ТФ ──
+            # ── Защита от дублей: не сохраняем если уже есть pending сигнал по этой паре+ТФ+направление ──
             existing = conn.execute(
-                "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result='pending' LIMIT 1",
-                (symbol, timeframe)
+                "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND direction=? AND result='pending' LIMIT 1",
+                (symbol, timeframe, direction)
             ).fetchone()
             if existing:
                 conn.close()
-                logging.info(f"save_signal_db: дубль {symbol} {timeframe} — пропущено (ID существует: {existing[0]})")
+                logging.info(f"save_signal_db: дубль {symbol} {timeframe} {direction} — пропущено (ID существует: {existing[0]})")
                 return None, learning_id
             cursor = conn.execute("""
                 INSERT INTO signals
@@ -3785,13 +3908,16 @@ def check_pending_signals():
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
         pending = conn.execute(
-            "SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at FROM signals WHERE result='pending'"
+            "SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours FROM signals WHERE result='pending'"
         ).fetchall()
         conn.close()
 
+        # Expiry по стратегии (часы)
+        _STRATEGY_EXPIRY = {"FAST": 4, "MTF": 72, "SWING": 96, "WYCKOFF": 504}
+
         closed = []
         for row in pending:
-            sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at = row
+            sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours = row
             prices = get_live_prices()
             current = None
             if symbol in prices:
@@ -3831,7 +3957,10 @@ def check_pending_signals():
                 elif current >= sl:
                     result = "sl"
 
-            if not result and hours_elapsed > 72:
+            # Expiry: используем estimated_hours или стратегию, fallback 72ч
+            _sig_type = (signal_type or "").upper()
+            _expiry_h = _STRATEGY_EXPIRY.get(_sig_type, estimated_hours or 72)
+            if not result and hours_elapsed > _expiry_h:
                 result = "expired"
 
             if result:
@@ -5029,7 +5158,7 @@ async def auto_add_rule(error_type, count):
         return None
 
 
-def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx=""):
+def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx="", entry=None, sl=None, tp1=None):
     """Короткий AI-комментарий к сигналу — с учётом накопленного опыта"""
     try:
         factors = []
@@ -5053,10 +5182,16 @@ def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg
         brain_section = f"\nМОЙ НАКОПЛЕННЫЙ ОПЫТ:\n{brain_ctx[:400]}" if brain_ctx else ""
         errors_section = f"\nПРОШЛЫЕ ОШИБКИ ПО {symbol}: {past_errors[:200]}" if past_errors else ""
 
+        # Конкретные уровни для осмысленного анализа
+        levels_section = ""
+        if entry and sl and tp1:
+            _rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+            levels_section = f"\nВход: {entry} | SL: {sl} | TP1: {tp1} | RR: {_rr:.1f}"
+
         prompt = f"""Ты APEX — торговый бот который учится на каждой сделке.
 
 Сигнал: {symbol} {direction} | Скор: {confluence_score}/100
-Факторы: {factors_text}{brain_section}{errors_section}
+Факторы: {factors_text}{levels_section}{brain_section}{errors_section}
 
 Напиши 2-3 предложения:
 1. Почему даёшь этот сигнал
@@ -6678,7 +6813,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     check_prev["close"] < check_prev["open"]):
                 direction = "BULLISH"
                 entry = smart_round(check["close"])
-                sl    = smart_round(check["low"] - atr * 0.3)
+                sl    = smart_round(check["low"] - atr * 1.0)
                 tp    = smart_round(prv_high)
                 logic = "свип лоу ↓ + возврат в диапазон + импульс вверх"
                 break
@@ -6690,7 +6825,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     check_prev["close"] > check_prev["open"]):
                 direction = "BEARISH"
                 entry = smart_round(check["close"])
-                sl    = smart_round(check["high"] + atr * 0.3)
+                sl    = smart_round(check["high"] + atr * 1.0)
                 tp    = smart_round(prv_low)
                 logic = "свип хая ↑ + отклонение + импульс вниз"
                 break
@@ -6709,7 +6844,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     if wick > 0.4:
                         direction = "BULLISH"
                         entry = smart_round(last_c["close"])
-                        sl    = smart_round(last_c["low"] - atr * 0.3)
+                        sl    = smart_round(last_c["low"] - atr * 1.0)
                         # TP = предыдущий хай свинга
                         tp    = smart_round(last_swing_high)
                         logic = f"EQL sweep — двойной лоу ${eql_level:.4f} выбит → разворот"
@@ -6720,7 +6855,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     if wick > 0.4:
                         direction = "BEARISH"
                         entry = smart_round(last_c["close"])
-                        sl    = smart_round(last_c["high"] + atr * 0.3)
+                        sl    = smart_round(last_c["high"] + atr * 1.0)
                         tp    = smart_round(last_swing_low)
                         logic = f"EQH sweep — двойной хай ${eqh_level:.4f} выбит → разворот"
             except Exception:
@@ -6728,6 +6863,13 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         if not direction:
             return None
+
+        # ── BTC фильтр для SWING ──
+        if symbol != "BTCUSDT":
+            btc_ok, btc_reason = btc_allows_signal(direction)
+            if not btc_ok:
+                logging.info(f"[SWING BTC Filter] {symbol} {direction} пропущен: {btc_reason}")
+                return None
 
         # ── Фильтр объёма на sweep свече ──
         # Sweep должен быть с повышенным объёмом (киты выбивают стопы)
@@ -6771,10 +6913,30 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
+        # ── Проверка ретеста OB в зоне CHoCH ──
+        try:
+            _swing_ob = find_ob(candles, direction)
+            if _swing_ob:
+                # Проверяем что текущая цена вернулась к OB зоне (ретест)
+                _in_ob_zone = (_swing_ob["bottom"] <= candles[-1]["close"] <= _swing_ob["top"] or
+                               abs(candles[-1]["close"] - _swing_ob["top"]) < atr * 0.5 or
+                               abs(candles[-1]["close"] - _swing_ob["bottom"]) < atr * 0.5)
+                if _in_ob_zone:
+                    # Цена в зоне OB — подтверждение ретеста
+                    entry = smart_round(candles[-1]["close"])  # уточняем entry
+        except Exception:
+            pass
+
         # Если sweep был давно — цена могла уйти далеко от входа
         current_price = candles[-1]["close"]
         if abs(current_price - entry) > atr * 2:
             return None
+
+        # ── Проверка противоположного OB между entry и TP ──
+        _adj_tp = check_opposing_ob(candles, direction, entry, tp)
+        if _adj_tp is None:
+            return None  # Противоположный OB блокирует TP
+        tp = _adj_tp
 
         # ── Фильтр RR ──
         risk   = abs(entry - sl)
@@ -6855,6 +7017,24 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp - entry) / entry * 100, 2)
 
+        # ── FR/OI фильтр для SWING ──
+        try:
+            _sw_funding = get_funding_rate(symbol)
+            if _sw_funding is not None and abs(_sw_funding) > 0.2:
+                if (direction == "BULLISH" and _sw_funding > 0.2) or (direction == "BEARISH" and _sw_funding < -0.2):
+                    logging.info(f"[SWING FR Block] {symbol}: FR {_sw_funding:+.4f}% экстремальный")
+                    return None
+        except Exception:
+            pass
+
+        # ── Dead hours penalty для SWING (22:00-06:00 UTC) ──
+        from datetime import datetime as _dt_sw
+        _sw_hour = _dt_sw.utcnow().hour
+        if 22 <= _sw_hour or _sw_hour <= 5:
+            if rr < 2.5:
+                logging.info(f"[SWING Dead Zone] {symbol}: RR {rr} < 2.5 в мёртвые часы — пропускаем")
+                return None
+
         # ── Groq анализирует реальную картину сетапа ──
         try:
             last_candles_summary = []
@@ -6874,34 +7054,47 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             distance_to_tp = abs(tp - entry)
             est_candles = round(distance_to_tp / atr, 1) if atr > 0 else 3
             est_hours = int(round(est_candles * candle_hours, 0))
-            # Минимум 12ч для 4h свечи (3 свечи), максимум 72ч
-            min_hours = 12 if timeframe == "4h" else 4
-            est_hours = max(min_hours, min(est_hours, 72))
+            # Минимум 12ч для swing (структурные сделки), максимум 96ч
+            est_hours = max(12, min(est_hours, 96))
 
             candles_str = " | ".join(last_candles_summary)
+            # OB/FVG зоны для промпта
+            _sw_ob = find_ob(candles, direction)
+            _sw_fvg = find_fvg(candles, direction)
+            _ob_desc = f"OB: {_sw_ob['bottom']:.6f}–{_sw_ob['top']:.6f}" if _sw_ob else "OB: нет"
+            _fvg_desc = f"FVG: {_sw_fvg['bottom']:.6f}–{_sw_fvg['top']:.6f}" if _sw_fvg else "FVG: нет"
+            # Volume profile последних 10 свечей
+            _vol_10 = [c.get("volume", 0) for c in candles[-10:]]
+            _avg_vol_10 = sum(_vol_10) / len(_vol_10) if _vol_10 else 0
+            _vol_desc = f"Vol avg10: {_avg_vol_10:.0f}, last: {_vol_10[-1]:.0f}" if _vol_10 else ""
+
             groq_prompt = (
                 f"Ты трейдер SMC. Swing сетап. Ответь СТРОГО JSON без лишнего текста:\n"
-                f"{{\"logic\": \"логика входа макс 12 слов\", \"hours\": число_часов}}\n\n"
+                f"{{\"logic\": \"логика входа макс 12 слов\", \"hours\": число_часов, \"valid\": true/false}}\n\n"
                 f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir} 1w: {htf_1w_swing}\n"
                 f"ATR: {smart_round(atr)} До TP: {smart_round(distance_to_tp)} Расчёт: ~{est_hours}ч\n"
+                f"{_ob_desc} | {_fvg_desc} | {_vol_desc}\n"
                 f"Свечи: {candles_str}"
             )
 
-            groq_response = ask_groq(groq_prompt, max_tokens=80)
+            groq_response = ask_groq(groq_prompt, max_tokens=100)
             if groq_response and len(groq_response) > 5:
                 try:
                     import json as _json, re as _re
                     clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
-                    # Пробуем найти JSON в тексте если он не чистый
                     json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
                     if json_match:
                         clean = json_match.group()
                     parsed = _json.loads(clean)
+                    # Groq как фильтр — если valid=false, блокируем (default=False)
+                    if not parsed.get("valid", False):
+                        logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
+                        return None
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
                         logic = str(parsed["logic"]).strip()
                     if parsed.get("hours") and str(parsed["hours"]).isdigit():
-                        est_hours = max(4, min(int(parsed["hours"]), 72))
+                        est_hours = max(12, min(int(parsed["hours"]), 96))
                 except Exception:
                     # Если JSON совсем не вышел — берём текст только если он осмысленный
                     clean_text = groq_response.strip().replace("\n", " ")
@@ -6910,8 +7103,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception as ge:
             logging.debug(f"[SwingGroq] {symbol}: {ge}")
             tf_hours = {"1h": 1, "4h": 4, "1d": 24}
-            est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 8
-            est_hours = max(4, min(est_hours, 72))
+            est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 12
+            est_hours = max(12, min(est_hours, 96))
 
         return {
             "symbol":    symbol,
@@ -7145,6 +7338,13 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         score = 0
         signals = []
 
+        # ── BTC фильтр для WYCKOFF (4h) ──
+        if symbol != "BTCUSDT":
+            btc_ok, btc_reason = btc_allows_signal("BULLISH", use_4h=True)
+            if not btc_ok:
+                logging.info(f"[WYCKOFF BTC Filter] {symbol} LONG пропущен: {btc_reason}")
+                return None
+
         # ── 1. ДАУНТРЕНД 30+ дней ──
         price_peak = max(c["high"] for c in candles_1d[-50:-15])
         drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
@@ -7220,8 +7420,39 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         # ── Минимальный порог ──
         if score < 65:
             return None
-        if not spring_found and not sos_found:
+        # Требуем Spring И SOS одновременно (AND, не OR)
+        if not spring_found or not sos_found:
             return None
+
+        # ── Volume/range compression перед входом ──
+        # Последние 5-7 свечей должны иметь уменьшающийся диапазон и объём ниже среднего
+        try:
+            _last_7 = candles_1d[-7:]
+            _prev_13 = candles_1d[-20:-7]
+            _avg_range_prev = sum(c["high"] - c["low"] for c in _prev_13) / len(_prev_13) if _prev_13 else 1
+            _avg_range_last = sum(c["high"] - c["low"] for c in _last_7) / len(_last_7)
+            _avg_vol_prev = sum(c["volume"] for c in _prev_13) / len(_prev_13) if _prev_13 else 1
+            _avg_vol_last = sum(c["volume"] for c in _last_7) / len(_last_7)
+            _range_compress = _avg_range_last / _avg_range_prev if _avg_range_prev > 0 else 1
+            _vol_compress = _avg_vol_last / _avg_vol_prev if _avg_vol_prev > 0 else 1
+            if _range_compress > 0.85 and _vol_compress > 0.85:
+                # Нет сжатия — ещё рано входить
+                logging.info(f"[WYCKOFF] {symbol}: нет сжатия (range {_range_compress:.2f}, vol {_vol_compress:.2f}) — ждём")
+                return None
+            if _range_compress < 0.7:
+                score += 10
+                signals.append(f"✅ Диапазон сжат {_range_compress:.0%}")
+        except Exception:
+            pass
+
+        # ── check_entry_timing() — валидация тайминга входа ──
+        try:
+            _wy_timing = check_entry_timing(candles_4h, "BULLISH", price_now, "4h")
+            if not _wy_timing.get("valid", True):
+                logging.info(f"[WYCKOFF] {symbol}: тайминг входа не подтверждён")
+                return None
+        except Exception:
+            pass
 
         # ── Вход/Стоп/TP ──
         entry  = price_now
@@ -7236,6 +7467,18 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             for ph in ["SC", "AR", "ST", "Spring", "SOS"]:
                 if ph in phases:
                     phase_summary.append(ph)
+            # Объёмы фаз для Groq
+            _phase_vols = []
+            if "SC" in phases:
+                _phase_vols.append(f"SC vol: {phases['SC'].get('vol', 0):.0f}")
+            if "AR" in phases:
+                _phase_vols.append(f"AR idx: {phases['AR'].get('idx', '?')}")
+            if "ST" in phases:
+                _phase_vols.append(f"ST price: {phases['ST'].get('price', 0):.6f}")
+            _avg_vol_1d = sum(c["volume"] for c in candles_1d[-20:]) / 20 if candles_1d else 0
+            _phase_vols.append(f"avg_vol_1d: {_avg_vol_1d:.0f}")
+            _phase_vols.append(f"vol_compression: {vol_compression:.2f}")
+
             groq_prompt = (
                 f"Ты эксперт Wyckoff. Дай цель роста после Spring. Ответь СТРОГО JSON:\n"
                 f'{{"target": число_цены, "target_pct": процент, "logic": "причина макс 10 слов"}}\n\n'
@@ -7245,6 +7488,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"Пик до падения: {price_peak:.6f}\n"
                 f"Боковик: {acc_low:.6f}—{acc_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
+                f"Объёмы фаз: {', '.join(_phase_vols)}\n"
                 f"Даунтренд: -{drawdown_pct:.0f}%"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
@@ -7315,6 +7559,13 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         score = 0
         signals = []
 
+        # ── BTC фильтр для WYCKOFF DISTRIBUTION (4h) ──
+        if symbol != "BTCUSDT":
+            btc_ok, btc_reason = btc_allows_signal("BEARISH", use_4h=True)
+            if not btc_ok:
+                logging.info(f"[WYCKOFF BTC Filter] {symbol} SHORT пропущен: {btc_reason}")
+                return None
+
         # ── 1. АПТРЕНД 30+ дней ──
         price_bottom = min(c["low"] for c in candles_1d[-50:-15])
         pump_pct = (price_now - price_bottom) / price_bottom * 100 if price_bottom > 0 else 0
@@ -7384,8 +7635,32 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         if score < 65:
             return None
-        if not utad_found and not sow_found:
+        # Требуем UTAD И SOW одновременно (AND, не OR)
+        if not utad_found or not sow_found:
             return None
+
+        # ── Volume/range compression перед входом ──
+        try:
+            _last_7d = candles_1d[-7:]
+            _prev_13d = candles_1d[-20:-7]
+            _avg_range_prev_d = sum(c["high"] - c["low"] for c in _prev_13d) / len(_prev_13d) if _prev_13d else 1
+            _avg_range_last_d = sum(c["high"] - c["low"] for c in _last_7d) / len(_last_7d)
+            _avg_vol_prev_d = sum(c["volume"] for c in _prev_13d) / len(_prev_13d) if _prev_13d else 1
+            _avg_vol_last_d = sum(c["volume"] for c in _last_7d) / len(_last_7d)
+            _range_comp_d = _avg_range_last_d / _avg_range_prev_d if _avg_range_prev_d > 0 else 1
+            _vol_comp_d = _avg_vol_last_d / _avg_vol_prev_d if _avg_vol_prev_d > 0 else 1
+            if _range_comp_d > 0.85 and _vol_comp_d > 0.85:
+                return None  # Нет сжатия
+        except Exception:
+            pass
+
+        # ── check_entry_timing() ──
+        try:
+            _wy_timing_d = check_entry_timing(candles_4h, "BEARISH", price_now, "4h")
+            if not _wy_timing_d.get("valid", True):
+                return None
+        except Exception:
+            pass
 
         # ── Вход/Стоп/TP ──
         entry = price_now
@@ -7400,6 +7675,14 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             for ph in ["BC", "AR", "ST", "UTAD", "SOW"]:
                 if ph in phases:
                     phase_summary.append(ph)
+            # Объёмы фаз для Groq
+            _d_phase_vols = []
+            if "BC" in phases:
+                _d_phase_vols.append(f"BC vol: {phases['BC'].get('vol', 0):.0f}")
+            _avg_vol_1d_d = sum(c["volume"] for c in candles_1d[-20:]) / 20 if candles_1d else 0
+            _d_phase_vols.append(f"avg_vol_1d: {_avg_vol_1d_d:.0f}")
+            _d_phase_vols.append(f"vol_compression: {vol_compression:.2f}")
+
             groq_prompt = (
                 f"Ты эксперт Wyckoff Distribution. Дай цель падения после UTAD. Ответь СТРОГО JSON:\n"
                 f'{{"target": число_цены, "target_pct": процент_падения, "logic": "причина макс 10 слов"}}\n\n'
@@ -7409,6 +7692,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"Основание до роста: {price_bottom:.6f}\n"
                 f"Боковик: {dist_low:.6f}—{dist_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
+                f"Объёмы фаз: {', '.join(_d_phase_vols)}\n"
                 f"Рост: +{pump_pct:.0f}%"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
@@ -7483,6 +7767,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not (8 <= _hour < 13 or 16 <= _hour < 21):
             return None
 
+        # ── 0. Защита от боковика ──
+        _fast_regime = get_market_regime(symbol)
+        if isinstance(_fast_regime, dict) and _fast_regime.get("mode") == "SIDEWAYS":
+            return None
+
         # ── 1. BTC направление ──
         btc_ok, btc_reason = btc_allows_signal("BULLISH")
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
@@ -7507,6 +7796,15 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
         direction = direction_1d
 
+        # ── 2.5. FR hard block для FAST ──
+        try:
+            _fast_funding = get_funding_rate(symbol)
+            if _fast_funding is not None and abs(_fast_funding) > 0.2:
+                if (direction == "BULLISH" and _fast_funding > 0.2) or (direction == "BEARISH" and _fast_funding < -0.2):
+                    return None
+        except Exception:
+            pass
+
         # ── 3. 4h OB/FVG зона ──
         candles_4h = get_candles(symbol, "4h", 50)
         if not candles_4h or len(candles_4h) < 20:
@@ -7520,22 +7818,23 @@ def detect_fast_deal(symbol: str) -> dict | None:
         in_zone = False
         zone_desc = ""
         atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
+        _zone_tol = atr_4h * 0.5  # Сужённый допуск ±ATR×0.5
 
         if ob_4h:
             zone_bottom = ob_4h["bottom"]
             zone_top    = ob_4h["top"]
-            # Цена должна быть рядом с зоной (±ATR)
-            if direction == "BULLISH" and zone_bottom - atr_4h <= price_now <= zone_top + atr_4h:
+            # Цена должна быть рядом с зоной (±ATR×0.5)
+            if direction == "BULLISH" and zone_bottom - _zone_tol <= price_now <= zone_top + _zone_tol:
                 in_zone = True
                 zone_desc = f"4h OB ${zone_bottom:.4f}–${zone_top:.4f}"
-            elif direction == "BEARISH" and zone_bottom - atr_4h <= price_now <= zone_top + atr_4h:
+            elif direction == "BEARISH" and zone_bottom - _zone_tol <= price_now <= zone_top + _zone_tol:
                 in_zone = True
                 zone_desc = f"4h OB ${zone_bottom:.4f}–${zone_top:.4f}"
 
         if not in_zone and fvg_4h:
             zone_bottom = fvg_4h["bottom"]
             zone_top    = fvg_4h["top"]
-            if zone_bottom - atr_4h <= price_now <= zone_top + atr_4h:
+            if zone_bottom - _zone_tol <= price_now <= zone_top + _zone_tol:
                 in_zone = True
                 zone_desc = f"4h FVG ${zone_bottom:.4f}–${zone_top:.4f}"
 
@@ -7556,6 +7855,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None
         if direction == "BEARISH" and not (last_1h["close"] < last_1h["open"] and is_impulse_1h):
             return None
+
+        # Volume check на 1h impulse — должен быть выше среднего
+        _avg_vol_1h = sum(c.get("volume", 0) for c in candles_1h[:-1]) / max(len(candles_1h) - 1, 1)
+        if _avg_vol_1h > 0 and last_1h.get("volume", 0) < _avg_vol_1h * 1.3:
+            return None  # Импульс без объёма — ненадёжный
 
         # ── 5. 5m sweep + возврат ──
         candles_5m = get_candles(symbol, "5m", 30)
@@ -7580,8 +7884,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
                     wick = (c["close"] - c["low"]) / (c["high"] - c["low"] + 0.000001)
                     if wick > 0.4:
                         sweep_found = True
-                        entry = smart_round(candles_5m[-1]["close"])
-                        sl    = smart_round(c["low"] - atr_5m * 0.3)
+                        _sweep_candles_ago = i
+                        entry = smart_round(c["close"])  # точка возврата sweep свечи
+                        sl    = smart_round(c["low"] - atr_5m * 1.0)
                         break
             else:
                 # Sweep хая + возврат
@@ -7589,18 +7894,28 @@ def detect_fast_deal(symbol: str) -> dict | None:
                     wick = (c["high"] - c["close"]) / (c["high"] - c["low"] + 0.000001)
                     if wick > 0.4:
                         sweep_found = True
-                        entry = smart_round(candles_5m[-1]["close"])
-                        sl    = smart_round(c["high"] + atr_5m * 0.3)
+                        _sweep_candles_ago = i
+                        entry = smart_round(c["close"])  # точка возврата sweep свечи
+                        sl    = smart_round(c["high"] + atr_5m * 1.0)
                         break
 
         if not sweep_found or not entry or not sl:
             return None
 
-        # ── TP = +1% от входа (реалистично за 15-30 мин) ──
+        # ── Engulfing как дополнительное подтверждение ──
+        _has_engulfing_5m = detect_engulfing(candles_5m, direction)
+
+        # ── Volume check на 5m sweep свече ──
+        _avg_vol_5m = sum(c.get("volume", 0) for c in candles_5m[-20:-1]) / 19 if len(candles_5m) >= 20 else 0
+        _sweep_c = candles_5m[-_sweep_candles_ago]
+        if _avg_vol_5m > 0 and _sweep_c.get("volume", 0) < _avg_vol_5m * 1.2:
+            return None  # Sweep без объёма — ненадёжный
+
+        # ── TP = ATR×2.5 от входа (адаптивно к волатильности) ──
         if direction == "BULLISH":
-            tp = smart_round(entry * 1.010)  # +1%
+            tp = smart_round(entry + atr_5m * 2.5)
         else:
-            tp = smart_round(entry * 0.990)  # -1%
+            tp = smart_round(entry - atr_5m * 2.5)
 
         # ── RR проверка ──
         risk   = abs(entry - sl)
@@ -7617,14 +7932,20 @@ def detect_fast_deal(symbol: str) -> dict | None:
         # ── Groq анализирует ──
         logic = ""
         try:
+            # Дополнительный контекст для Groq
+            _ob_4h_desc = f"OB: {ob_4h['bottom']:.4f}–{ob_4h['top']:.4f}" if ob_4h else "OB: нет"
+            _fvg_4h_desc = f"FVG: {fvg_4h['bottom']:.4f}–{fvg_4h['top']:.4f}" if fvg_4h else "FVG: нет"
+            _sweep_vol_desc = f"Vol sweep: {_sweep_c.get('volume', 0):.0f}, avg: {_avg_vol_5m:.0f}" if _avg_vol_5m > 0 else ""
+
             groq_prompt = (
                 f"Ты SMC скальпер. Оцени 5m сигнал. Ответь СТРОГО JSON:\n"
                 f'{{"logic": "причина входа макс 8 слов", "valid": true/false}}\n\n'
                 f"Пара: {symbol} Направление: {direction}\n"
-                f"5m sweep: {'лоу' if direction == 'BULLISH' else 'хая'}\n"
-                f"4h зона: {zone_desc}\n"
+                f"5m sweep: {'лоу' if direction == 'BULLISH' else 'хая'} ({_sweep_candles_ago} свечей назад)\n"
+                f"4h зона: {zone_desc} | {_ob_4h_desc} | {_fvg_4h_desc}\n"
                 f"1d тренд: {direction_1d}\n"
                 f"BTC тренд: {btc_trend}\n"
+                f"{_sweep_vol_desc}\n"
                 f"Вход: {entry} SL: {sl} TP: {tp} RR: {rr}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)
@@ -7634,8 +7955,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
                 if m:
                     parsed = _j.loads(m.group())
-                    if not parsed.get("valid", True):
-                        return None  # Groq отклонил сигнал
+                    if not parsed.get("valid", False):
+                        return None  # Groq отклонил сигнал (default=False — безопаснее)
                     if parsed.get("logic"):
                         logic = str(parsed["logic"]).strip()
         except Exception:

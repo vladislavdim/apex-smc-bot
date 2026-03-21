@@ -1982,12 +1982,12 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
             signals.append(f"💥 BREAKOUT вниз с объёмом x{round(last_vol/avg_vol_30, 1)}")
             direction = "BEARISH"
         elif breakout_up:
-            score += 10
-            signals.append(f"⬆️ Пробой вверх (объём слабый)")
+            score += 3
+            signals.append(f"⬆️ Пробой вверх (объём слабый, вес снижен)")
             direction = "BULLISH"
         elif breakout_down:
-            score += 10
-            signals.append(f"⬇️ Пробой вниз (объём слабый)")
+            score += 3
+            signals.append(f"⬇️ Пробой вниз (объём слабый, вес снижен)")
             direction = "BEARISH"
 
         # Если нет направления — определяем по позиции в диапазоне
