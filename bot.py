@@ -3213,7 +3213,7 @@ async def auto_fast_deal_scan():
                 _cd = _sq3.connect("brain.db", timeout=10)
                 row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
                 last_sent = row[0] if row else 0
-                if now_ts - last_sent < 1 * 3600:
+                if now_ts - last_sent < 2 * 3600:
                     _cd.close()
                     continue
                 _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
