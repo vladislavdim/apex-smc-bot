@@ -69,8 +69,13 @@ def fix_missing_columns():
         ("ALTER TABLE signals ADD COLUMN confluence INTEGER DEFAULT 0",),
         ("ALTER TABLE signals ADD COLUMN regime TEXT DEFAULT 'UNKNOWN'",),
         ("ALTER TABLE signals ADD COLUMN learning_id INTEGER DEFAULT NULL",),
-        
-        # signal_learning уже имеет PRIMARY KEY на symbol, не добавляем id
+        # user_memory
+        ("ALTER TABLE user_memory ADD COLUMN total_messages INTEGER DEFAULT 0",),
+        # bot_errors — недостающие колонки
+        ("ALTER TABLE bot_errors ADD COLUMN hours_in_trade REAL",),
+        ("ALTER TABLE bot_errors ADD COLUMN market_context TEXT",),
+        ("ALTER TABLE bot_errors ADD COLUMN fixed_at TEXT",),
+        ("ALTER TABLE bot_errors ADD COLUMN fix_description TEXT",),
     ]
     
     try:

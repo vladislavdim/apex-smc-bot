@@ -437,13 +437,101 @@ def run_migrations():
                     conn.execute(migration[0])
                 except sqlite3.OperationalError:
                     pass  # Колонка уже существует
-            
+
             # Активируем старые записи
             try:
                 conn.execute("UPDATE self_rules SET active=1 WHERE active IS NULL")
             except:
                 pass
-            
+
+            # === Миграция user_memory: добавляем total_messages если нет ===
+            try:
+                conn.execute("ALTER TABLE user_memory ADD COLUMN total_messages INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # уже есть
+
+            # === Миграция signal_log: пересоздаём если нет колонки id ===
+            try:
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(signal_log)").fetchall()]
+                if cols and 'id' not in cols:
+                    logging.info("Migrating signal_log: adding id column...")
+                    conn.execute("ALTER TABLE signal_log RENAME TO signal_log_old")
+                    conn.execute("""CREATE TABLE signal_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT, direction TEXT, grade TEXT,
+                        entry REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
+                        timeframe TEXT, result TEXT DEFAULT 'PENDING',
+                        hit_tp INTEGER DEFAULT 0, rr_achieved REAL DEFAULT 0,
+                        hours_open REAL DEFAULT 0, confluence INTEGER DEFAULT 0,
+                        regime TEXT, source TEXT, notes TEXT DEFAULT '',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP, closed_at TEXT)""")
+                    # Копируем данные из старой таблицы
+                    old_cols = [row[1] for row in conn.execute("PRAGMA table_info(signal_log_old)").fetchall()]
+                    common = [c for c in old_cols if c in (
+                        'symbol','direction','grade','entry','sl','tp1','tp2','tp3',
+                        'timeframe','result','hit_tp','rr_achieved','hours_open',
+                        'confluence','regime','source','notes','created_at','closed_at')]
+                    if common:
+                        cols_str = ', '.join(common)
+                        conn.execute(f"INSERT INTO signal_log ({cols_str}) SELECT {cols_str} FROM signal_log_old")
+                    conn.execute("DROP TABLE signal_log_old")
+                    logging.info("signal_log migrated successfully with id column")
+            except Exception as e:
+                logging.error(f"signal_log migration: {e}")
+
+            # === Миграция bot_errors: добавляем недостающие колонки ===
+            try:
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(bot_errors)").fetchall()]
+                if cols:
+                    for col, typedef in [
+                        ("signal_id", "INTEGER"),
+                        ("symbol", "TEXT"),
+                        ("direction", "TEXT"),
+                        ("entry", "REAL"),
+                        ("sl", "REAL"),
+                        ("result", "TEXT"),
+                        ("error_type", "TEXT"),
+                        ("error_description", "TEXT"),
+                        ("ai_analysis", "TEXT"),
+                        ("ai_lesson", "TEXT"),
+                        ("ai_next_time", "TEXT"),
+                        ("fixed", "INTEGER DEFAULT 0"),
+                        ("fix_description", "TEXT"),
+                        ("hours_in_trade", "REAL"),
+                        ("market_context", "TEXT"),
+                        ("created_at", "TEXT DEFAULT CURRENT_TIMESTAMP"),
+                        ("fixed_at", "TEXT"),
+                    ]:
+                        if col not in cols:
+                            try:
+                                conn.execute(f"ALTER TABLE bot_errors ADD COLUMN {col} {typedef}")
+                            except sqlite3.OperationalError:
+                                pass
+            except Exception as e:
+                logging.error(f"bot_errors migration: {e}")
+
+            # === Миграция signal_learning: добавляем недостающие колонки ===
+            try:
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(signal_learning)").fetchall()]
+                if cols:
+                    for col, typedef in [
+                        ("total", "INTEGER DEFAULT 0"),
+                        ("wins", "INTEGER DEFAULT 0"),
+                        ("losses", "INTEGER DEFAULT 0"),
+                        ("avg_hours_to_tp", "REAL DEFAULT 0"),
+                        ("best_timeframe", "TEXT"),
+                        ("worst_timeframe", "TEXT"),
+                        ("win_rate", "REAL DEFAULT 0"),
+                        ("last_analysis", "TEXT"),
+                    ]:
+                        if col not in cols:
+                            try:
+                                conn.execute(f"ALTER TABLE signal_learning ADD COLUMN {col} {typedef}")
+                            except sqlite3.OperationalError:
+                                pass
+            except Exception as e:
+                logging.error(f"signal_learning migration: {e}")
+
             conn.commit()
             logging.info("Database migrations completed successfully")
             

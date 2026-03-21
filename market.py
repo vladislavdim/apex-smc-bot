@@ -738,7 +738,9 @@ def update_user_memory(user_id, name="", profile=None, preferences=None, coins=N
             conn.execute(f"UPDATE user_memory SET {', '.join(updates)} WHERE user_id=?", params)
         else:
             conn.execute(
-                "INSERT INTO user_memory VALUES (?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO user_memory
+                (user_id, name, profile, preferences, coins_mentioned, deposit, risk_percent, total_messages, first_seen, last_seen)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (user_id, name, profile or "", preferences or "", coins or "", deposit or 0, 1.0, 0, now, now)
             )
         conn.commit()
@@ -749,7 +751,7 @@ def update_user_memory(user_id, name="", profile=None, preferences=None, coins=N
 def save_chat_log(user_id, role, content):
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        conn.execute("INSERT INTO chat_log VALUES (NULL,?,?,?,CURRENT_TIMESTAMP)", (user_id, role, content[:2000]))
+        conn.execute("INSERT INTO chat_log (user_id, role, content, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)", (user_id, role, content[:2000]))
         conn.commit()
         conn.close()
     except:
@@ -3968,7 +3970,9 @@ def update_signal_learning(symbol, hours_to_close, is_win, timeframe, result):
             )
         else:
             conn.execute(
-                "INSERT INTO signal_learning VALUES (?,1,?,?,?,?,?,?,?)",
+                """INSERT INTO signal_learning
+                (symbol, total, wins, losses, avg_hours_to_tp, best_timeframe, worst_timeframe, win_rate, last_analysis)
+                VALUES (?,1,?,?,?,?,?,?,?)""",
                 (symbol, 1 if is_win else 0, 0 if is_win else 1,
                  float(hours_to_close), timeframe, None,
                  100.0 if is_win else 0.0, now)
@@ -4906,8 +4910,11 @@ async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, h
 
         # Сохраняем ошибку в БД
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        conn.execute("""INSERT INTO bot_errors VALUES
-            (NULL,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,CURRENT_TIMESTAMP,NULL)""",
+        conn.execute("""INSERT INTO bot_errors
+            (signal_id, symbol, direction, entry, sl, result,
+             error_type, error_description, ai_analysis, ai_lesson, ai_next_time,
+             fixed, fix_description, hours_in_trade, market_context, created_at, fixed_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,CURRENT_TIMESTAMP,NULL)""",
             (signal_id, symbol, direction, entry, sl, result,
              error_type, error_label,
              ai_analysis.strip(), ai_lesson.strip(), ai_next_time.strip(),
