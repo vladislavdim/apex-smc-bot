@@ -2709,7 +2709,7 @@ async def _send_signal(sd):
     if not ADMIN_IDS:
         return
     now_ts = time.time()
-    cache_key = f"{sd['symbol']}:{sd['direction']}:{sd.get('timeframe','1h')}"
+    cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
     try:
         import sqlite3 as _sq3
         _cd = _sq3.connect("brain.db", timeout=10)
@@ -2818,17 +2818,6 @@ async def auto_scan_1h():
         await asyncio.sleep(1)
 
 
-async def auto_scan_4h():
-    """Каждые 30 минут: скан 4h таймфрейма"""
-    signals = await _scan_tf("4h", pairs_limit=80)
-    logging.info(f"Скан 4h: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=3.0)]
-    logging.info(f"Скан 4h: актуальных {len(valid)}/{len(signals)}")
-    for sd in valid[:3]:
-        await _send_signal(sd)
-        await asyncio.sleep(1)
-
-
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
     pairs = get_top_pairs(60)
@@ -2860,6 +2849,18 @@ async def auto_scan_swing():
             htf_text = f" | 1d: {htf}" if htf else ""
 
             risk_label = "низкий" if r["rr"] >= 3 else "средний"
+
+            # AI комментарий
+            _sw_comment = ""
+            try:
+                _sw_comment = generate_signal_comment(
+                    symbol, direction, None, int(r["rr"] * 20), "SWING",
+                    None, None, r.get("ob"), r.get("fvg"), "",
+                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="4h"
+                )
+            except Exception:
+                pass
+
             text = (
                 f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 4h{htf_text}\n"
@@ -2873,6 +2874,8 @@ async def auto_scan_swing():
                 f"⚡ Риск: {risk_label}\n"
                 f"⏱ Горизонт: ~{r.get('est_hours', 8)}ч"
             )
+            if _sw_comment:
+                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_sw_comment}</i>"
 
             sd = {
                 "symbol": symbol, "direction": direction,
@@ -3070,6 +3073,17 @@ async def auto_wyckoff_scan():
                 range_txt = f"📦 Боковик у вершины: {r.get('dist_range',0):.1f}%"
                 tp_sign = "-"
 
+            # AI комментарий
+            _wyk_comment = ""
+            try:
+                _wyk_comment = generate_signal_comment(
+                    symbol, direction, None, r["score"], "WYCKOFF",
+                    None, None, r.get("ob"), r.get("fvg"), "",
+                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="1d"
+                )
+            except Exception:
+                pass
+
             text = (
                 f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 1d | {wyckoff_type}\n"
@@ -3088,6 +3102,8 @@ async def auto_wyckoff_scan():
                 f"⚡ Риск: средний\n"
                 f"⏱ Горизонт: ~7-21 дней"
             )
+            if _wyk_comment:
+                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_wyk_comment}</i>"
 
             # Блокируем если сделка уже открыта
             try:
@@ -3176,6 +3192,17 @@ async def auto_fast_deal_scan():
             direction = r["direction"]
             dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
 
+            # AI комментарий
+            _fast_comment = ""
+            try:
+                _fast_comment = generate_signal_comment(
+                    symbol, direction, None, int(r["rr"] * 20), "FAST",
+                    None, None, r.get("ob"), r.get("fvg"), "",
+                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="5m"
+                )
+            except Exception:
+                pass
+
             text = (
                 f"⚡ <b>[FAST]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 5m | 1d: {r['direction_1d']}\n"
@@ -3190,6 +3217,8 @@ async def auto_fast_deal_scan():
                 f"⭐ RR: {r['rr']} | Риск: низкий\n"
                 f"⏱ Горизонт: ~15-30 мин"
             )
+            if _fast_comment:
+                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_fast_comment}</i>"
 
             # Блокируем если сделка уже открыта
             try:
@@ -4357,8 +4386,7 @@ def main():
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
-            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин
-            scheduler.add_job(auto_scan_4h, "interval", minutes=30, jitter=120)       # 4h — каждые 30 мин
+            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
             scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)

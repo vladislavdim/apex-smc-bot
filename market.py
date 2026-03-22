@@ -3744,7 +3744,7 @@ def full_scan(symbol, timeframe="1h"):
         brain_ctx = get_brain_context(symbol, direction)
         signal_comment = generate_signal_comment(
             symbol, direction, mtf, total_weight, regime, fg, funding, ob, fvg, brain_ctx,
-            entry=entry, sl=sl, tp1=tp1
+            entry=entry, sl=sl, tp1=tp1, timeframe=timeframe
         )
 
         # ── 6.5 Groq инсайт — почему эта сделка интересна (async) ──
@@ -5158,49 +5158,68 @@ async def auto_add_rule(error_type, count):
         return None
 
 
-def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx="", entry=None, sl=None, tp1=None):
+def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx="", entry=None, sl=None, tp1=None, timeframe=None):
     """Короткий AI-комментарий к сигналу — с учётом накопленного опыта"""
     try:
-        factors = []
-        if mtf:
-            factors.append(f"{mtf['match_count']} из {mtf['total']} таймфреймов показывают {direction}")
+        # Определяем таймфрейм из mtf dict или параметра
+        tf_label = timeframe or ""
+        if not tf_label and isinstance(mtf, dict):
+            tf_label = mtf.get("timeframe", mtf.get("tf", ""))
+        tf_text = f" | ТФ: {tf_label}" if tf_label else ""
+
+        # Конкретный паттерн входа (не общие фразы)
+        pattern_parts = []
         if ob:
-            factors.append(f"Order Block на уровне {ob['bottom']:.4f}–{ob['top']:.4f}")
+            ob_dir = "медвежий" if direction == "BEARISH" else "бычий"
+            pattern_parts.append(f"{ob_dir} OB {ob['bottom']:.4f}–{ob['top']:.4f}")
         if fvg:
-            factors.append(f"Fair Value Gap заполняется")
+            pattern_parts.append(f"FVG {fvg['bottom']:.4f}–{fvg['top']:.4f}")
         if fg:
-            factors.append(f"Fear & Greed = {fg['value']} ({fg['label']})")
+            pattern_parts.append(f"F&G={fg['value']} ({fg['label']})")
         if funding is not None:
-            factors.append(f"Funding Rate {funding:+.4f}%")
+            pattern_parts.append(f"FR {funding:+.4f}%")
         if regime:
             regime_mode = regime.get("mode", str(regime)) if isinstance(regime, dict) else str(regime)
-            factors.append(f"рынок в режиме {regime_mode}")
+            pattern_parts.append(f"режим {regime_mode}")
 
-        factors_text = ", ".join(factors)
+        pattern_text = ", ".join(pattern_parts) if pattern_parts else "нет доп. факторов"
         past_errors = get_knowledge(f"error_{symbol}")
 
         brain_section = f"\nМОЙ НАКОПЛЕННЫЙ ОПЫТ:\n{brain_ctx[:400]}" if brain_ctx else ""
         errors_section = f"\nПРОШЛЫЕ ОШИБКИ ПО {symbol}: {past_errors[:200]}" if past_errors else ""
 
-        # Конкретные уровни для осмысленного анализа
+        # Уровни входа — обязательно конкретные цены
         levels_section = ""
         if entry and sl and tp1:
             _rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
-            levels_section = f"\nВход: {entry} | SL: {sl} | TP1: {tp1} | RR: {_rr:.1f}"
+            _sl_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0
+            _tp_pct = abs(tp1 - entry) / entry * 100 if entry > 0 else 0
+            levels_section = (
+                f"\nВход: {entry} | SL: {sl} (-{_sl_pct:.2f}%) | TP1: {tp1} (+{_tp_pct:.2f}%) | RR: {_rr:.1f}"
+            )
 
-        prompt = f"""Ты APEX — торговый бот который учится на каждой сделке.
+        # OB/FVG уровни отдельно для анализа
+        zones_section = ""
+        if ob:
+            zones_section += f"\nOB зона: {ob['bottom']:.6f} – {ob['top']:.6f}"
+        if fvg:
+            zones_section += f"\nFVG зона: {fvg['bottom']:.6f} – {fvg['top']:.6f}"
 
-Сигнал: {symbol} {direction} | Скор: {confluence_score}/100
-Факторы: {factors_text}{levels_section}{brain_section}{errors_section}
+        prompt = f"""Отвечай ТОЛЬКО на русском языке, без иероглифов и символов других языков.
 
-Напиши 2-3 предложения:
-1. Почему даёшь этот сигнал
-2. Что ты УЖЕ ЗНАЕШЬ об этой монете из прошлого опыта (если есть)
-3. На что обратить внимание
+Ты APEX — торговый бот. Анализируй КОНКРЕТНЫЙ паттерн входа, не общие фразы.
 
-Коротко, конкретно, без воды."""
+Сигнал: {symbol} {direction}{tf_text} | Скор: {confluence_score}/100
+Паттерн: {pattern_text}{levels_section}{zones_section}{brain_section}{errors_section}
 
-        comment = ask_groq(prompt, max_tokens=180)
+Напиши 2-3 предложения на русском:
+1. Какой конкретный паттерн (OB, FVG, sweep, CHoCH) и на каком уровне цены
+2. Что знаешь об этой монете из опыта (если есть)
+3. Ключевой риск этой конкретной сделки
+
+Только русский язык. Конкретные цены и уровни. Без воды и общих фраз."""
+
+        comment = ask_groq(prompt, max_tokens=200)
         return comment.strip() if comment else ""
     except:
         return ""
@@ -7121,6 +7140,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "htf_1w":    htf_1w_swing,
             "weekly_warning": weekly_warning,
             "est_hours": est_hours,
+            "ob":        _sw_ob,
+            "fvg":       _sw_fvg,
             "scan_type": "swing",
         }
 
@@ -7522,6 +7543,10 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["SC", "AR", "ST", "Spring", "SOS"] if p in phases and (p not in ["Spring","SOS"] or phases[p].get("found"))]
 
+        # OB/FVG для AI комментария
+        _wyk_ob = find_ob(candles_1d, "BULLISH")
+        _wyk_fvg = find_fvg(candles_1d, "BULLISH")
+
         return {
             "symbol": symbol, "direction": "BULLISH",
             "timeframe": "1d", "entry": entry,
@@ -7532,6 +7557,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             "spring": spring_found, "sos": sos_found,
             "phases": " → ".join(phase_names),
             "acc_low": acc_low, "acc_high": acc_high,
+            "ob": _wyk_ob, "fvg": _wyk_fvg,
             "scan_type": "wyckoff",
         }
 
@@ -7725,6 +7751,10 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["BC", "AR", "ST", "UTAD", "SOW"] if p in phases and (p not in ["UTAD","SOW"] or phases[p].get("found"))]
 
+        # OB/FVG для AI комментария
+        _wyk_ob = find_ob(candles_1d, "BEARISH")
+        _wyk_fvg = find_fvg(candles_1d, "BEARISH")
+
         return {
             "symbol": symbol, "direction": "BEARISH",
             "timeframe": "1d", "entry": entry,
@@ -7735,6 +7765,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             "utad": utad_found, "sow": sow_found,
             "phases": " → ".join(phase_names),
             "dist_low": dist_low, "dist_high": dist_high,
+            "ob": _wyk_ob, "fvg": _wyk_fvg,
             "scan_type": "wyckoff",
         }
 
@@ -7978,6 +8009,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "logic":     logic,
             "zone":      zone_desc,
             "direction_1d": direction_1d,
+            "ob":        ob_4h,
+            "fvg":       fvg_4h,
             "scan_type": "fast",
         }
 
