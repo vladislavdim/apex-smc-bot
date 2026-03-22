@@ -28,7 +28,7 @@ except ImportError as e:
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
@@ -2472,6 +2472,37 @@ async def cmd_errors(message: types.Message):
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
+@dp.chat_member()
+async def on_new_member(event: ChatMemberUpdated):
+    """Приветствие новых участников канала"""
+    try:
+        old_status = event.old_chat_member.status if event.old_chat_member else "left"
+        new_status = event.new_chat_member.status if event.new_chat_member else "left"
+        # Только новые участники (было left/kicked → стало member/administrator)
+        if old_status in ("left", "kicked", "restricted") and new_status in ("member", "administrator"):
+            user = event.new_chat_member.user
+            name = user.first_name or "трейдер"
+            # Groq генерирует уникальное приветствие
+            greeting = None
+            try:
+                groq_prompt = (
+                    f"Придумай короткое креативное приветствие для нового подписчика "
+                    f"трейдингового канала. Имя: {name}. Упомяни профитные сделки и удачу. "
+                    f"Максимум 2 предложения. Только на русском."
+                )
+                groq_resp = ask_groq(groq_prompt, max_tokens=80)
+                if groq_resp and len(groq_resp.strip()) > 10:
+                    greeting = groq_resp.strip()
+            except Exception:
+                pass
+            if not greeting:
+                greeting = f"Привет {name}! Рады видеть тебя — профитных сделок и зелёных свечей! 🚀"
+            await bot.send_message(event.chat.id, greeting)
+            logging.info(f"[Welcome] {name} (id={user.id}) joined chat {event.chat.id}")
+    except Exception as e:
+        logging.debug(f"on_new_member error: {e}")
+
+
 @dp.message()
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
@@ -2700,6 +2731,8 @@ def _format_channel_signal(sd: dict) -> str:
         f"",
         f"⚡ Риск: {risk}",
         f"⏱ Горизонт: {tf_time}",
+        f"",
+        f"💡 Это аналитика, не совет. Торгуй осознанно",
     ]
     return "\n".join(lines)
 
@@ -2876,6 +2909,7 @@ async def auto_scan_swing():
             )
             if _sw_comment:
                 text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_sw_comment}</i>"
+            text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             sd = {
                 "symbol": symbol, "direction": direction,
@@ -3108,6 +3142,7 @@ async def auto_wyckoff_scan():
             )
             if _wyk_comment:
                 text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_wyk_comment}</i>"
+            text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа
             if not _is_entry_still_valid(r, max_drift_pct=5.0):
@@ -3234,6 +3269,7 @@ async def auto_fast_deal_scan():
             )
             if _fast_comment:
                 text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_fast_comment}</i>"
+            text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа (1.5% для скальпинга)
             if not _is_entry_still_valid(r, max_drift_pct=1.5):
@@ -3660,6 +3696,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             f"⚡ Риск: {risk_level}\n"
             f"⏱ Горизонт: {groq_time}"
         )
+        text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
