@@ -1630,8 +1630,28 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         buf = buf_map.get(timeframe, 0.004)
 
         if direction == "BULLISH":
-            # --- ENTRY ---
-            entry = smart_round(ob["top"] if ob else price)
+            # --- ENTRY: OTE Fibonacci 0.705 вместо OB ---
+            if len(lows) >= 1 and len(highs) >= 1:
+                swing_low = min(lows[-3:]) if len(lows) >= 3 else min(lows)
+                swing_high = max(highs[-3:]) if len(highs) >= 3 else max(highs)
+                ote_entry = swing_low + (swing_high - swing_low) * 0.705
+                entry = smart_round(ote_entry)
+            else:
+                entry = smart_round(ob["top"] if ob else price)
+
+            # --- Mitigation check: если OB уже протестирован — блокируем ---
+            if ob:
+                ob_top = ob["top"]
+                ob_bottom = ob["bottom"]
+                _mitigated = False
+                for _mc in candles[-20:-1]:
+                    if _mc["low"] <= ob_top and _mc["high"] >= ob_bottom:
+                        _mitigated = True
+                        break
+                if _mitigated:
+                    return {"entry": entry, "sl": entry * 0.96, "tp1": entry * 1.02,
+                            "tp2": entry * 1.04, "tp3": entry * 1.04, "rr": 0.5,
+                            "mitigated": True}
 
             # --- SL: за значимый swing low (второй если есть) ---
             atr_sl = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
@@ -1714,8 +1734,29 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             tp3 = tp2
 
         else:  # BEARISH
-            # --- ENTRY ---
-            entry = smart_round(ob["bottom"] if ob else price)
+            # --- ENTRY: OTE Fibonacci 0.705 вместо OB ---
+            if len(lows) >= 1 and len(highs) >= 1:
+                swing_low = min(lows[-3:]) if len(lows) >= 3 else min(lows)
+                swing_high = max(highs[-3:]) if len(highs) >= 3 else max(highs)
+                ote_entry = swing_high - (swing_high - swing_low) * 0.705
+                entry = smart_round(ote_entry)
+            else:
+                entry = smart_round(ob["bottom"] if ob else price)
+
+            # --- Mitigation check: если OB уже протестирован — блокируем ---
+            if ob:
+                ob_top = ob["top"]
+                ob_bottom = ob["bottom"]
+                _mitigated = False
+                for _mc in candles[-20:-1]:
+                    if _mc["low"] <= ob_top and _mc["high"] >= ob_bottom:
+                        _mitigated = True
+                        break
+                if _mitigated:
+                    return {"entry": entry, "sl": entry * 1.04, "tp1": entry * 0.98,
+                            "tp2": entry * 0.96, "tp3": entry * 0.96, "rr": 0.5,
+                            "mitigated": True}
+
             # --- SL: за ближайшей структурной зоной выше входа ---
             atr_sl_b = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
             sl_candidates = []
@@ -6902,14 +6943,32 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 logging.info(f"[SWING BTC Filter] {symbol} {direction} пропущен: {btc_reason}")
                 return None
 
-        # ── Фильтр объёма на sweep свече ──
-        # Sweep должен быть с повышенным объёмом (киты выбивают стопы)
+        # ── Фильтр объёма на sweep свече >= 1.5×avg_vol ──
         try:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 0.6:
-                return None  # Объём слишком низкий — ложный sweep
+            if avg_vol > 0 and sweep_vol < avg_vol * 1.5:
+                return None  # Объём < 1.5×avg — ненадёжный sweep
+        except Exception:
+            pass
+
+        # ── Displacement candle — свеча после sweep должна быть импульсной ──
+        # body > 60% от range в направлении сигнала
+        try:
+            if lookback_i >= 2:
+                _disp_candle = candles[-lookback_i + 1]
+                _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
+                _disp_range = _disp_candle["high"] - _disp_candle["low"]
+                if _disp_range > 0:
+                    _disp_ratio = _disp_body / _disp_range
+                    if _disp_ratio < 0.6:
+                        return None  # Нет displacement — не импульсная свеча
+                    # Проверяем направление displacement
+                    if direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]:
+                        return None  # Displacement против направления
+                    if direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]:
+                        return None  # Displacement против направления
         except Exception:
             pass
 
@@ -7488,7 +7547,20 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             pass
 
         # ── Вход/Стоп/TP ──
-        entry  = price_now
+        # Entry после pullback к Creek (верхняя граница накопления)
+        creek = acc_high  # Creek = AR level / верхняя граница боковика
+        # Если цена уже откатила к Creek — входим. Если нет — ждём.
+        creek_tolerance = (acc_high - acc_low) * 0.15  # 15% от диапазона боковика
+        if abs(price_now - creek) <= creek_tolerance:
+            entry = price_now  # Цена у Creek — входим
+        elif price_now < creek:
+            entry = price_now  # Цена ниже Creek (ещё в зоне накопления) — входим
+        else:
+            # Цена далеко выше Creek — пропускаем, поезд ушёл
+            if price_now > creek * 1.05:
+                return None
+            entry = price_now
+
         sl     = round(acc_low * 0.96, 8)  # Стоп под лоу боковика -4%
         ar_price = phases.get("AR", {}).get("price", price_peak * 0.8)
 
@@ -7543,6 +7615,11 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             tp = round(max(ar_price, entry * 1.25), 8)
         if not logic:
             logic = f"Spring после SC+AR+ST — разворот Wyckoff"
+
+        # ── Clamp Groq TP: LONG от entry×1.05 до entry×1.50 ──
+        tp = max(tp, entry * 1.05)
+        tp = min(tp, entry * 1.50)
+        tp = round(tp, 8)
 
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
@@ -7701,7 +7778,19 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             pass
 
         # ── Вход/Стоп/TP ──
-        entry = price_now
+        # Entry после pullback к Creek (нижняя граница дистрибуции)
+        creek_d = dist_low  # Creek = AR level / нижняя граница боковика
+        creek_tolerance_d = (dist_high - dist_low) * 0.15
+        if abs(price_now - creek_d) <= creek_tolerance_d:
+            entry = price_now  # Цена у Creek — входим
+        elif price_now > creek_d:
+            entry = price_now  # Цена выше Creek (ещё в зоне дистрибуции) — входим
+        else:
+            # Цена далеко ниже Creek — поезд ушёл
+            if price_now < creek_d * 0.95:
+                return None
+            entry = price_now
+
         sl    = round(dist_high * 1.04, 8)  # Стоп над хаем боковика +4%
         ar_price = phases.get("AR", {}).get("price", price_bottom * 1.2)
 
@@ -7751,6 +7840,11 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             tp = round(min(ar_price, entry * 0.75), 8)
         if not logic:
             logic = f"UTAD после BC+AR+ST — дистрибуция Wyckoff"
+
+        # ── Clamp Groq TP: SHORT от entry×0.50 до entry×0.95 ──
+        tp = min(tp, entry * 0.95)
+        tp = max(tp, entry * 0.50)
+        tp = round(tp, 8)
 
         risk   = abs(sl - entry)
         reward = abs(entry - tp)
@@ -7805,9 +7899,14 @@ def detect_fast_deal(symbol: str) -> dict | None:
     """
     try:
         from datetime import datetime as _dt
-        _hour = _dt.utcnow().hour
-        # Только в активные сессии: Лондон 08-12 и NY 16-20 UTC
-        if not (8 <= _hour < 13 or 16 <= _hour < 21):
+        _now_dt = _dt.utcnow()
+        _hour = _now_dt.hour
+        _minute = _now_dt.minute
+        _time_minutes = _hour * 60 + _minute
+        # Kill Zone сужен: 08:30-10:30 UTC и 16:30-18:30 UTC
+        _in_london_kz = 510 <= _time_minutes <= 630   # 08:30 - 10:30
+        _in_ny_kz     = 990 <= _time_minutes <= 1110   # 16:30 - 18:30
+        if not (_in_london_kz or _in_ny_kz):
             return None
 
         # ── 0. Защита от боковика ──
@@ -7954,15 +8053,18 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _avg_vol_5m > 0 and _sweep_c.get("volume", 0) < _avg_vol_5m * 1.2:
             return None  # Sweep без объёма — ненадёжный
 
-        # ── TP = ATR×2.5 от входа (адаптивно к волатильности) ──
+        # ── TP1 = ATR×1.5, TP2 = ATR×2.5 от входа ──
         if direction == "BULLISH":
-            tp = smart_round(entry + atr_5m * 2.5)
+            tp1 = smart_round(entry + atr_5m * 1.5)
+            tp2 = smart_round(entry + atr_5m * 2.5)
         else:
-            tp = smart_round(entry - atr_5m * 2.5)
+            tp1 = smart_round(entry - atr_5m * 1.5)
+            tp2 = smart_round(entry - atr_5m * 2.5)
+        tp = tp2  # основной TP для RR расчёта
 
         # ── RR проверка ──
         risk   = abs(entry - sl)
-        reward = abs(tp - entry)
+        reward = abs(tp1 - entry)
         if risk == 0:
             return None
         rr = round(reward / risk, 2)
@@ -7970,7 +8072,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None
 
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
-        tp_pct = round(abs(tp - entry) / entry * 100, 2)
+        tp_pct = round(abs(tp1 - entry) / entry * 100, 2)
+        tp2_pct = round(abs(tp2 - entry) / entry * 100, 2)
 
         # ── Groq анализирует ──
         logic = ""
@@ -8015,8 +8118,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "entry":     entry,
             "sl":        sl,
             "tp":        tp,
+            "tp1":       tp1,
+            "tp2":       tp2,
             "sl_pct":    sl_pct,
             "tp_pct":    tp_pct,
+            "tp2_pct":   tp2_pct,
             "rr":        rr,
             "logic":     logic,
             "zone":      zone_desc,
