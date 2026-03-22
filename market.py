@@ -7197,6 +7197,17 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             _sw_fg_str = f"{_sw_fg['value']} ({_sw_fg['label']})" if _sw_fg else "N/A"
             _sw_regime_str = _sw_regime.get("mode", "?") if isinstance(_sw_regime, dict) else str(_sw_regime)
 
+            # Pattern history для Groq
+            _sw_pat_str = ""
+            try:
+                _sw_pat = _learn_patterns(symbol, direction, timeframe, _sw_regime_str, 0)
+                if _sw_pat.get("found") and _sw_pat.get("samples", 0) >= 3:
+                    _sw_pat_str = (f"\nИстория похожих: {_sw_pat['samples']} сделок, "
+                                   f"WR: {_sw_pat['win_rate']:.0f}%, avg RR: {_sw_pat['avg_rr']:.1f}, "
+                                   f"вердикт: {_sw_pat.get('verdict', '?')}")
+            except Exception:
+                pass
+
             groq_prompt = (
                 f"Ты трейдер SMC. Swing сетап. Ответь СТРОГО JSON без лишнего текста:\n"
                 f"{{\"logic\": \"логика входа макс 12 слов\", \"hours\": число_часов, \"valid\": true/false}}\n\n"
@@ -7206,6 +7217,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"Funding: {_sw_fund_str} | Fear&Greed: {_sw_fg_str} | Режим: {_sw_regime_str}\n"
                 f"{_ob_desc} | {_fvg_desc} | {_vol_desc}\n"
                 f"Свечи: {candles_str}"
+                f"{_sw_pat_str}"
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100)
@@ -7638,6 +7650,17 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             _wy_ob_str = f"OB: {_wyk_ob['bottom']:.6f}–{_wyk_ob['top']:.6f}" if _wyk_ob else "OB: нет"
             _wy_fvg_str = f"FVG: {_wyk_fvg['bottom']:.6f}–{_wyk_fvg['top']:.6f}" if _wyk_fvg else "FVG: нет"
 
+            # Pattern history для Groq
+            _wy_pat_str = ""
+            try:
+                _wy_pat = _learn_patterns(symbol, "BULLISH", "1d", "accumulation", 0)
+                if _wy_pat.get("found") and _wy_pat.get("samples", 0) >= 3:
+                    _wy_pat_str = (f"\nИстория похожих: {_wy_pat['samples']} сделок, "
+                                   f"WR: {_wy_pat['win_rate']:.0f}%, avg RR: {_wy_pat['avg_rr']:.1f}, "
+                                   f"вердикт: {_wy_pat.get('verdict', '?')}")
+            except Exception:
+                pass
+
             groq_prompt = (
                 f"Ты эксперт Wyckoff. Оцени сетап и дай цель. Ответь СТРОГО JSON:\n"
                 f'{{"target": число_цены, "target_pct": процент, "logic": "причина макс 10 слов", "valid": true/false}}\n\n'
@@ -7652,6 +7675,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"Funding: {_wy_fund_str} | Fear&Greed: {_wy_fg_str}\n"
                 f"{_wy_ob_str} | {_wy_fvg_str}\n"
                 f"Даунтренд: -{drawdown_pct:.0f}%"
+                f"{_wy_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
             if groq_resp:
@@ -7881,6 +7905,17 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             _wyd_ob_str = f"OB: {_wyk_ob['bottom']:.6f}–{_wyk_ob['top']:.6f}" if _wyk_ob else "OB: нет"
             _wyd_fvg_str = f"FVG: {_wyk_fvg['bottom']:.6f}–{_wyk_fvg['top']:.6f}" if _wyk_fvg else "FVG: нет"
 
+            # Pattern history для Groq
+            _wyd_pat_str = ""
+            try:
+                _wyd_pat = _learn_patterns(symbol, "BEARISH", "1d", "distribution", 0)
+                if _wyd_pat.get("found") and _wyd_pat.get("samples", 0) >= 3:
+                    _wyd_pat_str = (f"\nИстория похожих: {_wyd_pat['samples']} сделок, "
+                                    f"WR: {_wyd_pat['win_rate']:.0f}%, avg RR: {_wyd_pat['avg_rr']:.1f}, "
+                                    f"вердикт: {_wyd_pat.get('verdict', '?')}")
+            except Exception:
+                pass
+
             groq_prompt = (
                 f"Ты эксперт Wyckoff Distribution. Оцени сетап и дай цель. Ответь СТРОГО JSON:\n"
                 f'{{"target": число_цены, "target_pct": процент_падения, "logic": "причина макс 10 слов", "valid": true/false}}\n\n'
@@ -7895,6 +7930,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"Funding: {_wyd_fund_str} | Fear&Greed: {_wyd_fg_str}\n"
                 f"{_wyd_ob_str} | {_wyd_fvg_str}\n"
                 f"Рост: +{pump_pct:.0f}%"
+                f"{_wyd_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
             if groq_resp:
@@ -8165,6 +8201,17 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _fast_fund_str = f"{_fast_funding:+.4f}%" if _fast_funding is not None else "N/A"
             _fast_regime_str = _fast_regime.get("mode", "?") if isinstance(_fast_regime, dict) else str(_fast_regime)
 
+            # Pattern history для Groq
+            _fast_pat_str = ""
+            try:
+                _fast_pat = _learn_patterns(symbol, direction, "5m", _fast_regime_str, 0)
+                if _fast_pat.get("found") and _fast_pat.get("samples", 0) >= 3:
+                    _fast_pat_str = (f"\nИстория похожих: {_fast_pat['samples']} сделок, "
+                                     f"WR: {_fast_pat['win_rate']:.0f}%, avg RR: {_fast_pat['avg_rr']:.1f}, "
+                                     f"вердикт: {_fast_pat.get('verdict', '?')}")
+            except Exception:
+                pass
+
             groq_prompt = (
                 f"Ты SMC скальпер. Оцени 5m сигнал. Ответь СТРОГО JSON:\n"
                 f'{{"logic": "причина входа макс 8 слов", "valid": true/false}}\n\n'
@@ -8175,6 +8222,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"Funding: {_fast_fund_str} | Fear&Greed: {_fast_fg_str} | Режим: {_fast_regime_str}\n"
                 f"{_sweep_vol_desc}\n"
                 f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2} RR: {rr}"
+                f"{_fast_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)
             if not groq_resp:

@@ -3600,6 +3600,17 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             _vol_str = f"Vol: {_vol_last:.0f} vs avg: {_vol_avg:.0f}" if _vol_avg > 0 else ""
 
             conf_short = "\n".join(confluence[:5]) if confluence else "нет данных"
+            # Pattern history для Groq
+            _pat_str = ""
+            try:
+                _pat = _learn_patterns(symbol, direction, timeframe,
+                                       regime_val, conf_score)
+                if _pat.get("found") and _pat.get("samples", 0) >= 3:
+                    _pat_str = (f"\nИстория похожих: {_pat['samples']} сделок, "
+                                f"WR: {_pat['win_rate']:.0f}%, avg RR: {_pat['avg_rr']:.1f}, "
+                                f"вердикт: {_pat.get('verdict', '?')}")
+            except Exception:
+                pass
             groq_prompt = (
                 f"Ты трейдер SMC. Позиционный сигнал. Ответь СТРОГО JSON без лишнего:\n"
                 f'{{\"logic\": \"почему входим макс 15 слов\", \"hours\": число_часов_до_tp, \"valid\": true/false}}\n\n'
@@ -3611,6 +3622,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 f"{_ob_str} | {_fvg_str} | ATR: {smart_price_fmt(_atr_mtf)}\n"
                 f"{_vol_str}\n"
                 f"Confluence:\n{conf_short}"
+                f"{_pat_str}"
             )
             groq_response = ask_groq(groq_prompt, max_tokens=100)
             if groq_response and len(groq_response) > 5:
