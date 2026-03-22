@@ -465,6 +465,37 @@ def init_db():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         fixed_at TEXT)""")
 
+    # Миграция bot_errors — добавляем недостающие колонки в существующую таблицу
+    try:
+        _be_cols = [row[1] for row in c.execute("PRAGMA table_info(bot_errors)").fetchall()]
+        if _be_cols:
+            for _be_col, _be_type in [
+                ("signal_id", "INTEGER"),
+                ("symbol", "TEXT"),
+                ("direction", "TEXT"),
+                ("entry", "REAL"),
+                ("sl", "REAL"),
+                ("result", "TEXT"),
+                ("error_type", "TEXT"),
+                ("error_description", "TEXT"),
+                ("ai_analysis", "TEXT"),
+                ("ai_lesson", "TEXT"),
+                ("ai_next_time", "TEXT"),
+                ("fixed", "INTEGER DEFAULT 0"),
+                ("fix_description", "TEXT"),
+                ("hours_in_trade", "REAL"),
+                ("market_context", "TEXT"),
+                ("created_at", "TEXT DEFAULT CURRENT_TIMESTAMP"),
+                ("fixed_at", "TEXT"),
+            ]:
+                if _be_col not in _be_cols:
+                    try:
+                        c.execute(f"ALTER TABLE bot_errors ADD COLUMN {_be_col} {_be_type}")
+                    except Exception:
+                        pass
+    except Exception as _be_e:
+        logging.warning(f"bot_errors migration in init_db: {_be_e}")
+
     # Таблицы из learning.py — создаём здесь тоже чтобы close_signal не падал
     c.execute("""CREATE TABLE IF NOT EXISTS signal_stats (
         symbol       TEXT PRIMARY KEY,
