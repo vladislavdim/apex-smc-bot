@@ -2709,7 +2709,7 @@ async def _send_signal(sd):
     if not ADMIN_IDS:
         return
     now_ts = time.time()
-    cache_key = f"{sd['symbol']}:{sd['direction']}:{sd.get('timeframe','1h')}"
+    cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
     try:
         import sqlite3 as _sq3
         _cd = _sq3.connect("brain.db", timeout=10)
@@ -2813,17 +2813,6 @@ async def auto_scan_1h():
     logging.info(f"Скан 1h: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
     logging.info(f"Скан 1h: актуальных {len(valid)}/{len(signals)}")
-    for sd in valid[:3]:
-        await _send_signal(sd)
-        await asyncio.sleep(1)
-
-
-async def auto_scan_4h():
-    """Каждые 30 минут: скан 4h таймфрейма"""
-    signals = await _scan_tf("4h", pairs_limit=80)
-    logging.info(f"Скан 4h: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=3.0)]
-    logging.info(f"Скан 4h: актуальных {len(valid)}/{len(signals)}")
     for sd in valid[:3]:
         await _send_signal(sd)
         await asyncio.sleep(1)
@@ -4397,8 +4386,7 @@ def main():
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
-            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин
-            scheduler.add_job(auto_scan_4h, "interval", minutes=30, jitter=120)       # 4h — каждые 30 мин
+            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
             scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)
