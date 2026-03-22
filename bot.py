@@ -1857,20 +1857,13 @@ async def handle_callback(callback: CallbackQuery):
                 text = "\n".join(lines)
                 text += f"\n<i>Как только пара достигнет 3/3 — придёт сигнал автоматически</i>"
                 if len(text) > 3800:
-                if len(text) > 3800:
-                    lines_cut = ["👁 <b>Наблюдение</b> — ждут подтверждения
-"]
+                    lines_cut = ["<b>Наблюдение</b> — ждут подтверждения\n"]
                     for r in rows:
                         symbol, direction, tf, score, created, expires = r
-                        dir_label = "🟢" if direction == "BULLISH" else "🔴"
-                        bar = "🟩" * score + "⬜" * (3 - score)
-                        lines_cut.append(f"{dir_label} <b>{symbol}</b> {tf} {bar} {score}/3")
-                    lines_cut.append(f"
-<i>Всего {len(rows)} пар. Сигнал придёт при 3/3</i>")
-                    text = "
-".join(lines_cut)
-                    text = "
-".join(lines_cut)
+                        dir_label = "LONG" if direction == "BULLISH" else "SHORT"
+                        lines_cut.append(f"<b>{symbol}</b> {dir_label} {tf} {score}/3")
+                    lines_cut.append(f"\n<i>Всего {len(rows)} пар. Сигнал придёт при 3/3</i>")
+                    text = "\n".join(lines_cut)
 
             await callback.message.edit_text(
                 text, parse_mode="HTML",
