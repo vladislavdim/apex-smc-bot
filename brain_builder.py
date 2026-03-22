@@ -33,180 +33,174 @@ groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 # ──────────────────────────────────────────────
 
 def init_brain_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
 
-    # Основное хранилище знаний
-    c.execute("""CREATE TABLE IF NOT EXISTS knowledge (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic TEXT,
-        content TEXT,
-        source TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # Основное хранилище знаний
+        c.execute("""CREATE TABLE IF NOT EXISTS knowledge (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT,
+            content TEXT,
+            source TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    # SMC паттерны
-    c.execute("""CREATE TABLE IF NOT EXISTS smc_patterns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        pattern_type TEXT,
-        symbol TEXT,
-        timeframe TEXT,
-        description TEXT,
-        success_rate REAL DEFAULT 0.0,
-        examples TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # SMC паттерны
+        c.execute("""CREATE TABLE IF NOT EXISTS smc_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_type TEXT,
+            symbol TEXT,
+            timeframe TEXT,
+            description TEXT,
+            success_rate REAL DEFAULT 0.0,
+            examples TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    # Правила торговли по монетам
-    c.execute("""CREATE TABLE IF NOT EXISTS coin_rules (
-        symbol TEXT PRIMARY KEY,
-        best_timeframe TEXT,
-        best_setup TEXT,
-        avoid_conditions TEXT,
-        avg_move_pct REAL DEFAULT 0.0,
-        volatility TEXT,
-        notes TEXT,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # Правила торговли по монетам
+        c.execute("""CREATE TABLE IF NOT EXISTS coin_rules (
+            symbol TEXT PRIMARY KEY,
+            best_timeframe TEXT,
+            best_setup TEXT,
+            avoid_conditions TEXT,
+            avg_move_pct REAL DEFAULT 0.0,
+            volatility TEXT,
+            notes TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    # История сделок (синхронизируется с основным bot)
-    c.execute("""CREATE TABLE IF NOT EXISTS trade_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT,
-        direction TEXT,
-        entry REAL,
-        exit_price REAL,
-        result TEXT,
-        pnl_pct REAL,
-        timeframe TEXT,
-        setup TEXT,
-        lesson TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # История сделок (синхронизируется с основным bot)
+        c.execute("""CREATE TABLE IF NOT EXISTS trade_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            direction TEXT,
+            entry REAL,
+            exit_price REAL,
+            result TEXT,
+            pnl_pct REAL,
+            timeframe TEXT,
+            setup TEXT,
+            lesson TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    # Макро тренды
-    c.execute("""CREATE TABLE IF NOT EXISTS macro_trends (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        indicator TEXT,
-        value TEXT,
-        interpretation TEXT,
-        impact_on_crypto TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # Макро тренды
+        c.execute("""CREATE TABLE IF NOT EXISTS macro_trends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            indicator TEXT,
+            value TEXT,
+            interpretation TEXT,
+            impact_on_crypto TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    # Рыночный контекст (обновляется каждый час)
-    c.execute("""CREATE TABLE IF NOT EXISTS market_context (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        btc_dominance REAL,
-        fear_greed INTEGER,
-        dxy_trend TEXT,
-        market_phase TEXT,
-        top_movers TEXT,
-        groq_summary TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # Рыночный контекст (обновляется каждый час)
+        c.execute("""CREATE TABLE IF NOT EXISTS market_context (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            btc_dominance REAL,
+            fear_greed INTEGER,
+            dxy_trend TEXT,
+            market_phase TEXT,
+            top_movers TEXT,
+            groq_summary TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    # Самообучение — правила стратегии
-    c.execute("""CREATE TABLE IF NOT EXISTS self_rules (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        category TEXT,
-        rule TEXT,
-        confidence REAL DEFAULT 0.5,
-        confirmed_by INTEGER DEFAULT 0,
-        contradicted_by INTEGER DEFAULT 0,
-        source TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+        # Самообучение — правила стратегии
+        c.execute("""CREATE TABLE IF NOT EXISTS self_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            rule TEXT,
+            confidence REAL DEFAULT 0.5,
+            confirmed_by INTEGER DEFAULT 0,
+            contradicted_by INTEGER DEFAULT 0,
+            source TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
     logging.info(f"Brain DB инициализирована: {DB_PATH}")
 
 
 def save_knowledge(topic, content, source="brain_builder"):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        # Обновляем если уже есть
-        existing = conn.execute(
-            "SELECT id FROM knowledge WHERE topic=? AND source=?", (topic, source)
-        ).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE knowledge SET content=?, created_at=CURRENT_TIMESTAMP WHERE id=?",
-                (content[:2000], existing[0])
-            )
-        else:
-            conn.execute(
-                "INSERT INTO knowledge VALUES (NULL,?,?,?,CURRENT_TIMESTAMP)",
-                (topic, content[:2000], source)
-            )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            # Обновляем если уже есть
+            existing = conn.execute(
+                "SELECT id FROM knowledge WHERE topic=? AND source=?", (topic, source)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE knowledge SET content=?, created_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (content[:2000], existing[0])
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO knowledge VALUES (NULL,?,?,?,CURRENT_TIMESTAMP)",
+                    (topic, content[:2000], source)
+                )
+            conn.commit()
     except Exception as e:
         logging.error(f"save_knowledge: {e}")
 
 
 def save_smc_pattern(pattern_type, symbol, timeframe, description, examples=""):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("""INSERT INTO smc_patterns VALUES
-            (NULL,?,?,?,?,0.0,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
-            (pattern_type, symbol, timeframe, description[:500], examples[:300])
-        )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""INSERT INTO smc_patterns VALUES
+                (NULL,?,?,?,?,0.0,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
+                (pattern_type, symbol, timeframe, description[:500], examples[:300])
+            )
+            conn.commit()
     except Exception as e:
         logging.error(f"save_smc_pattern: {e}")
 
 
 def save_coin_rule(symbol, best_tf, best_setup, avoid, avg_move, volatility, notes):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("""INSERT OR REPLACE INTO coin_rules VALUES
-            (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-            (symbol, best_tf, best_setup[:300], avoid[:300], avg_move, volatility, notes[:300])
-        )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""INSERT OR REPLACE INTO coin_rules VALUES
+                (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                (symbol, best_tf, best_setup[:300], avoid[:300], avg_move, volatility, notes[:300])
+            )
+            conn.commit()
     except Exception as e:
         logging.error(f"save_coin_rule: {e}")
 
 
 def save_macro_trend(indicator, value, interpretation, impact):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("""INSERT INTO macro_trends VALUES
-            (NULL,?,?,?,?,CURRENT_TIMESTAMP)""",
-            (indicator, str(value)[:100], interpretation[:300], impact[:300])
-        )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""INSERT INTO macro_trends VALUES
+                (NULL,?,?,?,?,CURRENT_TIMESTAMP)""",
+                (indicator, str(value)[:100], interpretation[:300], impact[:300])
+            )
+            conn.commit()
     except Exception as e:
         logging.error(f"save_macro_trend: {e}")
 
 
 def save_self_rule(category, rule, confidence=0.5, source="brain_builder"):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        existing = conn.execute(
-            "SELECT id, confidence, confirmed_by FROM self_rules WHERE rule LIKE ? AND category=?",
-            (f"%{rule[:50]}%", category)
-        ).fetchone()
-        if existing:
-            new_conf = min(1.0, existing[1] + 0.05)
-            conn.execute(
-                "UPDATE self_rules SET confidence=?, confirmed_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (new_conf, existing[2] + 1, existing[0])
-            )
-        else:
-            conn.execute(
-                "INSERT INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active, created_at, updated_at) VALUES (?,?,?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                (category, rule[:300], "auto", rule[:300], confidence, source)
-            )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            existing = conn.execute(
+                "SELECT id, confidence, confirmed_by FROM self_rules WHERE rule LIKE ? AND category=?",
+                (f"%{rule[:50]}%", category)
+            ).fetchone()
+            if existing:
+                new_conf = min(1.0, existing[1] + 0.05)
+                conn.execute(
+                    "UPDATE self_rules SET confidence=?, confirmed_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (new_conf, existing[2] + 1, existing[0])
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO self_rules (category, rule, rule_type, rule_text, confidence, source, active, created_at, updated_at) VALUES (?,?,?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (category, rule[:300], "auto", rule[:300], confidence, source)
+                )
+            conn.commit()
     except Exception as e:
         logging.error(f"save_self_rule: {e}")
 
@@ -297,7 +291,8 @@ def parse_rss(url, limit=5):
             if title:
                 items.append(title)
         return items
-    except:
+    except Exception as e:
+        logging.warning(f"parse_rss: {e}")
         return []
 
 
@@ -420,8 +415,8 @@ def fetch_crypto_news():
             items = parse_rss(url, limit=5)
             all_news.extend(items)
             time.sleep(0.5)
-        except:
-            pass
+        except Exception as e:
+            logging.warning(f"fetch_crypto_news source: {e}")
     return all_news[:15]
 
 
@@ -499,8 +494,8 @@ def fetch_fred_macro():
                             "change": change,
                             "date": latest["date"]
                         }
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"FRED parse {series_id}: {e}")
             time.sleep(0.3)
         except Exception as e:
             logging.debug(f"FRED {series_id}: {e}")
@@ -835,22 +830,21 @@ def learn_macro_trends():
     if analysis:
         # Сохраняем в рыночный контекст
         try:
-            conn = sqlite3.connect(DB_PATH)
-            gainers_str = json.dumps(gainers)
-            losers_str = json.dumps(losers)
-            conn.execute("""INSERT INTO market_context VALUES
-                (NULL,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-                (
-                    btc_dom or 0,
-                    fg_value or 0,
-                    f"DXY {dxy_value} ({dxy_change:+.2f}%)" if dxy_value else "N/A",
-                    "определяется анализом",
-                    f"gainers:{gainers_str} losers:{losers_str}",
-                    analysis
+            with sqlite3.connect(DB_PATH) as conn:
+                gainers_str = json.dumps(gainers)
+                losers_str = json.dumps(losers)
+                conn.execute("""INSERT INTO market_context VALUES
+                    (NULL,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                    (
+                        btc_dom or 0,
+                        fg_value or 0,
+                        f"DXY {dxy_value} ({dxy_change:+.2f}%)" if dxy_value else "N/A",
+                        "определяется анализом",
+                        f"gainers:{gainers_str} losers:{losers_str}",
+                        analysis
+                    )
                 )
-            )
-            conn.commit()
-            conn.close()
+                conn.commit()
         except Exception as e:
             logging.error(f"Save market_context: {e}")
 
@@ -967,20 +961,18 @@ def analyze_trade_history():
     logging.info("📊 Анализирую историю сделок...")
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-
-        # Пробуем достать сигналы из основной таблицы
-        signals = conn.execute("""
-            SELECT symbol, direction, entry, tp1, sl, result, timeframe, grade, created_at
-            FROM signals
-            WHERE result != 'pending'
-            ORDER BY id DESC
-            LIMIT 50
-        """).fetchall()
+        with sqlite3.connect(DB_PATH) as conn:
+            # Пробуем достать сигналы из основной таблицы
+            signals = conn.execute("""
+                SELECT symbol, direction, entry, tp1, sl, result, timeframe, grade, created_at
+                FROM signals
+                WHERE result != 'pending'
+                ORDER BY id DESC
+                LIMIT 50
+            """).fetchall()
 
         if not signals:
             logging.info("  История сделок пуста — пропускаем")
-            conn.close()
             return
 
         # Статистика
@@ -1007,8 +999,6 @@ def analyze_trade_history():
 
         best_text = "\n".join([f"{s}: {d['wins']}/{d['total']} ({round(d['wins']/d['total']*100)}%)" for s,d in best])
         worst_text = "\n".join([f"{s}: {d['losses']} потерь из {d['total']}" for s,d in worst])
-
-        conn.close()
 
         # Groq анализирует паттерны ошибок
         recent_losses = [s for s in signals if s[5] == "sl"][:10]
@@ -1130,12 +1120,11 @@ def run_brain_builder(full=False):
 
     # Итоговая статистика
     try:
-        conn = sqlite3.connect(DB_PATH)
-        knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
-        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
-        patterns_count = conn.execute("SELECT COUNT(*) FROM smc_patterns").fetchone()[0]
-        coin_rules_count = conn.execute("SELECT COUNT(*) FROM coin_rules").fetchone()[0]
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+            rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+            patterns_count = conn.execute("SELECT COUNT(*) FROM smc_patterns").fetchone()[0]
+            coin_rules_count = conn.execute("SELECT COUNT(*) FROM coin_rules").fetchone()[0]
         logging.info(
             f"🧠 Brain Builder завершён за {elapsed}с | "
             f"знаний:{knowledge_count} правил:{rules_count} "
@@ -1156,23 +1145,22 @@ def run_brain_builder(full=False):
 def get_brain_summary():
     """Возвращает текущее состояние мозга для отображения в боте"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()
-        knowledge_count = knowledge_count[0] if knowledge_count else 0
-        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()
-        rules_count = rules_count[0] if rules_count else 0
-        top_rules = conn.execute(
-            "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 10"
-        ).fetchall()
-        latest_macro = conn.execute(
-            "SELECT groq_summary, created_at FROM market_context ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        coin_count = conn.execute("SELECT COUNT(*) FROM coin_rules").fetchone()
-        coin_count = coin_count[0] if coin_count else 0
-        pattern_count = conn.execute("SELECT COUNT(*) FROM smc_patterns").fetchone()
-        pattern_count = pattern_count[0] if pattern_count else 0
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()
+            knowledge_count = knowledge_count[0] if knowledge_count else 0
+            rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()
+            rules_count = rules_count[0] if rules_count else 0
+            top_rules = conn.execute(
+                "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 10"
+            ).fetchall()
+            latest_macro = conn.execute(
+                "SELECT groq_summary, created_at FROM market_context ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            coin_count = conn.execute("SELECT COUNT(*) FROM coin_rules").fetchone()
+            coin_count = coin_count[0] if coin_count else 0
+            pattern_count = conn.execute("SELECT COUNT(*) FROM smc_patterns").fetchone()
+            pattern_count = pattern_count[0] if pattern_count else 0
 
         rules_text = "\n".join([
             f"[{r[0] or '?'}] {(r[1] or '')[:70]} — {float(r[2] or 0):.0%}"

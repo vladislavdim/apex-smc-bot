@@ -55,45 +55,6 @@ def run_confluence_boosters(candles, direction):
         logging.error(f"run_confluence_boosters error: {e}")
         return 0, []
 
-def boost_strong_volume(candles, direction):
-    """ЗАЩИЩЁННАЯ ФУНКЦИЯ - не может быть удалена Groq"""
-    try:
-        if not candles or len(candles) < 10:
-            return 0, ""
-        
-        volumes = [c.get("volume", 0) for c in candles[-20:]]
-        avg_volume = sum(volumes) / len(volumes) if volumes else 0
-        last_volume = volumes[-1] if volumes else 0
-        
-        if avg_volume > 0 and last_volume > avg_volume * 1.8:
-            return 8, "✅ Аномальный объём (+8)"
-        
-        return 0, ""
-        
-    except Exception as e:
-        logging.error(f"boost_strong_volume error: {e}")
-        return 0, ""
-
-def boost_clean_structure(candles, direction):
-    """ЗАЩИЩЁННАЯ ФУНКЦИЯ - не может быть удалена Groq"""
-    try:
-        if not candles or len(candles) < 5:
-            return 0, ""
-        
-        last5 = candles[-5:]
-        bullish_count = sum(1 for c in last5 if c["close"] > c["open"])
-        
-        if direction == "BULLISH" and bullish_count >= 4:
-            return 5, "✅ Чистая бычья структура (+5)"
-        elif direction == "BEARISH" and bullish_count <= 1:
-            return 5, "✅ Чистая медвежья структура (+5)"
-        
-        return 0, ""
-        
-    except Exception as e:
-        logging.error(f"boost_clean_structure error: {e}")
-        return 0, ""
-
 def get_extensions_summary():
     """ЗАЩИЩЁННАЯ ФУНКЦИЯ - не может быть удалена Groq"""
     return {
