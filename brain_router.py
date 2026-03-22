@@ -65,113 +65,112 @@ COINGECKO_IDS = {
 # ──────────────────────────────────────────────────────────────
 def _init_router_db():
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS router_source_map (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, interval TEXT, source TEXT,
-                success_count INTEGER DEFAULT 0,
-                fail_count INTEGER DEFAULT 0,
-                last_success REAL DEFAULT 0,
-                last_fail REAL DEFAULT 0,
-                avg_latency REAL DEFAULT 0,
-                notes TEXT DEFAULT '',
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_workarounds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                error_pattern TEXT,
-                solution TEXT,
-                source_skip TEXT DEFAULT '',
-                confidence REAL DEFAULT 0.5,
-                uses INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_synthetic_tf (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, target_tf TEXT, base_tf TEXT,
-                quality REAL DEFAULT 0.7,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_knowledge (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT, key TEXT, value TEXT,
-                confidence REAL DEFAULT 0.5,
-                expires_at TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_signal_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, direction TEXT, grade TEXT,
-                tf TEXT, regime TEXT, confluence INTEGER,
-                entry REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
-                result TEXT DEFAULT 'pending',
-                rr REAL DEFAULT 0,
-                hours_held REAL DEFAULT 0,
-                groq_insight TEXT DEFAULT '',
-                error_reason TEXT DEFAULT '',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                closed_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS router_market_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, hour_utc INTEGER, day_of_week INTEGER,
-                win_count INTEGER DEFAULT 0, loss_count INTEGER DEFAULT 0,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_pair_intelligence (
-                symbol TEXT PRIMARY KEY,
-                best_tf TEXT DEFAULT '1h',
-                best_session TEXT DEFAULT 'london',
-                avg_volatility REAL DEFAULT 0,
-                btc_beta REAL DEFAULT 1.0,
-                typical_move_pct REAL DEFAULT 2.0,
-                last_pump_pattern TEXT DEFAULT '',
-                accumulation_score REAL DEFAULT 0,
-                notes TEXT DEFAULT '',
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_groq_insights (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT,
-                content TEXT,
-                confidence REAL DEFAULT 0.5,
-                used_count INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_contradiction_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, factors TEXT, verdict TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS router_seasonality (
-                month INTEGER PRIMARY KEY,
-                btc_avg_return REAL DEFAULT 0,
-                alt_avg_return REAL DEFAULT 0,
-                notes TEXT DEFAULT ''
-            );
-        """)
-        # Вставляем историческую сезонность BTC (данные по месяцам)
-        seasonality = [
-            (1, 8.5, 12.0, "Январь — обычно бычий после декабря"),
-            (2, 14.0, 18.0, "Февраль — сильный месяц"),
-            (3, 5.0, 8.0, "Март — неоднозначный"),
-            (4, 12.0, 15.0, "Апрель — pre-halving рост"),
-            (5, -5.0, -3.0, "Май — 'sell in May'"),
-            (6, -10.0, -8.0, "Июнь — слабый месяц"),
-            (7, 3.0, 5.0, "Июль — летнее восстановление"),
-            (8, -2.0, -1.0, "Август — нейтральный"),
-            (9, -8.0, -6.0, "Сентябрь — исторически худший"),
-            (10, 18.0, 22.0, "Октябрь — Uptober, сильный рост"),
-            (11, 25.0, 30.0, "Ноябрь — традиционно самый бычий"),
-            (12, 5.0, 8.0, "Декабрь — фиксация прибыли"),
-        ]
-        for row in seasonality:
-            conn.execute(
-                "INSERT OR IGNORE INTO router_seasonality VALUES (?,?,?,?)", row
-            )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS router_source_map (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT, interval TEXT, source TEXT,
+                    success_count INTEGER DEFAULT 0,
+                    fail_count INTEGER DEFAULT 0,
+                    last_success REAL DEFAULT 0,
+                    last_fail REAL DEFAULT 0,
+                    avg_latency REAL DEFAULT 0,
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_workarounds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    error_pattern TEXT,
+                    solution TEXT,
+                    source_skip TEXT DEFAULT '',
+                    confidence REAL DEFAULT 0.5,
+                    uses INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_synthetic_tf (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT, target_tf TEXT, base_tf TEXT,
+                    quality REAL DEFAULT 0.7,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_knowledge (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT, key TEXT, value TEXT,
+                    confidence REAL DEFAULT 0.5,
+                    expires_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_signal_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT, direction TEXT, grade TEXT,
+                    tf TEXT, regime TEXT, confluence INTEGER,
+                    entry REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
+                    result TEXT DEFAULT 'pending',
+                    rr REAL DEFAULT 0,
+                    hours_held REAL DEFAULT 0,
+                    groq_insight TEXT DEFAULT '',
+                    error_reason TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS router_market_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT, hour_utc INTEGER, day_of_week INTEGER,
+                    win_count INTEGER DEFAULT 0, loss_count INTEGER DEFAULT 0,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_pair_intelligence (
+                    symbol TEXT PRIMARY KEY,
+                    best_tf TEXT DEFAULT '1h',
+                    best_session TEXT DEFAULT 'london',
+                    avg_volatility REAL DEFAULT 0,
+                    btc_beta REAL DEFAULT 1.0,
+                    typical_move_pct REAL DEFAULT 2.0,
+                    last_pump_pattern TEXT DEFAULT '',
+                    accumulation_score REAL DEFAULT 0,
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_groq_insights (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT,
+                    content TEXT,
+                    confidence REAL DEFAULT 0.5,
+                    used_count INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_contradiction_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT, factors TEXT, verdict TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS router_seasonality (
+                    month INTEGER PRIMARY KEY,
+                    btc_avg_return REAL DEFAULT 0,
+                    alt_avg_return REAL DEFAULT 0,
+                    notes TEXT DEFAULT ''
+                );
+            """)
+            # Вставляем историческую сезонность BTC (данные по месяцам)
+            seasonality = [
+                (1, 8.5, 12.0, "Январь — обычно бычий после декабря"),
+                (2, 14.0, 18.0, "Февраль — сильный месяц"),
+                (3, 5.0, 8.0, "Март — неоднозначный"),
+                (4, 12.0, 15.0, "Апрель — pre-halving рост"),
+                (5, -5.0, -3.0, "Май — 'sell in May'"),
+                (6, -10.0, -8.0, "Июнь — слабый месяц"),
+                (7, 3.0, 5.0, "Июль — летнее восстановление"),
+                (8, -2.0, -1.0, "Август — нейтральный"),
+                (9, -8.0, -6.0, "Сентябрь — исторически худший"),
+                (10, 18.0, 22.0, "Октябрь — Uptober, сильный рост"),
+                (11, 25.0, 30.0, "Ноябрь — традиционно самый бычий"),
+                (12, 5.0, 8.0, "Декабрь — фиксация прибыли"),
+            ]
+            for row in seasonality:
+                conn.execute(
+                    "INSERT OR IGNORE INTO router_seasonality VALUES (?,?,?,?)", row
+                )
+            conn.commit()
         logging.info("[Router] БД инициализирована")
     except Exception as e:
         logging.error(f"[Router] init DB: {e}")
@@ -231,38 +230,37 @@ def _groq(prompt: str, max_tokens: int = 300, system: str = "") -> str:
 def _record_source(symbol: str, interval: str, source: str,
                    success: bool, latency: float = 0.0, note: str = ""):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        row = conn.execute(
-            "SELECT id, success_count, fail_count, avg_latency FROM router_source_map "
-            "WHERE symbol=? AND interval=? AND source=?",
-            (symbol, interval, source)
-        ).fetchone()
-        now = time.time()
-        if row:
-            sc = row[1] + (1 if success else 0)
-            fc = row[2] + (0 if success else 1)
-            al = (row[3] * 0.8 + latency * 0.2) if latency > 0 else row[3]
-            conn.execute(
-                "UPDATE router_source_map SET success_count=?, fail_count=?, "
-                "avg_latency=?, last_success=?, last_fail=?, notes=?, updated_at=CURRENT_TIMESTAMP "
-                "WHERE id=?",
-                (sc, fc, al,
-                 now if success else row[3],
-                 now if not success else 0,
-                 note, row[0])
-            )
-        else:
-            conn.execute(
-                "INSERT INTO router_source_map "
-                "(symbol, interval, source, success_count, fail_count, avg_latency, "
-                "last_success, last_fail, notes) VALUES (?,?,?,?,?,?,?,?,?)",
-                (symbol, interval, source,
-                 1 if success else 0, 0 if success else 1,
-                 latency, now if success else 0,
-                 now if not success else 0, note)
-            )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            row = conn.execute(
+                "SELECT id, success_count, fail_count, avg_latency FROM router_source_map "
+                "WHERE symbol=? AND interval=? AND source=?",
+                (symbol, interval, source)
+            ).fetchone()
+            now = time.time()
+            if row:
+                sc = row[1] + (1 if success else 0)
+                fc = row[2] + (0 if success else 1)
+                al = (row[3] * 0.8 + latency * 0.2) if latency > 0 else row[3]
+                conn.execute(
+                    "UPDATE router_source_map SET success_count=?, fail_count=?, "
+                    "avg_latency=?, last_success=?, last_fail=?, notes=?, updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=?",
+                    (sc, fc, al,
+                     now if success else row[3],
+                     now if not success else 0,
+                     note, row[0])
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO router_source_map "
+                    "(symbol, interval, source, success_count, fail_count, avg_latency, "
+                    "last_success, last_fail, notes) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (symbol, interval, source,
+                     1 if success else 0, 0 if success else 1,
+                     latency, now if success else 0,
+                     now if not success else 0, note)
+                )
+            conn.commit()
     except Exception as e:
         logging.debug(f"[Router] _record_source: {e}")
 
@@ -277,13 +275,12 @@ def _get_best_sources(symbol: str, interval: str) -> list:
         "twelvedata", "coingecko", "synthetic"
     ]
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        rows = conn.execute(
-            "SELECT source, success_count, fail_count, avg_latency FROM router_source_map "
-            "WHERE symbol=? AND interval=?",
-            (symbol, interval)
-        ).fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            rows = conn.execute(
+                "SELECT source, success_count, fail_count, avg_latency FROM router_source_map "
+                "WHERE symbol=? AND interval=?",
+                (symbol, interval)
+            ).fetchall()
         if not rows:
             return defaults
         scored = {}
@@ -665,17 +662,16 @@ def _groq_analyze_candle_failure(symbol: str, interval: str, errors: list):
         skip = data.get("skip_sources", [])
         note = data.get("note", "")
         # Записываем workaround в БД
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        conn.execute(
-            "INSERT INTO router_workarounds "
-            "(error_pattern, solution, source_skip, confidence) VALUES (?,?,?,?)",
-            (f"{symbol}_{interval}", data.get("reason",""), ",".join(skip), 0.7)
-        )
-        # Понижаем надёжность плохих источников для этой пары
-        for src in skip:
-            _record_source(symbol, interval, src, False, 0, "groq_skip")
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            conn.execute(
+                "INSERT INTO router_workarounds "
+                "(error_pattern, solution, source_skip, confidence) VALUES (?,?,?,?)",
+                (f"{symbol}_{interval}", data.get("reason",""), ",".join(skip), 0.7)
+            )
+            # Понижаем надёжность плохих источников для этой пары
+            for src in skip:
+                _record_source(symbol, interval, src, False, 0, "groq_skip")
+            conn.commit()
         logging.info(f"[Router] Groq workaround для {symbol} {interval}: пропустить {skip}")
     except Exception as e:
         logging.debug(f"[Router] _groq_analyze_candle_failure: {e}")
@@ -771,12 +767,11 @@ def get_seasonality_context() -> dict:
     """Текущая сезонность BTC по месяцам"""
     try:
         month = datetime.now().month
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        row = conn.execute(
-            "SELECT btc_avg_return, alt_avg_return, notes FROM router_seasonality WHERE month=?",
-            (month,)
-        ).fetchone()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            row = conn.execute(
+                "SELECT btc_avg_return, alt_avg_return, notes FROM router_seasonality WHERE month=?",
+                (month,)
+            ).fetchone()
         if row:
             btc_ret, alt_ret, notes = row
             bias = "BULLISH" if btc_ret > 3 else "BEARISH" if btc_ret < -3 else "NEUTRAL"
@@ -805,13 +800,12 @@ def get_session_context() -> dict:
 def get_pair_best_hours(symbol: str) -> dict:
     """Лучшие часы для сигналов по этой паре (из истории)"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        rows = conn.execute(
-            "SELECT hour_utc, win_count, loss_count FROM router_market_memory "
-            "WHERE symbol=? ORDER BY (win_count * 1.0 / (win_count+loss_count+0.1)) DESC LIMIT 3",
-            (symbol,)
-        ).fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            rows = conn.execute(
+                "SELECT hour_utc, win_count, loss_count FROM router_market_memory "
+                "WHERE symbol=? ORDER BY (win_count * 1.0 / (win_count+loss_count+0.1)) DESC LIMIT 3",
+                (symbol,)
+            ).fetchall()
         if rows:
             best = [r[0] for r in rows if r[1]+r[2] > 2]
             return {"best_hours": best, "has_history": True}
@@ -823,26 +817,25 @@ def record_signal_outcome(symbol: str, direction: str, tf: str,
                            result: str, hour_utc: int):
     """Запоминаем результат сигнала по часу — учим бота лучшему времени входа"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        row = conn.execute(
-            "SELECT id, win_count, loss_count FROM router_market_memory "
-            "WHERE symbol=? AND hour_utc=?", (symbol, hour_utc)
-        ).fetchone()
-        if row:
-            wc = row[1] + (1 if result in ("tp1","tp2","tp3","win") else 0)
-            lc = row[2] + (1 if result in ("sl","loss") else 0)
-            conn.execute("UPDATE router_market_memory SET win_count=?, loss_count=?, "
-                        "updated_at=CURRENT_TIMESTAMP WHERE id=?", (wc, lc, row[0]))
-        else:
-            wc = 1 if result in ("tp1","tp2","tp3","win") else 0
-            lc = 1 if result in ("sl","loss") else 0
-            conn.execute(
-                "INSERT INTO router_market_memory "
-                "(symbol, hour_utc, day_of_week, win_count, loss_count) VALUES (?,?,?,?,?)",
-                (symbol, hour_utc, datetime.utcnow().weekday(), wc, lc)
-            )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            row = conn.execute(
+                "SELECT id, win_count, loss_count FROM router_market_memory "
+                "WHERE symbol=? AND hour_utc=?", (symbol, hour_utc)
+            ).fetchone()
+            if row:
+                wc = row[1] + (1 if result in ("tp1","tp2","tp3","win") else 0)
+                lc = row[2] + (1 if result in ("sl","loss") else 0)
+                conn.execute("UPDATE router_market_memory SET win_count=?, loss_count=?, "
+                            "updated_at=CURRENT_TIMESTAMP WHERE id=?", (wc, lc, row[0]))
+            else:
+                wc = 1 if result in ("tp1","tp2","tp3","win") else 0
+                lc = 1 if result in ("sl","loss") else 0
+                conn.execute(
+                    "INSERT INTO router_market_memory "
+                    "(symbol, hour_utc, day_of_week, win_count, loss_count) VALUES (?,?,?,?,?)",
+                    (symbol, hour_utc, datetime.utcnow().weekday(), wc, lc)
+                )
+            conn.commit()
     except Exception as e:
         logging.debug(f"[Router] record_signal_outcome: {e}")
 
@@ -938,23 +931,22 @@ def detect_accumulation(symbol: str) -> dict:
 
 def _update_pair_intelligence(symbol: str, **kwargs):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        row = conn.execute(
-            "SELECT symbol FROM router_pair_intelligence WHERE symbol=?", (symbol,)
-        ).fetchone()
-        if row:
-            for k, v in kwargs.items():
-                conn.execute(f"UPDATE router_pair_intelligence SET {k}=?, "
-                            "updated_at=CURRENT_TIMESTAMP WHERE symbol=?", (v, symbol))
-        else:
-            conn.execute(
-                "INSERT INTO router_pair_intelligence (symbol) VALUES (?)", (symbol,)
-            )
-            for k, v in kwargs.items():
-                conn.execute(f"UPDATE router_pair_intelligence SET {k}=? WHERE symbol=?",
-                            (v, symbol))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            row = conn.execute(
+                "SELECT symbol FROM router_pair_intelligence WHERE symbol=?", (symbol,)
+            ).fetchone()
+            if row:
+                for k, v in kwargs.items():
+                    conn.execute(f"UPDATE router_pair_intelligence SET {k}=?, "
+                                "updated_at=CURRENT_TIMESTAMP WHERE symbol=?", (v, symbol))
+            else:
+                conn.execute(
+                    "INSERT INTO router_pair_intelligence (symbol) VALUES (?)", (symbol,)
+                )
+                for k, v in kwargs.items():
+                    conn.execute(f"UPDATE router_pair_intelligence SET {k}=? WHERE symbol=?",
+                                (v, symbol))
+            conn.commit()
     except Exception as e:
         logging.debug(f"[Router] _update_pair_intelligence: {e}")
 
@@ -1013,15 +1005,14 @@ def detect_contradictions(symbol: str, direction: str,
     # Сохраняем в лог
     if conflicts or warnings:
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-            conn.execute(
-                "INSERT INTO router_contradiction_log (symbol, factors, verdict) VALUES (?,?,?)",
-                (symbol, json.dumps(conflicts + warnings), verdict)
-            )
-            conn.commit()
-            conn.close()
-        except:
-            pass
+            with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+                conn.execute(
+                    "INSERT INTO router_contradiction_log (symbol, factors, verdict) VALUES (?,?,?)",
+                    (symbol, json.dumps(conflicts + warnings), verdict)
+                )
+                conn.commit()
+        except Exception as e:
+            logging.warning(f"contradiction_log save: {e}")
 
     return result
 
@@ -1138,16 +1129,15 @@ def groq_learn_from_result(symbol: str, direction: str, grade: str,
             if "```" in resp:
                 resp = resp.split("```")[1].replace("json","").strip()
             data = json.loads(resp)
-            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-            conn.execute(
-                "INSERT INTO router_groq_insights (category, content, confidence) VALUES (?,?,?)",
-                (f"trade_lesson_{symbol}",
-                 f"{'WIN' if is_win else 'LOSS'} | {data.get('lesson','')} | "
-                 f"Rule: {data.get('rule','')} | Avoid: {data.get('avoid_next_time','')}",
-                 data.get("confidence", 0.6))
-            )
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+                conn.execute(
+                    "INSERT INTO router_groq_insights (category, content, confidence) VALUES (?,?,?)",
+                    (f"trade_lesson_{symbol}",
+                     f"{'WIN' if is_win else 'LOSS'} | {data.get('lesson','')} | "
+                     f"Rule: {data.get('rule','')} | Avoid: {data.get('avoid_next_time','')}",
+                     data.get("confidence", 0.6))
+                )
+                conn.commit()
             logging.info(f"[Router] Groq урок сохранён для {symbol} {result}")
         except Exception as e:
             logging.debug(f"[Router] groq_learn_from_result: {e}")
@@ -1162,21 +1152,20 @@ def groq_daily_strategy_review():
     if not GROQ_KEY:
         return
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        # Собираем статистику за 7 дней
-        rows = conn.execute(
-            "SELECT symbol, grade, tf, regime, result, COUNT(*) as cnt "
-            "FROM router_signal_history "
-            "WHERE created_at > datetime('now', '-7 days') "
-            "GROUP BY symbol, grade, tf, result ORDER BY cnt DESC LIMIT 30"
-        ).fetchall()
-        # Последние инсайты
-        lessons = conn.execute(
-            "SELECT content FROM router_groq_insights "
-            "WHERE category LIKE 'trade_lesson_%' "
-            "ORDER BY created_at DESC LIMIT 20"
-        ).fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            # Собираем статистику за 7 дней
+            rows = conn.execute(
+                "SELECT symbol, grade, tf, regime, result, COUNT(*) as cnt "
+                "FROM router_signal_history "
+                "WHERE created_at > datetime('now', '-7 days') "
+                "GROUP BY symbol, grade, tf, result ORDER BY cnt DESC LIMIT 30"
+            ).fetchall()
+            # Последние инсайты
+            lessons = conn.execute(
+                "SELECT content FROM router_groq_insights "
+                "WHERE category LIKE 'trade_lesson_%' "
+                "ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
 
         if not rows and not lessons:
             return
@@ -1196,13 +1185,12 @@ def groq_daily_strategy_review():
         strategy = _groq(prompt, max_tokens=400,
                         system="Ты опытный трейдер SMC. Пиши конкретные правила.")
         if strategy:
-            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-            conn.execute(
-                "INSERT INTO router_groq_insights (category, content, confidence) VALUES (?,?,?)",
-                ("daily_strategy", strategy, 0.8)
-            )
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+                conn.execute(
+                    "INSERT INTO router_groq_insights (category, content, confidence) VALUES (?,?,?)",
+                    ("daily_strategy", strategy, 0.8)
+                )
+                conn.commit()
             logging.info("[Router] Ежедневная стратегия обновлена")
     except Exception as e:
         logging.error(f"[Router] groq_daily_strategy_review: {e}")
@@ -1210,12 +1198,11 @@ def groq_daily_strategy_review():
 def get_daily_strategy() -> str:
     """Возвращает последнюю дневную стратегию"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        row = conn.execute(
-            "SELECT content, created_at FROM router_groq_insights "
-            "WHERE category='daily_strategy' ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            row = conn.execute(
+                "SELECT content, created_at FROM router_groq_insights "
+                "WHERE category='daily_strategy' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
         if row:
             return f"📊 Стратегия ({row[1][:10]}):\n{row[0]}"
     except Exception as e:
@@ -1225,17 +1212,16 @@ def get_daily_strategy() -> str:
 def get_groq_insights_summary() -> str:
     """Краткая сводка последних инсайтов Groq для меню Мозга"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        lessons = conn.execute(
-            "SELECT content, created_at FROM router_groq_insights "
-            "WHERE category LIKE 'trade_lesson_%' "
-            "ORDER BY created_at DESC LIMIT 5"
-        ).fetchall()
-        workarounds = conn.execute(
-            "SELECT error_pattern, solution, uses FROM router_workarounds "
-            "ORDER BY uses DESC LIMIT 3"
-        ).fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            lessons = conn.execute(
+                "SELECT content, created_at FROM router_groq_insights "
+                "WHERE category LIKE 'trade_lesson_%' "
+                "ORDER BY created_at DESC LIMIT 5"
+            ).fetchall()
+            workarounds = conn.execute(
+                "SELECT error_pattern, solution, uses FROM router_workarounds "
+                "ORDER BY uses DESC LIMIT 3"
+            ).fetchall()
 
         lines = ["<b>🧠 Роутер — накопленный опыт:</b>\n"]
 
@@ -1258,13 +1244,12 @@ def get_groq_insights_summary() -> str:
 def get_source_reliability_text() -> str:
     """Таблица надёжности источников для меню"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        rows = conn.execute(
-            "SELECT source, SUM(success_count), SUM(fail_count), AVG(avg_latency) "
-            "FROM router_source_map GROUP BY source "
-            "ORDER BY (SUM(success_count)*1.0/(SUM(success_count)+SUM(fail_count)+0.1)) DESC"
-        ).fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
+            rows = conn.execute(
+                "SELECT source, SUM(success_count), SUM(fail_count), AVG(avg_latency) "
+                "FROM router_source_map GROUP BY source "
+                "ORDER BY (SUM(success_count)*1.0/(SUM(success_count)+SUM(fail_count)+0.1)) DESC"
+            ).fetchall()
         if not rows:
             return "Данных пока нет — накапливаются по мере работы"
         lines = ["<b>📡 Надёжность источников данных:</b>\n"]

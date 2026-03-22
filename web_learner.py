@@ -14,38 +14,37 @@ GROQ_MODEL = "llama-3.1-8b-instant"
 # ═══════════════════════════════════════════════════════════════
 
 def init_web_learner_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS web_knowledge (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic TEXT,
-        query TEXT,
-        summary TEXT,
-        source_url TEXT,
-        relevance REAL DEFAULT 0.5,
-        applied INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS web_knowledge (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT,
+            query TEXT,
+            summary TEXT,
+            source_url TEXT,
+            relevance REAL DEFAULT 0.5,
+            applied INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
-    conn.execute("""CREATE TABLE IF NOT EXISTS learning_agenda (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic TEXT UNIQUE,
-        priority INTEGER DEFAULT 5,
-        reason TEXT,
-        status TEXT DEFAULT 'pending',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        completed_at TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS learning_agenda (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT UNIQUE,
+            priority INTEGER DEFAULT 5,
+            reason TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT)""")
 
-    conn.execute("""CREATE TABLE IF NOT EXISTS strategy_library (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
-        description TEXT,
-        conditions TEXT,
-        win_rate_expected REAL,
-        tested INTEGER DEFAULT 0,
-        actual_win_rate REAL,
-        source TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    conn.commit()
-    conn.close()
+        conn.execute("""CREATE TABLE IF NOT EXISTS strategy_library (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            description TEXT,
+            conditions TEXT,
+            win_rate_expected REAL,
+            tested INTEGER DEFAULT 0,
+            actual_win_rate REAL,
+            source TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        conn.commit()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -263,24 +262,21 @@ def groq_decide_learning_agenda():
     Результат: список тем для исследования.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        with sqlite3.connect(DB_PATH) as conn:
+            # Собираем статистику
+            stats = conn.execute("""
+                SELECT symbol, win_rate, total FROM symbol_stats
+                WHERE total >= 3 ORDER BY win_rate ASC LIMIT 5
+            """).fetchall()
 
-        # Собираем статистику
-        stats = conn.execute("""
-            SELECT symbol, win_rate, total FROM symbol_stats
-            WHERE total >= 3 ORDER BY win_rate ASC LIMIT 5
-        """).fetchall()
+            rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+            patterns_count = conn.execute("SELECT COUNT(*) FROM pattern_memory").fetchone()[0]
 
-        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
-        patterns_count = conn.execute("SELECT COUNT(*) FROM pattern_memory").fetchone()[0]
-
-        # Незакрытые пробелы в знаниях
-        gaps = conn.execute("""
-            SELECT query FROM knowledge_gaps
-            WHERE resolved=0 ORDER BY id DESC LIMIT 5
-        """).fetchall() if conn.execute("SELECT name FROM sqlite_master WHERE name='knowledge_gaps'").fetchone() else []
-
-        conn.close()
+            # Незакрытые пробелы в знаниях
+            gaps = conn.execute("""
+                SELECT query FROM knowledge_gaps
+                WHERE resolved=0 ORDER BY id DESC LIMIT 5
+            """).fetchall() if conn.execute("SELECT name FROM sqlite_master WHERE name='knowledge_gaps'").fetchone() else []
 
         worst = [(s[0], round(s[1], 1)) for s in stats] if stats else []
 
@@ -315,16 +311,15 @@ def groq_decide_learning_agenda():
         items = data.get("agenda", [])
 
         # Сохраняем в agenda
-        conn = sqlite3.connect(DB_PATH)
-        for item in items:
-            try:
-                conn.execute("""INSERT OR IGNORE INTO learning_agenda (topic, priority, reason)
-                    VALUES (?,?,?)""",
-                    (item["topic"], item.get("priority", 5), item.get("reason", "")))
-            except Exception:
-                pass
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            for item in items:
+                try:
+                    conn.execute("""INSERT OR IGNORE INTO learning_agenda (topic, priority, reason)
+                        VALUES (?,?,?)""",
+                        (item["topic"], item.get("priority", 5), item.get("reason", "")))
+                except Exception:
+                    pass
+            conn.commit()
 
         logging.info(f"[WebLearner] Groq составил агенду: {[i['topic'] for i in items]}")
         return items
@@ -432,51 +427,49 @@ def groq_research_topic(topic: str, query: str) -> dict:
         data = json.loads(clean)
 
         # Сохраняем в базу
-        conn = sqlite3.connect(DB_PATH)
-
-        # Основные знания — safe insert с fallback
-        try:
-            conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
-                VALUES (?,?,?,?,?)""",
-                (topic, query, data.get("summary", ""), texts[0]["url"] if texts else "",
-                 float(data.get("relevance", 0.5))))
-        except Exception:
-            conn.execute("""INSERT INTO web_knowledge (topic, summary, source_url, relevance)
-                VALUES (?,?,?,?)""",
-                (topic, data.get("summary", ""), texts[0]["url"] if texts else "",
-                 float(data.get("relevance", 0.5))))
-
-        # Торговые правила → в self_rules
-        for rule_item in data.get("trading_rules", []):
-            rule_text = rule_item.get("rule", "")
+        with sqlite3.connect(DB_PATH) as conn:
+            # Основные знания — safe insert с fallback
             try:
-                confidence = float(str(rule_item.get("confidence", 0.6)).split()[0])
-            except (ValueError, TypeError):
-                confidence = 0.6
-            rule_type = (rule_item.get("type") or "PREFER").lower()
-            if rule_text and confidence >= 0.6:
-                conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at, active)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
-                    (rule_type, rule_text, confidence, f"web_research:{topic}"))
-
-        # Стратегия → в библиотеку
-        strat = data.get("strategy", {})
-        if strat.get("name"):
-            try:
-                conn.execute("""INSERT OR IGNORE INTO strategy_library
-                    (name, description, conditions, win_rate_expected, source)
+                conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
                     VALUES (?,?,?,?,?)""",
-                    (strat["name"], data.get("summary", ""), strat.get("conditions", ""),
-                     strat.get("win_rate_expected"), f"web_research"))
+                    (topic, query, data.get("summary", ""), texts[0]["url"] if texts else "",
+                     float(data.get("relevance", 0.5))))
             except Exception:
-                pass
+                conn.execute("""INSERT INTO web_knowledge (topic, summary, source_url, relevance)
+                    VALUES (?,?,?,?)""",
+                    (topic, data.get("summary", ""), texts[0]["url"] if texts else "",
+                     float(data.get("relevance", 0.5))))
 
-        # Отмечаем тему как выполненную
-        conn.execute("""UPDATE learning_agenda SET status='done', completed_at=CURRENT_TIMESTAMP
-            WHERE topic=?""", (topic,))
+            # Торговые правила → в self_rules
+            for rule_item in data.get("trading_rules", []):
+                rule_text = rule_item.get("rule", "")
+                try:
+                    confidence = float(str(rule_item.get("confidence", 0.6)).split()[0])
+                except (ValueError, TypeError):
+                    confidence = 0.6
+                rule_type = (rule_item.get("type") or "PREFER").lower()
+                if rule_text and confidence >= 0.6:
+                    conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at, active)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
+                        (rule_type, rule_text, confidence, f"web_research:{topic}"))
 
-        conn.commit()
-        conn.close()
+            # Стратегия → в библиотеку
+            strat = data.get("strategy", {})
+            if strat.get("name"):
+                try:
+                    conn.execute("""INSERT OR IGNORE INTO strategy_library
+                        (name, description, conditions, win_rate_expected, source)
+                        VALUES (?,?,?,?,?)""",
+                        (strat["name"], data.get("summary", ""), strat.get("conditions", ""),
+                         strat.get("win_rate_expected"), f"web_research"))
+                except Exception:
+                    pass
+
+            # Отмечаем тему как выполненную
+            conn.execute("""UPDATE learning_agenda SET status='done', completed_at=CURRENT_TIMESTAMP
+                WHERE topic=?""", (topic,))
+
+            conn.commit()
 
         logging.info(f"[WebLearner] ✅ Изучено: {topic} | Релевантность: {data.get('relevance', 0):.1f}")
         return data
@@ -503,28 +496,26 @@ def run_web_learning_cycle():
 
         # Добавляем колонку query если нет (миграция)
         try:
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("ALTER TABLE learning_agenda ADD COLUMN query TEXT")
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("ALTER TABLE learning_agenda ADD COLUMN query TEXT")
+                conn.commit()
         except Exception:
             pass
 
         # Сначала проверяем незакрытые темы из агенды
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            pending = conn.execute("""
-                SELECT topic, query FROM learning_agenda
-                WHERE status='pending' ORDER BY priority DESC LIMIT 3
-            """).fetchall()
-        except Exception:
-            # Старая БД без query — берём только topic
-            rows = conn.execute("""
-                SELECT topic FROM learning_agenda
-                WHERE status='pending' ORDER BY priority DESC LIMIT 3
-            """).fetchall()
-            pending = [(r[0], r[0]) for r in rows]
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            try:
+                pending = conn.execute("""
+                    SELECT topic, query FROM learning_agenda
+                    WHERE status='pending' ORDER BY priority DESC LIMIT 3
+                """).fetchall()
+            except Exception:
+                # Старая БД без query — берём только topic
+                rows = conn.execute("""
+                    SELECT topic FROM learning_agenda
+                    WHERE status='pending' ORDER BY priority DESC LIMIT 3
+                """).fetchall()
+                pending = [(r[0], r[0]) for r in rows]
 
         if not pending:
             # Groq решает что изучать
@@ -588,21 +579,20 @@ def get_daily_market_digest() -> str:
         data = json.loads(clean)
 
         # Сохраняем в web_knowledge
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
-                VALUES (?,?,?,?,?)""",
-                ("daily_digest", "market_news",
-                 f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
-                 "rss_feeds", 0.9))
-        except Exception:
-            conn.execute("""INSERT INTO web_knowledge (topic, summary, source_url, relevance)
-                VALUES (?,?,?,?)""",
-                ("daily_digest",
-                 f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
-                 "rss_feeds", 0.9))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            try:
+                conn.execute("""INSERT INTO web_knowledge (topic, query, summary, source_url, relevance)
+                    VALUES (?,?,?,?,?)""",
+                    ("daily_digest", "market_news",
+                     f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
+                     "rss_feeds", 0.9))
+            except Exception:
+                conn.execute("""INSERT INTO web_knowledge (topic, summary, source_url, relevance)
+                    VALUES (?,?,?,?)""",
+                    ("daily_digest",
+                     f"Сентимент: {data.get('market_sentiment')} | {data.get('trading_implications','')}",
+                     "rss_feeds", 0.9))
+            conn.commit()
 
         logging.info(f"[WebLearner] 📰 Дайджест: {data.get('market_sentiment')} | Риск: {data.get('risk_level')}")
         return data.get("trading_implications", "")
@@ -615,17 +605,16 @@ def get_daily_market_digest() -> str:
 def get_web_knowledge_summary() -> str:
     """Краткая сводка накопленных веб-знаний для отображения"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        total = conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone()[0]
-        recent = conn.execute("""
-            SELECT topic, summary FROM web_knowledge
-            ORDER BY created_at DESC LIMIT 3
-        """).fetchall()
-        strategies = conn.execute("SELECT COUNT(*) FROM strategy_library").fetchone()[0]
-        pending_agenda = conn.execute("""
-            SELECT COUNT(*) FROM learning_agenda WHERE status='pending'
-        """).fetchone()[0]
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            total = conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone()[0]
+            recent = conn.execute("""
+                SELECT topic, summary FROM web_knowledge
+                ORDER BY created_at DESC LIMIT 3
+            """).fetchall()
+            strategies = conn.execute("SELECT COUNT(*) FROM strategy_library").fetchone()[0]
+            pending_agenda = conn.execute("""
+                SELECT COUNT(*) FROM learning_agenda WHERE status='pending'
+            """).fetchone()[0]
 
         lines = [f"📚 Веб-знания: {total} тем | 📈 Стратегий: {strategies} | 📋 В очереди: {pending_agenda}"]
         if recent:
@@ -647,17 +636,16 @@ def groq_self_improve():
     новые правила для self_rules на основе статистики сделок.
     """
     try:
-        conn = sqlite3.connect(DB_PATH)
+        with sqlite3.connect(DB_PATH) as conn:
+            # Статистика за 7 дней
+            stats = conn.execute("""
+                SELECT symbol, result, rr_achieved, timeframe, confluence, regime
+                FROM signal_log
+                WHERE created_at > datetime('now', '-7 days')
+                ORDER BY created_at DESC LIMIT 50
+            """).fetchall()
 
-        # Статистика за 7 дней
-        stats = conn.execute("""
-            SELECT symbol, result, rr_achieved, timeframe, confluence, regime
-            FROM signal_log
-            WHERE created_at > datetime('now', '-7 days')
-            ORDER BY created_at DESC LIMIT 50
-        """).fetchall()
-
-        rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+            rules_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
         wins  = len([s for s in stats if s[1] in ('tp1','tp2','tp3')])
         losses = len([s for s in stats if s[1] == 'sl'])
         total = len(stats)
@@ -665,8 +653,6 @@ def groq_self_improve():
 
         best  = [(s[0], s[2]) for s in stats if s[1] in ('tp2','tp3')][:5]
         worst = [(s[0], s[4]) for s in stats if s[1] == 'sl'][:5]
-
-        conn.close()
 
         prompt = f"""Ты — AI торговый бот APEX. Проанализируй свои результаты и предложи улучшения.
 
@@ -698,23 +684,22 @@ def groq_self_improve():
         data = json.loads(clean)
         improvements = data.get("improvements", [])
 
-        conn = sqlite3.connect(DB_PATH)
-        saved = 0
-        for imp in improvements:
-            rule_text = imp.get("rule_text")
-            try:
-                conf_val = float(str(imp.get("confidence", 0)).split()[0])
-            except (ValueError, TypeError):
-                conf_val = 0.0
-            if rule_text and conf_val >= 0.65:
-                conn.execute("""INSERT OR IGNORE INTO self_rules
-                    (rule_type, rule_text, confidence, source, created_at, active)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
-                    (imp.get("rule_type", "prefer"), rule_text,
-                     imp.get("confidence", 0.7), "groq_self_improve"))
-                saved += 1
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            saved = 0
+            for imp in improvements:
+                rule_text = imp.get("rule_text")
+                try:
+                    conf_val = float(str(imp.get("confidence", 0)).split()[0])
+                except (ValueError, TypeError):
+                    conf_val = 0.0
+                if rule_text and conf_val >= 0.65:
+                    conn.execute("""INSERT OR IGNORE INTO self_rules
+                        (rule_type, rule_text, confidence, source, created_at, active)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
+                        (imp.get("rule_type", "prefer"), rule_text,
+                         imp.get("confidence", 0.7), "groq_self_improve"))
+                    saved += 1
+            conn.commit()
 
         logging.info(f"[WebLearner] Groq самоулучшение: {saved} правил добавлено")
         return improvements

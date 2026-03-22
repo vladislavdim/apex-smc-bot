@@ -2787,6 +2787,18 @@ def get_upcoming_events():
     try:
         now = datetime.now()
         warnings = []
+        items = []
+        try:
+            r = requests.get(
+                "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                items = r.json()
+        except Exception as e:
+            logging.debug(f"get_upcoming_events fetch: {e}")
+
         for item in items:
             title = item.get("title", "")
             if any(kw.lower() in title.lower() for kw in high_impact):
@@ -2795,7 +2807,8 @@ def get_upcoming_events():
         econ_cache = " | ".join(warnings[:2]) if warnings else ""
         econ_cache_time = time.time()
         return econ_cache
-    except:
+    except Exception as e:
+        logging.debug(f"get_upcoming_events: {e}")
         return ""
 
 # ===== РЫНОЧНЫЙ РЕЖИМ =====
@@ -3022,7 +3035,7 @@ def analyze_trade_type(symbol, trade_type="swing"):
             tp2 = round(entry + risk * 3, 6)
             tp3 = round(entry + risk * 5, 6)
         else:
-            entry = ob["bottom"] if ob else price
+            entry = ob["top"] if ob else price
             sl = round(entry + risk, 6)
             tp1 = round(entry - risk * 2, 6)
             tp2 = round(entry - risk * 3, 6)
@@ -3185,24 +3198,6 @@ def full_scan(symbol, timeframe="1h"):
             logging.info(f"[BTC Filter] {symbol} пропущен: {btc_reason}")
             return None
 
-        # ── CHoCH/MSS подтверждение на 15m ──
-        try:
-            _candles_15m = get_candles(symbol, "15m", 30)
-            if _candles_15m and len(_candles_15m) >= 10:
-                _sw_15m, _sl_15m = find_swings(_candles_15m, lookback=3)
-                _cl_15m = classify_swings(_sw_15m, _sl_15m)
-                _ev_15m = detect_events(_candles_15m, _cl_15m)
-                _has_choch_15m = any(
-                    e.get("direction") == direction and e.get("type") in ("CHoCH", "BOS")
-                    for e in _ev_15m
-                )
-                if not _has_choch_15m:
-                    # Нет CHoCH/BOS на 15m — добавляем penalty
-                    total_weight -= 8
-                    confluence.append(f"⚠️ Нет CHoCH/BOS на 15m (-8)")
-        except Exception:
-            pass
-
         # Старший ТФ — не входим в лонг у сопротивления
         if htf.get("near_resistance") and direction == "BULLISH":
             logging.info(f"[HTF Filter] {symbol} у сопротивления ({htf['dist_to_resistance']:.1f}% до него) — лонг пропущен")
@@ -3225,6 +3220,23 @@ def full_scan(symbol, timeframe="1h"):
         mtf_w = weights.get("mtf", 30)
         confluence.append(f"✅ {mtf['match_count']}/{mtf['total']} ТФ совпали (вес {mtf_w})")
         total_weight += mtf_w
+
+        # ── CHoCH/MSS подтверждение на 15m ──
+        try:
+            _candles_15m = get_candles(symbol, "15m", 30)
+            if _candles_15m and len(_candles_15m) >= 10:
+                _sw_15m, _sl_15m = find_swings(_candles_15m, lookback=3)
+                _cl_15m = classify_swings(_sw_15m, _sl_15m)
+                _ev_15m = detect_events(_candles_15m, _cl_15m)
+                _has_choch_15m = any(
+                    e.get("direction") == direction and e.get("type") in ("CHoCH", "BOS")
+                    for e in _ev_15m
+                )
+                if not _has_choch_15m:
+                    total_weight -= 8
+                    confluence.append(f"⚠️ Нет CHoCH/BOS на 15m (-8)")
+        except Exception:
+            pass
 
         if ob:
             ob_w = weights.get("ob", 25)
@@ -3688,7 +3700,7 @@ def full_scan(symbol, timeframe="1h"):
             tp2 = smart_round(entry + risk * 3)
             tp3 = smart_round(entry + risk * 5)
         else:
-            entry = ob["bottom"] if ob else price
+            entry = ob["top"] if ob else price
             sl = smart_round(entry + risk)
             tp1 = smart_round(entry - risk * 2)
             tp2 = smart_round(entry - risk * 3)

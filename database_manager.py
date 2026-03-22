@@ -289,8 +289,8 @@ class DatabasePool:
             if conn:
                 try:
                     conn.commit()
-                except:
-                    pass  # connection might be closed
+                except Exception as e:
+                    logging.warning(f"db pool commit: {e}")
                 
                 with self.lock:
                     if len(self.pool) < self.max_connections:
@@ -441,8 +441,8 @@ def run_migrations():
             # Активируем старые записи
             try:
                 conn.execute("UPDATE self_rules SET active=1 WHERE active IS NULL")
-            except:
-                pass
+            except Exception as e:
+                logging.warning(f"self_rules migration: {e}")
 
             # === Миграция user_memory: добавляем total_messages если нет ===
             try:

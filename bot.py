@@ -637,10 +637,10 @@ async def cmd_stats(message: types.Message):
     mem = get_user_memory(user_id)
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        total = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
-        wins = conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone()[0]
-        losses = conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone()[0]
-        pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+        total = (conn.execute("SELECT COUNT(*) FROM signals").fetchone() or [0])[0]
+        wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
+        losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone() or [0])[0]
+        pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
         top = conn.execute(
             "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
         ).fetchall()
@@ -1156,19 +1156,19 @@ async def handle_callback(callback: CallbackQuery):
         try:
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
             # Считаем только реально отправленные сигналы (не pending из очереди)
-            total = conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending' OR result IS NULL").fetchone()[0]
+            total = (conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending' OR result IS NULL").fetchone() or [0])[0]
             # Добавляем pending которые реально в работе (не в timing_queue)
-            real_pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+            real_pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
             total = total + real_pending  # Все записи в signals — это уже отправленные
-            wins = conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone()[0]
-            losses = conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone()[0]
-            pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+            wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
+            losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone() or [0])[0]
+            pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
             # Наблюдение — пары в очереди тайминга
-            watchlist = conn.execute("SELECT COUNT(*) FROM timing_queue WHERE status='waiting'").fetchone()[0]
+            watchlist = (conn.execute("SELECT COUNT(*) FROM timing_queue WHERE status='waiting'").fetchone() or [0])[0]
             top = conn.execute(
                 "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
             ).fetchall()
-            errors_count = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone()[0]
+            errors_count = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
             patterns = conn.execute(
                 "SELECT error_type, count FROM error_patterns ORDER BY count DESC LIMIT 3"
             ).fetchall()
@@ -1211,30 +1211,30 @@ async def handle_callback(callback: CallbackQuery):
         try:
             # Данные из основной БД
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+            rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
             top_rules = conn.execute(
                 "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 5"
             ).fetchall()
-            obs_count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
-            model_count = conn.execute("SELECT COUNT(*) FROM market_model").fetchone()[0]
+            obs_count = (conn.execute("SELECT COUNT(*) FROM observations").fetchone() or [0])[0]
+            model_count = (conn.execute("SELECT COUNT(*) FROM market_model").fetchone() or [0])[0]
             # avoid_count — проверяем оба варианта (старый category и новый rule_type)
-            avoid_count = conn.execute(
+            avoid_count = (conn.execute(
                 "SELECT COUNT(*) FROM self_rules WHERE rule_type='avoid' OR category='avoid'"
-            ).fetchone()[0]
+            ).fetchone() or [0])[0]
             # knowledge_count — из таблицы knowledge напрямую
-            knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+            knowledge_count = (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
             # pattern_count — из signal_log
             try:
-                pattern_count = conn.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
+                pattern_count = (conn.execute("SELECT COUNT(*) FROM signal_log").fetchone() or [0])[0]
             except Exception as e:
                 import logging
                 logging.error(e)
                 pattern_count = 0
             # coin_count — правила по монетам
             try:
-                coin_count = conn.execute(
+                coin_count = (conn.execute(
                     "SELECT COUNT(DISTINCT symbol) FROM signal_log WHERE symbol IS NOT NULL"
-                ).fetchone()[0]
+                ).fetchone() or [0])[0]
             except Exception as e:
                 import logging
                 logging.error(e)
@@ -1348,10 +1348,10 @@ async def handle_callback(callback: CallbackQuery):
                 # learning.py нет — показываем статистику из brain.db напрямую
                 try:
                     conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-                    total_sig = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
-                    wins = conn.execute("SELECT COUNT(*) FROM signals WHERE result='win'").fetchone()[0]
-                    losses = conn.execute("SELECT COUNT(*) FROM signals WHERE result='loss'").fetchone()[0]
-                    pending = conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone()[0]
+                    total_sig = (conn.execute("SELECT COUNT(*) FROM signals").fetchone() or [0])[0]
+                    wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='win'").fetchone() or [0])[0]
+                    losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='loss'").fetchone() or [0])[0]
+                    pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
                     conn.close()
                     wr = round(wins/(wins+losses)*100) if (wins+losses) > 0 else 0
                     full = (
@@ -1422,12 +1422,12 @@ async def handle_callback(callback: CallbackQuery):
             priority_row = conn.execute(
                 "SELECT content FROM knowledge WHERE topic='priority_action' ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            new_rules = conn.execute(
+            new_rules = (conn.execute(
                 "SELECT COUNT(*) FROM self_rules WHERE category='self_improve'"
-            ).fetchone()[0]
-            suggested = conn.execute(
+            ).fetchone() or [0])[0]
+            suggested = (conn.execute(
                 "SELECT COUNT(*) FROM knowledge WHERE topic='suggested_api'"
-            ).fetchone()[0]
+            ).fetchone() or [0])[0]
             conn.close()
             priority_txt = priority_row[0][:200] if priority_row else "нет"
             result_text = (
@@ -1768,7 +1768,7 @@ async def handle_callback(callback: CallbackQuery):
         await autonomous_learning_cycle()
         brain = (get_brain_summary() or {}) if BRAIN_BUILDER_AVAILABLE else {}
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        rule_count = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
+        rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
         conn.close()
         await callback.message.edit_text(
             f"✅ <b>Обучение завершено</b>\n\n"
@@ -1789,11 +1789,11 @@ async def handle_callback(callback: CallbackQuery):
         try:
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
             history      = conn.execute("SELECT title, description, after_value, impact_score, created_at FROM learning_history ORDER BY id DESC LIMIT 20").fetchall()
-            total_events = conn.execute("SELECT COUNT(*) FROM learning_history").fetchone()[0]
-            rules_total  = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()[0]
-            rules_strong = conn.execute("SELECT COUNT(*) FROM self_rules WHERE confidence >= 0.7").fetchone()[0]
-            errors_fixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone()[0]
-            knowledge_cnt= conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+            total_events = (conn.execute("SELECT COUNT(*) FROM learning_history").fetchone() or [0])[0]
+            rules_total  = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
+            rules_strong = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE confidence >= 0.7").fetchone() or [0])[0]
+            errors_fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
+            knowledge_cnt= (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
             conn.close()
         except:
             history = []; total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
@@ -1880,11 +1880,11 @@ async def handle_callback(callback: CallbackQuery):
                    FROM signals WHERE result LIKE 'tp%'
                    ORDER BY closed_at DESC LIMIT 15"""
             ).fetchall()
-            total_wins = conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone()[0]
-            total_sigs = conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending'").fetchone()[0]
-            avg_hours = conn.execute(
+            total_wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
+            total_sigs = (conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending'").fetchone() or [0])[0]
+            avg_hours = (conn.execute(
                 "SELECT AVG((julianday(closed_at)-julianday(created_at))*24) FROM signals WHERE result LIKE 'tp%'"
-            ).fetchone()[0] or 0
+            ).fetchone() or [0])[0] or 0
             best = conn.execute(
                 "SELECT symbol, win_rate FROM signal_learning ORDER BY win_rate DESC LIMIT 3"
             ).fetchall()
@@ -1942,9 +1942,9 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "menu_errors":
         try:
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            total_err = conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone()[0]
-            unfixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone()[0]
-            fixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone()[0]
+            total_err = (conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone() or [0])[0]
+            unfixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
+            fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
             errors = conn.execute(
                 """SELECT id, symbol, direction, error_type, result, fixed, created_at
                    FROM bot_errors ORDER BY id DESC LIMIT 8"""
@@ -2305,19 +2305,19 @@ async def cmd_brain(message: types.Message):
     """Показываем что бот знает — его база знаний"""
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        total_k = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+        total_k = (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
         sources = conn.execute(
             "SELECT source, COUNT(*) as cnt FROM knowledge GROUP BY source ORDER BY cnt DESC LIMIT 8"
         ).fetchall()
         recent = conn.execute(
             "SELECT topic, source, created_at FROM knowledge ORDER BY id DESC LIMIT 5"
         ).fetchall()
-        reflections = conn.execute(
+        reflections = (conn.execute(
             "SELECT COUNT(*) FROM knowledge WHERE source='self-reflection'"
-        ).fetchone()[0]
-        comparisons = conn.execute(
+        ).fetchone() or [0])[0]
+        comparisons = (conn.execute(
             "SELECT COUNT(*) FROM knowledge WHERE source='self-compare'"
-        ).fetchone()[0]
+        ).fetchone() or [0])[0]
         conn.close()
 
         sources_text = "\n".join([f"• {r[0]}: {r[1]} записей" for r in sources])
@@ -2429,9 +2429,9 @@ async def cmd_errors(message: types.Message):
     # /errors — список всех ошибок
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        total = conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone()[0]
-        unfixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone()[0]
-        fixed = conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone()[0]
+        total = (conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone() or [0])[0]
+        unfixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
+        fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
 
         # Последние 10 ошибок
         errors = conn.execute(
@@ -3834,6 +3834,7 @@ async def groq_analyze_logs():
             "INSERT INTO brain_log (event_type, title, description, source) VALUES (?,?,?,?)",
             ("log_analysis", "[" + severity.upper() + "] " + summary, desc, "groq_log_analyzer")
         )
+        conn.commit()
         conn.close()
 
         logging.info(f"[LogAnalyzer] {severity}: {summary[:80]}")
@@ -3934,7 +3935,7 @@ async def restore_db_from_github():
             local_size = os.path.getsize("brain.db")
             try:
                 _conn = _sq.connect("brain.db", timeout=5)
-                local_knowledge = _conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+                local_knowledge = (_conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
                 _conn.close()
             except Exception:
                 local_knowledge = 0
