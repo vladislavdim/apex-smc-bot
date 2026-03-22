@@ -5161,46 +5161,59 @@ async def auto_add_rule(error_type, count):
 def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx="", entry=None, sl=None, tp1=None):
     """Короткий AI-комментарий к сигналу — с учётом накопленного опыта"""
     try:
-        factors = []
-        if mtf:
-            factors.append(f"{mtf['match_count']} из {mtf['total']} таймфреймов показывают {direction}")
+        # Конкретный паттерн входа (не общие фразы)
+        pattern_parts = []
         if ob:
-            factors.append(f"Order Block на уровне {ob['bottom']:.4f}–{ob['top']:.4f}")
+            ob_dir = "медвежий" if direction == "BEARISH" else "бычий"
+            pattern_parts.append(f"{ob_dir} OB {ob['bottom']:.4f}–{ob['top']:.4f}")
         if fvg:
-            factors.append(f"Fair Value Gap заполняется")
+            pattern_parts.append(f"FVG {fvg['bottom']:.4f}–{fvg['top']:.4f}")
         if fg:
-            factors.append(f"Fear & Greed = {fg['value']} ({fg['label']})")
+            pattern_parts.append(f"F&G={fg['value']} ({fg['label']})")
         if funding is not None:
-            factors.append(f"Funding Rate {funding:+.4f}%")
+            pattern_parts.append(f"FR {funding:+.4f}%")
         if regime:
             regime_mode = regime.get("mode", str(regime)) if isinstance(regime, dict) else str(regime)
-            factors.append(f"рынок в режиме {regime_mode}")
+            pattern_parts.append(f"режим {regime_mode}")
 
-        factors_text = ", ".join(factors)
+        pattern_text = ", ".join(pattern_parts) if pattern_parts else "нет доп. факторов"
         past_errors = get_knowledge(f"error_{symbol}")
 
         brain_section = f"\nМОЙ НАКОПЛЕННЫЙ ОПЫТ:\n{brain_ctx[:400]}" if brain_ctx else ""
         errors_section = f"\nПРОШЛЫЕ ОШИБКИ ПО {symbol}: {past_errors[:200]}" if past_errors else ""
 
-        # Конкретные уровни для осмысленного анализа
+        # Уровни входа — обязательно конкретные цены
         levels_section = ""
         if entry and sl and tp1:
             _rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
-            levels_section = f"\nВход: {entry} | SL: {sl} | TP1: {tp1} | RR: {_rr:.1f}"
+            _sl_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0
+            _tp_pct = abs(tp1 - entry) / entry * 100 if entry > 0 else 0
+            levels_section = (
+                f"\nВход: {entry} | SL: {sl} (-{_sl_pct:.2f}%) | TP1: {tp1} (+{_tp_pct:.2f}%) | RR: {_rr:.1f}"
+            )
 
-        prompt = f"""Ты APEX — торговый бот который учится на каждой сделке.
+        # OB/FVG уровни отдельно для анализа
+        zones_section = ""
+        if ob:
+            zones_section += f"\nOB зона: {ob['bottom']:.6f} – {ob['top']:.6f}"
+        if fvg:
+            zones_section += f"\nFVG зона: {fvg['bottom']:.6f} – {fvg['top']:.6f}"
+
+        prompt = f"""Отвечай ТОЛЬКО на русском языке, без иероглифов и символов других языков.
+
+Ты APEX — торговый бот. Анализируй КОНКРЕТНЫЙ паттерн входа, не общие фразы.
 
 Сигнал: {symbol} {direction} | Скор: {confluence_score}/100
-Факторы: {factors_text}{levels_section}{brain_section}{errors_section}
+Паттерн: {pattern_text}{levels_section}{zones_section}{brain_section}{errors_section}
 
-Напиши 2-3 предложения:
-1. Почему даёшь этот сигнал
-2. Что ты УЖЕ ЗНАЕШЬ об этой монете из прошлого опыта (если есть)
-3. На что обратить внимание
+Напиши 2-3 предложения на русском:
+1. Какой конкретный паттерн (OB, FVG, sweep, CHoCH) и на каком уровне цены
+2. Что знаешь об этой монете из опыта (если есть)
+3. Ключевой риск этой конкретной сделки
 
-Коротко, конкретно, без воды."""
+Только русский язык. Конкретные цены и уровни. Без воды и общих фраз."""
 
-        comment = ask_groq(prompt, max_tokens=180)
+        comment = ask_groq(prompt, max_tokens=200)
         return comment.strip() if comment else ""
     except:
         return ""
