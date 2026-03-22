@@ -3164,10 +3164,13 @@ async def auto_wyckoff_scan():
 
 
 async def auto_fast_deal_scan():
-    """Каждые 5 мин: 5m скальпинг — только в активные сессии 08-12 и 16-20 UTC"""
+    """Каждые 5 мин: 5m скальпинг — Kill Zone 08:30-10:30 и 16:30-18:30 UTC"""
     from datetime import datetime as _dt
-    _hour = _dt.utcnow().hour
-    if not (8 <= _hour < 12 or 16 <= _hour < 20):
+    _now_dt = _dt.utcnow()
+    _hour = _now_dt.hour
+    _minute = _now_dt.minute
+    _time_m = _hour * 60 + _minute
+    if not (510 <= _time_m <= 630 or 990 <= _time_m <= 1110):
         return
 
     found = []
@@ -3203,11 +3206,15 @@ async def auto_fast_deal_scan():
             except Exception:
                 pass
 
+            _fast_tp1 = r.get("tp1", r["tp"])
+            _fast_tp2 = r.get("tp2", r["tp"])
+            _fast_tp2_pct = r.get("tp2_pct", r["tp_pct"])
             text = (
                 f"⚡ <b>[FAST]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 5m | 1d: {r['direction_1d']}\n"
                 f"\n"
-                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code> (+{r['tp_pct']}%)\n"
+                f"🎯 TP1:  <code>{smart_price_fmt(_fast_tp1)}</code> (+{r['tp_pct']}%)\n"
+                f"🎯 TP2:  <code>{smart_price_fmt(_fast_tp2)}</code> (+{_fast_tp2_pct}%)\n"
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
                 f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code> (-{r['sl_pct']}%)\n"
                 f"\n"
@@ -3251,10 +3258,12 @@ async def auto_fast_deal_scan():
             except Exception:
                 pass
 
-            # Сохраняем в БД
+            # Сохраняем в БД с tp1 и tp2 отдельно для частичного закрытия
+            _f_tp1 = r.get("tp1", r["tp"])
+            _f_tp2 = r.get("tp2", r["tp"])
             save_signal_db(
                 symbol, direction, "FAST",
-                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                r["entry"], _f_tp1, _f_tp2, _f_tp2, r["sl"],
                 "5m", 1, "⚡ FAST",
                 confluence=int(r["rr"] * 20), regime="FAST"
             )
@@ -3483,6 +3492,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
+        # Mitigation check — OB уже протестирован, вход ненадёжный
+        if levels.get("mitigated"):
+            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
+            return None
         entry = levels["entry"]
         sl    = levels["sl"]
         tp1   = levels["tp1"]
