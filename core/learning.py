@@ -599,6 +599,21 @@ def should_skip_symbol(symbol: str, direction: str) -> tuple[bool, str]:
             conn.close()
             return True, f"Частый SL паттерн (x{bad[0]})"
 
+        # ── Cross-strategy learning ──
+        # Если 2+ разных стратегии дали SL на одной паре за последние 48ч — блокируем
+        try:
+            cross = conn.execute("""
+                SELECT COUNT(DISTINCT signal_type) as strat_count, COUNT(*) as total_sl
+                FROM signals
+                WHERE symbol=? AND direction=? AND result='sl'
+                AND created_at >= datetime('now', '-48 hours')
+            """, (symbol, direction)).fetchone()
+            if cross and cross[0] >= 2:
+                conn.close()
+                return True, f"Cross-strategy SL: {cross[0]} стратегий дали SL ({cross[1]} сделок за 48ч)"
+        except Exception:
+            pass
+
         conn.close()
         return False, ""
     except:
