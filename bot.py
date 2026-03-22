@@ -2896,6 +2896,10 @@ async def auto_scan_swing():
                 "scan_type": "swing",
             }
 
+            # Проверка актуальности цены входа
+            if not _is_entry_still_valid(sd, max_drift_pct=3.0):
+                continue
+
             # Блокируем если сделка уже открыта в БД
             try:
                 import sqlite3 as _sq3
@@ -3113,6 +3117,10 @@ async def auto_wyckoff_scan():
             if _wyk_comment:
                 text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_wyk_comment}</i>"
 
+            # Проверка актуальности цены входа
+            if not _is_entry_still_valid(r, max_drift_pct=5.0):
+                continue
+
             # Блокируем если сделка уже открыта
             try:
                 import sqlite3 as _sq3
@@ -3234,6 +3242,10 @@ async def auto_fast_deal_scan():
             )
             if _fast_comment:
                 text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_fast_comment}</i>"
+
+            # Проверка актуальности цены входа (1.5% для скальпинга)
+            if not _is_entry_still_valid(r, max_drift_pct=1.5):
+                continue
 
             # Блокируем если сделка уже открыта
             try:
@@ -3561,6 +3573,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # ── Groq анализирует логику позиционного входа ──
         groq_logic = ""
         groq_time = tf_time_hint
+        _groq_valid = True  # default: пропускаем если Groq не ответил
         try:
             fg = get_fear_greed()
             funding = get_funding_rate(symbol)
@@ -3570,18 +3583,36 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             regime_val = regime.get("mode", "?") if isinstance(regime, dict) else str(regime)
             htf_1d = smc_on_tf(symbol, "1d")
             htf_1w = smc_on_tf(symbol, "1w")
+            # BTC тренд
+            _btc_1h = smc_on_tf("BTCUSDT", "1h")
+            _btc_1d = smc_on_tf("BTCUSDT", "1d")
+            _btc_str = f"BTC 1h: {_btc_1h}, 1d: {_btc_1d}"
+            # OB/FVG зоны
+            _ob_str = f"OB: {ob['bottom']:.6f}–{ob['top']:.6f}" if ob else "OB: нет"
+            _fvg_str = f"FVG: {fvg['bottom']:.6f}–{fvg['top']:.6f}" if fvg else "FVG: нет"
+            # ATR
+            _candle_h = [c["high"] for c in candles[-14:]]
+            _candle_l = [c["low"] for c in candles[-14:]]
+            _atr_mtf = sum(_candle_h[i] - _candle_l[i] for i in range(len(_candle_h))) / len(_candle_h)
+            # Volume
+            _vol_last = candles[-1].get("volume", 0)
+            _vol_avg = sum(c.get("volume", 0) for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
+            _vol_str = f"Vol: {_vol_last:.0f} vs avg: {_vol_avg:.0f}" if _vol_avg > 0 else ""
+
             conf_short = "\n".join(confluence[:5]) if confluence else "нет данных"
             groq_prompt = (
                 f"Ты трейдер SMC. Позиционный сигнал. Ответь СТРОГО JSON без лишнего:\n"
-                f'{{\"logic\": \"почему входим макс 15 слов\", \"hours\": число_часов_до_tp}}\n\n'
+                f'{{\"logic\": \"почему входим макс 15 слов\", \"hours\": число_часов_до_tp, \"valid\": true/false}}\n\n'
                 f"Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
                 f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
                 f"MTF: {mtf.get('match_count',0)}/4 | 1d: {htf_1d} | 1w: {htf_1w}\n"
                 f"RR: {levels.get('rr',0)} | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
-                f"Режим: {regime_val}\n"
+                f"Режим: {regime_val} | {_btc_str}\n"
+                f"{_ob_str} | {_fvg_str} | ATR: {smart_price_fmt(_atr_mtf)}\n"
+                f"{_vol_str}\n"
                 f"Confluence:\n{conf_short}"
             )
-            groq_response = ask_groq(groq_prompt, max_tokens=80)
+            groq_response = ask_groq(groq_prompt, max_tokens=100)
             if groq_response and len(groq_response) > 5:
                 try:
                     import json as _json, re as _re
@@ -3590,6 +3621,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                     if json_match:
                         clean = json_match.group()
                     parsed = _json.loads(clean)
+                    # Groq как фильтр — если valid=false, блокируем
+                    if not parsed.get("valid", True):
+                        logging.info(f"[MTF Groq] {symbol} {direction}: Groq отклонил сигнал")
+                        return None
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
                         groq_logic = str(parsed["logic"]).strip()
                     if parsed.get("hours"):

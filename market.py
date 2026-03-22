@@ -7189,43 +7189,52 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             _avg_vol_10 = sum(_vol_10) / len(_vol_10) if _vol_10 else 0
             _vol_desc = f"Vol avg10: {_avg_vol_10:.0f}, last: {_vol_10[-1]:.0f}" if _vol_10 else ""
 
+            # Funding, Fear&Greed, Market Regime
+            _sw_funding = get_funding_rate(symbol)
+            _sw_fg = get_fear_greed()
+            _sw_regime = get_market_regime(symbol)
+            _sw_fund_str = f"{_sw_funding:+.4f}%" if _sw_funding is not None else "N/A"
+            _sw_fg_str = f"{_sw_fg['value']} ({_sw_fg['label']})" if _sw_fg else "N/A"
+            _sw_regime_str = _sw_regime.get("mode", "?") if isinstance(_sw_regime, dict) else str(_sw_regime)
+
             groq_prompt = (
                 f"Ты трейдер SMC. Swing сетап. Ответь СТРОГО JSON без лишнего текста:\n"
                 f"{{\"logic\": \"логика входа макс 12 слов\", \"hours\": число_часов, \"valid\": true/false}}\n\n"
                 f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir} 1w: {htf_1w_swing}\n"
                 f"ATR: {smart_round(atr)} До TP: {smart_round(distance_to_tp)} Расчёт: ~{est_hours}ч\n"
+                f"Funding: {_sw_fund_str} | Fear&Greed: {_sw_fg_str} | Режим: {_sw_regime_str}\n"
                 f"{_ob_desc} | {_fvg_desc} | {_vol_desc}\n"
                 f"Свечи: {candles_str}"
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100)
-            if groq_response and len(groq_response) > 5:
-                try:
-                    import json as _json, re as _re
-                    clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
-                    json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                    if json_match:
-                        clean = json_match.group()
-                    parsed = _json.loads(clean)
-                    # Groq как фильтр — если valid=false, блокируем (default=False)
-                    if not parsed.get("valid", False):
-                        logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
-                        return None
-                    if parsed.get("logic") and len(str(parsed["logic"])) > 5:
-                        logic = str(parsed["logic"]).strip()
-                    if parsed.get("hours") and str(parsed["hours"]).isdigit():
-                        est_hours = max(12, min(int(parsed["hours"]), 96))
-                except Exception:
-                    # Если JSON совсем не вышел — берём текст только если он осмысленный
-                    clean_text = groq_response.strip().replace("\n", " ")
-                    if len(clean_text) > 10 and not clean_text.upper() == clean_text:
-                        logic = clean_text[:80]
+            if not groq_response or len(groq_response) <= 5:
+                # Groq timeout/fail — блокируем сигнал вместо fallback
+                logging.info(f"[SWING Groq] {symbol}: Groq не ответил — блокируем сигнал")
+                return None
+            try:
+                import json as _json, re as _re
+                clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
+                json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                if json_match:
+                    clean = json_match.group()
+                parsed = _json.loads(clean)
+                # Groq как фильтр — если valid=false, блокируем (default=False)
+                if not parsed.get("valid", False):
+                    logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
+                    return None
+                if parsed.get("logic") and len(str(parsed["logic"])) > 5:
+                    logic = str(parsed["logic"]).strip()
+                if parsed.get("hours") and str(parsed["hours"]).isdigit():
+                    est_hours = max(12, min(int(parsed["hours"]), 96))
+            except Exception:
+                # JSON не распарсился — блокируем
+                logging.info(f"[SWING Groq] {symbol}: Groq вернул не-JSON — блокируем сигнал")
+                return None
         except Exception as ge:
-            logging.debug(f"[SwingGroq] {symbol}: {ge}")
-            tf_hours = {"1h": 1, "4h": 4, "1d": 24}
-            est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 12
-            est_hours = max(12, min(est_hours, 96))
+            logging.info(f"[SWING Groq] {symbol}: exception {ge} — блокируем сигнал")
+            return None
 
         return {
             "symbol":    symbol,
@@ -7595,7 +7604,11 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         sl     = round(acc_low * 0.96, 8)  # Стоп под лоу боковика -4%
         ar_price = phases.get("AR", {}).get("price", price_peak * 0.8)
 
-        # Groq считает цель
+        # OB/FVG для промпта и результата
+        _wyk_ob = find_ob(candles_1d, "BULLISH")
+        _wyk_fvg = find_fvg(candles_1d, "BULLISH")
+
+        # Groq считает цель + валидирует сигнал
         tp = None
         logic = ""
         try:
@@ -7615,9 +7628,19 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             _phase_vols.append(f"avg_vol_1d: {_avg_vol_1d:.0f}")
             _phase_vols.append(f"vol_compression: {vol_compression:.2f}")
 
+            # HTF тренд, Funding, Fear&Greed
+            _wy_htf_1d = smc_on_tf(symbol, "1d")
+            _wy_htf_1w = smc_on_tf(symbol, "1w")
+            _wy_funding = get_funding_rate(symbol)
+            _wy_fg = get_fear_greed()
+            _wy_fund_str = f"{_wy_funding:+.4f}%" if _wy_funding is not None else "N/A"
+            _wy_fg_str = f"{_wy_fg['value']} ({_wy_fg['label']})" if _wy_fg else "N/A"
+            _wy_ob_str = f"OB: {_wyk_ob['bottom']:.6f}–{_wyk_ob['top']:.6f}" if _wyk_ob else "OB: нет"
+            _wy_fvg_str = f"FVG: {_wyk_fvg['bottom']:.6f}–{_wyk_fvg['top']:.6f}" if _wyk_fvg else "FVG: нет"
+
             groq_prompt = (
-                f"Ты эксперт Wyckoff. Дай цель роста после Spring. Ответь СТРОГО JSON:\n"
-                f'{{"target": число_цены, "target_pct": процент, "logic": "причина макс 10 слов"}}\n\n'
+                f"Ты эксперт Wyckoff. Оцени сетап и дай цель. Ответь СТРОГО JSON:\n"
+                f'{{"target": число_цены, "target_pct": процент, "logic": "причина макс 10 слов", "valid": true/false}}\n\n'
                 f"Пара: {symbol}\nЦена: {price_now}\n"
                 f"SC лоу: {phases['SC']['price']:.6f}\n"
                 f"AR хай: {ar_price:.6f}\n"
@@ -7625,6 +7648,9 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"Боковик: {acc_low:.6f}—{acc_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
                 f"Объёмы фаз: {', '.join(_phase_vols)}\n"
+                f"1d: {_wy_htf_1d} | 1w: {_wy_htf_1w}\n"
+                f"Funding: {_wy_fund_str} | Fear&Greed: {_wy_fg_str}\n"
+                f"{_wy_ob_str} | {_wy_fvg_str}\n"
                 f"Даунтренд: -{drawdown_pct:.0f}%"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
@@ -7634,6 +7660,10 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
                 if m:
                     parsed = _j.loads(m.group())
+                    # Groq как фильтр — если valid=false, блокируем
+                    if not parsed.get("valid", True):
+                        logging.info(f"[WYCKOFF Groq] {symbol} LONG: Groq отклонил сигнал")
+                        return None
                     if parsed.get("target") and float(parsed["target"]) > entry:
                         tp = float(parsed["target"])
                     if parsed.get("logic"):
@@ -7662,10 +7692,6 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         sl_pct = round((entry - sl) / entry * 100, 1)
 
         phase_names = [p for p in ["SC", "AR", "ST", "Spring", "SOS"] if p in phases and (p not in ["Spring","SOS"] or phases[p].get("found"))]
-
-        # OB/FVG для AI комментария
-        _wyk_ob = find_ob(candles_1d, "BULLISH")
-        _wyk_fvg = find_fvg(candles_1d, "BULLISH")
 
         return {
             "symbol": symbol, "direction": "BULLISH",
@@ -7825,7 +7851,11 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         sl    = round(dist_high * 1.04, 8)  # Стоп над хаем боковика +4%
         ar_price = phases.get("AR", {}).get("price", price_bottom * 1.2)
 
-        # Groq считает цель
+        # OB/FVG для промпта и результата
+        _wyk_ob = find_ob(candles_1d, "BEARISH")
+        _wyk_fvg = find_fvg(candles_1d, "BEARISH")
+
+        # Groq считает цель + валидирует сигнал
         tp = None
         logic = ""
         try:
@@ -7841,9 +7871,19 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             _d_phase_vols.append(f"avg_vol_1d: {_avg_vol_1d_d:.0f}")
             _d_phase_vols.append(f"vol_compression: {vol_compression:.2f}")
 
+            # HTF тренд, Funding, Fear&Greed
+            _wyd_htf_1d = smc_on_tf(symbol, "1d")
+            _wyd_htf_1w = smc_on_tf(symbol, "1w")
+            _wyd_funding = get_funding_rate(symbol)
+            _wyd_fg = get_fear_greed()
+            _wyd_fund_str = f"{_wyd_funding:+.4f}%" if _wyd_funding is not None else "N/A"
+            _wyd_fg_str = f"{_wyd_fg['value']} ({_wyd_fg['label']})" if _wyd_fg else "N/A"
+            _wyd_ob_str = f"OB: {_wyk_ob['bottom']:.6f}–{_wyk_ob['top']:.6f}" if _wyk_ob else "OB: нет"
+            _wyd_fvg_str = f"FVG: {_wyk_fvg['bottom']:.6f}–{_wyk_fvg['top']:.6f}" if _wyk_fvg else "FVG: нет"
+
             groq_prompt = (
-                f"Ты эксперт Wyckoff Distribution. Дай цель падения после UTAD. Ответь СТРОГО JSON:\n"
-                f'{{"target": число_цены, "target_pct": процент_падения, "logic": "причина макс 10 слов"}}\n\n'
+                f"Ты эксперт Wyckoff Distribution. Оцени сетап и дай цель. Ответь СТРОГО JSON:\n"
+                f'{{"target": число_цены, "target_pct": процент_падения, "logic": "причина макс 10 слов", "valid": true/false}}\n\n'
                 f"Пара: {symbol}\nЦена: {price_now}\n"
                 f"BC хай: {phases['BC']['price']:.6f}\n"
                 f"AR лоу: {ar_price:.6f}\n"
@@ -7851,6 +7891,9 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"Боковик: {dist_low:.6f}—{dist_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
                 f"Объёмы фаз: {', '.join(_d_phase_vols)}\n"
+                f"1d: {_wyd_htf_1d} | 1w: {_wyd_htf_1w}\n"
+                f"Funding: {_wyd_fund_str} | Fear&Greed: {_wyd_fg_str}\n"
+                f"{_wyd_ob_str} | {_wyd_fvg_str}\n"
                 f"Рост: +{pump_pct:.0f}%"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
@@ -7860,6 +7903,10 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
                 if m:
                     parsed = _j.loads(m.group())
+                    # Groq как фильтр — если valid=false, блокируем
+                    if not parsed.get("valid", True):
+                        logging.info(f"[WYCKOFF Groq] {symbol} SHORT: Groq отклонил сигнал")
+                        return None
                     if parsed.get("target") and float(parsed["target"]) < entry:
                         tp = float(parsed["target"])
                     if parsed.get("logic"):
@@ -7887,10 +7934,6 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         sl_pct = round((sl - entry) / entry * 100, 1)
 
         phase_names = [p for p in ["BC", "AR", "ST", "UTAD", "SOW"] if p in phases and (p not in ["UTAD","SOW"] or phases[p].get("found"))]
-
-        # OB/FVG для AI комментария
-        _wyk_ob = find_ob(candles_1d, "BEARISH")
-        _wyk_fvg = find_fvg(candles_1d, "BEARISH")
 
         return {
             "symbol": symbol, "direction": "BEARISH",
@@ -8114,30 +8157,46 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _fvg_4h_desc = f"FVG: {fvg_4h['bottom']:.4f}–{fvg_4h['top']:.4f}" if fvg_4h else "FVG: нет"
             _sweep_vol_desc = f"Vol sweep: {_sweep_c.get('volume', 0):.0f}, avg: {_avg_vol_5m:.0f}" if _avg_vol_5m > 0 else ""
 
+            # Fear&Greed, Funding, Market Regime
+            _fast_fg = get_fear_greed()
+            _fast_funding = get_funding_rate(symbol)
+            _fast_regime = get_market_regime(symbol)
+            _fast_fg_str = f"{_fast_fg['value']} ({_fast_fg['label']})" if _fast_fg else "N/A"
+            _fast_fund_str = f"{_fast_funding:+.4f}%" if _fast_funding is not None else "N/A"
+            _fast_regime_str = _fast_regime.get("mode", "?") if isinstance(_fast_regime, dict) else str(_fast_regime)
+
             groq_prompt = (
                 f"Ты SMC скальпер. Оцени 5m сигнал. Ответь СТРОГО JSON:\n"
                 f'{{"logic": "причина входа макс 8 слов", "valid": true/false}}\n\n'
                 f"Пара: {symbol} Направление: {direction}\n"
                 f"5m sweep: {'лоу' if direction == 'BULLISH' else 'хая'} ({_sweep_candles_ago} свечей назад)\n"
                 f"4h зона: {zone_desc} | {_ob_4h_desc} | {_fvg_4h_desc}\n"
-                f"1d тренд: {direction_1d}\n"
-                f"BTC тренд: {btc_trend}\n"
+                f"1d тренд: {direction_1d} | BTC: {btc_trend}\n"
+                f"Funding: {_fast_fund_str} | Fear&Greed: {_fast_fg_str} | Режим: {_fast_regime_str}\n"
                 f"{_sweep_vol_desc}\n"
-                f"Вход: {entry} SL: {sl} TP: {tp} RR: {rr}"
+                f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2} RR: {rr}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)
-            if groq_resp:
-                import json as _j, re as _re
-                clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
-                m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if m:
-                    parsed = _j.loads(m.group())
-                    if not parsed.get("valid", False):
-                        return None  # Groq отклонил сигнал (default=False — безопаснее)
-                    if parsed.get("logic"):
-                        logic = str(parsed["logic"]).strip()
-        except Exception:
-            pass
+            if not groq_resp:
+                # Groq timeout — блокируем сигнал
+                logging.info(f"[FAST Groq] {symbol}: Groq не ответил — блокируем сигнал")
+                return None
+            import json as _j, re as _re
+            clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
+            m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+            if m:
+                parsed = _j.loads(m.group())
+                if not parsed.get("valid", False):
+                    return None  # Groq отклонил сигнал (default=False — безопаснее)
+                if parsed.get("logic"):
+                    logic = str(parsed["logic"]).strip()
+            else:
+                # Groq не вернул JSON — блокируем
+                logging.info(f"[FAST Groq] {symbol}: Groq вернул не-JSON — блокируем сигнал")
+                return None
+        except Exception as _fast_ge:
+            logging.info(f"[FAST Groq] {symbol}: exception {_fast_ge} — блокируем сигнал")
+            return None
 
         if not logic:
             logic = f"Sweep {'лоу' if direction == 'BULLISH' else 'хая'} 5m в зоне {zone_desc[:20]}"
