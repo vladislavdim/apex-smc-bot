@@ -404,7 +404,7 @@ def multi_tf_analysis(symbol: str, timeframes: list = None) -> dict | None:
             if tf not in timeframes:
                 r = smc_tf(symbol, tf)
                 if r["direction"]:
-                    tf_results[tf] = r; available.append(tf); timeframes = timeframes+[tf]
+                    tf_results[tf] = r; available.append(tf)
         if not available: return None
 
     bullish = [tf for tf in available if tf_results[tf]["direction"]=="BULLISH"]
