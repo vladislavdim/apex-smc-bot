@@ -2860,6 +2860,18 @@ async def auto_scan_swing():
             htf_text = f" | 1d: {htf}" if htf else ""
 
             risk_label = "низкий" if r["rr"] >= 3 else "средний"
+
+            # AI комментарий
+            _sw_comment = ""
+            try:
+                _sw_comment = generate_signal_comment(
+                    symbol, direction, None, int(r["rr"] * 20), "SWING",
+                    None, None, r.get("ob"), r.get("fvg"), "",
+                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="4h"
+                )
+            except Exception:
+                pass
+
             text = (
                 f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 4h{htf_text}\n"
@@ -2873,6 +2885,8 @@ async def auto_scan_swing():
                 f"⚡ Риск: {risk_label}\n"
                 f"⏱ Горизонт: ~{r.get('est_hours', 8)}ч"
             )
+            if _sw_comment:
+                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_sw_comment}</i>"
 
             sd = {
                 "symbol": symbol, "direction": direction,
@@ -3070,6 +3084,17 @@ async def auto_wyckoff_scan():
                 range_txt = f"📦 Боковик у вершины: {r.get('dist_range',0):.1f}%"
                 tp_sign = "-"
 
+            # AI комментарий
+            _wyk_comment = ""
+            try:
+                _wyk_comment = generate_signal_comment(
+                    symbol, direction, None, r["score"], "WYCKOFF",
+                    None, None, r.get("ob"), r.get("fvg"), "",
+                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="1d"
+                )
+            except Exception:
+                pass
+
             text = (
                 f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 1d | {wyckoff_type}\n"
@@ -3088,6 +3113,8 @@ async def auto_wyckoff_scan():
                 f"⚡ Риск: средний\n"
                 f"⏱ Горизонт: ~7-21 дней"
             )
+            if _wyk_comment:
+                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_wyk_comment}</i>"
 
             # Блокируем если сделка уже открыта
             try:
@@ -3176,6 +3203,17 @@ async def auto_fast_deal_scan():
             direction = r["direction"]
             dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
 
+            # AI комментарий
+            _fast_comment = ""
+            try:
+                _fast_comment = generate_signal_comment(
+                    symbol, direction, None, int(r["rr"] * 20), "FAST",
+                    None, None, r.get("ob"), r.get("fvg"), "",
+                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="5m"
+                )
+            except Exception:
+                pass
+
             text = (
                 f"⚡ <b>[FAST]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 5m | 1d: {r['direction_1d']}\n"
@@ -3190,6 +3228,8 @@ async def auto_fast_deal_scan():
                 f"⭐ RR: {r['rr']} | Риск: низкий\n"
                 f"⏱ Горизонт: ~15-30 мин"
             )
+            if _fast_comment:
+                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_fast_comment}</i>"
 
             # Блокируем если сделка уже открыта
             try:

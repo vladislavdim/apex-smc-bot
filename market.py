@@ -3744,7 +3744,7 @@ def full_scan(symbol, timeframe="1h"):
         brain_ctx = get_brain_context(symbol, direction)
         signal_comment = generate_signal_comment(
             symbol, direction, mtf, total_weight, regime, fg, funding, ob, fvg, brain_ctx,
-            entry=entry, sl=sl, tp1=tp1
+            entry=entry, sl=sl, tp1=tp1, timeframe=timeframe
         )
 
         # ── 6.5 Groq инсайт — почему эта сделка интересна (async) ──
@@ -5158,9 +5158,15 @@ async def auto_add_rule(error_type, count):
         return None
 
 
-def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx="", entry=None, sl=None, tp1=None):
+def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg, funding, ob, fvg, brain_ctx="", entry=None, sl=None, tp1=None, timeframe=None):
     """Короткий AI-комментарий к сигналу — с учётом накопленного опыта"""
     try:
+        # Определяем таймфрейм из mtf dict или параметра
+        tf_label = timeframe or ""
+        if not tf_label and isinstance(mtf, dict):
+            tf_label = mtf.get("timeframe", mtf.get("tf", ""))
+        tf_text = f" | ТФ: {tf_label}" if tf_label else ""
+
         # Конкретный паттерн входа (не общие фразы)
         pattern_parts = []
         if ob:
@@ -5203,7 +5209,7 @@ def generate_signal_comment(symbol, direction, mtf, confluence_score, regime, fg
 
 Ты APEX — торговый бот. Анализируй КОНКРЕТНЫЙ паттерн входа, не общие фразы.
 
-Сигнал: {symbol} {direction} | Скор: {confluence_score}/100
+Сигнал: {symbol} {direction}{tf_text} | Скор: {confluence_score}/100
 Паттерн: {pattern_text}{levels_section}{zones_section}{brain_section}{errors_section}
 
 Напиши 2-3 предложения на русском:
@@ -7134,6 +7140,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "htf_1w":    htf_1w_swing,
             "weekly_warning": weekly_warning,
             "est_hours": est_hours,
+            "ob":        _sw_ob,
+            "fvg":       _sw_fvg,
             "scan_type": "swing",
         }
 
@@ -7535,6 +7543,10 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["SC", "AR", "ST", "Spring", "SOS"] if p in phases and (p not in ["Spring","SOS"] or phases[p].get("found"))]
 
+        # OB/FVG для AI комментария
+        _wyk_ob = find_ob(candles_1d, "BULLISH")
+        _wyk_fvg = find_fvg(candles_1d, "BULLISH")
+
         return {
             "symbol": symbol, "direction": "BULLISH",
             "timeframe": "1d", "entry": entry,
@@ -7545,6 +7557,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             "spring": spring_found, "sos": sos_found,
             "phases": " → ".join(phase_names),
             "acc_low": acc_low, "acc_high": acc_high,
+            "ob": _wyk_ob, "fvg": _wyk_fvg,
             "scan_type": "wyckoff",
         }
 
@@ -7738,6 +7751,10 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["BC", "AR", "ST", "UTAD", "SOW"] if p in phases and (p not in ["UTAD","SOW"] or phases[p].get("found"))]
 
+        # OB/FVG для AI комментария
+        _wyk_ob = find_ob(candles_1d, "BEARISH")
+        _wyk_fvg = find_fvg(candles_1d, "BEARISH")
+
         return {
             "symbol": symbol, "direction": "BEARISH",
             "timeframe": "1d", "entry": entry,
@@ -7748,6 +7765,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             "utad": utad_found, "sow": sow_found,
             "phases": " → ".join(phase_names),
             "dist_low": dist_low, "dist_high": dist_high,
+            "ob": _wyk_ob, "fvg": _wyk_fvg,
             "scan_type": "wyckoff",
         }
 
@@ -7991,6 +8009,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "logic":     logic,
             "zone":      zone_desc,
             "direction_1d": direction_1d,
+            "ob":        ob_4h,
+            "fvg":       fvg_4h,
             "scan_type": "fast",
         }
 
