@@ -3673,7 +3673,14 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                         logging.info(f"[MTF Groq] {symbol} {direction}: Groq отклонил сигнал")
                         return None
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
-                        groq_logic = str(parsed["logic"]).strip()
+                        raw_logic = str(parsed["logic"]).strip()
+                        # Убираем JSON артефакты если Groq вернул сырой JSON
+                        if raw_logic.startswith("{") or '"logic"' in raw_logic:
+                            import re as _re2
+                            m = _re2.search(r'"logic"\s*:\s*"([^"]+)"', raw_logic)
+                            groq_logic = m.group(1) if m else raw_logic[:100]
+                        else:
+                            groq_logic = raw_logic
                     if parsed.get("hours"):
                         hrs = int(parsed["hours"])
                         groq_time = f"~{hrs}ч" if hrs < 24 else f"~{hrs//24}дн"
