@@ -2807,6 +2807,9 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
                 signals.append(sig_data)
                 logging.info(f"[_scan_tf] {symbol} {timeframe} → сигнал: {sig_data.get('direction')} {sig_data.get('grade')}")
             await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            logging.info(f"[_scan_tf] {timeframe} прерван планировщиком")
+            break
         except Exception as e:
             logging.error(f"[_scan_tf] {symbol} {timeframe} ошибка: {e}")
     logging.info(f"[_scan_tf] {timeframe} завершён: {len(signals)} сигналов из {len(pairs)} пар")
@@ -2887,6 +2890,9 @@ async def auto_scan_swing():
             if r:
                 found.append(r)
             await asyncio.sleep(0.15)
+        except asyncio.CancelledError:
+            logging.info("[auto_scan_swing] Прерван планировщиком — продолжаем")
+            break
         except Exception as e:
             logging.warning(f"[auto_scan_swing] {symbol}: {e}")
 
