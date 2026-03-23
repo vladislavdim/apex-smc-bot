@@ -3572,10 +3572,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
-        # Mitigation check — OB уже протестирован, вход ненадёжный
-        if levels.get("mitigated"):
-            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
-            return None
+        # Mitigation check — OB уже протестирован, передаём Groq как контекст
+        _ob_mitigated = levels.get("mitigated", False)
+        if _ob_mitigated:
+            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, передаём Groq")
         entry = levels["entry"]
         sl    = levels["sl"]
         tp1   = levels["tp1"]
