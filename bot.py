@@ -3545,14 +3545,11 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         tp1   = levels["tp1"]
         tp2   = levels["tp2"]
         tp3   = levels["tp3"]
-        # Фильтр по RR — минимум 1.5
-        if levels.get("rr", 0) < 1.5:
-            return None
+        # RR — контекст для Groq
+        _rr_val = levels.get("rr", 0)
 
-        # Фильтр VWAP — не входим если перекуплен/перепродан
+        # VWAP — контекст для Groq
         vwap_warning = any("перекуплен" in c or "перепродан" in c for c in confluence)
-        if vwap_warning and timeframe == "1h":
-            return None
 
         est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
