@@ -3526,8 +3526,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         if len(confluence) < min_conf.get(timeframe, 3):
             return None
 
-        # 1h — только 4/4 ТФ
-        if timeframe == "1h" and mtf.get("match_count", 0) < 4:
+        # 1h — минимум 3/4 ТФ
+        if timeframe == "1h" and mtf.get("match_count", 0) < 3:
             return None
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
@@ -3611,6 +3611,14 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             regime_val = regime.get("mode", "?") if isinstance(regime, dict) else str(regime)
             htf_1d = smc_on_tf(symbol, "1d")
             htf_1w = smc_on_tf(symbol, "1w")
+            # 1w конфликт — предупреждение для Groq
+            _1w_conflict = False
+            if htf_1w:
+                if direction == "BULLISH" and "BEARISH" in str(htf_1w).upper():
+                    _1w_conflict = True
+                elif direction == "BEARISH" and "BULLISH" in str(htf_1w).upper():
+                    _1w_conflict = True
+            _1w_warn = "⚠️ ПРОТИВ 1w тренда" if _1w_conflict else ""
             # BTC тренд
             _btc_1h = smc_on_tf("BTCUSDT", "1h")
             _btc_1d = smc_on_tf("BTCUSDT", "1d")
@@ -3644,7 +3652,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 f'{{\"logic\": \"почему входим макс 15 слов\", \"hours\": число_часов_до_tp, \"valid\": true/false}}\n\n'
                 f"Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
                 f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
-                f"MTF: {mtf.get('match_count',0)}/4 | 1d: {htf_1d} | 1w: {htf_1w}\n"
+                f"MTF: {mtf.get('match_count',0)}/4 | 1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
                 f"RR: {levels.get('rr',0)} | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
                 f"Режим: {regime_val} | {_btc_str}\n"
                 f"{_ob_str} | {_fvg_str} | ATR: {smart_price_fmt(_atr_mtf)}\n"

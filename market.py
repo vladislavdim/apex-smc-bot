@@ -3191,7 +3191,7 @@ def full_scan(symbol, timeframe="1h"):
         if not isinstance(regime, dict):
             regime = {"mode": str(regime) if regime else "UNKNOWN",
                       "direction": "NONE", "confidence": 0}
-        if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 75:
+        if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
             return None
 
         # ── 0.5. Groq читает свои правила перед сигналом ──
@@ -3245,17 +3245,18 @@ def full_scan(symbol, timeframe="1h"):
         htf = get_higher_tf_context(symbol)
         fg_hist = get_fg_history()
 
-        # ── HTF фильтр: 1w → жёсткий, 1d → подтверждение ──
+        # ── HTF фильтр: 1w → penalty, 1d → подтверждение ──
         htf_1w = smc_on_tf(symbol, "1w")
         htf_1d = smc_on_tf(symbol, "1d")
-        # 1w жёсткий фильтр для MTF
+        # 1w конфликт — не блокируем, а штрафуем и передаём Groq
+        _1w_conflict = False
         if htf_1w:
             if direction == "BULLISH" and "BEARISH" in str(htf_1w).upper():
-                logging.info(f"[1w Filter] {symbol} LONG заблокирован — 1w BEARISH")
-                return None
+                _1w_conflict = True
+                logging.info(f"[1w Filter] {symbol} LONG против 1w BEARISH — penalty -10")
             if direction == "BEARISH" and "BULLISH" in str(htf_1w).upper():
-                logging.info(f"[1w Filter] {symbol} SHORT заблокирован — 1w BULLISH")
-                return None
+                _1w_conflict = True
+                logging.info(f"[1w Filter] {symbol} SHORT против 1w BULLISH — penalty -10")
         # 1d подтверждение
         if htf_1d:
             if direction == "BULLISH" and "BEARISH" in str(htf_1d).upper():
@@ -3287,6 +3288,11 @@ def full_scan(symbol, timeframe="1h"):
         weights = get_confluence_weights(symbol)
         confluence = []
         total_weight = 0
+
+        # 1w penalty если против тренда
+        if _1w_conflict:
+            total_weight -= 10
+            confluence.append("⚠️ Против 1w тренда (-10)")
 
         # MTF — базовый вес
         mtf_w = weights.get("mtf", 30)
