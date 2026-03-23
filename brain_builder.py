@@ -138,7 +138,7 @@ def save_knowledge(topic, content, source="brain_builder"):
                 )
             else:
                 conn.execute(
-                    "INSERT INTO knowledge VALUES (NULL,?,?,?,CURRENT_TIMESTAMP)",
+                    "INSERT INTO knowledge (topic, content, source, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
                     (topic, content[:2000], source)
                 )
             conn.commit()
