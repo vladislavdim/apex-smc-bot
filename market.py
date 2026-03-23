@@ -8022,8 +8022,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _minute = _now_dt.minute
         _time_minutes = _hour * 60 + _minute
         # Kill Zone сужен: 08:30-10:30 UTC и 16:30-18:30 UTC
-        _in_london_kz = 510 <= _time_minutes <= 630   # 08:30 - 10:30
-        _in_ny_kz     = 990 <= _time_minutes <= 1110   # 16:30 - 18:30
+        _in_london_kz = 510 <= _time_minutes <= 810   # 08:30 - 13:30
+        _in_ny_kz     = 990 <= _time_minutes <= 1290   # 16:30 - 21:30
         if not (_in_london_kz or _in_ny_kz):
             return None
 
