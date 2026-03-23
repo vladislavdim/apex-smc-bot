@@ -4512,7 +4512,8 @@ def main():
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
-            scheduler.add_job(backup_db_to_github, "interval", hours=1)
+            # backup_db_to_github убран из heartbeat-цикла — вызывает disk I/O ошибки
+            # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             scheduler.start()

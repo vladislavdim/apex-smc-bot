@@ -4602,7 +4602,7 @@ def get_recent_news():
 def save_knowledge(topic, content, source="auto"):
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        conn.execute("INSERT INTO knowledge VALUES (NULL,?,?,?,CURRENT_TIMESTAMP)", (topic, content, source))
+        conn.execute("INSERT INTO knowledge (topic, content, source, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)", (topic, content, source))
         conn.commit()
         conn.close()
     except:

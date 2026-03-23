@@ -424,7 +424,11 @@ def groq_research_topic(topic: str, query: str) -> dict:
             return {}
 
         clean = re.sub(r'```json|```', '', response).strip()
-        data = json.loads(clean)
+        try:
+            data = json.loads(clean)
+        except (json.JSONDecodeError, ValueError) as je:
+            logging.warning(f"groq_research_topic {topic}: JSON parse error: {je}")
+            return {}
 
         # Сохраняем в базу
         with sqlite3.connect(DB_PATH) as conn:
