@@ -3415,7 +3415,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception as _e:
             pass
 
-        mtf = multi_tf_analysis(symbol, ["1h", "4h", "1d", "1w"])  # 1d/1w — контекст для анализа
+        mtf = multi_tf_analysis(symbol, ["1h", "4h"])  # основной анализ
         if not mtf:
             return None
 
