@@ -4493,12 +4493,19 @@ def main():
                     await asyncio.sleep(2)
 
         async def polling_main():
+            await restore_db_from_github()  # восстанавливаем БД из GitHub при каждом старте
             init_db()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
                     init_brain_db()
                 except Exception as _ibe:
                     logging.warning(f"init_brain_db: {_ibe}")
+            if _LEARNING_OK:
+                try:
+                    from learning import init_learning
+                    init_learning()
+                except Exception as _ile:
+                    logging.warning(f"init_learning: {_ile}")
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
             threading.Thread(target=get_top_pairs, daemon=True).start()
@@ -4524,6 +4531,7 @@ def main():
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
             scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
+            scheduler.add_job(backup_db_to_github, "interval", minutes=30, jitter=120, max_instances=1, coalesce=True)  # бэкап каждые 30 мин
             scheduler.start()
             asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")
