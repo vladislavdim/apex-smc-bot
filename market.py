@@ -7227,32 +7227,34 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100)
-            if not groq_response or len(groq_response) <= 5:
-                # Groq timeout/fail — блокируем сигнал вместо fallback
-                logging.info(f"[SWING Groq] {symbol}: Groq не ответил — блокируем сигнал")
-                return None
-            try:
-                import json as _json, re as _re
-                clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
-                json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if json_match:
-                    clean = json_match.group()
-                parsed = _json.loads(clean)
-                # Groq как фильтр — если valid=false, блокируем (default=False)
-                if not parsed.get("valid", False):
-                    logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
-                    return None
-                if parsed.get("logic") and len(str(parsed["logic"])) > 5:
-                    logic = str(parsed["logic"]).strip()
-                if parsed.get("hours") and str(parsed["hours"]).isdigit():
-                    est_hours = max(12, min(int(parsed["hours"]), 96))
-            except Exception:
-                # JSON не распарсился — блокируем
-                logging.info(f"[SWING Groq] {symbol}: Groq вернул не-JSON — блокируем сигнал")
-                return None
+            if groq_response and len(groq_response) > 5:
+                try:
+                    import json as _json, re as _re
+                    clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
+                    json_match = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                    if json_match:
+                        clean = json_match.group()
+                    parsed = _json.loads(clean)
+                    # Groq как фильтр — если явно valid=false, блокируем
+                    if not parsed.get("valid", True):
+                        logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
+                        return None
+                    if parsed.get("logic") and len(str(parsed["logic"])) > 5:
+                        logic = str(parsed["logic"]).strip()
+                    if parsed.get("hours") and str(parsed["hours"]).isdigit():
+                        est_hours = max(12, min(int(parsed["hours"]), 96))
+                except Exception:
+                    # JSON не распарсился — fallback, не блокируем
+                    clean_text = groq_response.strip().replace("\n", " ")
+                    if len(clean_text) > 10:
+                        logic = clean_text[:80]
+            else:
+                logging.debug(f"[SWING Groq] {symbol}: Groq не ответил — fallback")
         except Exception as ge:
-            logging.info(f"[SWING Groq] {symbol}: exception {ge} — блокируем сигнал")
-            return None
+            logging.debug(f"[SwingGroq] {symbol}: {ge}")
+            tf_hours = {"1h": 1, "4h": 4, "1d": 24}
+            est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 12
+            est_hours = max(12, min(est_hours, 96))
 
         return {
             "symbol":    symbol,
@@ -8231,26 +8233,21 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"{_fast_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)
-            if not groq_resp:
-                # Groq timeout — блокируем сигнал
-                logging.info(f"[FAST Groq] {symbol}: Groq не ответил — блокируем сигнал")
-                return None
-            import json as _j, re as _re
-            clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
-            m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-            if m:
-                parsed = _j.loads(m.group())
-                if not parsed.get("valid", False):
-                    return None  # Groq отклонил сигнал (default=False — безопаснее)
-                if parsed.get("logic"):
-                    logic = str(parsed["logic"]).strip()
+            if groq_resp:
+                import json as _j, re as _re
+                clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
+                m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
+                if m:
+                    parsed = _j.loads(m.group())
+                    # Groq как фильтр — блокируем только если явно valid=false
+                    if not parsed.get("valid", True):
+                        return None
+                    if parsed.get("logic"):
+                        logic = str(parsed["logic"]).strip()
             else:
-                # Groq не вернул JSON — блокируем
-                logging.info(f"[FAST Groq] {symbol}: Groq вернул не-JSON — блокируем сигнал")
-                return None
+                logging.debug(f"[FAST Groq] {symbol}: Groq не ответил — fallback")
         except Exception as _fast_ge:
-            logging.info(f"[FAST Groq] {symbol}: exception {_fast_ge} — блокируем сигнал")
-            return None
+            logging.debug(f"[FAST Groq] {symbol}: {_fast_ge}")
 
         if not logic:
             logic = f"Sweep {'лоу' if direction == 'BULLISH' else 'хая'} 5m в зоне {zone_desc[:20]}"
