@@ -2747,7 +2747,9 @@ def _format_channel_signal(sd: dict) -> str:
 
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
+    logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
     if not ADMIN_IDS:
+        logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         return
     now_ts = time.time()
     cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
@@ -2758,30 +2760,36 @@ async def _send_signal(sd):
         last_sent = row[0] if row else 0
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             _cd.close()
+            logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
             return
         _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
         _cd.commit()
         _cd.close()
-    except Exception:
+    except Exception as _cde:
+        logging.warning(f"[_send_signal] cooldown DB ошибка: {_cde}")
         last_sent = _sent_signal_cache.get(cache_key, 0)
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+            logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
             return
         _sent_signal_cache[cache_key] = now_ts
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, sd["text"], parse_mode="HTML")
+            logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
         except Exception as e:
-            logging.debug(f"send_signal admin {admin_id}: {e}")
+            logging.warning(f"[_send_signal] Ошибка отправки admin {admin_id}: {e}")
     try:
         channel_text = _format_channel_signal(sd)
         scan_type = sd.get("scan_type", "")
         # Отправляем в главный канал (все стратегии)
         await bot.send_message(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+        logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
         # SWING также в ветку Swing второго канала
         if scan_type == "swing":
             await bot.send_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+            logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except Exception as ce:
-        logging.warning(f"Channel send error: {ce}")
+        logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     # backup только по расписанию (раз в час) — не после каждого сигнала
     pass
 
@@ -2790,15 +2798,18 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
     """Сканирует топ пары на одном таймфрейме, возвращает сигналы"""
     pairs = get_top_pairs(pairs_limit)
     signals = []
+    logging.info(f"[_scan_tf] Начинаем скан {timeframe}, пар: {len(pairs)}")
     for symbol in pairs:
         try:
             sig_data = full_scan_raw(symbol, timeframe, auto=True)
             if sig_data:
                 sig_data["timeframe"] = timeframe
                 signals.append(sig_data)
+                logging.info(f"[_scan_tf] {symbol} {timeframe} → сигнал: {sig_data.get('direction')} {sig_data.get('grade')}")
             await asyncio.sleep(0.3)
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"[_scan_tf] {symbol} {timeframe} ошибка: {e}")
+    logging.info(f"[_scan_tf] {timeframe} завершён: {len(signals)} сигналов из {len(pairs)} пар")
     return signals
 
 
@@ -2850,17 +2861,24 @@ async def auto_scan_job():
 
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
-    signals = await _scan_tf("1h", pairs_limit=80)
-    logging.info(f"Скан 1h: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
-    logging.info(f"Скан 1h: актуальных {len(valid)}/{len(signals)}")
-    for sd in valid[:3]:
-        await _send_signal(sd)
-        await asyncio.sleep(1)
+    logging.info("[auto_scan_1h] ЗАПУЩЕН")
+    try:
+        signals = await _scan_tf("1h", pairs_limit=80)
+        logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
+        valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
+        logging.info(f"[auto_scan_1h] Актуальных {len(valid)}/{len(signals)}")
+        for sd in valid[:3]:
+            logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
+            await _send_signal(sd)
+            await asyncio.sleep(1)
+        logging.info(f"[auto_scan_1h] Завершён, отправлено {min(len(valid),3)}")
+    except Exception as e:
+        logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
 
 
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
+    logging.info("[auto_scan_swing] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
     for symbol in pairs:
@@ -2870,15 +2888,15 @@ async def auto_scan_swing():
                 found.append(r)
             await asyncio.sleep(0.15)
         except Exception as e:
-            logging.debug(f"swing scan {symbol}: {e}")
+            logging.warning(f"[auto_scan_swing] {symbol}: {e}")
 
     if not found:
-        logging.info("Swing scan 4h: сетапов нет")
+        logging.info("[auto_scan_swing] Swing scan 4h: сетапов нет")
         return
 
     # Сортируем по RR
     found.sort(key=lambda x: x["rr"], reverse=True)
-    logging.info(f"Swing scan 4h: найдено {len(found)} сетапов")
+    logging.info(f"[auto_scan_swing] Swing scan 4h: найдено {len(found)} сетапов")
 
     for r in found[:2]:  # максимум 2 сигнала за раз
         try:
@@ -3076,6 +3094,7 @@ async def auto_scan_mega():
 
 async def auto_wyckoff_scan():
     """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
+    logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
     for symbol in pairs:
@@ -3090,14 +3109,14 @@ async def auto_wyckoff_scan():
                 found.append(r2)
             await asyncio.sleep(0.5)
         except Exception as e:
-            logging.debug(f"wyckoff scan {symbol}: {e}")
+            logging.warning(f"[auto_wyckoff_scan] {symbol}: {e}")
 
     if not found:
-        logging.info("Wyckoff scan: паттернов нет")
+        logging.info("[auto_wyckoff_scan] Wyckoff scan: паттернов нет")
         return
 
     found.sort(key=lambda x: x["score"], reverse=True)
-    logging.info(f"Wyckoff scan: найдено {len(found)}")
+    logging.info(f"[auto_wyckoff_scan] Wyckoff scan: найдено {len(found)}")
 
     for r in found[:2]:
         try:
@@ -3222,8 +3241,10 @@ async def auto_fast_deal_scan():
     _minute = _now_dt.minute
     _time_m = _hour * 60 + _minute
     if not (510 <= _time_m <= 630 or 990 <= _time_m <= 1110):
+        logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
 
+    logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН (Kill Zone {_hour:02d}:{_minute:02d} UTC)")
     found = []
     for symbol in FAST_PAIRS:
         try:
@@ -3232,7 +3253,7 @@ async def auto_fast_deal_scan():
                 found.append(r)
             await asyncio.sleep(0.3)
         except Exception as e:
-            logging.debug(f"fast deal scan {symbol}: {e}")
+            logging.warning(f"[auto_fast_deal_scan] {symbol}: {e}")
 
     if not found:
         return
@@ -3532,10 +3553,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # Минимальный порог confluence по таймфрейму
         min_conf = {"1h": 4, "4h": 3, "1d": 3, "1w": 2}
         if len(confluence) < min_conf.get(timeframe, 3):
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
         # 1h — минимум 3/4 ТФ
         if timeframe == "1h" and mtf.get("match_count", 0) < 3:
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {mtf.get('match_count',0)} < 3)")
             return None
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
@@ -3544,7 +3567,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Только МЕГА ТОП и ТОП СДЕЛКА
         if mtf.get("grade") not in ("МЕГА ТОП", "ТОП СДЕЛКА"):
-            return None  # market.py grade check — МЕГА ТОП или ТОП СДЕЛКА от multi_tf_analysis
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (grade='{mtf.get('grade')}', нужно МЕГА ТОП или ТОП СДЕЛКА)")
+            return None
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
@@ -3717,6 +3741,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
         timing_score = timing.get("score", 0)
+        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid')}")
 
         # Порог 3/3 — только подтверждённые входы
         if timing_score < 3:
@@ -3726,7 +3751,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 sig_name, text, timing_score
             )
             if saved:
-                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3)")
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → СОХРАНЁН В ОЧЕРЕДЬ (score {timing_score}/3)")
+            else:
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} — дубль или ошибка сохранения (score {timing_score}/3)")
             return None  # Ждём подтверждения тайминга
 
         # Тайминг ОК — сохраняем в БД только сейчас
@@ -4234,6 +4261,127 @@ async def on_startup(app):
     else:
         logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
+    # ── Webhook режим: настройка планировщика (сигналы + мозг) ──
+    # BUG FIX: этот блок был случайно перемещён внутрь recheck_timing_queue.
+    # Теперь он правильно инициализируется при старте webhook-сервера.
+    webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
+
+    # Основные сигналы
+    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=10, jitter=30)
+    webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_fast_deal_scan,  "interval", minutes=5,  jitter=30,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600)
+    webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+    webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10)
+    # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
+    webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
+    webhook_scheduler.add_job(check_alerts,         "interval", minutes=5)
+    webhook_scheduler.add_job(auto_research,        "interval", hours=2)
+    webhook_scheduler.add_job(night_brain_tasks,    "interval", minutes=30, jitter=180)
+    webhook_scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+
+    # Мозг / самообучение
+    async def _weekly_report_job():
+        try:
+            loop = asyncio.get_running_loop()
+            report = await loop.run_in_executor(None, _learn_weekly_report)
+            if report and ADMIN_ID:
+                await bot.send_message(ADMIN_ID, report, parse_mode="HTML")
+        except Exception as e:
+            logging.warning(f"Weekly report error: {e}")
+    webhook_scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0, timezone="UTC")
+
+    async def _review_rules_job():
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_review_rules)
+            await loop.run_in_executor(None, _learn_ab_test)
+        except Exception as e:
+            logging.error(f"review_rules_job: {e}")
+    webhook_scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
+
+    async def _self_diagnose_job():
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self_diagnose_and_grow)
+        await loop.run_in_executor(None, auto_fill_knowledge_gaps)
+    webhook_scheduler.add_job(_self_diagnose_job, "interval", hours=6, jitter=1200)
+
+    async def _run_self_analysis():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_self_analysis)
+    webhook_scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
+
+    async def _run_decay():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_decay)
+    webhook_scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
+
+    async def _run_strategy_update():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_build_strategy)
+            logging.info("[Scheduler] Стратегия Groq обновлена")
+    webhook_scheduler.add_job(_run_strategy_update, "cron", hour=5, minute=0)
+
+    async def _run_groq_diagnosis():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_self_diag)
+            logging.info("[Scheduler] Groq самодиагностика завершена")
+    webhook_scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
+
+    webhook_scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
+
+    async def _router_daily_review():
+        if _ROUTER_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _brain_router.daily_review)
+            logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
+    webhook_scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
+
+    webhook_scheduler.add_job(run_brain_builder_async,     "interval", hours=1,  jitter=300)
+    webhook_scheduler.add_job(run_brain_builder_full_async, "cron",     hour=3,   minute=0)
+
+    async def _run_web_learner():
+        if _WEB_LEARNER_OK:
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, _web_learn_cycle)
+            if results:
+                logging.info(f"[WebLearner] Изучено тем: {len(results)}")
+            await backup_db_to_github()
+    webhook_scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300)
+    webhook_scheduler.add_job(_run_web_learner, "date",
+        run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
+
+    async def _run_self_improve():
+        if _WEB_LEARNER_OK:
+            loop = asyncio.get_running_loop()
+            improvements = await loop.run_in_executor(None, _web_self_improve)
+            if improvements:
+                logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
+    webhook_scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
+
+    async def _run_autopilot_fast():
+        if _AUTOPILOT_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _autopilot_fast)
+    webhook_scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
+
+    async def _run_autopilot_deep():
+        if _AUTOPILOT_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _autopilot_deep)
+    webhook_scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600)
+
+    webhook_scheduler.start()
+    setup_error_capture()
+    asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))
+    logging.info("APEX запущен! (webhook mode)")
+
 
 async def recheck_timing_queue():
     """Каждые 15 мин перепроверяет очередь тайминга"""
@@ -4284,125 +4432,9 @@ async def recheck_timing_queue():
                     logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3)")
 
             except Exception as e:
-                logging.debug(f"[TimingQueue] {symbol}: {e}")
+                logging.warning(f"[TimingQueue] {symbol}: {e}")
     except Exception as e:
         logging.error(f"[TimingQueue] recheck error: {e}")
-
-    scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
-
-    # Еженедельный отчёт — каждое воскресенье в 08:00 UTC
-    async def _weekly_report_job():
-        try:
-            loop = asyncio.get_running_loop()
-            report = await loop.run_in_executor(None, _learn_weekly_report)
-            if report and ADMIN_ID:
-                await bot.send_message(ADMIN_ID, report, parse_mode="HTML")
-        except Exception as e:
-            logging.warning(f"Weekly report error: {e}")
-
-    scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0, timezone="UTC")
-
-    # Пересмотр правил — каждые 3 дня
-    async def _review_rules_job():
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_review_rules)
-            await loop.run_in_executor(None, _learn_ab_test)
-        except Exception as e:
-            logging.error(f"review_rules_job: {e}")
-
-    scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
-    async def _self_diagnose_job():
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self_diagnose_and_grow)
-        await loop.run_in_executor(None, auto_fill_knowledge_gaps)
-    scheduler.add_job(_self_diagnose_job, "interval", hours=6, jitter=1200)
-    # Самоанализ точности + обновление авто-правил
-    async def _run_self_analysis():
-        if _LEARNING_OK:
-            import asyncio as _a
-            await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
-    scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
-
-    # Decay правил — раз в сутки ослабляем устаревшие правила
-    async def _run_decay():
-        if _LEARNING_OK:
-            import asyncio as _a
-            await _a.get_event_loop().run_in_executor(None, _learn_decay)
-    scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
-
-    # Groq стратегия — обновляется раз в день в 5:00
-    async def _run_strategy_update():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_build_strategy)
-            logging.info("[Scheduler] Стратегия Groq обновлена")
-    scheduler.add_job(_run_strategy_update, "cron", hour=5, minute=0)
-
-    # Groq самодиагностика ошибок — каждые 12 часов
-    async def _run_groq_diagnosis():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_self_diag)
-            logging.info("[Scheduler] Groq самодиагностика завершена")
-    scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
-
-    # Groq читает логи и анализирует ошибки каждые 30 минут
-    scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
-
-    # Brain Router — ежедневный обзор стратегии в 05:30 (после strategy_update)
-    async def _router_daily_review():
-        if _ROUTER_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _brain_router.daily_review)
-            logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
-    scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
-
-    # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
-    scheduler.add_job(run_brain_builder_async, "interval", hours=1, jitter=300)
-    scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
-
-    # Web Learner — автономный поиск знаний каждые 4 часа
-    async def _run_web_learner():
-        if _WEB_LEARNER_OK:
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(None, _web_learn_cycle)
-            if results:
-                logging.info(f"[WebLearner] Изучено тем: {len(results)}")
-            await backup_db_to_github()
-    scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300)
-    scheduler.add_job(_run_web_learner, "date",
-        run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
-
-    # Groq самоулучшение — каждые 8 часов анализирует результаты и добавляет правила
-    async def _run_self_improve():
-        if _WEB_LEARNER_OK:
-            loop = asyncio.get_running_loop()
-            improvements = await loop.run_in_executor(None, _web_self_improve)
-            if improvements:
-                logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
-    scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
-
-    # Автопилот — быстрый цикл каждые 15 минут
-    async def _run_autopilot_fast():
-        if _AUTOPILOT_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _autopilot_fast)
-    scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
-    scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30)
-
-    # Автопилот — глубокий цикл каждые 4 часа
-    async def _run_autopilot_deep():
-        if _AUTOPILOT_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _autopilot_deep)
-    scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600)
-
-    scheduler.start()
-    setup_error_capture()
-    # Первый цикл обучения — через 60 сек после старта
-    asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))  # 5 мин после старта
-    logging.info("APEX запущен!")
 
 async def on_startup_diagnose(app):
     """Первая самодиагностика через 8 мин после старта"""
@@ -4516,6 +4548,8 @@ def main():
             # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+            # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
+            scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
             scheduler.start()
             asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")

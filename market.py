@@ -1455,7 +1455,7 @@ def save_to_timing_queue(symbol, direction, timeframe, entry, sl, tp1, tp2, tp3,
         logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3, истекает через {hours}ч)")
         return True
     except Exception as e:
-        logging.debug(f"save_to_timing_queue {symbol}: {e}")
+        logging.warning(f"[TimingQueue] ОШИБКА save_to_timing_queue {symbol}: {e}")
         return False
 
 
