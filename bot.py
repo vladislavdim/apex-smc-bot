@@ -2910,15 +2910,6 @@ async def auto_scan_swing():
             risk_label = "низкий" if r["rr"] >= 3 else "средний"
 
             # AI комментарий
-            _sw_comment = ""
-            try:
-                _sw_comment = generate_signal_comment(
-                    symbol, direction, None, int(r["rr"] * 20), "SWING",
-                    None, None, r.get("ob"), r.get("fvg"), "",
-                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="4h"
-                )
-            except Exception:
-                pass
 
             text = (
                 f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
@@ -2928,13 +2919,11 @@ async def auto_scan_swing():
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
                 f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
                 f"\n"
-                f"{trend_icon} Логика: {r['logic']}\n"
+                f"📈 Логика: {r['logic']}\n"
                 f"\n"
                 f"⚡ Риск: {risk_label}\n"
                 f"⏱ Горизонт: ~{r.get('est_hours', 8)}ч"
             )
-            if _sw_comment:
-                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_sw_comment}</i>"
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             sd = {
@@ -3139,15 +3128,6 @@ async def auto_wyckoff_scan():
                 tp_sign = "-"
 
             # AI комментарий
-            _wyk_comment = ""
-            try:
-                _wyk_comment = generate_signal_comment(
-                    symbol, direction, None, r["score"], "WYCKOFF",
-                    None, None, r.get("ob"), r.get("fvg"), "",
-                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="1d"
-                )
-            except Exception:
-                pass
 
             text = (
                 f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — {dir_label}\n"
@@ -3167,8 +3147,6 @@ async def auto_wyckoff_scan():
                 f"⚡ Риск: средний\n"
                 f"⏱ Горизонт: ~7-21 дней"
             )
-            if _wyk_comment:
-                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_wyk_comment}</i>"
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа
@@ -3268,15 +3246,6 @@ async def auto_fast_deal_scan():
             dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
 
             # AI комментарий
-            _fast_comment = ""
-            try:
-                _fast_comment = generate_signal_comment(
-                    symbol, direction, None, int(r["rr"] * 20), "FAST",
-                    None, None, r.get("ob"), r.get("fvg"), "",
-                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="5m"
-                )
-            except Exception:
-                pass
 
             _fast_tp1 = r.get("tp1", r["tp"])
             _fast_tp2 = r.get("tp2", r["tp"])
@@ -3296,8 +3265,6 @@ async def auto_fast_deal_scan():
                 f"⭐ RR: {r['rr']} | Риск: низкий\n"
                 f"⏱ Горизонт: ~15-30 мин"
             )
-            if _fast_comment:
-                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_fast_comment}</i>"
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа (1.5% для скальпинга)
@@ -3565,10 +3532,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         if timeframe not in ("1h", "4h"):
             return None
 
-        # Только МЕГА ТОП и ТОП СДЕЛКА
-        if mtf.get("grade") not in ("МЕГА ТОП", "ТОП СДЕЛКА"):
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (grade='{mtf.get('grade')}', нужно МЕГА ТОП или ТОП СДЕЛКА)")
-            return None
+        # Grade фильтр убран — пропускаем все пары с MTF сигналом
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
@@ -3731,7 +3695,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
             f"🛑 Стоп: <code>{smart_price_fmt(sl)}</code>\n"
             f"\n"
-            f"{trend_icon} Логика:\n{groq_logic}\n"
+            f"📈 Логика:\n{groq_logic}\n"
             f"\n"
             f"⚡ Риск: {risk_level}\n"
             f"⏱ Горизонт: {groq_time}"
