@@ -8002,7 +8002,9 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
 FAST_PAIRS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ADAUSDT", "DOTUSDT"
+    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ADAUSDT", "DOTUSDT",
+    "MATICUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT",
+    "SUIUSDT", "INJUSDT", "FETUSDT", "WIFUSDT", "PEPEUSDT"
 ]
 
 def detect_fast_deal(symbol: str) -> dict | None:
@@ -8021,9 +8023,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _hour = _now_dt.hour
         _minute = _now_dt.minute
         _time_minutes = _hour * 60 + _minute
-        # Kill Zone сужен: 08:30-10:30 UTC и 16:30-18:30 UTC
-        _in_london_kz = 510 <= _time_minutes <= 630   # 08:30 - 10:30
-        _in_ny_kz     = 990 <= _time_minutes <= 1110   # 16:30 - 18:30
+        # Kill Zone расширен: 07:00-11:00 UTC и 15:00-19:00 UTC
+        _in_london_kz = 420 <= _time_minutes <= 660   # 07:00 - 11:00
+        _in_ny_kz     = 900 <= _time_minutes <= 1140   # 15:00 - 19:00
         if not (_in_london_kz or _in_ny_kz):
             return None
 
