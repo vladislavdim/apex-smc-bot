@@ -6998,8 +6998,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 1.5:
-                return None  # Объём < 1.5×avg — ненадёжный sweep
+            if avg_vol > 0 and sweep_vol < avg_vol * 1.2:
+                return None  # Объём < 1.2×avg — ненадёжный sweep
         except Exception:
             pass
 
@@ -7012,7 +7012,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 _disp_range = _disp_candle["high"] - _disp_candle["low"]
                 if _disp_range > 0:
                     _disp_ratio = _disp_body / _disp_range
-                    if _disp_ratio < 0.6:
+                    if _disp_ratio < 0.4:
                         return None  # Нет displacement — не импульсная свеча
                     # Проверяем направление displacement
                     if direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]:
@@ -7084,7 +7084,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if risk == 0:
             return None
         rr_check = reward / risk
-        if rr_check < 1.5 or rr_check > 5.0:
+        if rr_check < 2.0 or rr_check > 6.0:
             return None
 
         # ── Фильтр — цель должна быть реальной ──
@@ -8091,7 +8091,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         in_zone = False
         zone_desc = ""
         atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
-        _zone_tol = atr_4h * 0.5  # Сужённый допуск ±ATR×0.5
+        _zone_tol = atr_4h * 1.0  # Допуск ±ATR×1.0
 
         if ob_4h:
             zone_bottom = ob_4h["bottom"]
