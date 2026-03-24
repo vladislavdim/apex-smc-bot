@@ -3491,13 +3491,13 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             pass
 
         # Минимальный порог confluence по таймфрейму
-        min_conf = {"1h": 2, "4h": 2, "1d": 2, "1w": 1}
+        min_conf = {"1h": 4, "4h": 3, "1d": 3, "1w": 2}
         if len(confluence) < min_conf.get(timeframe, 3):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
         # 1h — минимум 3/4 ТФ
-        if timeframe == "1h" and mtf.get("match_count", 0) < 1:
+        if timeframe == "1h" and mtf.get("match_count", 0) < 3:
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {mtf.get('match_count',0)} < 3)")
             return None
 
