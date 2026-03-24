@@ -644,13 +644,27 @@ async def cmd_stats(message: types.Message):
         top = conn.execute(
             "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
         ).fetchall()
+        # Статистика по стратегиям
+        strategy_rows = conn.execute(
+            "SELECT signal_type, COUNT(*), SUM(CASE WHEN result LIKE 'tp%' THEN 1 ELSE 0 END) FROM signals WHERE signal_type IS NOT NULL GROUP BY signal_type"
+        ).fetchall()
         conn.close()
     except:
         total = wins = losses = pending = 0
         top = []
+        strategy_rows = []
 
     wr = round(wins / total * 100, 1) if total > 0 else 0
     top_text = "\n".join([f"• {r[0]}: {r[1]:.0f}% WR, avg {r[3]:.0f}ч ({r[2]} сигн.)" for r in top]) or "Нет данных"
+
+    # Формируем текст по стратегиям
+    strategy_icons = {"MTF": "📐", "SWING": "🔄", "WYCKOFF": "🌊", "FAST": "⚡"}
+    strategy_lines = []
+    for stype, s_total, s_wins in strategy_rows:
+        s_wr = round(s_wins / s_total * 100, 1) if s_total > 0 else 0
+        icon = strategy_icons.get((stype or "").upper(), "📊")
+        strategy_lines.append(f"{icon} {stype}: {s_total} сигн. | WR {s_wr}%")
+    strategy_text = "\n".join(strategy_lines) or "Нет данных"
 
     profile_text = ""
     if mem["profile"]:
@@ -664,6 +678,7 @@ async def cmd_stats(message: types.Message):
         f"📈 <b>Статистика APEX</b>\n\n"
         f"Сигналов: {total} | ✅ {wins} | ❌ {losses} | ⏳ {pending}\n"
         f"🎯 Win Rate: <b>{wr}%</b>\n\n"
+        f"📊 <b>По стратегиям:</b>\n{strategy_text}\n\n"
         f"🏆 <b>Топ монеты:</b>\n{top_text}"
         f"{profile_text}",
         parse_mode="HTML"
@@ -2884,11 +2899,15 @@ async def auto_scan_swing():
     logging.info("[auto_scan_swing] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
+    blocked = 0
     for symbol in pairs:
         try:
             r = detect_swing_setup(symbol, "4h")
             if r:
                 found.append(r)
+                logging.info(f"[auto_scan_swing] {symbol} НАЙДЕН: {r.get('direction')} RR={r.get('rr')}")
+            else:
+                blocked += 1
             await asyncio.sleep(0.15)
         except asyncio.CancelledError:
             logging.info("[auto_scan_swing] Прерван планировщиком — продолжаем")
@@ -2897,7 +2916,7 @@ async def auto_scan_swing():
             logging.warning(f"[auto_scan_swing] {symbol}: {e}")
 
     if not found:
-        logging.info("[auto_scan_swing] Swing scan 4h: сетапов нет")
+        logging.info(f"[auto_scan_swing] Swing scan 4h: сетапов нет (проверено {len(pairs)}, заблокировано фильтрами {blocked})")
         return
 
     # Сортируем по RR
@@ -4391,6 +4410,14 @@ async def recheck_timing_queue():
                 logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: {old_score}/3 → {new_score}/3")
 
                 if timing["valid"] and new_score >= 3:
+                    # Проверяем RR по текущей цене (минимум 2.0 для MTF)
+                    _risk = abs(entry - sl)
+                    _reward = abs(tp1 - entry)
+                    _rr_now = _reward / _risk if _risk > 0 else 0
+                    if _rr_now < 2.0:
+                        logging.info(f"[TimingQueue] {symbol} {direction} — RR {_rr_now:.2f} < 2.0, ждём")
+                        continue
+
                     # Обновляем текст — добавляем пометку
                     updated_text = "\U0001F514 <b>\u0422\u0410\u0419\u041c\u0418\u041d\u0413 \u041f\u041e\u0414\u0422\u0412\u0415\u0420\u0416\u0414\u0401\u041d!</b>\n" + signal_text.replace(
                         f"⏰ <b>Тайминг:</b> ⏳",
@@ -4403,7 +4430,7 @@ async def recheck_timing_queue():
                     }
                     await _send_signal(sd)
                     remove_from_timing_queue(queue_id)
-                    logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3)")
+                    logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3, RR {_rr_now:.2f})")
 
             except Exception as e:
                 logging.warning(f"[TimingQueue] {symbol}: {e}")
