@@ -2979,26 +2979,6 @@ async def auto_scan_swing():
                     continue
             except Exception:
                 pass
-            # Проверяем cooldown
-            cache_key = f"{symbol}:SWING:{direction}:4h"
-            now_ts = time.time()
-            try:
-                import sqlite3 as _sq3
-                _cd = _sq3.connect("brain.db", timeout=10)
-                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-                last_sent = row[0] if row else 0
-                if now_ts - last_sent < 4 * 3600:
-                    _cd.close()
-                    continue
-                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-                _cd.commit()
-                _cd.close()
-            except Exception:
-                last_sent = _sent_signal_cache.get(cache_key, 0)
-                if now_ts - last_sent < 4 * 3600:
-                    continue
-                _sent_signal_cache[cache_key] = now_ts
-
             # Сохраняем в БД
             save_signal_db(
                 symbol, direction, "SWING",
