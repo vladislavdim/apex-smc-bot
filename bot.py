@@ -4516,7 +4516,8 @@ def main():
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
             scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
-            scheduler.add_job(backup_db_to_github, "interval", minutes=30, jitter=120, max_instances=1, coalesce=True)  # бэкап каждые 30 мин
+            # backup_db_to_github убран из scheduler — вызывает disk I/O ошибки
+            # Бэкап происходит только после отправки сигналов
             scheduler.start()
             asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")
