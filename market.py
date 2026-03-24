@@ -4028,24 +4028,37 @@ def check_pending_signals():
 
             result = None
             hit_tp = None
+            _sig_type_check = (signal_type or "").upper()
             if direction == "BULLISH":
-                if current >= tp3:
-                    result, hit_tp = "tp3", 3
-                elif current >= tp2:
-                    result, hit_tp = "tp2", 2
-                elif current >= tp1:
-                    result, hit_tp = "tp1", 1
-                elif current <= sl:
-                    result = "sl"
+                if _sig_type_check == "FAST":
+                    # FAST: TP1 и TP2, без TP3
+                    if current >= tp2:
+                        result, hit_tp = "tp2", 2
+                    elif current >= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current <= sl:
+                        result = "sl"
+                else:
+                    # MTF/SWING/WYCKOFF: только одно TP уведомление
+                    if current >= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current <= sl:
+                        result = "sl"
             else:
-                if current <= tp3:
-                    result, hit_tp = "tp3", 3
-                elif current <= tp2:
-                    result, hit_tp = "tp2", 2
-                elif current <= tp1:
-                    result, hit_tp = "tp1", 1
-                elif current >= sl:
-                    result = "sl"
+                if _sig_type_check == "FAST":
+                    # FAST: TP1 и TP2, без TP3
+                    if current <= tp2:
+                        result, hit_tp = "tp2", 2
+                    elif current <= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current >= sl:
+                        result = "sl"
+                else:
+                    # MTF/SWING/WYCKOFF: только одно TP уведомление
+                    if current <= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current >= sl:
+                        result = "sl"
 
             # Expiry: используем estimated_hours или стратегию, fallback 72ч
             _sig_type = (signal_type or "").upper()
