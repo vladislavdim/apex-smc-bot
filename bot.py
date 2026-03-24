@@ -3172,23 +3172,6 @@ async def auto_wyckoff_scan():
             except Exception:
                 pass
 
-            # Cooldown 24ч
-            cache_key = f"{symbol}:WYCKOFF:{direction}:1d"
-            now_ts = time.time()
-            try:
-                import sqlite3 as _sq3
-                _cd = _sq3.connect("brain.db", timeout=10)
-                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-                last_sent = row[0] if row else 0
-                if now_ts - last_sent < 24 * 3600:
-                    _cd.close()
-                    continue
-                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-                _cd.commit()
-                _cd.close()
-            except Exception:
-                pass
-
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "1d", "entry": r["entry"],
@@ -3290,22 +3273,7 @@ async def auto_fast_deal_scan():
             except Exception:
                 pass
 
-            # Cooldown 1ч для скальпинга
-            cache_key = f"{symbol}:FAST:{direction}:5m"
-            now_ts = time.time()
-            try:
-                import sqlite3 as _sq3
-                _cd = _sq3.connect("brain.db", timeout=10)
-                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-                last_sent = row[0] if row else 0
-                if now_ts - last_sent < 2 * 3600:
-                    _cd.close()
-                    continue
-                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-                _cd.commit()
-                _cd.close()
-            except Exception:
-                pass
+
 
             # Сохраняем в БД с tp1 и tp2 отдельно для частичного закрытия
             _f_tp1 = r.get("tp1", r["tp"])
