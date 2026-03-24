@@ -3998,10 +3998,14 @@ async def restore_db_from_github():
             logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
             return
         import base64, sqlite3 as _sq
-        r = requests.get(
-            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
-            timeout=10
+        loop = asyncio.get_event_loop()
+        r = await loop.run_in_executor(
+            None,
+            lambda: requests.get(
+                f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
+                headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+                timeout=10
+            )
         )
         if r.status_code != 200:
             logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
@@ -4468,7 +4472,13 @@ def main():
                     await asyncio.sleep(2)
 
         async def polling_main():
-            await restore_db_from_github()  # восстанавливаем БД из GitHub при каждом старте
+            # Восстанавливаем БД из GitHub с таймаутом 30 сек чтобы не блокировать деплой
+            try:
+                await asyncio.wait_for(restore_db_from_github(), timeout=30)
+            except asyncio.TimeoutError:
+                logging.warning("restore_db_from_github: таймаут 30с — продолжаем без восстановления")
+            except Exception as _re:
+                logging.warning(f"restore_db_from_github: {_re}")
             init_db()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
