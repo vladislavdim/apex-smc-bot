@@ -7514,10 +7514,12 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         price_peak = max(c["high"] for c in candles_1d[-50:-15])
         drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
 
+        # Для BTC порог снижен до 12% (BTC редко падает на 20%)
+        _wyckoff_min_drawdown = 12 if symbol == "BTCUSDT" else 20
         if drawdown_pct >= 35:
             score += 30
             signals.append(f"✅ Глубокий даунтренд -{drawdown_pct:.0f}% от пика")
-        elif drawdown_pct >= 20:
+        elif drawdown_pct >= _wyckoff_min_drawdown:
             score += 15
             signals.append(f"⚡️ Коррекция -{drawdown_pct:.0f}% от пика")
         else:
@@ -8046,7 +8048,6 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None
 
         # ── 1. BTC направление ──
-        btc_ok, btc_reason = btc_allows_signal("BULLISH")
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
         btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
 
@@ -8055,17 +8056,17 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not direction_1d or direction_1d not in ("BULLISH", "BEARISH"):
             return None
 
-        # BTC фильтр: для LONG BTC не должен падать
-        # Для SHORT BTC не должен агрессивно расти (>1% за последние 3 свечи 1h)
-        if direction_1d == "BULLISH" and btc_trend == "BEARISH":
-            return None
-        if direction_1d == "BEARISH" and btc_trend == "BULLISH":
-            try:
-                btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
-                if btc_change > 1.0:
-                    return None  # BTC растёт >1% — шорт альт опасен
-            except Exception:
-                pass
+        # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
+        if symbol != "BTCUSDT":
+            if direction_1d == "BULLISH" and btc_trend == "BEARISH":
+                return None
+            if direction_1d == "BEARISH" and btc_trend == "BULLISH":
+                try:
+                    btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
+                    if btc_change > 1.0:
+                        return None  # BTC растёт >1% — шорт альт опасен
+                except Exception:
+                    pass
 
         direction = direction_1d
 
