@@ -644,13 +644,27 @@ async def cmd_stats(message: types.Message):
         top = conn.execute(
             "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
         ).fetchall()
+        # Статистика по стратегиям
+        strategy_rows = conn.execute(
+            "SELECT signal_type, COUNT(*), SUM(CASE WHEN result LIKE 'tp%' THEN 1 ELSE 0 END) FROM signals WHERE signal_type IS NOT NULL GROUP BY signal_type"
+        ).fetchall()
         conn.close()
     except:
         total = wins = losses = pending = 0
         top = []
+        strategy_rows = []
 
     wr = round(wins / total * 100, 1) if total > 0 else 0
     top_text = "\n".join([f"• {r[0]}: {r[1]:.0f}% WR, avg {r[3]:.0f}ч ({r[2]} сигн.)" for r in top]) or "Нет данных"
+
+    # Формируем текст по стратегиям
+    strategy_icons = {"MTF": "📐", "SWING": "🔄", "WYCKOFF": "🌊", "FAST": "⚡"}
+    strategy_lines = []
+    for stype, s_total, s_wins in strategy_rows:
+        s_wr = round(s_wins / s_total * 100, 1) if s_total > 0 else 0
+        icon = strategy_icons.get((stype or "").upper(), "📊")
+        strategy_lines.append(f"{icon} {stype}: {s_total} сигн. | WR {s_wr}%")
+    strategy_text = "\n".join(strategy_lines) or "Нет данных"
 
     profile_text = ""
     if mem["profile"]:
@@ -664,6 +678,7 @@ async def cmd_stats(message: types.Message):
         f"📈 <b>Статистика APEX</b>\n\n"
         f"Сигналов: {total} | ✅ {wins} | ❌ {losses} | ⏳ {pending}\n"
         f"🎯 Win Rate: <b>{wr}%</b>\n\n"
+        f"📊 <b>По стратегиям:</b>\n{strategy_text}\n\n"
         f"🏆 <b>Топ монеты:</b>\n{top_text}"
         f"{profile_text}",
         parse_mode="HTML"
@@ -1856,6 +1871,14 @@ async def handle_callback(callback: CallbackQuery):
                     lines.append("")
                 text = "\n".join(lines)
                 text += f"\n<i>Как только пара достигнет 3/3 — придёт сигнал автоматически</i>"
+                if len(text) > 3800:
+                    lines_cut = ["<b>Наблюдение</b> — ждут подтверждения\n"]
+                    for r in rows:
+                        symbol, direction, tf, score, created, expires = r
+                        dir_label = "LONG" if direction == "BULLISH" else "SHORT"
+                        lines_cut.append(f"<b>{symbol}</b> {dir_label} {tf} {score}/3")
+                    lines_cut.append(f"\n<i>Всего {len(rows)} пар. Сигнал придёт при 3/3</i>")
+                    text = "\n".join(lines_cut)
 
             await callback.message.edit_text(
                 text, parse_mode="HTML",
@@ -2739,7 +2762,9 @@ def _format_channel_signal(sd: dict) -> str:
 
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
+    logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
     if not ADMIN_IDS:
+        logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         return
     now_ts = time.time()
     cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
@@ -2750,30 +2775,36 @@ async def _send_signal(sd):
         last_sent = row[0] if row else 0
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             _cd.close()
+            logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
             return
         _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
         _cd.commit()
         _cd.close()
-    except Exception:
+    except Exception as _cde:
+        logging.warning(f"[_send_signal] cooldown DB ошибка: {_cde}")
         last_sent = _sent_signal_cache.get(cache_key, 0)
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+            logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
             return
         _sent_signal_cache[cache_key] = now_ts
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, sd["text"], parse_mode="HTML")
+            logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
         except Exception as e:
-            logging.debug(f"send_signal admin {admin_id}: {e}")
+            logging.warning(f"[_send_signal] Ошибка отправки admin {admin_id}: {e}")
     try:
         channel_text = _format_channel_signal(sd)
         scan_type = sd.get("scan_type", "")
         # Отправляем в главный канал (все стратегии)
         await bot.send_message(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+        logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
         # SWING также в ветку Swing второго канала
         if scan_type == "swing":
             await bot.send_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+            logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except Exception as ce:
-        logging.warning(f"Channel send error: {ce}")
+        logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     # backup только по расписанию (раз в час) — не после каждого сигнала
     pass
 
@@ -2782,15 +2813,21 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
     """Сканирует топ пары на одном таймфрейме, возвращает сигналы"""
     pairs = get_top_pairs(pairs_limit)
     signals = []
+    logging.info(f"[_scan_tf] Начинаем скан {timeframe}, пар: {len(pairs)}")
     for symbol in pairs:
         try:
             sig_data = full_scan_raw(symbol, timeframe, auto=True)
             if sig_data:
                 sig_data["timeframe"] = timeframe
                 signals.append(sig_data)
+                logging.info(f"[_scan_tf] {symbol} {timeframe} → сигнал: {sig_data.get('direction')} {sig_data.get('grade')}")
             await asyncio.sleep(0.3)
-        except:
-            pass
+        except asyncio.CancelledError:
+            logging.info(f"[_scan_tf] {timeframe} прерван планировщиком")
+            break
+        except Exception as e:
+            logging.error(f"[_scan_tf] {symbol} {timeframe} ошибка: {e}")
+    logging.info(f"[_scan_tf] {timeframe} завершён: {len(signals)} сигналов из {len(pairs)} пар")
     return signals
 
 
@@ -2842,35 +2879,49 @@ async def auto_scan_job():
 
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
-    signals = await _scan_tf("1h", pairs_limit=80)
-    logging.info(f"Скан 1h: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
-    logging.info(f"Скан 1h: актуальных {len(valid)}/{len(signals)}")
-    for sd in valid[:3]:
-        await _send_signal(sd)
-        await asyncio.sleep(1)
+    logging.info("[auto_scan_1h] ЗАПУЩЕН")
+    try:
+        signals = await _scan_tf("1h", pairs_limit=80)
+        logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
+        valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
+        logging.info(f"[auto_scan_1h] Актуальных {len(valid)}/{len(signals)}")
+        for sd in valid[:3]:
+            logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
+            await _send_signal(sd)
+            await asyncio.sleep(1)
+        logging.info(f"[auto_scan_1h] Завершён, отправлено {min(len(valid),3)}")
+    except Exception as e:
+        logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
 
 
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
+    logging.info("[auto_scan_swing] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
+    blocked = 0
     for symbol in pairs:
         try:
             r = detect_swing_setup(symbol, "4h")
             if r:
                 found.append(r)
+                logging.info(f"[auto_scan_swing] {symbol} НАЙДЕН: {r.get('direction')} RR={r.get('rr')}")
+            else:
+                blocked += 1
             await asyncio.sleep(0.15)
+        except asyncio.CancelledError:
+            logging.info("[auto_scan_swing] Прерван планировщиком — продолжаем")
+            break
         except Exception as e:
-            logging.debug(f"swing scan {symbol}: {e}")
+            logging.warning(f"[auto_scan_swing] {symbol}: {e}")
 
     if not found:
-        logging.info("Swing scan 4h: сетапов нет")
+        logging.info(f"[auto_scan_swing] Swing scan 4h: сетапов нет (проверено {len(pairs)}, заблокировано фильтрами {blocked})")
         return
 
     # Сортируем по RR
     found.sort(key=lambda x: x["rr"], reverse=True)
-    logging.info(f"Swing scan 4h: найдено {len(found)} сетапов")
+    logging.info(f"[auto_scan_swing] Swing scan 4h: найдено {len(found)} сетапов")
 
     for r in found[:2]:  # максимум 2 сигнала за раз
         try:
@@ -2884,15 +2935,6 @@ async def auto_scan_swing():
             risk_label = "низкий" if r["rr"] >= 3 else "средний"
 
             # AI комментарий
-            _sw_comment = ""
-            try:
-                _sw_comment = generate_signal_comment(
-                    symbol, direction, None, int(r["rr"] * 20), "SWING",
-                    None, None, r.get("ob"), r.get("fvg"), "",
-                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="4h"
-                )
-            except Exception:
-                pass
 
             text = (
                 f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
@@ -2902,13 +2944,11 @@ async def auto_scan_swing():
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
                 f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
                 f"\n"
-                f"{trend_icon} Логика: {r['logic']}\n"
+                f"📈 Логика: {r['logic']}\n"
                 f"\n"
                 f"⚡ Риск: {risk_label}\n"
                 f"⏱ Горизонт: ~{r.get('est_hours', 8)}ч"
             )
-            if _sw_comment:
-                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_sw_comment}</i>"
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             sd = {
@@ -2939,26 +2979,6 @@ async def auto_scan_swing():
                     continue
             except Exception:
                 pass
-            # Проверяем cooldown
-            cache_key = f"{symbol}:SWING:{direction}:4h"
-            now_ts = time.time()
-            try:
-                import sqlite3 as _sq3
-                _cd = _sq3.connect("brain.db", timeout=10)
-                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-                last_sent = row[0] if row else 0
-                if now_ts - last_sent < 4 * 3600:
-                    _cd.close()
-                    continue
-                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-                _cd.commit()
-                _cd.close()
-            except Exception:
-                last_sent = _sent_signal_cache.get(cache_key, 0)
-                if now_ts - last_sent < 4 * 3600:
-                    continue
-                _sent_signal_cache[cache_key] = now_ts
-
             # Сохраняем в БД
             save_signal_db(
                 symbol, direction, "SWING",
@@ -3068,6 +3088,7 @@ async def auto_scan_mega():
 
 async def auto_wyckoff_scan():
     """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
+    logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
     for symbol in pairs:
@@ -3082,14 +3103,14 @@ async def auto_wyckoff_scan():
                 found.append(r2)
             await asyncio.sleep(0.5)
         except Exception as e:
-            logging.debug(f"wyckoff scan {symbol}: {e}")
+            logging.warning(f"[auto_wyckoff_scan] {symbol}: {e}")
 
     if not found:
-        logging.info("Wyckoff scan: паттернов нет")
+        logging.info("[auto_wyckoff_scan] Wyckoff scan: паттернов нет")
         return
 
     found.sort(key=lambda x: x["score"], reverse=True)
-    logging.info(f"Wyckoff scan: найдено {len(found)}")
+    logging.info(f"[auto_wyckoff_scan] Wyckoff scan: найдено {len(found)}")
 
     for r in found[:2]:
         try:
@@ -3112,15 +3133,6 @@ async def auto_wyckoff_scan():
                 tp_sign = "-"
 
             # AI комментарий
-            _wyk_comment = ""
-            try:
-                _wyk_comment = generate_signal_comment(
-                    symbol, direction, None, r["score"], "WYCKOFF",
-                    None, None, r.get("ob"), r.get("fvg"), "",
-                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="1d"
-                )
-            except Exception:
-                pass
 
             text = (
                 f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — {dir_label}\n"
@@ -3140,8 +3152,6 @@ async def auto_wyckoff_scan():
                 f"⚡ Риск: средний\n"
                 f"⏱ Горизонт: ~7-21 дней"
             )
-            if _wyk_comment:
-                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_wyk_comment}</i>"
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа
@@ -3159,23 +3169,6 @@ async def auto_wyckoff_scan():
                 _chk.close()
                 if _open:
                     continue
-            except Exception:
-                pass
-
-            # Cooldown 24ч
-            cache_key = f"{symbol}:WYCKOFF:{direction}:1d"
-            now_ts = time.time()
-            try:
-                import sqlite3 as _sq3
-                _cd = _sq3.connect("brain.db", timeout=10)
-                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-                last_sent = row[0] if row else 0
-                if now_ts - last_sent < 24 * 3600:
-                    _cd.close()
-                    continue
-                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-                _cd.commit()
-                _cd.close()
             except Exception:
                 pass
 
@@ -3213,9 +3206,11 @@ async def auto_fast_deal_scan():
     _hour = _now_dt.hour
     _minute = _now_dt.minute
     _time_m = _hour * 60 + _minute
-    if not (420 <= _time_m <= 660 or 900 <= _time_m <= 1140):
+    if not (510 <= _time_m <= 630 or 990 <= _time_m <= 1110):
+        logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
 
+    logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН (Kill Zone {_hour:02d}:{_minute:02d} UTC)")
     found = []
     for symbol in FAST_PAIRS:
         try:
@@ -3224,7 +3219,7 @@ async def auto_fast_deal_scan():
                 found.append(r)
             await asyncio.sleep(0.3)
         except Exception as e:
-            logging.debug(f"fast deal scan {symbol}: {e}")
+            logging.warning(f"[auto_fast_deal_scan] {symbol}: {e}")
 
     if not found:
         return
@@ -3239,15 +3234,6 @@ async def auto_fast_deal_scan():
             dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
 
             # AI комментарий
-            _fast_comment = ""
-            try:
-                _fast_comment = generate_signal_comment(
-                    symbol, direction, None, int(r["rr"] * 20), "FAST",
-                    None, None, r.get("ob"), r.get("fvg"), "",
-                    entry=r["entry"], sl=r["sl"], tp1=r["tp"], timeframe="5m"
-                )
-            except Exception:
-                pass
 
             _fast_tp1 = r.get("tp1", r["tp"])
             _fast_tp2 = r.get("tp2", r["tp"])
@@ -3267,8 +3253,6 @@ async def auto_fast_deal_scan():
                 f"⭐ RR: {r['rr']} | Риск: низкий\n"
                 f"⏱ Горизонт: ~15-30 мин"
             )
-            if _fast_comment:
-                text += f"\n\n💬 <b>APEX думает:</b>\n<i>{_fast_comment}</i>"
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа (1.5% для скальпинга)
@@ -3289,22 +3273,7 @@ async def auto_fast_deal_scan():
             except Exception:
                 pass
 
-            # Cooldown 1ч для скальпинга
-            cache_key = f"{symbol}:FAST:{direction}:5m"
-            now_ts = time.time()
-            try:
-                import sqlite3 as _sq3
-                _cd = _sq3.connect("brain.db", timeout=10)
-                row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-                last_sent = row[0] if row else 0
-                if now_ts - last_sent < 2 * 3600:
-                    _cd.close()
-                    continue
-                _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-                _cd.commit()
-                _cd.close()
-            except Exception:
-                pass
+
 
             # Сохраняем в БД с tp1 и tp2 отдельно для частичного закрытия
             _f_tp1 = r.get("tp1", r["tp"])
@@ -3419,7 +3388,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception as _e:
             pass
 
-        mtf = multi_tf_analysis(symbol, ["1h", "4h", "1d", "1w"])  # 1d/1w — контекст для анализа
+        mtf = multi_tf_analysis(symbol, ["1h", "4h"])  # основной анализ
         if not mtf:
             return None
 
@@ -3524,39 +3493,38 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # Минимальный порог confluence по таймфрейму
         min_conf = {"1h": 4, "4h": 3, "1d": 3, "1w": 2}
         if len(confluence) < min_conf.get(timeframe, 3):
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
-        # 1h — минимум 3/4 ТФ
-        if timeframe == "1h" and mtf.get("match_count", 0) < 3:
+        # 1h — минимум 2/4 ТФ (2/4 проходит с предупреждением, 1/4 блокируется)
+        _match = mtf.get("match_count", 0)
+        if timeframe == "1h" and _match < 2:
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {_match} < 2)")
             return None
+        _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (2/4 ТФ)" if _match == 2 else ""
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
             return None
 
-        # Только МЕГА ТОП и ТОП СДЕЛКА
-        if mtf.get("grade") not in ("МЕГА ТОП", "ТОП СДЕЛКА"):
-            return None  # market.py grade check — МЕГА ТОП или ТОП СДЕЛКА от multi_tf_analysis
+        # Grade фильтр убран — пропускаем все пары с MTF сигналом
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
-        # Mitigation check — OB уже протестирован, вход ненадёжный
-        if levels.get("mitigated"):
-            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
-            return None
+        # Mitigation check — OB уже протестирован, передаём Groq как контекст
+        _ob_mitigated = levels.get("mitigated", False)
+        if _ob_mitigated:
+            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, передаём Groq")
         entry = levels["entry"]
         sl    = levels["sl"]
         tp1   = levels["tp1"]
         tp2   = levels["tp2"]
         tp3   = levels["tp3"]
-        # Фильтр по RR — минимум 1.5
-        if levels.get("rr", 0) < 1.5:
-            return None
+        # RR — контекст для Groq
+        _rr_val = levels.get("rr", 0)
 
-        # Фильтр VWAP — не входим если перекуплен/перепродан
+        # VWAP — контекст для Groq
         vwap_warning = any("перекуплен" in c or "перепродан" in c for c in confluence)
-        if vwap_warning and timeframe == "1h":
-            return None
 
         est_hours, confidence, win_rate = get_estimated_time(symbol, timeframe)
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
@@ -3674,7 +3642,14 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                         logging.info(f"[MTF Groq] {symbol} {direction}: Groq отклонил сигнал")
                         return None
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
-                        groq_logic = str(parsed["logic"]).strip()
+                        raw_logic = str(parsed["logic"]).strip()
+                        # Убираем JSON артефакты если Groq вернул сырой JSON
+                        if raw_logic.startswith("{") or '"logic"' in raw_logic:
+                            import re as _re2
+                            m = _re2.search(r'"logic"\s*:\s*"([^"]+)"', raw_logic)
+                            groq_logic = m.group(1) if m else raw_logic[:100]
+                        else:
+                            groq_logic = raw_logic
                     if parsed.get("hours"):
                         hrs = int(parsed["hours"])
                         groq_time = f"~{hrs}ч" if hrs < 24 else f"~{hrs//24}дн"
@@ -3693,13 +3668,13 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         text = (
             f"📐 <b>[MTF]</b> | <b>{symbol}</b> — {dir_label}\n"
-            f"📊 Контекст: {tf_label}\n"
+            f"📊 Контекст: {tf_label}{(' | ' + _weak_mtf_warn) if _weak_mtf_warn else ''}\n"
             f"\n"
             f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
             f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
             f"🛑 Стоп: <code>{smart_price_fmt(sl)}</code>\n"
             f"\n"
-            f"{trend_icon} Логика:\n{groq_logic}\n"
+            f"📈 Логика:\n{groq_logic}\n"
             f"\n"
             f"⚡ Риск: {risk_level}\n"
             f"⏱ Горизонт: {groq_time}"
@@ -3709,6 +3684,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
         timing_score = timing.get("score", 0)
+        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid')}")
 
         # Порог 3/3 — только подтверждённые входы
         if timing_score < 3:
@@ -3718,7 +3694,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 sig_name, text, timing_score
             )
             if saved:
-                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3)")
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → СОХРАНЁН В ОЧЕРЕДЬ (score {timing_score}/3)")
+            else:
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} — дубль или ошибка сохранения (score {timing_score}/3)")
             return None  # Ждём подтверждения тайминга
 
         # Тайминг ОК — сохраняем в БД только сейчас
@@ -4022,10 +4000,14 @@ async def restore_db_from_github():
             logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
             return
         import base64, sqlite3 as _sq
-        r = requests.get(
-            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
-            timeout=10
+        loop = asyncio.get_event_loop()
+        r = await loop.run_in_executor(
+            None,
+            lambda: requests.get(
+                f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
+                headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+                timeout=10
+            )
         )
         if r.status_code != 200:
             logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
@@ -4226,6 +4208,127 @@ async def on_startup(app):
     else:
         logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
 
+    # ── Webhook режим: настройка планировщика (сигналы + мозг) ──
+    # BUG FIX: этот блок был случайно перемещён внутрь recheck_timing_queue.
+    # Теперь он правильно инициализируется при старте webhook-сервера.
+    webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
+
+    # Основные сигналы
+    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=10, jitter=30)
+    webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_fast_deal_scan,  "interval", minutes=5,  jitter=30,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600)
+    webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+    webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10)
+    # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
+    webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
+    webhook_scheduler.add_job(check_alerts,         "interval", minutes=5)
+    webhook_scheduler.add_job(auto_research,        "interval", hours=2)
+    webhook_scheduler.add_job(night_brain_tasks,    "interval", minutes=30, jitter=180)
+    webhook_scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+
+    # Мозг / самообучение
+    async def _weekly_report_job():
+        try:
+            loop = asyncio.get_running_loop()
+            report = await loop.run_in_executor(None, _learn_weekly_report)
+            if report and ADMIN_ID:
+                await bot.send_message(ADMIN_ID, report, parse_mode="HTML")
+        except Exception as e:
+            logging.warning(f"Weekly report error: {e}")
+    webhook_scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0, timezone="UTC")
+
+    async def _review_rules_job():
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_review_rules)
+            await loop.run_in_executor(None, _learn_ab_test)
+        except Exception as e:
+            logging.error(f"review_rules_job: {e}")
+    webhook_scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
+
+    async def _self_diagnose_job():
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self_diagnose_and_grow)
+        await loop.run_in_executor(None, auto_fill_knowledge_gaps)
+    webhook_scheduler.add_job(_self_diagnose_job, "interval", hours=6, jitter=1200)
+
+    async def _run_self_analysis():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_self_analysis)
+    webhook_scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
+
+    async def _run_decay():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_decay)
+    webhook_scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
+
+    async def _run_strategy_update():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_build_strategy)
+            logging.info("[Scheduler] Стратегия Groq обновлена")
+    webhook_scheduler.add_job(_run_strategy_update, "cron", hour=5, minute=0)
+
+    async def _run_groq_diagnosis():
+        if _LEARNING_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _learn_self_diag)
+            logging.info("[Scheduler] Groq самодиагностика завершена")
+    webhook_scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
+
+    webhook_scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
+
+    async def _router_daily_review():
+        if _ROUTER_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _brain_router.daily_review)
+            logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
+    webhook_scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
+
+    webhook_scheduler.add_job(run_brain_builder_async,     "interval", hours=1,  jitter=300)
+    webhook_scheduler.add_job(run_brain_builder_full_async, "cron",     hour=3,   minute=0)
+
+    async def _run_web_learner():
+        if _WEB_LEARNER_OK:
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, _web_learn_cycle)
+            if results:
+                logging.info(f"[WebLearner] Изучено тем: {len(results)}")
+            await backup_db_to_github()
+    webhook_scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300)
+    webhook_scheduler.add_job(_run_web_learner, "date",
+        run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
+
+    async def _run_self_improve():
+        if _WEB_LEARNER_OK:
+            loop = asyncio.get_running_loop()
+            improvements = await loop.run_in_executor(None, _web_self_improve)
+            if improvements:
+                logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
+    webhook_scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
+
+    async def _run_autopilot_fast():
+        if _AUTOPILOT_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _autopilot_fast)
+    webhook_scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
+
+    async def _run_autopilot_deep():
+        if _AUTOPILOT_OK:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _autopilot_deep)
+    webhook_scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600)
+
+    webhook_scheduler.start()
+    setup_error_capture()
+    asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))
+    logging.info("APEX запущен! (webhook mode)")
+
 
 async def recheck_timing_queue():
     """Каждые 15 мин перепроверяет очередь тайминга"""
@@ -4261,6 +4364,14 @@ async def recheck_timing_queue():
                 logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: {old_score}/3 → {new_score}/3")
 
                 if timing["valid"] and new_score >= 3:
+                    # Проверяем RR по текущей цене (минимум 2.0 для MTF)
+                    _risk = abs(entry - sl)
+                    _reward = abs(tp1 - entry)
+                    _rr_now = _reward / _risk if _risk > 0 else 0
+                    if _rr_now < 2.0:
+                        logging.info(f"[TimingQueue] {symbol} {direction} — RR {_rr_now:.2f} < 2.0, ждём")
+                        continue
+
                     # Обновляем текст — добавляем пометку
                     updated_text = "\U0001F514 <b>\u0422\u0410\u0419\u041c\u0418\u041d\u0413 \u041f\u041e\u0414\u0422\u0412\u0415\u0420\u0416\u0414\u0401\u041d!</b>\n" + signal_text.replace(
                         f"⏰ <b>Тайминг:</b> ⏳",
@@ -4273,128 +4384,12 @@ async def recheck_timing_queue():
                     }
                     await _send_signal(sd)
                     remove_from_timing_queue(queue_id)
-                    logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3)")
+                    logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3, RR {_rr_now:.2f})")
 
             except Exception as e:
-                logging.debug(f"[TimingQueue] {symbol}: {e}")
+                logging.warning(f"[TimingQueue] {symbol}: {e}")
     except Exception as e:
         logging.error(f"[TimingQueue] recheck error: {e}")
-
-    scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
-
-    # Еженедельный отчёт — каждое воскресенье в 08:00 UTC
-    async def _weekly_report_job():
-        try:
-            loop = asyncio.get_running_loop()
-            report = await loop.run_in_executor(None, _learn_weekly_report)
-            if report and ADMIN_ID:
-                await bot.send_message(ADMIN_ID, report, parse_mode="HTML")
-        except Exception as e:
-            logging.warning(f"Weekly report error: {e}")
-
-    scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0, timezone="UTC")
-
-    # Пересмотр правил — каждые 3 дня
-    async def _review_rules_job():
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_review_rules)
-            await loop.run_in_executor(None, _learn_ab_test)
-        except Exception as e:
-            logging.error(f"review_rules_job: {e}")
-
-    scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
-    async def _self_diagnose_job():
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self_diagnose_and_grow)
-        await loop.run_in_executor(None, auto_fill_knowledge_gaps)
-    scheduler.add_job(_self_diagnose_job, "interval", hours=6, jitter=1200)
-    # Самоанализ точности + обновление авто-правил
-    async def _run_self_analysis():
-        if _LEARNING_OK:
-            import asyncio as _a
-            await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
-    scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
-
-    # Decay правил — раз в сутки ослабляем устаревшие правила
-    async def _run_decay():
-        if _LEARNING_OK:
-            import asyncio as _a
-            await _a.get_event_loop().run_in_executor(None, _learn_decay)
-    scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
-
-    # Groq стратегия — обновляется раз в день в 5:00
-    async def _run_strategy_update():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_build_strategy)
-            logging.info("[Scheduler] Стратегия Groq обновлена")
-    scheduler.add_job(_run_strategy_update, "cron", hour=5, minute=0)
-
-    # Groq самодиагностика ошибок — каждые 12 часов
-    async def _run_groq_diagnosis():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_self_diag)
-            logging.info("[Scheduler] Groq самодиагностика завершена")
-    scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
-
-    # Groq читает логи и анализирует ошибки каждые 30 минут
-    scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
-
-    # Brain Router — ежедневный обзор стратегии в 05:30 (после strategy_update)
-    async def _router_daily_review():
-        if _ROUTER_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _brain_router.daily_review)
-            logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
-    scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
-
-    # Brain Builder — каждые 3ч быстрый цикл (экономим токены), раз в сутки полный
-    scheduler.add_job(run_brain_builder_async, "interval", hours=1, jitter=300)
-    scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0)
-
-    # Web Learner — автономный поиск знаний каждые 4 часа
-    async def _run_web_learner():
-        if _WEB_LEARNER_OK:
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(None, _web_learn_cycle)
-            if results:
-                logging.info(f"[WebLearner] Изучено тем: {len(results)}")
-            await backup_db_to_github()
-    scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300)
-    scheduler.add_job(_run_web_learner, "date",
-        run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
-
-    # Groq самоулучшение — каждые 8 часов анализирует результаты и добавляет правила
-    async def _run_self_improve():
-        if _WEB_LEARNER_OK:
-            loop = asyncio.get_running_loop()
-            improvements = await loop.run_in_executor(None, _web_self_improve)
-            if improvements:
-                logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
-    scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
-
-    # Автопилот — быстрый цикл каждые 15 минут
-    async def _run_autopilot_fast():
-        if _AUTOPILOT_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _autopilot_fast)
-    scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
-    scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30)
-
-    # Автопилот — глубокий цикл каждые 4 часа
-    async def _run_autopilot_deep():
-        if _AUTOPILOT_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _autopilot_deep)
-    scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600)
-
-    scheduler.start()
-    setup_error_capture()
-    # Первый цикл обучения — через 60 сек после старта
-    asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))  # 5 мин после старта
-    logging.info("APEX запущен!")
 
 async def on_startup_diagnose(app):
     """Первая самодиагностика через 8 мин после старта"""
@@ -4479,12 +4474,25 @@ def main():
                     await asyncio.sleep(2)
 
         async def polling_main():
+            # Восстанавливаем БД из GitHub с таймаутом 30 сек чтобы не блокировать деплой
+            try:
+                await asyncio.wait_for(restore_db_from_github(), timeout=30)
+            except asyncio.TimeoutError:
+                logging.warning("restore_db_from_github: таймаут 30с — продолжаем без восстановления")
+            except Exception as _re:
+                logging.warning(f"restore_db_from_github: {_re}")
             init_db()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
                     init_brain_db()
                 except Exception as _ibe:
                     logging.warning(f"init_brain_db: {_ibe}")
+            if _LEARNING_OK:
+                try:
+                    from learning import init_learning
+                    init_learning()
+                except Exception as _ile:
+                    logging.warning(f"init_learning: {_ile}")
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
             threading.Thread(target=get_top_pairs, daemon=True).start()
@@ -4508,6 +4516,10 @@ def main():
             # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+            # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
+            scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
+            # backup_db_to_github убран из scheduler — вызывает disk I/O ошибки
+            # Бэкап происходит только после отправки сигналов
             scheduler.start()
             asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")

@@ -1455,7 +1455,7 @@ def save_to_timing_queue(symbol, direction, timeframe, entry, sl, tp1, tp2, tp3,
         logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → очередь (score {timing_score}/3, истекает через {hours}ч)")
         return True
     except Exception as e:
-        logging.debug(f"save_to_timing_queue {symbol}: {e}")
+        logging.warning(f"[TimingQueue] ОШИБКА save_to_timing_queue {symbol}: {e}")
         return False
 
 
@@ -4096,24 +4096,37 @@ def check_pending_signals():
 
             result = None
             hit_tp = None
+            _sig_type_check = (signal_type or "").upper()
             if direction == "BULLISH":
-                if current >= tp3:
-                    result, hit_tp = "tp3", 3
-                elif current >= tp2:
-                    result, hit_tp = "tp2", 2
-                elif current >= tp1:
-                    result, hit_tp = "tp1", 1
-                elif current <= sl:
-                    result = "sl"
+                if _sig_type_check == "FAST":
+                    # FAST: TP1 и TP2, без TP3
+                    if current >= tp2:
+                        result, hit_tp = "tp2", 2
+                    elif current >= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current <= sl:
+                        result = "sl"
+                else:
+                    # MTF/SWING/WYCKOFF: только одно TP уведомление
+                    if current >= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current <= sl:
+                        result = "sl"
             else:
-                if current <= tp3:
-                    result, hit_tp = "tp3", 3
-                elif current <= tp2:
-                    result, hit_tp = "tp2", 2
-                elif current <= tp1:
-                    result, hit_tp = "tp1", 1
-                elif current >= sl:
-                    result = "sl"
+                if _sig_type_check == "FAST":
+                    # FAST: TP1 и TP2, без TP3
+                    if current <= tp2:
+                        result, hit_tp = "tp2", 2
+                    elif current <= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current >= sl:
+                        result = "sl"
+                else:
+                    # MTF/SWING/WYCKOFF: только одно TP уведомление
+                    if current <= tp1:
+                        result, hit_tp = "tp1", 1
+                    elif current >= sl:
+                        result = "sl"
 
             # Expiry: используем estimated_hours или стратегию, fallback 72ч
             _sig_type = (signal_type or "").upper()
@@ -7056,8 +7069,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * _vol_mult:
-                return None  # Объём < threshold — ненадёжный sweep
+            if avg_vol > 0 and sweep_vol < avg_vol * 1.2:
+                return None  # Объём < 1.2×avg — ненадёжный sweep
         except Exception:
             pass
 
@@ -7074,8 +7087,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     _atr_median = _atr_vals[len(_atr_vals) // 2] if _atr_vals else atr
                     _disp_threshold = 0.50 if atr < _atr_median else 0.60
                     _disp_ratio = _disp_body / _disp_range
-                    if _disp_ratio < _disp_threshold:
-                        return None  # Нет displacement
+                    if _disp_ratio < 0.4:
+                        return None  # Нет displacement — не импульсная свеча
+                    # Проверяем направление displacement
                     if direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]:
                         return None
                     if direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]:
@@ -7216,7 +7230,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if risk == 0:
             return None
         rr_check = reward / risk
-        if rr_check < 1.5 or rr_check > 5.0:
+        if rr_check < 2.0 or rr_check > 6.0:
             return None
 
         # ── Фильтр — цель должна быть реальной ──
@@ -7654,10 +7668,12 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         price_peak = max(c["high"] for c in candles_1d[-50:-15])
         drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
 
+        # Для BTC порог снижен до 12% (BTC редко падает на 20%)
+        _wyckoff_min_drawdown = 12 if symbol == "BTCUSDT" else 20
         if drawdown_pct >= 35:
             score += 30
             signals.append(f"✅ Глубокий даунтренд -{drawdown_pct:.0f}% от пика")
-        elif drawdown_pct >= 20:
+        elif drawdown_pct >= _wyckoff_min_drawdown:
             score += 15
             signals.append(f"⚡️ Коррекция -{drawdown_pct:.0f}% от пика")
         else:
@@ -8176,9 +8192,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _hour = _now_dt.hour
         _minute = _now_dt.minute
         _time_minutes = _hour * 60 + _minute
-        # Kill Zone расширен: 07:00-11:00 UTC и 15:00-19:00 UTC
-        _in_london_kz = 420 <= _time_minutes <= 660   # 07:00 - 11:00
-        _in_ny_kz     = 900 <= _time_minutes <= 1140   # 15:00 - 19:00
+        # Kill Zone сужен: 08:30-10:30 UTC и 16:30-18:30 UTC
+        _in_london_kz = 510 <= _time_minutes <= 810   # 08:30 - 13:30
+        _in_ny_kz     = 990 <= _time_minutes <= 1290   # 16:30 - 21:30
         if not (_in_london_kz or _in_ny_kz):
             return None
 
@@ -8188,7 +8204,6 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None
 
         # ── 1. BTC направление ──
-        btc_ok, btc_reason = btc_allows_signal("BULLISH")
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
         btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
 
@@ -8197,17 +8212,17 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not direction_1d or direction_1d not in ("BULLISH", "BEARISH"):
             return None
 
-        # BTC фильтр: для LONG BTC не должен падать
-        # Для SHORT BTC не должен агрессивно расти (>1% за последние 3 свечи 1h)
-        if direction_1d == "BULLISH" and btc_trend == "BEARISH":
-            return None
-        if direction_1d == "BEARISH" and btc_trend == "BULLISH":
-            try:
-                btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
-                if btc_change > 1.0:
-                    return None  # BTC растёт >1% — шорт альт опасен
-            except Exception:
-                pass
+        # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
+        if symbol != "BTCUSDT":
+            if direction_1d == "BULLISH" and btc_trend == "BEARISH":
+                return None
+            if direction_1d == "BEARISH" and btc_trend == "BULLISH":
+                try:
+                    btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
+                    if btc_change > 1.0:
+                        return None  # BTC растёт >1% — шорт альт опасен
+                except Exception:
+                    pass
 
         direction = direction_1d
 
@@ -8233,7 +8248,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         in_zone = False
         zone_desc = ""
         atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
-        _zone_tol = atr_4h * 0.5  # Сужённый допуск ±ATR×0.5
+        _zone_tol = atr_4h * 1.0  # Допуск ±ATR×1.0
 
         if ob_4h:
             zone_bottom = ob_4h["bottom"]
