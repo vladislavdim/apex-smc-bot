@@ -2397,27 +2397,37 @@ def find_fvg(candles, direction):
     return None
 
 def check_opposing_ob(candles, direction, entry, tp):
-    """Проверяет нет ли противоположного OB между entry и TP.
+    """Проверяет нет ли противоположного OB или FVG между entry и TP.
     Возвращает скорректированный TP или None если блокирует."""
     opposing_dir = "BEARISH" if direction == "BULLISH" else "BULLISH"
     opp_ob = find_ob(candles, opposing_dir)
-    if not opp_ob:
-        return tp  # Нет противоположного OB — TP без изменений
+    opp_fvg = find_fvg(candles, opposing_dir)
 
-    if direction == "BULLISH":
-        # Bearish OB между entry и TP = сопротивление
-        if entry < opp_ob["bottom"] < tp:
-            new_tp = smart_round(opp_ob["bottom"] * 0.998)  # TP чуть ниже bearish OB
-            if new_tp > entry * 1.003:  # Минимум 0.3% профита
-                return new_tp
-            return None  # Слишком мало места — блокируем
-    else:
-        # Bullish OB между entry и TP (TP < entry для SHORT)
-        if tp < opp_ob["top"] < entry:
-            new_tp = smart_round(opp_ob["top"] * 1.002)  # TP чуть выше bullish OB
-            if new_tp < entry * 0.997:
-                return new_tp
-            return None
+    # Собираем все блокирующие зоны
+    blockers = []
+    if opp_ob:
+        blockers.append(("OB", opp_ob["bottom"], opp_ob["top"]))
+    if opp_fvg:
+        blockers.append(("FVG", opp_fvg["bottom"], opp_fvg["top"]))
+
+    if not blockers:
+        return tp
+
+    for _btype, b_bottom, b_top in blockers:
+        if direction == "BULLISH":
+            if entry < b_bottom < tp:
+                new_tp = smart_round(b_bottom * 0.998)
+                if new_tp > entry * 1.003:
+                    tp = new_tp  # сужаем TP до ближайшего блокера
+                else:
+                    return None
+        else:
+            if tp < b_top < entry:
+                new_tp = smart_round(b_top * 1.002)
+                if new_tp < entry * 0.997:
+                    tp = new_tp
+                else:
+                    return None
     return tp
 
 
@@ -3311,8 +3321,8 @@ def full_scan(symbol, timeframe="1h"):
                     for e in _ev_15m
                 )
                 if not _has_choch_15m:
-                    total_weight -= 8
-                    confluence.append(f"⚠️ Нет CHoCH/BOS на 15m (-8)")
+                    logging.info(f"full_scan {symbol}: нет CHoCH/BOS на 15m — hard block")
+                    return None
         except Exception:
             pass
 
@@ -3734,6 +3744,64 @@ def full_scan(symbol, timeframe="1h"):
                     confluence.extend(ext_descs)
             except Exception as _e:
                 logging.debug(f"ext boosters: {_e}")
+
+        # ── MTF Combo-Score: минимум 3 из 7 подтверждений ──
+        _combo_hits = 0
+        _combo_total = 7
+        # 1) OB найден
+        if ob:
+            _combo_hits += 1
+        # 2) FVG найден
+        if fvg:
+            _combo_hits += 1
+        # 3) CVD совпадает с направлением
+        try:
+            _combo_cvd = calculate_cvd(candles)
+            if _combo_cvd["signal"] == direction[:4] or _combo_cvd["signal"] == direction:
+                _combo_hits += 1
+        except Exception:
+            pass
+        # 4) RSI дивергенция (уже посчитана в confluence)
+        try:
+            _combo_div = detect_rsi_macd_divergence(candles, direction) if _SMC_ENGINE_OK else {"found": False}
+            if _combo_div.get("found"):
+                _combo_hits += 1
+        except Exception:
+            pass
+        # 5) Объём последних 3 свечей выше среднего
+        try:
+            _vol_avg20 = sum(c.get("volume", 0) for c in candles[-20:]) / 20 if len(candles) >= 20 else 0
+            _vol_last3 = sum(c.get("volume", 0) for c in candles[-3:]) / 3 if len(candles) >= 3 else 0
+            if _vol_avg20 > 0 and _vol_last3 > _vol_avg20:
+                _combo_hits += 1
+                confluence.append(f"✅ Объём 3 свечи выше avg ({_vol_last3/_vol_avg20:.1f}x) (+4)")
+                total_weight += 4
+        except Exception:
+            pass
+        # 6) BTC идёт в том же направлении (бонус, не просто "не против")
+        try:
+            _btc_chg = get_btc_1h_change()
+            if (direction == "BULLISH" and _btc_chg > 0.3) or (direction == "BEARISH" and _btc_chg < -0.3):
+                _combo_hits += 1
+                confluence.append(f"✅ BTC совпадает ({_btc_chg:+.1f}%) (+5)")
+                total_weight += 5
+        except Exception:
+            pass
+        # 7) Цена в OTE зоне (Fib 0.62-0.79)
+        try:
+            _combo_fib = get_fibonacci_levels(candles, direction) if _SMC_ENGINE_OK else {}
+            _nr = _combo_fib.get("nearest_ratio", 0)
+            if 0.62 <= _nr <= 0.79:
+                _combo_hits += 1
+                confluence.append(f"✅ OTE зона (Fib {_nr:.3f}) (+6)")
+                total_weight += 6
+        except Exception:
+            pass
+
+        if _combo_hits < 3:
+            logging.info(f"full_scan {symbol}: combo-score {_combo_hits}/{_combo_total} < 3 — пропускаем")
+            return None
+        confluence.append(f"🎯 Combo-score: {_combo_hits}/{_combo_total}")
 
         # Минимальный порог — учитывает серию потерь
         min_weight = max(streak_threshold, 18 if mtf["match_count"] >= 3 else 22)
@@ -6980,32 +7048,38 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 logging.info(f"[SWING BTC Filter] {symbol} {direction} пропущен: {btc_reason}")
                 return None
 
-        # ── Фильтр объёма на sweep свече >= 1.5×avg_vol ──
+        # ── Фильтр объёма на sweep свече (адаптивный: 1.5x active / 1.2x off-hours) ──
         try:
+            from datetime import datetime as _dt_vol
+            _vol_hour = _dt_vol.utcnow().hour
+            _vol_mult = 1.5 if 8 <= _vol_hour <= 21 else 1.2
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 1.5:
-                return None  # Объём < 1.5×avg — ненадёжный sweep
+            if avg_vol > 0 and sweep_vol < avg_vol * _vol_mult:
+                return None  # Объём < threshold — ненадёжный sweep
         except Exception:
             pass
 
         # ── Displacement candle — свеча после sweep должна быть импульсной ──
-        # body > 60% от range в направлении сигнала
+        # Адаптивный порог: если ATR < median → 50%, иначе 60%
         try:
             if lookback_i >= 2:
                 _disp_candle = candles[-lookback_i + 1]
                 _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
                 _disp_range = _disp_candle["high"] - _disp_candle["low"]
                 if _disp_range > 0:
+                    # Адаптивный displacement: ATR < median → 50%, ATR > median → 60%
+                    _atr_vals = sorted([candles[j]["high"] - candles[j]["low"] for j in range(-min(30, len(candles)), 0)])
+                    _atr_median = _atr_vals[len(_atr_vals) // 2] if _atr_vals else atr
+                    _disp_threshold = 0.50 if atr < _atr_median else 0.60
                     _disp_ratio = _disp_body / _disp_range
-                    if _disp_ratio < 0.6:
-                        return None  # Нет displacement — не импульсная свеча
-                    # Проверяем направление displacement
+                    if _disp_ratio < _disp_threshold:
+                        return None  # Нет displacement
                     if direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]:
-                        return None  # Displacement против направления
+                        return None
                     if direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]:
-                        return None  # Displacement против направления
+                        return None
         except Exception:
             pass
 
@@ -7040,7 +7114,78 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
+        # ── Reaction speed: sweep recovery within 1-2 candles ──
+        try:
+            if lookback_i <= 2:
+                pass  # Быстрая реакция — ОК
+            elif lookback_i >= 4:
+                return None  # Слишком долгое восстановление после sweep
+        except Exception:
+            pass
+
+        # ── RSI дивергенция для SWING ──
+        _swing_rsi_bonus = False
+        try:
+            if _SMC_ENGINE_OK:
+                _sw_rsi_div = detect_rsi_macd_divergence(candles, direction)
+                if _sw_rsi_div.get("found"):
+                    _swing_rsi_bonus = True
+        except Exception:
+            pass
+
+        # ── CVD подтверждение для SWING ──
+        _swing_cvd_ok = False
+        try:
+            _sw_cvd = calculate_cvd(candles)
+            if _sw_cvd["signal"] == direction[:4] or _sw_cvd["signal"] == direction:
+                _swing_cvd_ok = True
+        except Exception:
+            pass
+
+        # ── FVG в направлении сигнала между entry и TP ──
+        _swing_fvg_ok = False
+        try:
+            _sw_dir_fvg = find_fvg(candles, direction)
+            if _sw_dir_fvg:
+                if direction == "BULLISH" and entry <= _sw_dir_fvg["bottom"] <= tp:
+                    _swing_fvg_ok = True
+                elif direction == "BEARISH" and tp <= _sw_dir_fvg["top"] <= entry:
+                    _swing_fvg_ok = True
+                elif _sw_dir_fvg:
+                    _swing_fvg_ok = True  # FVG есть, но вне зоны — всё равно засчитаем
+        except Exception:
+            pass
+
+        # ── 1h CHoCH после 4h sweep ──
+        _swing_1h_choch = False
+        try:
+            if timeframe == "4h":
+                _c1h = get_candles(symbol, "1h", 20)
+                if _c1h and len(_c1h) >= 10:
+                    _sh1h, _sl1h = find_swings(_c1h, lookback=3)
+                    _cl1h = classify_swings(_sh1h, _sl1h)
+                    _ev1h = detect_events(_c1h, _cl1h)
+                    _swing_1h_choch = any(
+                        e.get("direction") == direction and e.get("type") in ("CHoCH", "BOS")
+                        for e in _ev1h
+                    )
+        except Exception:
+            pass
+
+        # ── Premium/Discount зона для SWING ──
+        _swing_pd_ok = False
+        try:
+            if _SMC_ENGINE_OK:
+                _sw_pd = get_premium_discount(candles)
+                # BULLISH должен быть в DISCOUNT, BEARISH в PREMIUM
+                if (direction == "BULLISH" and _sw_pd.get("zone") == "DISCOUNT") or \
+                   (direction == "BEARISH" and _sw_pd.get("zone") == "PREMIUM"):
+                    _swing_pd_ok = True
+        except Exception:
+            pass
+
         # ── Проверка ретеста OB в зоне CHoCH ──
+        _swing_ob = None
         try:
             _swing_ob = find_ob(candles, direction)
             if _swing_ob:
@@ -7080,34 +7225,26 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if direction == "BEARISH" and tp >= entry:
             return None
 
-        # ── Контекст старших ТФ ──
+        # ── HTF: 1d обязательное подтверждение, 1w — бонус/штраф ──
         tf_context = "1d" if timeframe == "4h" else "4h"
         htf_dir = smc_on_tf(symbol, tf_context)
 
-        # ── Фильтр 1w + 1d для SWING ──
-        htf_1w_swing = smc_on_tf(symbol, "1w")
-        weekly_warning = ""
-
-        # 1w BEARISH + 1d BEARISH → только SHORT
-        if htf_1w_swing and "BEARISH" in str(htf_1w_swing).upper():
-            if direction == "BULLISH":
-                if htf_dir and "BEARISH" in str(htf_dir).upper():
-                    return None  # 1w BEARISH + 1d BEARISH → LONG заблокирован
-                else:
-                    # 1w BEARISH + 1d BULLISH → LONG с предупреждением
-                    weekly_warning = "⚠️ 1w BEARISH — осторожно с лонгом"
-
-        # 1w BULLISH + 1d BEARISH → SHORT заблокирован
-        if htf_1w_swing and "BULLISH" in str(htf_1w_swing).upper():
-            if direction == "BEARISH" and htf_dir and "BEARISH" in str(htf_dir).upper():
-                return None  # Не шортим при бычьей неделе
-
-        # Стандартный 1d фильтр
+        # 1d — обязательное подтверждение (hard block)
         if htf_dir:
             if direction == "BULLISH" and "BEARISH" in str(htf_dir).upper():
                 return None
             if direction == "BEARISH" and "BULLISH" in str(htf_dir).upper():
                 return None
+
+        # 1w — дополнительное подтверждение (бонус/штраф, НЕ hard block)
+        htf_1w_swing = smc_on_tf(symbol, "1w")
+        weekly_warning = ""
+        if htf_1w_swing:
+            _1w_str = str(htf_1w_swing).upper()
+            if direction == "BULLISH" and "BEARISH" in _1w_str:
+                weekly_warning = "⚠️ 1w BEARISH — осторожно с лонгом"
+            elif direction == "BEARISH" and "BULLISH" in _1w_str:
+                weekly_warning = "⚠️ 1w BULLISH — осторожно с шортом"
 
         # ── Дополнительно: проверяем 15m подтверждение ──
         try:
@@ -7256,6 +7393,21 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 12
             est_hours = max(12, min(est_hours, 96))
 
+        # ── SWING Quality Score: подсчёт подтверждений ──
+        _sw_confirms = sum([
+            _swing_rsi_bonus,   # RSI дивергенция
+            _swing_cvd_ok,      # CVD совпадает
+            _swing_fvg_ok,      # FVG в направлении
+            _swing_1h_choch,    # 1h CHoCH после 4h sweep
+            _swing_pd_ok,       # Premium/Discount зона
+            bool(not weekly_warning),  # 1w не против
+        ])
+        _sw_quality = f" [Q:{_sw_confirms}/6]"
+        # Если менее 2 подтверждений — требуем RR >= 2.5
+        if _sw_confirms < 2 and rr < 2.5:
+            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6, RR={rr} < 2.5 — пропуск")
+            return None
+
         return {
             "symbol":    symbol,
             "direction": direction,
@@ -7266,13 +7418,14 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "sl_pct":    sl_pct,
             "tp_pct":    tp_pct,
             "rr":        rr,
-            "logic":     logic,
+            "logic":     logic + _sw_quality,
             "htf_dir":   htf_dir,
             "htf_1w":    htf_1w_swing,
             "weekly_warning": weekly_warning,
             "est_hours": est_hours,
-            "ob":        _sw_ob,
-            "fvg":       _sw_fvg,
+            "ob":        _swing_ob,
+            "fvg":       _sw_dir_fvg if _swing_fvg_ok else None,
+            "confirms":  _sw_confirms,
             "scan_type": "swing",
         }
 
@@ -8164,7 +8317,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not sweep_found or not entry or not sl:
             return None
 
-        # ── Engulfing как дополнительное подтверждение ──
+        # ── Engulfing как подтверждение (используется в скоркарте) ──
         _has_engulfing_5m = detect_engulfing(candles_5m, direction)
 
         # ── Volume check на 5m sweep свече ──
@@ -8172,6 +8325,83 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _sweep_c = candles_5m[-_sweep_candles_ago]
         if _avg_vol_5m > 0 and _sweep_c.get("volume", 0) < _avg_vol_5m * 1.2:
             return None  # Sweep без объёма — ненадёжный
+
+        # ── FAST Mini-Scorecard: 7 условий, минимум 3 ──
+        _fast_score = 0
+
+        # 1) Предыдущая свеча закрылась в направлении сигнала
+        _prev_5m = candles_5m[-2]
+        if direction == "BULLISH" and _prev_5m["close"] > _prev_5m["open"]:
+            _fast_score += 1
+        elif direction == "BEARISH" and _prev_5m["close"] < _prev_5m["open"]:
+            _fast_score += 1
+
+        # 2) BTC на 5m в том же направлении
+        try:
+            _btc_5m = get_candles("BTCUSDT", "5m", 5)
+            if _btc_5m and len(_btc_5m) >= 2:
+                _btc_5m_dir = "BULLISH" if _btc_5m[-1]["close"] > _btc_5m[-2]["close"] else "BEARISH"
+                if _btc_5m_dir == direction:
+                    _fast_score += 1
+        except Exception:
+            pass
+
+        # 3) Объём растёт последние 3 свечи
+        try:
+            if len(candles_5m) >= 4:
+                _v1 = candles_5m[-4].get("volume", 0)
+                _v2 = candles_5m[-3].get("volume", 0)
+                _v3 = candles_5m[-2].get("volume", 0)
+                if _v1 > 0 and _v2 > _v1 and _v3 > _v2:
+                    _fast_score += 1
+        except Exception:
+            pass
+
+        # 4) Sweep на EQH/EQL
+        try:
+            _eqh, _eql = find_equal_highs_lows(candles_5m, lookback=20)
+            if direction == "BULLISH" and _eql and _sweep_c["low"] < _eql:
+                _fast_score += 1
+            elif direction == "BEARISH" and _eqh and _sweep_c["high"] > _eqh:
+                _fast_score += 1
+        except Exception:
+            pass
+
+        # 5) Counter-sweep protection: нет обратного sweep после нашего
+        _counter_sweep = False
+        try:
+            for _cs_i in range(_sweep_candles_ago - 1, 0, -1):
+                _cs_c = candles_5m[-_cs_i]
+                if direction == "BULLISH" and _cs_c["high"] > candles_5m[-_cs_i - 1]["high"] and _cs_c["close"] < candles_5m[-_cs_i - 1]["high"]:
+                    _counter_sweep = True
+                    break
+                if direction == "BEARISH" and _cs_c["low"] < candles_5m[-_cs_i - 1]["low"] and _cs_c["close"] > candles_5m[-_cs_i - 1]["low"]:
+                    _counter_sweep = True
+                    break
+        except Exception:
+            pass
+        if not _counter_sweep:
+            _fast_score += 1
+
+        # 6) Engulfing паттерн
+        if _has_engulfing_5m:
+            _fast_score += 1
+
+        # 7) Session timing: первые 30 мин Kill Zone — бонус
+        _session_bonus = False
+        if _in_london_kz and _time_minutes <= 450:    # первые 30 мин London (07:00-07:30)
+            _session_bonus = True
+        elif _in_ny_kz and _time_minutes <= 930:      # первые 30 мин NY (15:00-15:30)
+            _session_bonus = True
+        if _session_bonus:
+            _fast_score += 1
+        # Последние 15 мин часа — штраф (если score на грани)
+        _last_15_min = _minute >= 45
+
+        # Минимум 3 из 7 для прохождения
+        if _fast_score < 3:
+            logging.info(f"[FAST Score] {symbol}: mini-score {_fast_score}/7 < 3 — пропуск")
+            return None
 
         # ── TP1 = ATR×1.5, TP2 = ATR×2.5 от входа ──
         if direction == "BULLISH":
@@ -8188,7 +8418,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if risk == 0:
             return None
         rr = round(reward / risk, 2)
-        if rr < 1.5:
+        # Последние 15 мин часа — ужесточаем RR
+        _min_rr = 2.0 if _last_15_min else 1.5
+        if rr < _min_rr:
             return None
 
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
@@ -8267,11 +8499,12 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "tp_pct":    tp_pct,
             "tp2_pct":   tp2_pct,
             "rr":        rr,
-            "logic":     logic,
+            "logic":     logic + f" [S:{_fast_score}/7]",
             "zone":      zone_desc,
             "direction_1d": direction_1d,
             "ob":        ob_4h,
             "fvg":       fvg_4h,
+            "fast_score": _fast_score,
             "scan_type": "fast",
         }
 
