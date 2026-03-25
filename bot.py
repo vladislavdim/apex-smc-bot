@@ -3200,7 +3200,7 @@ async def auto_wyckoff_scan():
 
 
 async def auto_fast_deal_scan():
-    """Каждые 5 мин: 5m скальпинг — Kill Zone 08:30-10:30 и 16:30-18:30 UTC"""
+    """Каждые 5 мин: 5m скальпинг — Kill Zone 07:00-11:00 и 15:00-19:00 UTC"""
     from datetime import datetime as _dt
     _now_dt = _dt.utcnow()
     _hour = _now_dt.hour
