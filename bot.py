@@ -3496,10 +3496,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
-        # 1h — минимум 3/4 ТФ
-        if timeframe == "1h" and mtf.get("match_count", 0) < 3:
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {mtf.get('match_count',0)} < 3)")
+        # 1h — минимум 2/4 ТФ (2/4 проходит с предупреждением, 1/4 блокируется)
+        _match = mtf.get("match_count", 0)
+        if timeframe == "1h" and _match < 2:
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {_match} < 2)")
             return None
+        _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (2/4 ТФ)" if _match == 2 else ""
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
@@ -3666,7 +3668,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         text = (
             f"📐 <b>[MTF]</b> | <b>{symbol}</b> — {dir_label}\n"
-            f"📊 Контекст: {tf_label}\n"
+            f"📊 Контекст: {tf_label}{(' | ' + _weak_mtf_warn) if _weak_mtf_warn else ''}\n"
             f"\n"
             f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
             f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
