@@ -7437,6 +7437,246 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
 
 
+# ===== СТРАТЕГИЯ 5: ZONE — вход из Discount/Premium зоны =====
+
+def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
+    """
+    ZONE стратегия: вход из Discount/Premium зоны с OB/FVG подтверждением.
+    Не требует sweep — опирается на зону интереса и отбой от неё.
+    """
+    try:
+        candles = get_candles(symbol, timeframe, 100)
+        if not candles or len(candles) < 50:
+            return None
+
+        price = candles[-1]["close"]
+        atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+
+        # ── 1. Диапазон и зоны ──
+        range_candles = candles[-50:]
+        range_high = max(c["high"] for c in range_candles)
+        range_low  = min(c["low"]  for c in range_candles)
+        range_mid  = (range_high + range_low) / 2
+        range_size = range_high - range_low
+
+        if range_size < atr * 2:
+            return None  # Диапазон слишком мал
+
+        in_discount = price <= range_mid  # Нижние 50% — для LONG
+        in_premium  = price >= range_mid  # Верхние 50% — для SHORT
+
+        if not in_discount and not in_premium:
+            return None
+
+        # Определяем направление
+        direction = "BULLISH" if in_discount else "BEARISH"
+
+        # ── 2. Находим OB и FVG в зоне ──
+        ob  = find_ob(candles, direction)
+        fvg = find_fvg(candles, direction)
+
+        zone_level = None
+        zone_type  = None
+
+        if ob:
+            # OB должен быть в нужной зоне
+            if direction == "BULLISH" and ob["top"] <= range_mid:
+                if ob["bottom"] <= price <= ob["top"] + atr * 0.5:
+                    zone_level = ob["bottom"]
+                    zone_type  = "OB"
+            elif direction == "BEARISH" and ob["bottom"] >= range_mid:
+                if ob["bottom"] - atr * 0.5 <= price <= ob["top"]:
+                    zone_level = ob["top"]
+                    zone_type  = "OB"
+
+        if not zone_level and fvg:
+            if direction == "BULLISH" and fvg["top"] <= range_mid:
+                if fvg["bottom"] <= price <= fvg["top"] + atr * 0.5:
+                    zone_level = fvg["bottom"]
+                    zone_type  = "FVG"
+            elif direction == "BEARISH" and fvg["bottom"] >= range_mid:
+                if fvg["bottom"] - atr * 0.5 <= price <= fvg["top"]:
+                    zone_level = fvg["top"]
+                    zone_type  = "FVG"
+
+        if not zone_level:
+            return None  # Нет зоны интереса рядом с ценой
+
+        # ── 3. Подтверждение отбоя — хотя бы 1 свеча в направлении ──
+        last = candles[-1]
+        rebound_bull = (last["close"] > last["open"] and
+                        last["low"] <= zone_level + atr * 0.3)
+        rebound_bear = (last["close"] < last["open"] and
+                        last["high"] >= zone_level - atr * 0.3)
+
+        if direction == "BULLISH" and not rebound_bull:
+            return None
+        if direction == "BEARISH" and not rebound_bear:
+            return None
+
+        # ── 4. HTF фильтры ──
+        htf_1d = smc_on_tf(symbol, "1d")
+        if htf_1d:
+            if direction == "BULLISH" and "BEARISH" in str(htf_1d).upper():
+                return None
+            if direction == "BEARISH" and "BULLISH" in str(htf_1d).upper():
+                return None
+
+        # ── 5. BTC фильтр ──
+        if symbol != "BTCUSDT":
+            btc_ok, btc_reason = btc_allows_signal(direction)
+            if not btc_ok:
+                return None
+
+        # ── 6. FR фильтр ──
+        try:
+            fr = get_funding_rate(symbol)
+            if fr is not None and abs(fr) > 0.2:
+                return None
+        except Exception:
+            pass
+
+        # ── 7. Quality score (минимум 3 из 7) ──
+        q_score = 0
+
+        # Q1: CHoCH/BOS на 1h
+        try:
+            dir_1h = smc_on_tf(symbol, "1h")
+            if dir_1h and direction in str(dir_1h).upper():
+                q_score += 1
+        except Exception:
+            pass
+
+        # Q2: Объём последних 3 свечей > avg
+        try:
+            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
+            if all(candles[-i]["volume"] > avg_vol for i in range(1, 4)):
+                q_score += 1
+        except Exception:
+            pass
+
+        # Q3: RSI не перекуплен (30-70)
+        try:
+            rmd = detect_rsi_macd_divergence(candles, direction)
+            rsi_val = rmd.get("rsi", 50) if rmd else 50
+            if 30 <= rsi_val <= 70:
+                q_score += 1
+        except Exception:
+            q_score += 1  # Нет данных — не блокируем
+
+        # Q4: FVG между entry и TP в направлении
+        try:
+            if fvg and direction == "BULLISH" and fvg["bottom"] > price:
+                q_score += 1
+            elif fvg and direction == "BEARISH" and fvg["top"] < price:
+                q_score += 1
+        except Exception:
+            pass
+
+        # Q5: BTC на 4h в том же направлении
+        try:
+            btc_4h = smc_on_tf("BTCUSDT", "4h")
+            if btc_4h and direction in str(btc_4h).upper():
+                q_score += 1
+        except Exception:
+            pass
+
+        # Q6: Funding rate нейтральный или против толпы
+        try:
+            fr = get_funding_rate(symbol)
+            if fr is not None:
+                if direction == "BULLISH" and fr < 0:
+                    q_score += 1  # Шорты накопились — хорошо для LONG
+                elif direction == "BEARISH" and fr > 0:
+                    q_score += 1  # Лонги накопились — хорошо для SHORT
+                elif abs(fr) < 0.05:
+                    q_score += 1  # Нейтральный
+        except Exception:
+            pass
+
+        # Q7: Свеча с объёмом на отбое > 1.3x avg
+        try:
+            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
+            if last["volume"] > avg_vol * 1.3:
+                q_score += 1
+        except Exception:
+            pass
+
+        if q_score < 3:
+            return None  # Недостаточно подтверждений
+
+        # ── 8. Расчёт entry / SL / TP ──
+        if direction == "BULLISH":
+            entry = smart_round(price)
+            sl    = smart_round(zone_level - atr * 0.5)
+            # TP = ближайший swing high
+            swing_highs, _ = find_swings(candles, lookback=5)
+            tp_candidates = [sh[1] for sh in swing_highs if sh[1] > entry * 1.005]
+            tp = smart_round(min(tp_candidates)) if tp_candidates else smart_round(entry + atr * 4)
+        else:
+            entry = smart_round(price)
+            sl    = smart_round(zone_level + atr * 0.5)
+            _, swing_lows = find_swings(candles, lookback=5)
+            tp_candidates = [sw[1] for sw in swing_lows if sw[1] < entry * 0.995]
+            tp = smart_round(max(tp_candidates)) if tp_candidates else smart_round(entry - atr * 4)
+
+        # ── 9. RR фильтр ──
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0:
+            return None
+        rr = round(reward / risk, 2)
+        if rr < 2.0:
+            return None
+
+        # ── 10. Groq анализ ──
+        logic = f"Вход из {'Discount' if direction == 'BULLISH' else 'Premium'} зоны ({zone_type})"
+        try:
+            _zone_prompt = (
+                f"Ты трейдер SMC. Анализируй вход из зоны интереса. Ответь СТРОГО JSON:\n"
+                f'{{\"logic\": \"причина входа макс 15 слов\", \"valid\": true/false}}\n\n'
+                f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
+                f"Зона: {'Discount' if direction == 'BULLISH' else 'Premium'} | Тип: {zone_type}\n"
+                f"Диапазон: {smart_price_fmt(range_low)}–{smart_price_fmt(range_high)} | Mid: {smart_price_fmt(range_mid)}\n"
+                f"Цена: {smart_price_fmt(price)} | OB: {smart_price_fmt(ob['bottom']) + '–' + smart_price_fmt(ob['top']) if ob else 'нет'}\n"
+                f"FVG: {smart_price_fmt(fvg['bottom']) + '–' + smart_price_fmt(fvg['top']) if fvg else 'нет'}\n"
+                f"1d тренд: {htf_1d} | Quality score: {q_score}/7\n"
+                f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)} RR: {rr}"
+            )
+            _zone_resp = ask_groq(_zone_prompt, max_tokens=80)
+            if _zone_resp:
+                import json as _j, re as _re
+                _clean = _re.sub(r'```json|```', '', _zone_resp).strip()
+                _m = _re.search(r'\{[^}]+\}', _clean, _re.DOTALL)
+                if _m:
+                    _parsed = _j.loads(_m.group())
+                    if not _parsed.get("valid", True):
+                        return None
+                    if _parsed.get("logic"):
+                        logic = str(_parsed["logic"]).strip()
+        except Exception:
+            pass
+
+        return {
+            "symbol":    symbol,
+            "direction": direction,
+            "entry":     entry,
+            "sl":        sl,
+            "tp":        tp,
+            "rr":        rr,
+            "zone_type": zone_type,
+            "zone":      "Discount" if direction == "BULLISH" else "Premium",
+            "q_score":   q_score,
+            "htf_dir":   htf_1d,
+            "logic":     logic,
+            "est_hours": 12,
+        }
+
+    except Exception as e:
+        logging.warning(f"detect_zone_setup {symbol}: {e}")
+        return None
+
+
 # ===== СТРАТЕГИЯ 3: WYCKOFF ACCUMULATION + DISTRIBUTION =====
 
 def _find_wyckoff_phases_accumulation(candles_1d, candles_4h):
