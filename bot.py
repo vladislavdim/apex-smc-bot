@@ -658,7 +658,7 @@ async def cmd_stats(message: types.Message):
     top_text = "\n".join([f"• {r[0]}: {r[1]:.0f}% WR, avg {r[3]:.0f}ч ({r[2]} сигн.)" for r in top]) or "Нет данных"
 
     # Формируем текст по стратегиям
-    strategy_icons = {"MTF": "📐", "SWING": "🔄", "WYCKOFF": "🌊", "FAST": "⚡"}
+    strategy_icons = {"MTF": "📐", "SWING": "🔄", "WYCKOFF": "🌊", "FAST": "⚡", "ZONE": "📦"}
     strategy_lines = []
     for stype, s_total, s_wins in strategy_rows:
         s_wr = round(s_wins / s_total * 100, 1) if s_total > 0 else 0
@@ -2995,6 +2995,92 @@ async def auto_scan_swing():
         except Exception as e:
             logging.error(f"[SwingScan] send {r.get('symbol')}: {e}")
 
+async def auto_zone_scan():
+    """Каждые 20 мин: сканирует зоны Discount/Premium с OB/FVG"""
+    logging.info("[auto_zone_scan] ЗАПУЩЕН")
+    pairs = get_top_pairs(60)
+    found = []
+    for symbol in pairs:
+        try:
+            r = detect_zone_setup(symbol, "4h")
+            if r:
+                found.append(r)
+                logging.info(f"[auto_zone_scan] {symbol} НАЙДЕН: {r['direction']} RR={r['rr']} zone={r['zone']}")
+            await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logging.warning(f"[auto_zone_scan] {symbol}: {e}")
+
+    if not found:
+        logging.info("[auto_zone_scan] Зон нет")
+        return
+
+    found.sort(key=lambda x: x["rr"], reverse=True)
+
+    for r in found[:3]:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+            htf       = r.get("htf_dir", "")
+
+            text = (
+                f"📦 <b>[ZONE]</b> | <b>{symbol}</b> — {dir_label}\n"
+                f"📊 Контекст: 4h | 1d: {htf} | {r['zone']} зона ({r['zone_type']})\n"
+                f"\n"
+                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code>\n"
+                f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
+                f"\n"
+                f"📈 Логика: {r['logic']}\n"
+                f"\n"
+                f"⭐ Quality: {r['q_score']}/7 | RR: {r['rr']}\n"
+                f"⏱ Горизонт: ~{r.get('est_hours', 12)}ч"
+            )
+            text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
+
+            sd = {
+                "symbol": symbol, "direction": direction,
+                "timeframe": "4h", "entry": r["entry"],
+                "sl": r["sl"], "tp1": r["tp"],
+                "tp2": r["tp"], "tp3": r["tp"],
+                "grade": "ZONE", "text": text,
+                "confluence_score": int(r["rr"] * 20),
+                "regime": "ZONE",
+                "scan_type": "zone",
+            }
+
+            if not _is_entry_still_valid(sd, max_drift_pct=2.0):
+                continue
+
+            try:
+                import sqlite3 as _sq3
+                _chk = _sq3.connect("brain.db", timeout=10)
+                _open = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND direction=? AND result='pending' LIMIT 1",
+                    (symbol, direction)
+                ).fetchone()
+                _chk.close()
+                if _open:
+                    continue
+            except Exception:
+                pass
+
+            save_signal_db(
+                symbol, direction, "ZONE",
+                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                "4h", 12, "ZONE",
+                confluence=int(r["rr"] * 20), regime="ZONE"
+            )
+
+            await _send_signal(sd)
+            logging.info(f"[ZoneScan] {symbol} {direction} RR={r['rr']} zone={r['zone']} → отправлен")
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logging.error(f"[ZoneScan] {r.get('symbol')}: {e}")
+
 async def auto_scan_1d():
     """Каждый час: скан 1d таймфрейма"""
     signals = await _scan_tf("1d", pairs_limit=20)
@@ -4230,6 +4316,7 @@ async def on_startup(app):
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=10, jitter=30)
     webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_zone_scan,       "interval", minutes=20, jitter=60,  max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
     webhook_scheduler.add_job(auto_fast_deal_scan,  "interval", minutes=5,  jitter=30,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600)
     webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
@@ -4515,6 +4602,7 @@ def main():
             scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
             scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
             scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
+            scheduler.add_job(auto_zone_scan, "interval", minutes=20, jitter=60, max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
