@@ -1690,8 +1690,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             sl_candidates = []
 
             if len(sl_swing) >= 2:
-                # Есть два swing low — берём второй (более значимый, дальше)
-                sl_candidates.append(sl_swing[1] * (1 - buf))
+                # Берём ближайший swing low (симметрично SHORT)
+                sl_candidates.append(sl_swing[0] * (1 - buf))
             elif sl_swing:
                 # Только один — берём его
                 sl_candidates.append(sl_swing[0] * (1 - buf))
@@ -1852,16 +1852,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
 
         # Если TP слишком близко — дополняем математикой
         if rr < 0.8:
-            tf_risk = {"5m": 0.010, "15m": 0.015, "1h": 0.025, "4h": 0.050, "1d": 0.100}
-            math_risk = price * tf_risk.get(timeframe, 0.025)
-            if direction == "BULLISH":
-                tp1 = smart_round(entry + max(risk * 3, math_risk * 3))
-                tp2 = smart_round(entry + max(risk * 5, math_risk * 5))
-                tp3 = tp2
-            else:
-                tp1 = smart_round(entry - max(risk * 3, math_risk * 3))
-                tp2 = smart_round(entry - max(risk * 5, math_risk * 5))
-                tp3 = tp2
+            return None  # Нет структурных уровней — не выдаём сигнал
             reward = abs(tp1 - entry)
             rr = round(reward / risk, 2)
 
