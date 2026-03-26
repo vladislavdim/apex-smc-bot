@@ -1680,9 +1680,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                         _mitigated = True
                         break
                 if _mitigated:
-                    return {"entry": entry, "sl": entry * 0.96, "tp1": entry * 1.02,
-                            "tp2": entry * 1.04, "tp3": entry * 1.04, "rr": 0.5,
-                            "mitigated": True}
+                    logging.info(f"[calc_smart_levels] OB mitigated BULLISH — продолжаем с обычным расчётом")
+                    # Не блокируем — просто считаем уровни по структуре
 
             # --- SL: за значимый swing low (второй если есть) ---
             atr_sl = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
@@ -1784,9 +1783,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
                         _mitigated = True
                         break
                 if _mitigated:
-                    return {"entry": entry, "sl": entry * 1.04, "tp1": entry * 0.98,
-                            "tp2": entry * 0.96, "tp3": entry * 0.96, "rr": 0.5,
-                            "mitigated": True}
+                    logging.info(f"[calc_smart_levels] OB mitigated BEARISH — продолжаем с обычным расчётом")
+                    # Не блокируем — просто считаем уровни по структуре
 
             # --- SL: за ближайшей структурной зоной выше входа ---
             atr_sl_b = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
@@ -1853,8 +1851,6 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         # Если TP слишком близко — дополняем математикой
         if rr < 0.8:
             return None  # Нет структурных уровней — не выдаём сигнал
-            reward = abs(tp1 - entry)
-            rr = round(reward / risk, 2)
 
         return {
             "entry": entry, "sl": sl,
@@ -3789,8 +3785,8 @@ def full_scan(symbol, timeframe="1h"):
         except Exception:
             pass
 
-        if _combo_hits < 3:
-            logging.info(f"full_scan {symbol}: combo-score {_combo_hits}/{_combo_total} < 3 — пропускаем")
+        if _combo_hits < 2:
+            logging.info(f"full_scan {symbol}: combo-score {_combo_hits}/{_combo_total} < 2 — пропускаем")
             return None
         confluence.append(f"🎯 Combo-score: {_combo_hits}/{_combo_total}")
 
@@ -7123,7 +7119,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         try:
             if lookback_i <= 2:
                 pass  # Быстрая реакция — ОК
-            elif lookback_i >= 4:
+            elif lookback_i >= 6:
                 return None  # Слишком долгое восстановление после sweep
         except Exception:
             pass
@@ -7408,9 +7404,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             bool(not weekly_warning),  # 1w не против
         ])
         _sw_quality = f" [Q:{_sw_confirms}/6]"
-        # Если менее 2 подтверждений — требуем RR >= 2.5
-        if _sw_confirms < 2 and rr < 2.5:
-            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6, RR={rr} < 2.5 — пропуск")
+        # Если менее 2 подтверждений — требуем RR >= 2.0
+        if _sw_confirms < 2 and rr < 2.0:
+            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6, RR={rr} < 2.0 — пропуск")
             return None
 
         return {
@@ -8198,10 +8194,14 @@ def detect_fast_deal(symbol: str) -> dict | None:
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
         btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
 
-        # ── 2. 1d тренд ──
-        direction_1d = smc_on_tf(symbol, "1d")
-        if not direction_1d or direction_1d not in ("BULLISH", "BEARISH"):
+        # ── 2. 4h+1h consensus (вместо 1d) ──
+        direction_4h = smc_on_tf(symbol, "4h")
+        direction_1h = smc_on_tf(symbol, "1h")
+        if not direction_4h or not direction_1h:
             return None
+        if direction_4h != direction_1h:
+            return None  # 4h и 1h расходятся — не входим
+        direction_1d = direction_4h  # используем как direction для дальнейшей логики
 
         # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
         if symbol != "BTCUSDT":

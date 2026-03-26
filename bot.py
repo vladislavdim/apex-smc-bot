@@ -3273,7 +3273,19 @@ async def auto_fast_deal_scan():
             except Exception:
                 pass
 
-
+            # Cooldown: не отправляем если недавно уже был FAST сигнал по этому символу
+            try:
+                _cdc = _sq3.connect("brain.db", timeout=10)
+                _cdrow = _cdc.execute(
+                    "SELECT 1 FROM signals WHERE symbol=? AND signal_type='FAST' AND timestamp > datetime('now', '-30 minutes') LIMIT 1",
+                    (symbol,)
+                ).fetchone()
+                _cdc.close()
+                if _cdrow:
+                    logging.info(f"[FastDeal] {symbol} — cooldown 30 min, пропускаем")
+                    continue
+            except Exception:
+                pass
 
             # Сохраняем в БД с tp1 и tp2 отдельно для частичного закрытия
             _f_tp1 = r.get("tp1", r["tp"])
@@ -3514,7 +3526,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # Mitigation check — OB уже протестирован, передаём Groq как контекст
         _ob_mitigated = levels.get("mitigated", False)
         if _ob_mitigated:
-            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, передаём Groq")
+            logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
+            return None
         entry = levels["entry"]
         sl    = levels["sl"]
         tp1   = levels["tp1"]
