@@ -7056,7 +7056,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 1.2:
+            if avg_vol > 0 and sweep_vol < avg_vol * 1.0:
                 return None  # Объём < 1.2×avg — ненадёжный sweep
         except Exception:
             pass
@@ -7602,7 +7602,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        if q_score < 3:
+        if q_score < 4:
             return None  # Недостаточно подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
@@ -7896,7 +7896,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
 
         # Для BTC порог снижен до 12% (BTC редко падает на 20%)
-        _wyckoff_min_drawdown = 12 if symbol == "BTCUSDT" else 20
+        _wyckoff_min_drawdown = 10 if symbol == "BTCUSDT" else 16
         if drawdown_pct >= 35:
             score += 30
             signals.append(f"✅ Глубокий даунтренд -{drawdown_pct:.0f}% от пика")
@@ -8645,7 +8645,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _last_15_min = _minute >= 45
 
         # Минимум 3 из 7 для прохождения
-        if _fast_score < 3:
+        if _fast_score < 2:
             logging.info(f"[FAST Score] {symbol}: mini-score {_fast_score}/7 < 3 — пропуск")
             return None
 
