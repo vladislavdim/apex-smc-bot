@@ -2885,7 +2885,7 @@ async def auto_scan_1h():
         logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
         valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
         logging.info(f"[auto_scan_1h] Актуальных {len(valid)}/{len(signals)}")
-        for sd in valid[:6]:
+        for sd in sorted(valid, key=lambda x: x.get("confluence_score", 0), reverse=True)[:3]:
             logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
             await _send_signal(sd)
             await asyncio.sleep(1)
