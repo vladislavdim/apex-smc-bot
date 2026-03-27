@@ -3609,7 +3609,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
-        # Mitigation check — OB уже протестирован, передаём Groq как контекст
+        if not levels:
+            return None
+        entry = levels["entry"]
         _ob_mitigated = levels.get("mitigated", False)
         if _ob_mitigated:
             logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
@@ -3802,8 +3804,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
-        timing_score = timing.get("score", 0)
-        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid')}")
+        timing_score = timing.get("score", 0) if timing else 0
+        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid') if timing else False}")
 
         # Порог 3/3 — только подтверждённые входы
         if timing_score < 3:
