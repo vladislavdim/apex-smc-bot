@@ -1644,7 +1644,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             raise ValueError("мало свечей")
 
         # Получаем структуру
-        raw_highs, raw_lows = find_swings(candles)
+        raw_highs, raw_lows = find_swings(candles, lookback=8)
         # find_swings возвращает (idx, price) или просто price — нормализуем
         highs = [h[1] if isinstance(h, (tuple, list)) else h for h in raw_highs]
         lows  = [l[1] if isinstance(l, (tuple, list)) else l for l in raw_lows]
@@ -1701,17 +1701,31 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if buy_stops_price and buy_stops_price < entry * 0.985:
                 sl_candidates.append(buy_stops_price * (1 - buf))
 
-            # Fallback: ATR * 2 (только если совсем нет структуры)
+            # FIX 6: Сначала ищем OB на 4h если нет свингов на 1h
             if not sl_candidates:
-                sl_candidates.append(entry - atr_sl * 2.0)
+                try:
+                    candles_4h = get_candles(symbol, "4h", 50) if symbol else None
+                    ob_4h = find_ob(candles_4h, direction) if candles_4h else None
+                    if ob_4h and direction == "BULLISH":
+                        sl_candidates.append(ob_4h["bottom"] * (1 - buf))
+                    elif ob_4h and direction == "BEARISH":
+                        sl_candidates.append(ob_4h["top"] * (1 + buf))
+                except Exception:
+                    pass
+            # Только если совсем нет структуры — ATR×1.0 (не 2.0)
+            if not sl_candidates:
+                sl_candidates.append(entry - atr_sl * 1.0)
 
             # Берём самый дальний кандидат (за реальной структурой)
             sl_raw = min(sl_candidates)
 
             # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
-            max_sl_pct = {"1h": 0.08, "4h": 0.10, "1d": 0.15, "1w": 0.20}
-            max_sl = entry * (1 - max_sl_pct.get(timeframe, 0.08))
+            max_sl_pct = {"1h": 0.03, "4h": 0.05, "1d": 0.10, "1w": 0.15}
+            max_sl = entry * (1 - max_sl_pct.get(timeframe, 0.03))
             sl = smart_round(max(sl_raw, max_sl))
+            # FIX 3: SL cap 4% от входа
+            _swing_sl_cap = entry * 0.96
+            sl = max(sl, _swing_sl_cap)
 
 
 
@@ -1814,9 +1828,12 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             sl_raw = min(sl_candidates)
 
             # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
-            max_sl_pct = {"1h": 0.08, "4h": 0.10, "1d": 0.15, "1w": 0.20}
-            max_sl = entry * (1 + max_sl_pct.get(timeframe, 0.08))
+            max_sl_pct = {"1h": 0.03, "4h": 0.05, "1d": 0.10, "1w": 0.15}
+            max_sl = entry * (1 + max_sl_pct.get(timeframe, 0.03))
             sl = smart_round(min(sl_raw, max_sl))
+            # FIX 3: SL cap 4% от входа
+            _swing_sl_cap_b = entry * 1.04
+            sl = min(sl, _swing_sl_cap_b)
             # --- TP1: ближайшая зона ликвидности ниже ---
             tp1_candidates = []
             buy_stops = heatmap.get("nearest_buy_stops")
