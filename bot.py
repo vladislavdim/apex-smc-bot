@@ -3486,7 +3486,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception as _e:
             pass
 
-        mtf = multi_tf_analysis(symbol, ["1h", "4h"])  # основной анализ
+        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])  # основной анализ
         if not mtf:
             return None
 
@@ -3621,6 +3621,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         tp3   = levels["tp3"]
         # RR — контекст для Groq
         _rr_val = levels.get("rr", 0)
+        if _rr_val < 2.0:
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} < 2.0 — пропускаем")
+            return None
 
         # VWAP — контекст для Groq
         vwap_warning = any("перекуплен" in c or "перепродан" in c for c in confluence)
