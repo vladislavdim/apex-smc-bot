@@ -3717,13 +3717,30 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                                 f"вердикт: {_pat.get('verdict', '?')}")
             except Exception:
                 pass
+            _sl_pct_mtf = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
             groq_prompt = (
-                f"Ты трейдер SMC. Позиционный сигнал. Ответь СТРОГО JSON без лишнего:\n"
-                f'{{\"logic\": \"почему входим макс 15 слов\", \"hours\": число_часов_до_tp, \"valid\": true/false}}\n\n'
-                f"Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
+                "Ты профессиональный SMC трейдер с 10-летним стажем. "
+                "Торгуешь только лучшие сетапы — лучше пропустить 10 хороших чем взять 1 плохой. "
+                f'Ответь СТРОГО JSON: {{\"logic\": \"причина входа макс 15 слов\", \"hours\": число, \"valid\": true/false}}\n\n'
+                "ПРАВИЛА БЛОКИРОВКИ (верни valid: false если):\n"
+                f"- RR < 2.0 — риск не оправдан (RR сейчас: {levels.get('rr',0)})\n"
+                f"- Стоп > 3% от входа (стоп сейчас: {_sl_pct_mtf}%)\n"
+                "- Цена не у структурного уровня (OB/FVG/swing)\n"
+                "- HTF (4h/1d) против направления сигнала\n"
+                "- Нет чёткого CHoCH или BOS подтверждающего вход\n"
+                "- Рынок в боковике без импульса\n"
+                "- Финансирование > 0.1% против направления\n\n"
+                "ПРАВИЛА ПОДТВЕРЖДЕНИЯ (valid: true если):\n"
+                "- Цена чётко в OB или FVG зоне\n"
+                "- 15m, 1h, 4h все в одном направлении\n"
+                "- Есть CHoCH или BOS после sweep ликвидности\n"
+                "- RR ≥ 2.0, стоп за структурным уровнем\n"
+                "- TP на реальном уровне (предыдущий swing, OB, ликвидность)\n"
+                "- BTC подтверждает направление\n\n"
+                f"Данные: Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
                 f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
-                f"MTF: {mtf.get('match_count',0)}/4 | 1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
-                f"RR: {levels.get('rr',0)} | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
+                f"MTF: {mtf.get('match_count',0)}/3 | 1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
+                f"RR: {levels.get('rr',0)} | Стоп: {_sl_pct_mtf}% | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
                 f"Режим: {regime_val} | {_btc_str}\n"
                 f"{_ob_str} | {_fvg_str} | ATR: {smart_price_fmt(_atr_mtf)}\n"
                 f"{_vol_str}\n"
