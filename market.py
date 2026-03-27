@@ -7602,7 +7602,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        if q_score < 4:
+        if q_score < 5:
             return None  # Недостаточно подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
