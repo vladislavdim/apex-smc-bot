@@ -5310,6 +5310,36 @@ def get_recent_errors(limit=10):
         return ""
 
 
+def get_relevant_rules(symbol: str, direction: str, limit: int = 5) -> str:
+    """Получить релевантные правила самообучения для Groq промптов"""
+    try:
+        import sqlite3 as _sq
+        _c = _sq.connect("brain.db", timeout=5)
+        rows = _c.execute("""
+            SELECT rule_text FROM self_rules
+            WHERE active=1
+            AND (rule_type='avoid' OR rule_type='prefer')
+            AND (rule_text LIKE ? OR rule_text LIKE ? OR rule_text LIKE '%' || ? || '%')
+            ORDER BY confidence DESC LIMIT ?
+        """, (f"%{symbol}%", f"%{direction}%", direction, limit)).fetchall()
+        if not rows:
+            rows = _c.execute("""
+                SELECT rule_text FROM self_rules
+                WHERE active=1 AND confidence >= 0.8
+                ORDER BY confidence DESC LIMIT ?
+            """, (limit,)).fetchall()
+        _c.close()
+        if not rows:
+            return ""
+        rules_text = "\nПРАВИЛА САМООБУЧЕНИЯ:\n"
+        for r in rows:
+            if r[0]:
+                rules_text += f"- {r[0][:100]}\n"
+        return rules_text
+    except Exception:
+        return ""
+
+
 async def auto_add_rule(error_type, count):
     """Когда ошибка повторяется 3+ раз — AI ищет паттерн и формулирует правило"""
     try:
@@ -7410,6 +7440,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 pass
 
             _sw_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
+            _self_rules = get_relevant_rules(symbol, direction)
             groq_prompt = (
                 "Ты опытный SMC трейдер специализирующийся на swing торговле. "
                 "Оцени качество sweep сетапа. "
@@ -7434,6 +7465,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"{_ob_desc} | {_fvg_desc} | {_vol_desc}\n"
                 f"Свечи: {candles_str}"
                 f"{_sw_pat_str}"
+                f"{_self_rules}"
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100)
@@ -7705,6 +7737,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         logic = f"Вход из {'Discount' if direction == 'BULLISH' else 'Premium'} зоны ({zone_type})"
         try:
             _zone_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
+            _self_rules = get_relevant_rules(symbol, direction)
             _zone_prompt = (
                 "Ты SMC трейдер специализирующийся на зонах интереса. "
                 "Оцени вход из Discount/Premium зоны. "
@@ -7729,6 +7762,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"FVG: {smart_price_fmt(fvg['bottom']) + '–' + smart_price_fmt(fvg['top']) if fvg else 'нет'}\n"
                 f"1d тренд: {htf_1d} | Quality score: {q_score}/7\n"
                 f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)} RR: {rr} Стоп: {_zone_sl_pct}%"
+                f"{_self_rules}"
             )
             _zone_resp = ask_groq(_zone_prompt, max_tokens=80)
             if _zone_resp:
@@ -8154,6 +8188,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
             _wy_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
             _wy_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
+            _self_rules = get_relevant_rules(symbol, "BULLISH")
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа и накоплении/дистрибуции. "
                 "Оцени качество Wyckoff Spring сетапа. "
@@ -8182,6 +8217,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"Funding: {_wy_fund_str} | Fear&Greed: {_wy_fg_str}\n"
                 f"{_wy_ob_str} | {_wy_fvg_str}"
                 f"{_wy_pat_str}"
+                f"{_self_rules}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
             if groq_resp:
@@ -8424,6 +8460,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
             _wyd_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
             _wyd_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
+            _self_rules = get_relevant_rules(symbol, "BEARISH")
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа Distribution (дистрибуция). "
                 "Оцени качество Wyckoff Distribution сетапа для SHORT. "
@@ -8451,6 +8488,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"Funding: {_wyd_fund_str} | Fear&Greed: {_wyd_fg_str}\n"
                 f"{_wyd_ob_str} | {_wyd_fvg_str}"
                 f"{_wyd_pat_str}"
+                f"{_self_rules}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
             if groq_resp:
@@ -8817,6 +8855,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 pass
 
             _fast_sl_pct = round(abs(entry - sl) / entry * 100, 2) if entry > 0 else 0
+            _self_rules = get_relevant_rules(symbol, direction)
             groq_prompt = (
                 "Ты SMC скальпер с опытом торговли в Kill Zone. "
                 "Оцени качество скальп сетапа на 5m. "
@@ -8843,6 +8882,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"{_sweep_vol_desc} | Мини-скор: {_fast_score}/7\n"
                 f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2} RR: {rr} Стоп: {_fast_sl_pct}%"
                 f"{_fast_pat_str}"
+                f"{_self_rules}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)
             if groq_resp:

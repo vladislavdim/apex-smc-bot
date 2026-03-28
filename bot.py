@@ -3731,6 +3731,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             except Exception:
                 pass
             _sl_pct_mtf = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
+            _self_rules = get_relevant_rules(symbol, direction)
             groq_prompt = (
                 "Ты профессиональный SMC трейдер с 10-летним стажем. "
                 "Торгуешь только лучшие сетапы — лучше пропустить 10 хороших чем взять 1 плохой. "
@@ -3759,6 +3760,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 f"{_vol_str}\n"
                 f"Confluence:\n{conf_short}"
                 f"{_pat_str}"
+                f"{_self_rules}"
             )
             groq_response = ask_groq(groq_prompt, max_tokens=100)
             if groq_response and len(groq_response) > 5:
