@@ -24,17 +24,30 @@ except ImportError as e:
     patches = {}
 
 # WAL патч — решает "database is locked"
+import sqlite3 as _sq
+if not getattr(_sq, "_wal_patched", False):
+    _orig_sq_connect = _sq.connect
+    def _wal_sq_connect(db, timeout=60, **kw):
+        kw.setdefault("check_same_thread", False)
+        conn = _orig_sq_connect(db, timeout=timeout, **kw)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        return conn
+    _sq.connect = _wal_sq_connect
+    _sq._wal_patched = True
 
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
-
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
 _orig_edit_text = _msg_module.Message.edit_text
 _orig_edit_markup = _msg_module.Message.edit_reply_markup
-
 async def _safe_edit_text(self, *args, **kwargs):
     try:
         return await _orig_edit_text(self, *args, **kwargs)
@@ -42,7 +55,6 @@ async def _safe_edit_text(self, *args, **kwargs):
         if "message is not modified" in str(e):
             return None
         raise
-
 async def _safe_edit_markup(self, *args, **kwargs):
     try:
         return await _orig_edit_markup(self, *args, **kwargs)
@@ -50,7 +62,6 @@ async def _safe_edit_markup(self, *args, **kwargs):
         if "message is not modified" in str(e):
             return None
         raise
-
 _msg_module.Message.edit_text = _safe_edit_text
 _msg_module.Message.edit_reply_markup = _safe_edit_markup
 from aiohttp import web
