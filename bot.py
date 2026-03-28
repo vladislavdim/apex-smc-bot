@@ -3486,7 +3486,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception as _e:
             pass
 
-        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])  # основной анализ
+        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h", "1d"])  # основной анализ, 1d как контекст
         if not mtf:
             return None
 
@@ -3594,12 +3594,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
-        # 1h — минимум 2/4 ТФ (2/4 проходит с предупреждением, 1/4 блокируется)
+       # 1h — минимум 3/4 ТФ (15m+1h+4h должны совпасть, 1d только контекст)
         _match = mtf.get("match_count", 0)
-        if timeframe == "1h" and _match < 2:
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {_match} < 2)")
+        if timeframe == "1h" and _match < 3:
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {_match} < 3)")
             return None
-        _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (2/4 ТФ)" if _match == 2 else ""
+        _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (3/4 ТФ)" if _match == 3 else ""
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
