@@ -1822,7 +1822,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
 
             # Fallback: ATR * 1.5
             if not sl_candidates:
-                sl_candidates.append(entry + atr_sl_b * 1.5)
+                sl_candidates.append(entry + atr_sl_b * 1.0)
 
             # Берём ближайший кандидат (минимальный риск)
             sl_raw = min(sl_candidates)
@@ -2325,7 +2325,7 @@ def format_historical_context(symbol, hist):
 
 # ===== SMC ENGINE =====
 
-def find_swings(candles, lookback=5):
+def find_swings(candles, lookback=8):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
         wh = [c["high"] for c in candles[i-lookback:i+lookback+1]]
@@ -4216,6 +4216,20 @@ def check_pending_signals():
                         sig_id, symbol, direction, entry, sl, result, hours_elapsed, timeframe
                     ))
 
+                # FIX 9: Записываем ошибку в bot_errors при SL
+                if result == "sl":
+                    try:
+                        _err_conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+                        _sl_pct = round(abs(entry - sl) / entry * 100, 2) if entry else 0
+                        _err_conn.execute(
+                            "INSERT INTO bot_errors (error_type, symbol, direction, details, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                            ("SL_HIT", symbol, direction, f"SL hit after {round(hours_elapsed,1)}h | SL%={_sl_pct}% | TF={timeframe} | Type={_sig_type_check}")
+                        )
+                        _err_conn.commit()
+                        _err_conn.close()
+                    except Exception as _err_e:
+                        logging.debug(f"[FIX9] bot_errors write: {_err_e}")
+
                 closed.append({
                     "signal_id": sig_id,
                     "symbol": symbol,
@@ -5277,6 +5291,25 @@ async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, h
         logging.error(f"Deep error analysis failed: {e}")
 
 
+def get_recent_errors(limit=10):
+    """FIX 10: Возвращает последние ошибки из bot_errors для контекста Groq промптов"""
+    try:
+        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+        rows = conn.execute(
+            "SELECT error_type, symbol, direction, details, created_at FROM bot_errors ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return ""
+        lines = []
+        for r in rows:
+            lines.append(f"{r[0]}: {r[1]} {r[2]} — {r[3]}")
+        return "\nПоследние ошибки бота:\n" + "\n".join(lines)
+    except Exception:
+        return ""
+
+
 async def auto_add_rule(error_type, count):
     """Когда ошибка повторяется 3+ раз — AI ищет паттерн и формулирует правило"""
     try:
@@ -5678,8 +5711,8 @@ def learn_from_web(topic, save=True):
         if not web_results:
             return None
 
-        total_chars = sum(len(r) for r in web_results)
-        facts_text = "\n\n".join(web_results)
+        total_chars = sum(len(str(r)) for r in web_results)
+        facts_text = "\n\n".join(str(r) if not isinstance(r, str) else r for r in web_results)
         old_knowledge = get_knowledge(topic)
 
         prompt = f"""Ты APEX — AI трейдер. Прочитай данные и извлеки торговые знания.
@@ -7228,6 +7261,13 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             return None  # Противоположный OB блокирует TP
         tp = _adj_tp
 
+        # SL cap — не дальше 4% от entry
+        _sl_max_pct = 0.04
+        if direction == "BULLISH":
+            sl = max(sl, entry * (1 - _sl_max_pct))
+        else:
+            sl = min(sl, entry * (1 + _sl_max_pct))
+
         # ── Фильтр RR ──
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
@@ -8112,6 +8152,8 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             except Exception:
                 pass
 
+            _wy_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
+            _wy_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа и накоплении/дистрибуции. "
                 "Оцени качество Wyckoff Spring сетапа. "
@@ -8135,6 +8177,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"Боковик: {acc_low:.6f}—{acc_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
                 f"Объёмы фаз: {', '.join(_phase_vols)}\n"
+                f"Entry: {entry} SL: {sl} TP: {tp} RR: {_wy_rr} | Стоп: {_wy_sl_pct}%\n"
                 f"1d: {_wy_htf_1d} | 1w: {_wy_htf_1w}\n"
                 f"Funding: {_wy_fund_str} | Fear&Greed: {_wy_fg_str}\n"
                 f"{_wy_ob_str} | {_wy_fvg_str}"
@@ -8379,6 +8422,8 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             except Exception:
                 pass
 
+            _wyd_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
+            _wyd_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа Distribution (дистрибуция). "
                 "Оцени качество Wyckoff Distribution сетапа для SHORT. "
@@ -8401,6 +8446,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"Боковик: {dist_low:.6f}—{dist_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
                 f"Объёмы фаз: {', '.join(_d_phase_vols)}\n"
+                f"Entry: {entry} SL: {sl} TP: {tp} RR: {_wyd_rr} | Стоп: {_wyd_sl_pct}%\n"
                 f"1d: {_wyd_htf_1d} | 1w: {_wyd_htf_1w}\n"
                 f"Funding: {_wyd_fund_str} | Fear&Greed: {_wyd_fg_str}\n"
                 f"{_wyd_ob_str} | {_wyd_fvg_str}"
@@ -8572,24 +8618,24 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not in_zone:
             return None
 
-        # ── 4. 1h импульсная свеча ──
-        candles_1h = get_candles(symbol, "1h", 10)
+        # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
+        candles_1h = get_candles(symbol, "15m", 20)
         if not candles_1h or len(candles_1h) < 3:
             return None
 
         last_1h = candles_1h[-1]
         body_1h = abs(last_1h["close"] - last_1h["open"])
         range_1h = last_1h["high"] - last_1h["low"] if last_1h["high"] != last_1h["low"] else 0.001
-        is_impulse_1h = body_1h / range_1h > 0.5
+        is_impulse_1h = body_1h / range_1h > 0.4
 
         if direction == "BULLISH" and not (last_1h["close"] > last_1h["open"] and is_impulse_1h):
             return None
         if direction == "BEARISH" and not (last_1h["close"] < last_1h["open"] and is_impulse_1h):
             return None
 
-        # Volume check на 1h impulse — должен быть выше среднего
+        # Volume check на 15m impulse — должен быть выше среднего
         _avg_vol_1h = sum(c.get("volume", 0) for c in candles_1h[:-1]) / max(len(candles_1h) - 1, 1)
-        if _avg_vol_1h > 0 and last_1h.get("volume", 0) < _avg_vol_1h * 1.3:
+        if _avg_vol_1h > 0 and last_1h.get("volume", 0) < _avg_vol_1h * 1.1:
             return None  # Импульс без объёма — ненадёжный
 
         # ── 5. 5m sweep + возврат ──
