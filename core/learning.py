@@ -380,16 +380,14 @@ def close_signal(signal_id: int, result: str, hit_tp: int = 0):
         with safe_db_connection() as conn:
             now = datetime.now().isoformat()
             
-            # Проверяем наличие колонки id
+            # Проверяем наличие колонки id, fallback на rowid
             cursor = conn.execute("PRAGMA table_info(signal_log)")
             columns = [row[1] for row in cursor.fetchall()]
-            
-            if 'id' not in columns:
-                logging.error("Column 'id' not found in signal_log table")
-                return
-            
+
+            _id_col = "id" if "id" in columns else "rowid"
+
             row = conn.execute(
-                "SELECT symbol,direction,entry,sl,tp1,tp2,tp3,timeframe,confluence,regime,created_at FROM signal_log WHERE id=?",
+                f"SELECT symbol,direction,entry,sl,tp1,tp2,tp3,timeframe,confluence,regime,created_at FROM signal_log WHERE {_id_col}=?",
                 (signal_id,)
             ).fetchone()
             if not row:
@@ -414,8 +412,8 @@ def close_signal(signal_id: int, result: str, hit_tp: int = 0):
             elif result == "sl":
                 rr = -1.0
 
-            conn.execute("""UPDATE signal_log SET result=?,hit_tp=?,rr_achieved=?,hours_open=?,closed_at=?
-                WHERE id=?""", (result, hit_tp, rr, hours_open, now, signal_id))
+            conn.execute(f"""UPDATE signal_log SET result=?,hit_tp=?,rr_achieved=?,hours_open=?,closed_at=?
+                WHERE {_id_col}=?""", (result, hit_tp, rr, hours_open, now, signal_id))
             conn.commit()
 
             # Обновляем статистику по монете
