@@ -1644,7 +1644,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             raise ValueError("мало свечей")
 
         # Получаем структуру
-        raw_highs, raw_lows = find_swings(candles)
+        raw_highs, raw_lows = find_swings(candles, lookback=8)
         # find_swings возвращает (idx, price) или просто price — нормализуем
         highs = [h[1] if isinstance(h, (tuple, list)) else h for h in raw_highs]
         lows  = [l[1] if isinstance(l, (tuple, list)) else l for l in raw_lows]
@@ -1701,17 +1701,31 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             if buy_stops_price and buy_stops_price < entry * 0.985:
                 sl_candidates.append(buy_stops_price * (1 - buf))
 
-            # Fallback: ATR * 1.0 (только если совсем нет структуры)
+            # FIX 6: Сначала ищем OB на 4h если нет свингов на 1h
+            if not sl_candidates:
+                try:
+                    candles_4h = get_candles(symbol, "4h", 50) if symbol else None
+                    ob_4h = find_ob(candles_4h, direction) if candles_4h else None
+                    if ob_4h and direction == "BULLISH":
+                        sl_candidates.append(ob_4h["bottom"] * (1 - buf))
+                    elif ob_4h and direction == "BEARISH":
+                        sl_candidates.append(ob_4h["top"] * (1 + buf))
+                except Exception:
+                    pass
+            # Только если совсем нет структуры — ATR×1.0 (не 2.0)
             if not sl_candidates:
                 sl_candidates.append(entry - atr_sl * 1.0)
 
             # Берём самый дальний кандидат (за реальной структурой)
             sl_raw = min(sl_candidates)
 
-            # Ограничение: стоп не дальше 3% для 1h, 4% для 4h, 8% для 1d
-            max_sl_pct = {"1h": 0.03, "4h": 0.04, "1d": 0.08, "1w": 0.12}
+            # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
+            max_sl_pct = {"1h": 0.03, "4h": 0.05, "1d": 0.10, "1w": 0.15}
             max_sl = entry * (1 - max_sl_pct.get(timeframe, 0.03))
             sl = smart_round(max(sl_raw, max_sl))
+            # FIX 3: SL cap 4% от входа
+            _swing_sl_cap = entry * 0.96
+            sl = max(sl, _swing_sl_cap)
 
 
 
@@ -1813,10 +1827,13 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             # Берём ближайший кандидат (минимальный риск)
             sl_raw = min(sl_candidates)
 
-            # Ограничение: стоп не дальше 3% для 1h, 4% для 4h, 8% для 1d
-            max_sl_pct = {"1h": 0.03, "4h": 0.04, "1d": 0.08, "1w": 0.12}
+            # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
+            max_sl_pct = {"1h": 0.03, "4h": 0.05, "1d": 0.10, "1w": 0.15}
             max_sl = entry * (1 + max_sl_pct.get(timeframe, 0.03))
             sl = smart_round(min(sl_raw, max_sl))
+            # FIX 3: SL cap 4% от входа
+            _swing_sl_cap_b = entry * 1.04
+            sl = min(sl, _swing_sl_cap_b)
             # --- TP1: ближайшая зона ликвидности ниже ---
             tp1_candidates = []
             buy_stops = heatmap.get("nearest_buy_stops")
@@ -7089,7 +7106,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 1.2:
+            if avg_vol > 0 and sweep_vol < avg_vol * 1.0:
                 return None  # Объём < 1.2×avg — ненадёжный sweep
         except Exception:
             pass
@@ -7392,34 +7409,27 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             except Exception:
                 pass
 
-            _sw_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
+            _sw_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
             groq_prompt = (
-                "Ты SMC трейдер специализирующийся на sweep и разворотных сетапах.\n"
-                'Отвечай СТРОГО JSON: {"logic": "макс 15 слов", "hours": число, "valid": true/false}\n\n'
-                "КАК ДУМАТЬ:\n"
-                "1. Sweep должен быть ЧЁТКИМ — цена пробила swing low/high и БЫСТРО вернулась (1-2 свечи)\n"
-                "2. После sweep должна смениться структура (CHoCH) — это подтверждение разворота\n"
-                "3. Стоп ставится ЗА sweep candle low/high — там где умные деньги собрали ликвидность\n"
-                "4. TP на следующем swing high/low — там где будет следующая ликвидность\n"
-                "5. Смотри на FVG между входом и TP — он притягивает цену\n\n"
-                "БЛОКИРУЙ если:\n"
-                f"- RR={rr} < 2.0\n"
-                f"- Стоп {_sw_sl_pct}% > 4% от входа\n"
-                "- Sweep слабый — нет объёма, медленный возврат > 3 свечей\n"
+                "Ты опытный SMC трейдер специализирующийся на swing торговле. "
+                "Оцени качество sweep сетапа. "
+                f"Ответь СТРОГО JSON: {{\"logic\": \"макс 15 слов\", \"hours\": число, \"valid\": true/false}}\n\n"
+                "БЛОКИРУЙ (valid: false) если:\n"
+                f"- RR < 2.0 или стоп > 4% (RR={rr}, стоп={_sw_sl_pct}%)\n"
+                "- Sweep был слабым (нет объёма, нет импульсной свечи обратно)\n"
                 "- Нет CHoCH после sweep — структура не сменилась\n"
-                "- 1d тренд против направления\n"
-                "- Между входом и TP сильный OB или FVG против направления\n\n"
-                "ПОДТВЕРЖДАЙ если:\n"
-                "- Sweep чёткий с объёмом, возврат за 1-2 свечи\n"
-                "- CHoCH или BOS подтверждает — структура сменилась\n"
-                f"- RR={rr} >= 2.5 (swing требует запаса)\n"
-                "- TP на реальном уровне с ликвидностью\n"
-                "- 1d или 4h тренд в том же направлении\n\n"
-                f"ДАННЫЕ СЕТАПА:\n"
-                f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
+                "- 1d тренд против направления сигнала\n"
+                "- Цена уже далеко от зоны sweep (> 2% от входа)\n"
+                "- Между входом и TP есть сильный OB или FVG против направления\n\n"
+                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
+                "- Sweep чёткий — пробой swing low/high с быстрым возвратом за 1-2 свечи\n"
+                "- Объём на sweep выше среднего\n"
+                "- CHoCH или BOS подтверждает разворот\n"
+                "- TP на реальном структурном уровне\n"
+                "- RR ≥ 2.5 — это swing, нужен запас\n\n"
+                f"Данные: Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir} 1w: {htf_1w_swing}\n"
-                f"RR: {rr} | Стоп: {_sw_sl_pct}%\n"
-                f"ATR: {smart_round(atr)} До TP: {smart_round(distance_to_tp)} Расчёт: ~{est_hours}ч\n"
+                f"RR: {rr} | Стоп: {_sw_sl_pct}% | ATR: {smart_round(atr)} | До TP: {smart_round(distance_to_tp)}ч\n"
                 f"Funding: {_sw_fund_str} | Fear&Greed: {_sw_fg_str} | Режим: {_sw_regime_str}\n"
                 f"{_ob_desc} | {_fvg_desc} | {_vol_desc}\n"
                 f"Свечи: {candles_str}"
@@ -7664,7 +7674,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        if q_score < 3:
+        if q_score < 5:
             return None  # Недостаточно подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
@@ -7694,38 +7704,31 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # ── 10. Groq анализ ──
         logic = f"Вход из {'Discount' if direction == 'BULLISH' else 'Premium'} зоны ({zone_type})"
         try:
-            _zone_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
+            _zone_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
             _zone_prompt = (
-                "Ты SMC трейдер специализирующийся на Premium/Discount зонах.\n"
-                'Отвечай СТРОГО JSON: {"logic": "макс 15 слов", "valid": true/false}\n\n'
-                "КАК ДУМАТЬ:\n"
-                "1. Discount зона (ниже 50% диапазона) — ищем LONG, Premium (выше 50%) — SHORT\n"
-                "2. В зоне должен быть OB или FVG — точка входа с институциональным интересом\n"
-                "3. CHoCH или BOS на младшем ТФ подтверждает разворот из зоны\n"
-                "4. Стоп за зоной — там где останется ликвидность\n"
-                "5. TP на swing high/low противоположной стороны диапазона\n\n"
-                "БЛОКИРУЙ если:\n"
-                f"- RR={rr} < 2.0\n"
-                f"- Стоп {_zone_sl_pct}% > 4% от входа\n"
-                "- Цена НЕ в зоне — вход из середины диапазона (equilibrium)\n"
-                "- Нет OB и нет FVG в зоне — нет институционального подтверждения\n"
-                "- 1d тренд ПРОТИВ направления сделки\n"
-                f"- Quality score {q_score}/7 < 4 — слабый сетап\n\n"
-                "ПОДТВЕРЖДАЙ если:\n"
-                f"- Цена в {'Discount' if direction == 'BULLISH' else 'Premium'} зоне\n"
-                "- OB + FVG совпадают — сильное подтверждение\n"
-                f"- RR={rr} >= 2.5\n"
-                "- 1d тренд совпадает с направлением\n"
-                f"- Quality score {q_score}/7 >= 5\n\n"
-                f"ДАННЫЕ СЕТАПА:\n"
-                f"Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
+                "Ты SMC трейдер специализирующийся на зонах интереса. "
+                "Оцени вход из Discount/Premium зоны. "
+                f'Ответь СТРОГО JSON: {{\"logic\": \"макс 15 слов\", \"valid\": true/false}}\n\n'
+                "БЛОКИРУЙ (valid: false) если:\n"
+                f"- RR < 2.0 или стоп > 3% (RR={rr}, стоп={_zone_sl_pct}%)\n"
+                "- Цена не чётко в OB или FVG зоне\n"
+                "- Нет отбоя от зоны (нет бычьей/медвежьей свечи от уровня)\n"
+                "- 1d тренд против направления\n"
+                "- OB/FVG уже был протестирован несколько раз (mitigated)\n"
+                "- Нет FVG между входом и TP для притяжения цены\n\n"
+                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
+                "- Цена чётко внутри OB или касается FVG\n"
+                "- Зона нетронутая (первый или второй тест)\n"
+                "- Есть хотя бы одна свеча отбоя от зоны\n"
+                "- 1d и 4h тренд совпадают с направлением\n"
+                "- RR ≥ 2.0, TP на реальном swing уровне\n\n"
+                f"Данные: Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Зона: {'Discount' if direction == 'BULLISH' else 'Premium'} | Тип: {zone_type}\n"
                 f"Диапазон: {smart_price_fmt(range_low)}–{smart_price_fmt(range_high)} | Mid: {smart_price_fmt(range_mid)}\n"
                 f"Цена: {smart_price_fmt(price)} | OB: {smart_price_fmt(ob['bottom']) + '–' + smart_price_fmt(ob['top']) if ob else 'нет'}\n"
                 f"FVG: {smart_price_fmt(fvg['bottom']) + '–' + smart_price_fmt(fvg['top']) if fvg else 'нет'}\n"
                 f"1d тренд: {htf_1d} | Quality score: {q_score}/7\n"
-                f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)}\n"
-                f"RR: {rr} | Стоп: {_zone_sl_pct}%"
+                f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)} RR: {rr} Стоп: {_zone_sl_pct}%"
             )
             _zone_resp = ask_groq(_zone_prompt, max_tokens=80)
             if _zone_resp:
@@ -7980,7 +7983,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
 
         # Для BTC порог снижен до 12% (BTC редко падает на 20%)
-        _wyckoff_min_drawdown = 12 if symbol == "BTCUSDT" else 20
+        _wyckoff_min_drawdown = 10 if symbol == "BTCUSDT" else 16
         if drawdown_pct >= 35:
             score += 30
             signals.append(f"✅ Глубокий даунтренд -{drawdown_pct:.0f}% от пика")
@@ -8152,38 +8155,32 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             _wy_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
             _wy_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
             groq_prompt = (
-                "Ты эксперт Wyckoff Accumulation с глубоким пониманием фаз.\n"
-                'Отвечай СТРОГО JSON: {"target": цена, "target_pct": процент, "logic": "макс 15 слов", "valid": true/false}\n\n'
-                "КАК ДУМАТЬ:\n"
-                "1. Spring (Test) — цена пробивает support боковика и БЫСТРО возвращается внутрь\n"
-                "2. Объём на Spring должен быть ВЫШЕ среднего — умные деньги покупают\n"
-                "3. После Spring цена должна пробить верх боковика (SOS — Sign of Strength)\n"
-                "4. Все фазы (SC→AR→ST→Spring→Test→SOS) должны быть последовательны\n"
-                "5. TP ставим на уровень пика до падения или AR high\n\n"
-                "БЛОКИРУЙ если:\n"
-                f"- RR={_wy_rr} < 2.0\n"
-                f"- Стоп {_wy_sl_pct}% > 8% от входа (1d ТФ допускает больше)\n"
-                "- Spring слабый — нет объёма, медленный возврат\n"
-                "- Фазы неполные — нет SC или нет AR\n"
-                "- 1d тренд BEARISH — глобальный тренд против\n"
-                f"- Даунтренд -{drawdown_pct:.0f}% < 20% — мало места для разворота\n\n"
-                "ПОДТВЕРЖДАЙ если:\n"
-                "- Spring чёткий с объёмом, возврат в боковик за 1-3 свечи\n"
-                "- Все фазы присутствуют и последовательны\n"
-                f"- RR={_wy_rr} >= 3.0 (Wyckoff даёт большие движения)\n"
-                "- 1d тренд нейтральный или BULLISH\n\n"
-                f"ДАННЫЕ СЕТАПА:\n"
-                f"Пара: {symbol} | Цена: {price_now}\n"
+                "Ты SMC трейдер специализирующийся на методе Вайкоффа и накоплении/дистрибуции. "
+                "Оцени качество Wyckoff Spring сетапа. "
+                f'Ответь СТРОГО JSON: {{"target": число_цены, "target_pct": процент, "logic": "макс 15 слов", "valid": true/false}}\n\n'
+                "БЛОКИРУЙ (valid: false) если:\n"
+                "- Spring или SOS отсутствуют или слабые\n"
+                "- Объём на Spring не выше среднего\n"
+                "- Нет compression (сжатие диапазона и объёма)\n"
+                "- RR < 2.0 от текущей цены до целевой\n"
+                "- Цена уже выше Creek линии (пропустили вход)\n"
+                "- BTC в нисходящем тренде на 4h\n\n"
+                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
+                "- Spring пробил поддержку и вернулся — ликвидность собрана\n"
+                "- SOS показал силу покупателей\n"
+                "- Объём снижается в боковике (накопление завершается)\n"
+                "- Цена у или ниже Creek — идеальный вход\n"
+                "- TP = уровень AR (автоматический ралли) или выше\n\n"
+                f"Данные: Пара: {symbol} Цена: {price_now}\n"
                 f"SC лоу: {phases['SC']['price']:.6f} | AR хай: {ar_price:.6f}\n"
-                f"Пик до падения: {price_peak:.6f}\n"
+                f"Пик до падения: {price_peak:.6f} | Даунтренд: -{drawdown_pct:.0f}%\n"
                 f"Боковик: {acc_low:.6f}—{acc_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
                 f"Объёмы фаз: {', '.join(_phase_vols)}\n"
                 f"Entry: {entry} SL: {sl} TP: {tp} RR: {_wy_rr} | Стоп: {_wy_sl_pct}%\n"
                 f"1d: {_wy_htf_1d} | 1w: {_wy_htf_1w}\n"
                 f"Funding: {_wy_fund_str} | Fear&Greed: {_wy_fg_str}\n"
-                f"{_wy_ob_str} | {_wy_fvg_str}\n"
-                f"Даунтренд: -{drawdown_pct:.0f}%"
+                f"{_wy_ob_str} | {_wy_fvg_str}"
                 f"{_wy_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
@@ -8428,38 +8425,31 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             _wyd_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
             _wyd_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
             groq_prompt = (
-                "Ты эксперт Wyckoff Distribution с глубоким пониманием фаз.\n"
-                'Отвечай СТРОГО JSON: {"target": цена, "target_pct": процент, "logic": "макс 15 слов", "valid": true/false}\n\n'
-                "КАК ДУМАТЬ:\n"
-                "1. UTAD (Upthrust After Distribution) — цена пробивает resistance и БЫСТРО возвращается\n"
-                "2. Объём на UTAD должен быть ВЫШЕ среднего — умные деньги продают\n"
-                "3. После UTAD цена должна пробить низ боковика (SOW — Sign of Weakness)\n"
-                "4. Все фазы (BC→AR→ST→UTAD→SOW) должны быть последовательны\n"
-                "5. TP ставим на уровень основания до роста или AR low\n\n"
-                "БЛОКИРУЙ если:\n"
-                f"- RR={_wyd_rr} < 2.0\n"
-                f"- Стоп {_wyd_sl_pct}% > 8% от входа\n"
-                "- UTAD слабый — нет объёма, медленный возврат\n"
-                "- Фазы неполные — нет BC или нет AR\n"
-                "- 1d тренд BULLISH — глобальный тренд против\n"
-                f"- Рост +{pump_pct:.0f}% < 30% — мало места для падения\n\n"
-                "ПОДТВЕРЖДАЙ если:\n"
-                "- UTAD чёткий с объёмом, возврат в боковик за 1-3 свечи\n"
-                "- Все фазы присутствуют и последовательны\n"
-                f"- RR={_wyd_rr} >= 3.0\n"
-                "- 1d тренд нейтральный или BEARISH\n\n"
-                f"ДАННЫЕ СЕТАПА:\n"
-                f"Пара: {symbol} | Цена: {price_now}\n"
+                "Ты SMC трейдер специализирующийся на методе Вайкоффа Distribution (дистрибуция). "
+                "Оцени качество Wyckoff Distribution сетапа для SHORT. "
+                f'Ответь СТРОГО JSON: {{"target": число_цены, "target_pct": процент_падения, "logic": "макс 15 слов", "valid": true/false}}\n\n'
+                "БЛОКИРУЙ (valid: false) если:\n"
+                "- UTAD или SOW отсутствуют или слабые\n"
+                "- Объём на UTAD не выше среднего\n"
+                "- RR < 2.0 от текущей цены до целевой\n"
+                "- Цена уже ниже AR лоу (пропустили вход)\n"
+                "- BTC в восходящем тренде на 4h\n\n"
+                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
+                "- UTAD пробил вершину и вернулся — ликвидность собрана\n"
+                "- SOW показал слабость покупателей\n"
+                "- Объём снижается у вершины (дистрибуция завершается)\n"
+                "- Цена у или выше Ice Line — идеальный SHORT\n"
+                "- TP = уровень AR лоу или ниже\n\n"
+                f"Данные: Пара: {symbol} Цена: {price_now}\n"
                 f"BC хай: {phases['BC']['price']:.6f} | AR лоу: {ar_price:.6f}\n"
-                f"Основание до роста: {price_bottom:.6f}\n"
+                f"Основание до роста: {price_bottom:.6f} | Рост: +{pump_pct:.0f}%\n"
                 f"Боковик: {dist_low:.6f}—{dist_high:.6f}\n"
                 f"Фазы: {', '.join(phase_summary)}\n"
                 f"Объёмы фаз: {', '.join(_d_phase_vols)}\n"
                 f"Entry: {entry} SL: {sl} TP: {tp} RR: {_wyd_rr} | Стоп: {_wyd_sl_pct}%\n"
                 f"1d: {_wyd_htf_1d} | 1w: {_wyd_htf_1w}\n"
                 f"Funding: {_wyd_fund_str} | Fear&Greed: {_wyd_fg_str}\n"
-                f"{_wyd_ob_str} | {_wyd_fvg_str}\n"
-                f"Рост: +{pump_pct:.0f}%"
+                f"{_wyd_ob_str} | {_wyd_fvg_str}"
                 f"{_wyd_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
@@ -8771,7 +8761,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _last_15_min = _minute >= 45
 
         # Минимум 3 из 7 для прохождения
-        if _fast_score < 3:
+        if _fast_score < 2:
             logging.info(f"[FAST Score] {symbol}: mini-score {_fast_score}/7 < 3 — пропуск")
             return None
 
@@ -8826,39 +8816,32 @@ def detect_fast_deal(symbol: str) -> dict | None:
             except Exception:
                 pass
 
-            _fast_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
+            _fast_sl_pct = round(abs(entry - sl) / entry * 100, 2) if entry > 0 else 0
             groq_prompt = (
-                "Ты Kill Zone скальпер — торгуешь ТОЛЬКО в London (07-11 UTC) и NY (15-19 UTC) сессии.\n"
-                'Отвечай СТРОГО JSON: {"logic": "макс 10 слов", "valid": true/false}\n\n'
-                "КАК ДУМАТЬ:\n"
-                "1. 5m sweep liquidity — цена забрала стопы и вернулась за 1-2 свечи\n"
-                "2. 4h OB или FVG подтверждает зону — институционалы там входили\n"
-                "3. Импульс после sweep — свеча закрывает > 60% тела в направлении сделки\n"
-                "4. Объём на sweep свече выше среднего — ликвидность реально забрали\n"
-                "5. BTC и 1d тренд совпадают — не иди против рынка на скальпе\n\n"
-                "БЛОКИРУЙ если:\n"
-                f"- RR={rr} < 2.0\n"
-                f"- Стоп {_fast_sl_pct}% > 1.5% от входа (скальп = узкий стоп)\n"
-                f"- Sweep давно — {_sweep_candles_ago} свечей назад > 3\n"
-                "- Нет OB и нет FVG на 4h — вход без подтверждения зоны\n"
-                "- 1d тренд ПРОТИВ направления\n"
-                "- BTC тренд ПРОТИВ направления\n"
-                "- Вне Kill Zone (London 07-11, NY 15-19 UTC)\n\n"
-                "ПОДТВЕРЖДАЙ если:\n"
-                "- Sweep чёткий, возврат за 1-2 свечи с объёмом\n"
-                "- 4h OB или FVG подтверждает зону входа\n"
-                f"- RR={rr} >= 2.5\n"
-                "- 1d тренд и BTC в том же направлении\n"
-                "- Сейчас Kill Zone\n\n"
-                f"ДАННЫЕ СЕТАПА:\n"
-                f"Пара: {symbol} Направление: {direction}\n"
+                "Ты SMC скальпер с опытом торговли в Kill Zone. "
+                "Оцени качество скальп сетапа на 5m. "
+                f'Ответь СТРОГО JSON: {{"logic": "макс 15 слов", "valid": true/false}}\n\n'
+                "БЛОКИРУЙ (valid: false) если:\n"
+                f"- RR < 1.5 или стоп > 1% (это скальп! RR={rr}, стоп={_fast_sl_pct}%)\n"
+                "- Sweep слабый — нет объёма, нет возврата за уровень\n"
+                "- BTC идёт против направления на 5m\n"
+                "- Нет импульсной свечи на 15m подтверждающей вход\n"
+                "- Цена не в зоне 4h OB или FVG\n"
+                "- Последние 15 минут часа — высокая волатильность\n\n"
+                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
+                "- Sweep чёткий на EQH/EQL или ключевом уровне\n"
+                "- 15m свеча закрылась в направлении с объёмом\n"
+                "- BTC на 5m в том же направлении\n"
+                "- Цена чётко в 4h OB или FVG зоне\n"
+                "- Начало Kill Zone (первые 30 минут) — лучший момент\n"
+                "- RR ≥ 1.5 с реалистичным TP\n\n"
+                f"Данные: Пара: {symbol} Направление: {direction}\n"
                 f"5m sweep: {'лоу' if direction == 'BULLISH' else 'хая'} ({_sweep_candles_ago} свечей назад)\n"
                 f"4h зона: {zone_desc} | {_ob_4h_desc} | {_fvg_4h_desc}\n"
-                f"1d тренд: {direction_1d} | BTC: {btc_trend}\n"
+                f"Тренд: {direction_1d} | BTC: {btc_trend}\n"
                 f"Funding: {_fast_fund_str} | Fear&Greed: {_fast_fg_str} | Режим: {_fast_regime_str}\n"
-                f"{_sweep_vol_desc}\n"
-                f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2}\n"
-                f"RR: {rr} | Стоп: {_fast_sl_pct}%"
+                f"{_sweep_vol_desc} | Мини-скор: {_fast_score}/7\n"
+                f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2} RR: {rr} Стоп: {_fast_sl_pct}%"
                 f"{_fast_pat_str}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)

@@ -24,17 +24,30 @@ except ImportError as e:
     patches = {}
 
 # WAL патч — решает "database is locked"
+import sqlite3 as _sq
+if not getattr(_sq, "_wal_patched", False):
+    _orig_sq_connect = _sq.connect
+    def _wal_sq_connect(db, timeout=60, **kw):
+        kw.setdefault("check_same_thread", False)
+        conn = _orig_sq_connect(db, timeout=timeout, **kw)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        return conn
+    _sq.connect = _wal_sq_connect
+    _sq._wal_patched = True
 
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
-
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
 _orig_edit_text = _msg_module.Message.edit_text
 _orig_edit_markup = _msg_module.Message.edit_reply_markup
-
 async def _safe_edit_text(self, *args, **kwargs):
     try:
         return await _orig_edit_text(self, *args, **kwargs)
@@ -42,7 +55,6 @@ async def _safe_edit_text(self, *args, **kwargs):
         if "message is not modified" in str(e):
             return None
         raise
-
 async def _safe_edit_markup(self, *args, **kwargs):
     try:
         return await _orig_edit_markup(self, *args, **kwargs)
@@ -50,7 +62,6 @@ async def _safe_edit_markup(self, *args, **kwargs):
         if "message is not modified" in str(e):
             return None
         raise
-
 _msg_module.Message.edit_text = _safe_edit_text
 _msg_module.Message.edit_reply_markup = _safe_edit_markup
 from aiohttp import web
@@ -3486,7 +3497,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception as _e:
             pass
 
-        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h"])  # основной анализ
+        mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h", "1d"])  # основной анализ, 1d как контекст
         if not mtf:
             return None
 
@@ -3594,12 +3605,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
-        # 1h — минимум 3/3 ТФ (15m+1h+4h все совпали)
+       # 1h — минимум 3/4 ТФ (15m+1h+4h должны совпасть, 1d только контекст)
         _match = mtf.get("match_count", 0)
         if timeframe == "1h" and _match < 3:
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {_match} < 3)")
             return None
-        _weak_mtf_warn = ""
+        _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (3/4 ТФ)" if _match == 3 else ""
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
@@ -3609,7 +3620,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
-        # Mitigation check — OB уже протестирован, передаём Groq как контекст
+        if not levels:
+            return None
+        entry = levels["entry"]
         _ob_mitigated = levels.get("mitigated", False)
         if _ob_mitigated:
             logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
@@ -3622,7 +3635,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # RR — контекст для Groq
         _rr_val = levels.get("rr", 0)
         if _rr_val < 2.0:
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val} < 2.0 — пропускаем")
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} < 2.0 — пропускаем")
             return None
 
         # VWAP — контекст для Groq
@@ -3717,38 +3730,31 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                                 f"вердикт: {_pat.get('verdict', '?')}")
             except Exception:
                 pass
-            _sl_pct_mtf = round(abs(entry - sl) / entry * 100, 1) if entry else 0
+            _sl_pct_mtf = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
             groq_prompt = (
                 "Ты профессиональный SMC трейдер с 10-летним стажем. "
-                "Торгуешь только лучшие сетапы — лучше пропустить 10 хороших чем взять 1 плохой.\n"
-                'Отвечай СТРОГО JSON: {"logic": "причина входа макс 15 слов", "hours": число, "valid": true/false}\n\n'
-                "КАК ДУМАТЬ О СЕТАПЕ:\n"
-                "1. Где цена относительно структуры? У OB? У FVG? В середине диапазона?\n"
-                "2. Sweep уже был? Ликвидность собрана?\n"
-                "3. Есть ли чёткий следующий уровень для TP?\n"
-                "4. Стоп должен быть ЗА структурным уровнем — не математический %\n"
-                "5. TP должен быть НА реальном уровне (swing high, OB, ликвидность)\n\n"
-                "БЛОКИРУЙ (valid: false) если:\n"
-                "- RR < 2.0 — риск не оправдан\n"
-                "- Стоп > 3% от входа на 1h\n"
-                "- Цена в середине диапазона — нет чёткой структуры\n"
-                "- HTF (4h/1d) против направления\n"
-                "- Нет CHoCH или BOS — структура не сменилась\n"
-                "- Между входом и TP сильный уровень сопротивления\n"
-                "- Финансирование > 0.15% против направления\n\n"
-                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
-                "- Цена в OB или касается FVG\n"
-                "- 15m, 1h, 4h в одном направлении\n"
-                "- Есть CHoCH/BOS после sweep\n"
-                "- Стоп за структурным уровнем, TP на реальном уровне\n"
-                "- RR ≥ 2.0, BTC подтверждает\n\n"
-                f"ДАННЫЕ СЕТАПА:\n"
-                f"Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
+                "Торгуешь только лучшие сетапы — лучше пропустить 10 хороших чем взять 1 плохой. "
+                f'Ответь СТРОГО JSON: {{\"logic\": \"причина входа макс 15 слов\", \"hours\": число, \"valid\": true/false}}\n\n'
+                "ПРАВИЛА БЛОКИРОВКИ (верни valid: false если):\n"
+                f"- RR < 2.0 — риск не оправдан (RR сейчас: {levels.get('rr',0)})\n"
+                f"- Стоп > 3% от входа (стоп сейчас: {_sl_pct_mtf}%)\n"
+                "- Цена не у структурного уровня (OB/FVG/swing)\n"
+                "- HTF (4h/1d) против направления сигнала\n"
+                "- Нет чёткого CHoCH или BOS подтверждающего вход\n"
+                "- Рынок в боковике без импульса\n"
+                "- Финансирование > 0.1% против направления\n\n"
+                "ПРАВИЛА ПОДТВЕРЖДЕНИЯ (valid: true если):\n"
+                "- Цена чётко в OB или FVG зоне\n"
+                "- 15m, 1h, 4h все в одном направлении\n"
+                "- Есть CHoCH или BOS после sweep ликвидности\n"
+                "- RR ≥ 2.0, стоп за структурным уровнем\n"
+                "- TP на реальном уровне (предыдущий swing, OB, ликвидность)\n"
+                "- BTC подтверждает направление\n\n"
+                f"Данные: Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
                 f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
-                f"RR: {_rr_val} | Стоп: {_sl_pct_mtf}% | MTF: {mtf.get('match_count',0)}/3\n"
-                f"1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
-                f"Fear&Greed: {fg_val} | Funding: {fund_val} | Режим: {regime_val}\n"
-                f"{_btc_str}\n"
+                f"MTF: {mtf.get('match_count',0)}/3 | 1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
+                f"RR: {levels.get('rr',0)} | Стоп: {_sl_pct_mtf}% | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
+                f"Режим: {regime_val} | {_btc_str}\n"
                 f"{_ob_str} | {_fvg_str} | ATR: {smart_price_fmt(_atr_mtf)}\n"
                 f"{_vol_str}\n"
                 f"Confluence:\n{conf_short}"
@@ -3809,8 +3815,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # ── Тайминг входа — если плохой, сохраняем в очередь ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
-        timing_score = timing.get("score", 0)
-        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid')}")
+        timing_score = timing.get("score", 0) if timing else 0
+        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid') if timing else False}")
 
         # Порог 3/3 — только подтверждённые входы
         if timing_score < 3:
