@@ -3198,6 +3198,10 @@ async def auto_wyckoff_scan():
             r2 = detect_wyckoff_distribution(symbol)
             if r2:
                 found.append(r2)
+            # Re-accumulation (чаще чем классический Wyckoff)
+            r_reac = detect_wyckoff_reaccumulation(symbol)
+            if r_reac:
+                found.append({**r_reac, "scan_type": "wyckoff"})
             await asyncio.sleep(0.5)
         except Exception as e:
             logging.warning(f"[auto_wyckoff_scan] {symbol}: {e}")
@@ -3518,6 +3522,63 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         candles = get_candles(symbol, timeframe, 100)
         if len(candles) < 20:
             return None
+
+        # ── EMA trend bias — не торговать против тренда ──
+        try:
+            _ema_candles = get_candles(symbol, "4h", 60)
+            if _ema_candles and len(_ema_candles) >= 50:
+                _closes = [c["close"] for c in _ema_candles]
+                _ema50 = sum(_closes[-50:]) / 50
+                _ema20 = sum(_closes[-20:]) / 20
+                _price_4h = _closes[-1]
+
+                if direction == "BULLISH":
+                    _ema_ok = _price_4h > _ema50 or _ema20 > _ema50
+                    if not _ema_ok:
+                        logging.debug(f"[MTF] {symbol}: цена ниже EMA50 на 4h — блок")
+                        return None
+                else:
+                    _ema_ok = _price_4h < _ema50 or _ema20 < _ema50
+                    if not _ema_ok:
+                        logging.debug(f"[MTF] {symbol}: цена выше EMA50 на 4h — блок")
+                        return None
+        except Exception:
+            pass
+
+        # ── OB/FVG hard block — цена должна быть у зоны ──
+        try:
+            _ob_check = find_ob(candles, direction)
+            _fvg_check = find_fvg(candles, direction)
+            _atr_check = sum(candles[-i]["high"]-candles[-i]["low"] for i in range(1,15)) / 14
+            _in_ob = (_ob_check and
+                     abs(candles[-1]["close"] - (_ob_check["top"]+_ob_check["bottom"])/2)
+                     <= _atr_check * 1.5)
+            _in_fvg = (_fvg_check and
+                      abs(candles[-1]["close"] - (_fvg_check["top"]+_fvg_check["bottom"])/2)
+                      <= _atr_check * 1.5)
+            if not _in_ob and not _in_fvg:
+                logging.debug(f"[MTF] {symbol}: цена не у OB/FVG зоны — блок")
+                return None
+        except Exception:
+            pass
+
+        # ── Premium/Discount зона — реальный расчёт ──
+        try:
+            _pd_candles = get_candles(symbol, "4h", 50)
+            if _pd_candles and len(_pd_candles) >= 20:
+                _pd_high = max(c["high"] for c in _pd_candles[-20:])
+                _pd_low = min(c["low"] for c in _pd_candles[-20:])
+                _pd_mid = (_pd_high + _pd_low) / 2
+                _pd_price = _pd_candles[-1]["close"]
+
+                if direction == "BULLISH" and _pd_price > _pd_mid:
+                    logging.debug(f"[MTF] {symbol}: цена в Premium зоне — LONG заблокирован")
+                    return None
+                elif direction == "BEARISH" and _pd_price < _pd_mid:
+                    logging.debug(f"[MTF] {symbol}: цена в Discount зоне — SHORT заблокирован")
+                    return None
+        except Exception:
+            pass
 
         price = candles[-1]["close"]
         ob = find_ob(candles, direction)
