@@ -7118,6 +7118,85 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             except Exception:
                 pass
 
+        # ── ВАРИАНТ 2: Реакция от OB/FVG без sweep ──
+        if not direction:
+            try:
+                _ob_sw = find_ob(candles, "BULLISH")
+                _fvg_sw = find_fvg(candles, "BULLISH")
+                _atr_sw = atr
+                _price = candles[-1]["close"]
+
+                # Bullish: цена у OB/FVG + бычья свеча отбоя
+                if _ob_sw:
+                    _in_ob = _ob_sw["bottom"] - _atr_sw*0.3 <= _price <= _ob_sw["top"] + _atr_sw*0.3
+                    _bull_candle = candles[-1]["close"] > candles[-1]["open"]
+                    _bull_body = abs(candles[-1]["close"]-candles[-1]["open"])
+                    _bull_range = candles[-1]["high"]-candles[-1]["low"]
+                    _bull_disp = _bull_body/_bull_range > 0.5 if _bull_range > 0 else False
+                    if _in_ob and _bull_candle and _bull_disp:
+                        direction = "BULLISH"
+                        entry = smart_round(_price)
+                        sl = smart_round(_ob_sw["bottom"] - _atr_sw * 0.5)
+                        tp = smart_round(last_swing_high)
+                        logic = f"Реакция от OB {smart_price_fmt(_ob_sw['bottom'])}–{smart_price_fmt(_ob_sw['top'])}"
+
+                # Bearish: цена у OB/FVG + медвежья свеча
+                _ob_bear = find_ob(candles, "BEARISH")
+                if not direction and _ob_bear:
+                    _in_ob_b = _ob_bear["bottom"] - _atr_sw*0.3 <= _price <= _ob_bear["top"] + _atr_sw*0.3
+                    _bear_candle = candles[-1]["close"] < candles[-1]["open"]
+                    _bear_body = abs(candles[-1]["close"]-candles[-1]["open"])
+                    _bear_range = candles[-1]["high"]-candles[-1]["low"]
+                    _bear_disp = _bear_body/_bear_range > 0.5 if _bear_range > 0 else False
+                    if _in_ob_b and _bear_candle and _bear_disp:
+                        direction = "BEARISH"
+                        entry = smart_round(_price)
+                        sl = smart_round(_ob_bear["top"] + _atr_sw * 0.5)
+                        tp = smart_round(last_swing_low)
+                        logic = f"Реакция от OB {smart_price_fmt(_ob_bear['bottom'])}–{smart_price_fmt(_ob_bear['top'])}"
+            except Exception:
+                pass
+
+        # ── Reaction speed — цена должна быстро реагировать от зоны ──
+        if direction:
+            try:
+                _reaction_candles = 0
+                _react_ob = None
+                if direction == "BULLISH":
+                    _react_ob = find_ob(candles, "BULLISH")
+                else:
+                    _react_ob = find_ob(candles, "BEARISH")
+                if _react_ob:
+                    for _rc in candles[-5:]:
+                        if direction == "BULLISH":
+                            _in_zone_rc = _react_ob["bottom"] <= _rc["low"] <= _react_ob["top"] * 1.01
+                        else:
+                            _in_zone_rc = _react_ob["bottom"] * 0.99 <= _rc["high"] <= _react_ob["top"]
+                        if _in_zone_rc:
+                            _reaction_candles += 1
+
+                    if _reaction_candles > 3:
+                        logging.debug(f"[SWING] {symbol}: цена тупит у зоны {_reaction_candles} свечей — слабый сетап")
+                        direction = None
+                        entry = None
+            except Exception:
+                pass
+
+        # ── Liquidity pool рядом — понимаем куда пойдут стопы ��─
+        if direction:
+            try:
+                eqh_level, eql_level = find_equal_highs_lows(candles, lookback=30)
+                if direction == "BULLISH" and eqh_level and eqh_level > entry:
+                    if eqh_level < tp:
+                        tp = smart_round(eqh_level)
+                    logic = logic + f" → ликвидность EQH {smart_price_fmt(eqh_level)}"
+                elif direction == "BEARISH" and eql_level and eql_level < entry:
+                    if eql_level > tp:
+                        tp = smart_round(eql_level)
+                    logic = logic + f" ��� ликвидность EQL {smart_price_fmt(eql_level)}"
+            except Exception:
+                pass
+
         if not direction:
             return None
 
@@ -7606,6 +7685,42 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if not zone_level:
             return None  # Нет зоны интереса рядом с ценой
 
+        # ── 2.5. Проверка свежести зоны (unmitigated + strong move away) ──
+        if zone_level and zone_type:
+            try:
+                _test_count = 0
+                _zone_top = ob["top"] if zone_type == "OB" and ob else (fvg["top"] if fvg else zone_level * 1.01)
+                _zone_bot = ob["bottom"] if zone_type == "OB" and ob else (fvg["bottom"] if fvg else zone_level * 0.99)
+
+                for c in candles[-30:]:
+                    if _zone_bot <= c["low"] <= _zone_top or _zone_bot <= c["high"] <= _zone_top:
+                        _test_count += 1
+
+                if _test_count > 2:
+                    logging.debug(f"[ZONE] {symbol}: зона протестирована {_test_count} раз — mitigated")
+                    return None
+
+                # Strong move away: после создания зоны был сильный импульс
+                _strong_move = False
+                for i in range(-25, -3):
+                    if abs(i) >= len(candles): continue
+                    c = candles[i]
+                    c_body = abs(c["close"] - c["open"])
+                    if c_body > atr * 1.5:
+                        if direction == "BULLISH" and c["close"] > c["open"]:
+                            _strong_move = True
+                            break
+                        elif direction == "BEARISH" and c["close"] < c["open"]:
+                            _strong_move = True
+                            break
+
+                if not _strong_move:
+                    logging.debug(f"[ZONE] {symbol}: нет сильного импульса от зоны")
+                    return None
+
+            except Exception:
+                pass
+
         # ── 3. Подтверждение отбоя — хотя бы 1 свеча в направлении ──
         last = candles[-1]
         rebound_bull = (last["close"] > last["open"] and
@@ -7703,6 +7818,29 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
             if last["volume"] > avg_vol * 1.3:
                 q_score += 1
+        except Exception:
+            pass
+
+        # ── 7.5. Imbalance (FVG внутри движения) — зона сильнее если есть дисбаланс ──
+        try:
+            _imbalance_found = False
+            for i in range(1, min(10, len(candles)-1)):
+                _c1 = candles[-i-1]
+                _c2 = candles[-i]
+                _c3 = candles[-i+1] if i > 1 else candles[-1]
+
+                if direction == "BULLISH":
+                    if _c3["low"] > _c1["high"]:
+                        _imbalance_found = True
+                        break
+                else:
+                    if _c3["high"] < _c1["low"]:
+                        _imbalance_found = True
+                        break
+
+            if not _imbalance_found:
+                q_score = max(0, q_score - 1)
+                logging.debug(f"[ZONE] {symbol}: нет FVG дисбаланса — q_score снижен до {q_score}")
         except Exception:
             pass
 
@@ -8548,6 +8686,131 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         return None
 
 
+def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
+    """
+    Re-accumulation: боковик после коррекции + higher lows + ликвидность выше
+    Работает чаще чем классический Wyckoff (раз в неделю vs раз в полгода)
+    """
+    try:
+        candles_1d = get_candles(symbol, "1d", 60)
+        candles_4h = get_candles(symbol, "4h", 100)
+        if not candles_1d or len(candles_1d) < 30: return None
+        if not candles_4h or len(candles_4h) < 50: return None
+
+        price_now = candles_1d[-1]["close"]
+
+        # ── 1. Коррекция от пика >= 8% ──
+        price_peak = max(c["high"] for c in candles_1d[-40:-10])
+        drawdown_pct = (price_peak - price_now) / price_peak * 100
+        if drawdown_pct < 8:
+            return None
+
+        # ── 2. Боковик последние 10-20 дней (range < 15%) ──
+        acc_candles = candles_1d[-20:]
+        acc_high = max(c["high"] for c in acc_candles)
+        acc_low = min(c["low"] for c in acc_candles)
+        acc_range_pct = (acc_high - acc_low) / acc_low * 100
+        if acc_range_pct > 15:
+            return None
+
+        # ── 3. Higher lows — покупатели давят снизу ──
+        lows_20 = [c["low"] for c in acc_candles]
+        local_lows = []
+        for i in range(1, len(lows_20)-1):
+            if lows_20[i] < lows_20[i-1] and lows_20[i] < lows_20[i+1]:
+                local_lows.append(lows_20[i])
+        higher_lows = len(local_lows) >= 2 and local_lows[-1] > local_lows[-2]
+        if not higher_lows:
+            return None
+
+        # ── 4. Volume compression — объём снижается в боковике ──
+        avg_vol_before = sum(c["volume"] for c in candles_1d[-40:-20]) / 20
+        avg_vol_acc = sum(c["volume"] for c in acc_candles) / len(acc_candles)
+        vol_compressed = avg_vol_acc < avg_vol_before * 0.8
+        if not vol_compressed:
+            return None
+
+        # ── 5. Volume expansion — первый взрыв объёма после compression ──
+        last_vol = candles_1d[-1]["volume"]
+        avg_vol_acc_last = sum(c["volume"] for c in candles_1d[-10:-1]) / 9
+        vol_expanding = last_vol > avg_vol_acc_last * 1.5
+
+        # ── 6. Ликвидность выше — EQH или swing high ──
+        highs_acc = [c["high"] for c in acc_candles]
+        eqh_levels = [h for h in highs_acc if abs(h - acc_high) / acc_high < 0.005]
+        liquidity_target = acc_high if len(eqh_levels) >= 2 else price_peak * 0.95
+
+        # ── 7. BTC фильтр ──
+        if symbol != "BTCUSDT":
+            btc_ok, _ = btc_allows_signal("BULLISH")
+            if not btc_ok: return None
+
+        # ── 8. Расчёт уровней ──
+        entry = smart_round(price_now)
+        sl = smart_round(acc_low * 0.98)
+        tp = smart_round(liquidity_target)
+
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0: return None
+        rr = round(reward / risk, 2)
+        if rr < 2.0: return None
+
+        signals = ["Higher Lows", "Vol Compression", "Liquidity Above"]
+        if vol_expanding:
+            signals.append("Vol Expansion")
+
+        # ── 9. Groq анализ ──
+        try:
+            _self_rules = get_relevant_rules(symbol, "BULLISH")
+            _wyk_prompt = (
+                "Ты SMC трейдер эксперт по накоплению Вайкоффа.\n"
+                'Отвечай СТРОГО JSON: {"logic": "макс 15 слов", "target": цена_числом, "valid": true/false}\n\n'
+                "КАК ДУМАТЬ:\n"
+                "1. Higher lows = покупатели накапливают позиции\n"
+                "2. Volume compression = умные деньги поглощают продажи тихо\n"
+                "3. Ликвидность выше (EQH) = цель для выноса стопов\n"
+                "4. Стоп ЗА acc_low — ниже всей зоны накопления\n"
+                "5. TP на ликвидности (EQH/swing high)\n\n"
+                "БЛОКИРУЙ если:\n"
+                "- Higher lows слабые или нет compression\n"
+                f"- RR={rr} < 2.0\n"
+                "- BTC в нисходящем тренде\n"
+                "- Нет чёткой ликвидности выше для TP\n\n"
+                "ПОДТВЕРЖДАЙ если:\n"
+                "- Чёткие higher lows + volume compression\n"
+                "- Коррекция 8%+ от пика завершена\n"
+                "- Ликвидность (EQH) чётко видна выше\n\n"
+                f"Данные: drawdown={round(drawdown_pct,1)}% range={round(acc_range_pct,1)}% "
+                f"higher_lows={higher_lows} vol_compressed={vol_compressed} "
+                f"vol_expanding={vol_expanding} (объём растёт = выход начался)\n"
+                f"entry={smart_price_fmt(entry)} sl={smart_price_fmt(sl)} tp={smart_price_fmt(tp)} RR={rr}"
+                f"{_self_rules}"
+            )
+            _resp = ask_groq(_wyk_prompt, max_tokens=100)
+            if _resp:
+                import json as _j, re as _re
+                _m = _re.search(r'\{[^}]+\}', _resp, _re.DOTALL)
+                if _m:
+                    _p = _j.loads(_m.group())
+                    if not _p.get("valid", True): return None
+                    if _p.get("target") and float(_p["target"]) > entry:
+                        tp = smart_round(float(_p["target"]))
+        except Exception:
+            pass
+
+        return {
+            "symbol": symbol, "direction": "BULLISH",
+            "entry": entry, "sl": sl, "tp": tp, "rr": rr,
+            "score": 75, "signals": signals,
+            "logic": f"Re-accumulation: higher lows + liquidity {smart_price_fmt(liquidity_target)}",
+            "drawdown_pct": drawdown_pct, "acc_range": acc_range_pct,
+        }
+    except Exception as e:
+        logging.warning(f"detect_wyckoff_reaccumulation {symbol}: {e}")
+        return None
+
+
 # ===== СТРАТЕГИЯ 4: FAST DEAL 5M СКАЛЬПИНГ =====
 
 FAST_PAIRS = [
@@ -8676,140 +8939,78 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _avg_vol_1h > 0 and last_1h.get("volume", 0) < _avg_vol_1h * 1.1:
             return None  # Импульс без объёма — ненадёжный
 
-        # ── 5. 5m sweep + возврат ──
-        candles_5m = get_candles(symbol, "5m", 30)
-        if not candles_5m or len(candles_5m) < 10:
+        # ── 5. 15m Engulfing + Displacement + Volume Spike ──
+        candles_15m = get_candles(symbol, "15m", 30)
+        if not candles_15m or len(candles_15m) < 10:
             return None
 
-        atr_5m = sum(c["high"] - c["low"] for c in candles_5m[-14:]) / 14
-        sweep_found = False
+        atr_15m = sum(c["high"] - c["low"] for c in candles_15m[-14:]) / 14
+        engulfing_found = False
         entry = None
         sl = None
 
-        # Ищем sweep на последних 5 свечах
-        for i in range(2, 6):
-            if i >= len(candles_5m):
-                break
-            c = candles_5m[-i]
-            c_prev = candles_5m[-i - 1]
+        for i in range(1, 5):
+            if i >= len(candles_15m): break
+            curr = candles_15m[-i]
+            prev = candles_15m[-i-1]
 
+            curr_body = abs(curr["close"] - curr["open"])
+            curr_range = curr["high"] - curr["low"]
+            prev_body = abs(prev["close"] - prev["open"])
+
+            # Displacement: тело > 65% range
+            if curr_range > 0 and curr_body / curr_range < 0.65:
+                continue
+
+            # Engulfing паттерн
             if direction == "BULLISH":
-                # Sweep лоу + возврат
-                if c["low"] < c_prev["low"] and c["close"] > c_prev["low"]:
-                    wick = (c["close"] - c["low"]) / (c["high"] - c["low"] + 0.000001)
-                    if wick > 0.4:
-                        sweep_found = True
-                        _sweep_candles_ago = i
-                        entry = smart_round(c["close"])  # точка возврата sweep свечи
-                        sl    = smart_round(c["low"] - atr_5m * 1.0)
-                        break
+                bull_eng = (curr["close"] > curr["open"] and
+                           curr["open"] <= prev["close"] and
+                           curr["close"] >= prev["open"] and
+                           curr_body > prev_body * 1.1)
+                if not bull_eng: continue
+                entry = smart_round(curr["close"])
+                sl = smart_round(curr["low"] - atr_15m * 0.5)
             else:
-                # Sweep хая + возврат
-                if c["high"] > c_prev["high"] and c["close"] < c_prev["high"]:
-                    wick = (c["high"] - c["close"]) / (c["high"] - c["low"] + 0.000001)
-                    if wick > 0.4:
-                        sweep_found = True
-                        _sweep_candles_ago = i
-                        entry = smart_round(c["close"])  # точка возврата sweep свечи
-                        sl    = smart_round(c["high"] + atr_5m * 1.0)
-                        break
+                bear_eng = (curr["close"] < curr["open"] and
+                           curr["open"] >= prev["close"] and
+                           curr["close"] <= prev["open"] and
+                           curr_body > prev_body * 1.1)
+                if not bear_eng: continue
+                entry = smart_round(curr["close"])
+                sl = smart_round(curr["high"] + atr_15m * 0.5)
 
-        if not sweep_found or not entry or not sl:
+            # Volume spike — объём в 1.8x выше среднего
+            avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
+            if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * 1.8:
+                continue
+
+            engulfing_found = True
+            _sweep_candles_ago = i
+            break
+
+        if not engulfing_found or entry is None:
             return None
 
-        # ── Engulfing как подтверждение (используется в скоркарте) ──
-        _has_engulfing_5m = detect_engulfing(candles_5m, direction)
-
-        # ── Volume check на 5m sweep свече ──
-        _avg_vol_5m = sum(c.get("volume", 0) for c in candles_5m[-20:-1]) / 19 if len(candles_5m) >= 20 else 0
-        _sweep_c = candles_5m[-_sweep_candles_ago]
-        if _avg_vol_5m > 0 and _sweep_c.get("volume", 0) < _avg_vol_5m * 1.2:
-            return None  # Sweep без объёма — ненадёжный
-
-        # ── FAST Mini-Scorecard: 7 условий, минимум 3 ──
-        _fast_score = 0
-
-        # 1) Предыдущая свеча закрылась в направлении сигнала
-        _prev_5m = candles_5m[-2]
-        if direction == "BULLISH" and _prev_5m["close"] > _prev_5m["open"]:
-            _fast_score += 1
-        elif direction == "BEARISH" and _prev_5m["close"] < _prev_5m["open"]:
-            _fast_score += 1
-
-        # 2) BTC на 5m в том же направлении
-        try:
-            _btc_5m = get_candles("BTCUSDT", "5m", 5)
-            if _btc_5m and len(_btc_5m) >= 2:
-                _btc_5m_dir = "BULLISH" if _btc_5m[-1]["close"] > _btc_5m[-2]["close"] else "BEARISH"
-                if _btc_5m_dir == direction:
-                    _fast_score += 1
-        except Exception:
-            pass
-
-        # 3) Объём растёт последние 3 свечи
-        try:
-            if len(candles_5m) >= 4:
-                _v1 = candles_5m[-4].get("volume", 0)
-                _v2 = candles_5m[-3].get("volume", 0)
-                _v3 = candles_5m[-2].get("volume", 0)
-                if _v1 > 0 and _v2 > _v1 and _v3 > _v2:
-                    _fast_score += 1
-        except Exception:
-            pass
-
-        # 4) Sweep на EQH/EQL
-        try:
-            _eqh, _eql = find_equal_highs_lows(candles_5m, lookback=20)
-            if direction == "BULLISH" and _eql and _sweep_c["low"] < _eql:
-                _fast_score += 1
-            elif direction == "BEARISH" and _eqh and _sweep_c["high"] > _eqh:
-                _fast_score += 1
-        except Exception:
-            pass
-
-        # 5) Counter-sweep protection: нет обратного sweep после нашего
-        _counter_sweep = False
-        try:
-            for _cs_i in range(_sweep_candles_ago - 1, 0, -1):
-                _cs_c = candles_5m[-_cs_i]
-                if direction == "BULLISH" and _cs_c["high"] > candles_5m[-_cs_i - 1]["high"] and _cs_c["close"] < candles_5m[-_cs_i - 1]["high"]:
-                    _counter_sweep = True
-                    break
-                if direction == "BEARISH" and _cs_c["low"] < candles_5m[-_cs_i - 1]["low"] and _cs_c["close"] > candles_5m[-_cs_i - 1]["low"]:
-                    _counter_sweep = True
-                    break
-        except Exception:
-            pass
-        if not _counter_sweep:
-            _fast_score += 1
-
-        # 6) Engulfing паттерн
-        if _has_engulfing_5m:
-            _fast_score += 1
-
-        # 7) Session timing: первые 30 мин Kill Zone — бонус
-        _session_bonus = False
-        if _in_london_kz and _time_minutes <= 450:    # первые 30 мин London (07:00-07:30)
-            _session_bonus = True
-        elif _in_ny_kz and _time_minutes <= 930:      # первые 30 мин NY (15:00-15:30)
-            _session_bonus = True
-        if _session_bonus:
-            _fast_score += 1
-        # Последние 15 мин часа — штраф (если score на грани)
-        _last_15_min = _minute >= 45
-
-        # Минимум 3 из 7 для прохождения
-        if _fast_score < 2:
-            logging.info(f"[FAST Score] {symbol}: mini-score {_fast_score}/7 < 3 — пропуск")
-            return None
-
-        # ── TP1 = ATR×1.5, TP2 = ATR×2.5 от входа ──
-        if direction == "BULLISH":
-            tp1 = smart_round(entry + atr_5m * 1.5)
-            tp2 = smart_round(entry + atr_5m * 2.5)
+        # ── Acceptance — цена закрылась выше/ниже зоны OB/FVG ──
+        if ob_4h and direction == "BULLISH":
+            _acceptance = candles_15m[-1]["close"] > ob_4h["top"]
+        elif ob_4h and direction == "BEARISH":
+            _acceptance = candles_15m[-1]["close"] < ob_4h["bottom"]
         else:
-            tp1 = smart_round(entry - atr_5m * 1.5)
-            tp2 = smart_round(entry - atr_5m * 2.5)
+            _acceptance = True  # Нет OB — не блокируем
+
+        if not _acceptance:
+            logging.debug(f"[FAST] {symbol}: нет acceptance — цена не закрылась за зоной")
+            return None
+
+        # ── TP = следующий EQH/FVG на 15m ──
+        if direction == "BULLISH":
+            tp1 = smart_round(entry + atr_15m * 2.5)
+            tp2 = smart_round(entry + atr_15m * 4.0)
+        else:
+            tp1 = smart_round(entry - atr_15m * 2.5)
+            tp2 = smart_round(entry - atr_15m * 4.0)
         tp = tp2  # основной TP для RR расчёта
 
         # ── RR проверка ──
@@ -8818,7 +9019,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if risk == 0:
             return None
         rr = round(reward / risk, 2)
-        # Последние 15 мин часа — ужесточаем RR
+        _last_15_min = _minute >= 45
         _min_rr = 2.0 if _last_15_min else 1.5
         if rr < _min_rr:
             return None
@@ -8833,7 +9034,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
             # Дополнительный контекст для Groq
             _ob_4h_desc = f"OB: {ob_4h['bottom']:.4f}–{ob_4h['top']:.4f}" if ob_4h else "OB: нет"
             _fvg_4h_desc = f"FVG: {fvg_4h['bottom']:.4f}–{fvg_4h['top']:.4f}" if fvg_4h else "FVG: нет"
-            _sweep_vol_desc = f"Vol sweep: {_sweep_c.get('volume', 0):.0f}, avg: {_avg_vol_5m:.0f}" if _avg_vol_5m > 0 else ""
+            _eng_c = candles_15m[-_sweep_candles_ago]
+            _avg_vol_15m_g = sum(c.get("volume", 0) for c in candles_15m[-20:-1]) / 19 if len(candles_15m) >= 20 else 0
+            _eng_vol_desc = f"Vol engulfing: {_eng_c.get('volume', 0):.0f}, avg: {_avg_vol_15m_g:.0f}" if _avg_vol_15m_g > 0 else ""
 
             # Fear&Greed, Funding, Market Regime
             _fast_fg = get_fear_greed()
@@ -8846,7 +9049,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             # Pattern history для Groq
             _fast_pat_str = ""
             try:
-                _fast_pat = _learn_patterns(symbol, direction, "5m", _fast_regime_str, 0)
+                _fast_pat = _learn_patterns(symbol, direction, "15m", _fast_regime_str, 0)
                 if _fast_pat.get("found") and _fast_pat.get("samples", 0) >= 3:
                     _fast_pat_str = (f"\nИстория похожих: {_fast_pat['samples']} сделок, "
                                      f"WR: {_fast_pat['win_rate']:.0f}%, avg RR: {_fast_pat['avg_rr']:.1f}, "
@@ -8857,30 +9060,36 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _fast_sl_pct = round(abs(entry - sl) / entry * 100, 2) if entry > 0 else 0
             _self_rules = get_relevant_rules(symbol, direction)
             groq_prompt = (
-                "Ты SMC скальпер с опытом торговли в Kill Zone. "
-                "Оцени качество скальп сетапа на 5m. "
-                f'Ответь СТРОГО JSON: {{"logic": "макс 15 слов", "valid": true/false}}\n\n'
-                "БЛОКИРУЙ (valid: false) если:\n"
-                f"- RR < 1.5 или стоп > 1% (это скальп! RR={rr}, стоп={_fast_sl_pct}%)\n"
-                "- Sweep слабый — нет объёма, нет возврата за уровень\n"
-                "- BTC идёт против направления на 5m\n"
-                "- Нет импульсной свечи на 15m подтверждающей вход\n"
-                "- Цена не в зоне 4h OB или FVG\n"
-                "- Последние 15 минут часа — высокая волатильность\n\n"
-                "ПОДТВЕРЖДАЙ (valid: true) если:\n"
-                "- Sweep чёткий на EQH/EQL или ключевом уровне\n"
-                "- 15m свеча закрылась в направлении с объёмом\n"
-                "- BTC на 5m в том же направлении\n"
-                "- Цена чётко в 4h OB или FVG зоне\n"
-                "- Начало Kill Zone (первые 30 минут) — лучший момент\n"
-                "- RR ≥ 1.5 с реалистичным TP\n\n"
-                f"Данные: Пара: {symbol} Направление: {direction}\n"
-                f"5m sweep: {'лоу' if direction == 'BULLISH' else 'хая'} ({_sweep_candles_ago} свечей назад)\n"
+                "Ты Kill Zone скальпер — торгуешь ТОЛЬКО в London (07-11 UTC) и NY (15-19 UTC) сессии.\n"
+                'Отвечай СТРОГО JSON: {"logic": "макс 10 слов", "valid": true/false}\n\n'
+                "КАК ДУМАТЬ:\n"
+                "1. 15m engulfing + displacement — тело > 65% range, поглощение предыдущей свечи\n"
+                "2. 4h OB или FVG подтверждает зону — институционалы там входили\n"
+                "3. Volume spike 1.8x — реальный интерес на engulfing свече\n"
+                "4. Acceptance — цена закрылась за зоной OB/FVG\n"
+                "5. BTC и 1d тренд совпадают — не иди против рынка\n\n"
+                "БЛОКИРУЙ если:\n"
+                f"- RR={rr} < 1.5\n"
+                f"- Стоп {_fast_sl_pct}% > 1.5% от входа (скальп = узкий стоп)\n"
+                "- Нет OB и нет FVG на 4h — вход без подтверждения зоны\n"
+                "- 1d тренд ПРОТИВ направления\n"
+                "- BTC тренд ПРОТИВ направления\n"
+                "- Вне Kill Zone (London 07-11, NY 15-19 UTC)\n\n"
+                "ПОДТВЕРЖДАЙ если:\n"
+                "- Engulfing чёткий с объёмом 1.8x+\n"
+                "- 4h OB или FVG подтверждает зону входа\n"
+                f"- RR={rr} >= 2.0\n"
+                "- 1d тренд и BTC в том же направлении\n"
+                "- Сейчас Kill Zone\n\n"
+                f"ДАННЫЕ СЕТАПА:\n"
+                f"Пара: {symbol} Направление: {direction}\n"
+                f"15m engulfing ({_sweep_candles_ago} свечей назад) | Acceptance: {_acceptance}\n"
                 f"4h зона: {zone_desc} | {_ob_4h_desc} | {_fvg_4h_desc}\n"
                 f"Тренд: {direction_1d} | BTC: {btc_trend}\n"
                 f"Funding: {_fast_fund_str} | Fear&Greed: {_fast_fg_str} | Режим: {_fast_regime_str}\n"
-                f"{_sweep_vol_desc} | Мини-скор: {_fast_score}/7\n"
-                f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2} RR: {rr} Стоп: {_fast_sl_pct}%"
+                f"{_eng_vol_desc}\n"
+                f"Вход: {entry} SL: {sl} TP1: {tp1} TP2: {tp2}\n"
+                f"RR: {rr} | Стоп: {_fast_sl_pct}%"
                 f"{_fast_pat_str}"
                 f"{_self_rules}"
             )
@@ -8902,7 +9111,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             logging.debug(f"[FAST Groq] {symbol}: {_fast_ge}")
 
         if not logic:
-            logic = f"Sweep {'лоу' if direction == 'BULLISH' else 'хая'} 5m в зоне {zone_desc[:20]}"
+            logic = f"Engulfing 15m в зоне {zone_desc[:20]}"
 
         return {
             "symbol":    symbol,
