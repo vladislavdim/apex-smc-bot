@@ -1866,8 +1866,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
         rr = round(reward / risk, 2)
 
         # Если TP слишком близко — дополняем математикой
-        if rr < 0.8:
-            return None  # Нет структурных уровней — не выдаём сигнал
+        if rr < 2.0:
+            return None  # Минимум RR 2.0 — качество важнее количества
 
         return {
             "entry": entry, "sl": sl,
@@ -1882,31 +1882,8 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
 
     except Exception as e:
         logging.debug(f"calc_smart_levels fallback ({direction} {timeframe}): {e}")
-        # Fallback на математический расчёт
-        tf_risk = {"5m": 0.010, "15m": 0.015, "1h": 0.025, "4h": 0.050, "1d": 0.100}
-        risk_pct = tf_risk.get(timeframe, 0.025)
-        risk = price * risk_pct
-        entry = smart_round(price)
-        if direction == "BULLISH":
-            sl  = smart_round(entry - risk)
-            tp1 = smart_round(entry + risk * 3)
-            tp2 = smart_round(entry + risk * 5)
-            tp3 = tp2
-        else:
-            sl  = smart_round(entry + risk)
-            tp1 = smart_round(entry - risk * 3)
-            tp2 = smart_round(entry - risk * 5)
-            tp3 = tp2
-        return {
-            "entry": entry, "sl": sl,
-            "tp1": tp1, "tp2": tp2, "tp3": tp3,
-            "sl_pct": round(risk_pct * 100, 2),
-            "tp1_pct": round(risk_pct * 200, 2),
-            "tp2_pct": round(risk_pct * 300, 2),
-            "tp3_pct": round(risk_pct * 500, 2),
-            "rr": 2.0,
-            "source": "math"
-        }
+        # Нет структурных уровней — блокируем (математические стопы запрещены)
+        return None
 
 def format_market():
     market = get_live_prices()
@@ -5291,14 +5268,25 @@ async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, h
         logging.error(f"Deep error analysis failed: {e}")
 
 
-def get_recent_errors(limit=10):
-    """FIX 10: Возвращает последние ошибки из bot_errors для контекста Groq промптов"""
+def get_recent_errors(symbol=None, limit=10):
+    """Возвращает последние ошибки из bot_errors для контекста Groq промптов"""
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        rows = conn.execute(
-            "SELECT error_type, symbol, direction, details, created_at FROM bot_errors ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
+        if symbol:
+            rows = conn.execute(
+                "SELECT error_type, symbol, direction, details, created_at FROM bot_errors WHERE symbol=? ORDER BY rowid DESC LIMIT ?",
+                (symbol, limit,)
+            ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    "SELECT error_type, symbol, direction, details, created_at FROM bot_errors ORDER BY rowid DESC LIMIT ?",
+                    (limit,)
+                ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT error_type, symbol, direction, details, created_at FROM bot_errors ORDER BY rowid DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
         conn.close()
         if not rows:
             return ""
@@ -7154,6 +7142,14 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         sl = smart_round(_ob_bear["top"] + _atr_sw * 0.5)
                         tp = smart_round(last_swing_low)
                         logic = f"Реакция от OB {smart_price_fmt(_ob_bear['bottom'])}–{smart_price_fmt(_ob_bear['top'])}"
+
+                # Variant 2: минимум RR 2.5 (строже чем sweep)
+                if direction and entry and sl and tp:
+                    _v2_risk = abs(entry - sl)
+                    _v2_reward = abs(tp - entry)
+                    if _v2_risk > 0 and _v2_reward / _v2_risk < 2.5:
+                        logging.info(f"[SWING V2] {symbol}: RR {_v2_reward/_v2_risk:.2f} < 2.5 — пропуск")
+                        return None
             except Exception:
                 pass
 
@@ -7520,6 +7516,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
             _sw_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
             _self_rules = get_relevant_rules(symbol, direction)
+            _recent_errors = get_recent_errors(symbol)
             groq_prompt = (
                 "Ты опытный SMC трейдер специализирующийся на swing торговле. "
                 "Оцени качество sweep сетапа. "
@@ -7530,13 +7527,19 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 "- Нет CHoCH после sweep — структура не сменилась\n"
                 "- 1d тренд против направления сигнала\n"
                 "- Цена уже далеко от зоны sweep (> 2% от входа)\n"
-                "- Между входом и TP есть сильный OB или FVG против направления\n\n"
+                "- Между входом и TP есть сильный OB или FVG против направления\n"
+                "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ (valid: true) если:\n"
                 "- Sweep чёткий — пробой swing low/high с быстрым возвратом за 1-2 свечи\n"
                 "- Объём на sweep выше среднего\n"
                 "- CHoCH или BOS подтверждает разворот\n"
                 "- TP на реальном структурном уровне\n"
                 "- RR ≥ 2.5 — это swing, нужен запас\n\n"
+                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
+                "- SL ТОЛЬКО за структурный уровень (swing low/high, OB edge, FVG edge)\n"
+                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
+                "- TP ТОЛЬКО на структурный уровень (EQH/EQL, OB, FVG, swing point)\n"
+                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
                 f"Данные: Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Вход: {entry} SL: {sl} TP: {tp} HTF: {htf_dir} 1w: {htf_1w_swing}\n"
                 f"RR: {rr} | Стоп: {_sw_sl_pct}% | ATR: {smart_round(atr)} | До TP: {smart_round(distance_to_tp)}ч\n"
@@ -7545,6 +7548,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"Свечи: {candles_str}"
                 f"{_sw_pat_str}"
                 f"{_self_rules}"
+                f"{_recent_errors}"
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100)
@@ -7692,7 +7696,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 _zone_top = ob["top"] if zone_type == "OB" and ob else (fvg["top"] if fvg else zone_level * 1.01)
                 _zone_bot = ob["bottom"] if zone_type == "OB" and ob else (fvg["bottom"] if fvg else zone_level * 0.99)
 
-                for c in candles[-30:]:
+                for c in candles[-30:-3]:
                     if _zone_bot <= c["low"] <= _zone_top or _zone_bot <= c["high"] <= _zone_top:
                         _test_count += 1
 
@@ -7876,6 +7880,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         try:
             _zone_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
             _self_rules = get_relevant_rules(symbol, direction)
+            _recent_errors = get_recent_errors(symbol)
             _zone_prompt = (
                 "Ты SMC трейдер специализирующийся на зонах интереса. "
                 "Оцени вход из Discount/Premium зоны. "
@@ -7886,13 +7891,19 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 "- Нет отбоя от зоны (нет бычьей/медвежьей свечи от уровня)\n"
                 "- 1d тренд против направления\n"
                 "- OB/FVG уже был протестирован несколько раз (mitigated)\n"
-                "- Нет FVG между входом и TP для притяжения цены\n\n"
+                "- Нет FVG между входом и TP для притяжения цены\n"
+                "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ (valid: true) если:\n"
                 "- Цена чётко внутри OB или касается FVG\n"
                 "- Зона нетронутая (первый или второй тест)\n"
                 "- Есть хотя бы одна свеча отбоя от зоны\n"
                 "- 1d и 4h тренд совпадают с направлением\n"
                 "- RR ≥ 2.0, TP на реальном swing уровне\n\n"
+                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
+                "- SL ТОЛЬКО за структурный уровень (OB edge, FVG edge, swing low/high)\n"
+                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
+                "- TP ТОЛЬКО на структурный уровень (EQH/EQL, OB, FVG, swing point)\n"
+                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
                 f"Данные: Пара: {symbol} ТФ: {timeframe} Направление: {direction}\n"
                 f"Зона: {'Discount' if direction == 'BULLISH' else 'Premium'} | Тип: {zone_type}\n"
                 f"Диапазон: {smart_price_fmt(range_low)}–{smart_price_fmt(range_high)} | Mid: {smart_price_fmt(range_mid)}\n"
@@ -7901,6 +7912,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"1d тренд: {htf_1d} | Quality score: {q_score}/7\n"
                 f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)} RR: {rr} Стоп: {_zone_sl_pct}%"
                 f"{_self_rules}"
+                f"{_recent_errors}"
             )
             _zone_resp = ask_groq(_zone_prompt, max_tokens=80)
             if _zone_resp:
@@ -8327,6 +8339,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             _wy_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
             _wy_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
             _self_rules = get_relevant_rules(symbol, "BULLISH")
+            _recent_errors = get_recent_errors(symbol)
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа и накоплении/дистрибуции. "
                 "Оцени качество Wyckoff Spring сетапа. "
@@ -8337,13 +8350,19 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 "- Нет compression (сжатие диапазона и объёма)\n"
                 "- RR < 2.0 от текущей цены до целевой\n"
                 "- Цена уже выше Creek линии (пропустили вход)\n"
-                "- BTC в нисходящем тренде на 4h\n\n"
+                "- BTC в нисходящем тренде на 4h\n"
+                "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ (valid: true) если:\n"
                 "- Spring пробил поддержку и вернулся — ликвидность собрана\n"
                 "- SOS показал силу покупателей\n"
                 "- Объём снижается в боковике (накопление завершается)\n"
                 "- Цена у или ниже Creek — идеальный вход\n"
                 "- TP = уровень AR (автоматический ралли) или выше\n\n"
+                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
+                "- SL ТОЛЬКО за структурный уровень (SC low, Spring low, acc_low)\n"
+                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
+                "- TP ТОЛЬКО на структурный уровень (AR high, Creek, swing point)\n"
+                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
                 f"Данные: Пара: {symbol} Цена: {price_now}\n"
                 f"SC лоу: {phases['SC']['price']:.6f} | AR хай: {ar_price:.6f}\n"
                 f"Пик до падения: {price_peak:.6f} | Даунтренд: -{drawdown_pct:.0f}%\n"
@@ -8356,6 +8375,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"{_wy_ob_str} | {_wy_fvg_str}"
                 f"{_wy_pat_str}"
                 f"{_self_rules}"
+                f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
             if groq_resp:
@@ -8599,6 +8619,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             _wyd_sl_pct = round(abs(entry - sl) / entry * 100, 1) if entry else 0
             _wyd_rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
             _self_rules = get_relevant_rules(symbol, "BEARISH")
+            _recent_errors = get_recent_errors(symbol)
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа Distribution (дистрибуция). "
                 "Оцени качество Wyckoff Distribution сетапа для SHORT. "
@@ -8608,13 +8629,19 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 "- Объём на UTAD не выше среднего\n"
                 "- RR < 2.0 от текущей цены до целевой\n"
                 "- Цена уже ниже AR лоу (пропустили вход)\n"
-                "- BTC в восходящем тренде на 4h\n\n"
+                "- BTC в восходящем тренде на 4h\n"
+                "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ (valid: true) если:\n"
                 "- UTAD пробил вершину и вернулся — ликвидность собрана\n"
                 "- SOW показал слабость покупателей\n"
                 "- Объём снижается у вершины (дистрибуция завершается)\n"
                 "- Цена у или выше Ice Line — идеальный SHORT\n"
                 "- TP = уровень AR лоу или ниже\n\n"
+                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
+                "- SL ТОЛЬКО за структурный уровень (BC high, UTAD high, dist_high)\n"
+                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
+                "- TP ТОЛЬКО на структурный уровень (AR low, Ice Line, swing point)\n"
+                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
                 f"Данные: Пара: {symbol} Цена: {price_now}\n"
                 f"BC хай: {phases['BC']['price']:.6f} | AR лоу: {ar_price:.6f}\n"
                 f"Основание до роста: {price_bottom:.6f} | Рост: +{pump_pct:.0f}%\n"
@@ -8627,6 +8654,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"{_wyd_ob_str} | {_wyd_fvg_str}"
                 f"{_wyd_pat_str}"
                 f"{_self_rules}"
+                f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120)
             if groq_resp:
@@ -8754,7 +8782,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         reward = abs(tp - entry)
         if risk == 0: return None
         rr = round(reward / risk, 2)
-        if rr < 2.0: return None
+        if rr < 2.5: return None
 
         signals = ["Higher Lows", "Vol Compression", "Liquidity Above"]
         if vol_expanding:
@@ -8763,6 +8791,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         # ── 9. Groq анализ ──
         try:
             _self_rules = get_relevant_rules(symbol, "BULLISH")
+            _recent_errors = get_recent_errors(symbol)
             _wyk_prompt = (
                 "Ты SMC трейдер эксперт по накоплению Вайкоффа.\n"
                 'Отвечай СТРОГО JSON: {"logic": "макс 15 слов", "target": цена_числом, "valid": true/false}\n\n'
@@ -8774,18 +8803,25 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 "5. TP на ликвидности (EQH/swing high)\n\n"
                 "БЛОКИРУЙ если:\n"
                 "- Higher lows слабые или нет compression\n"
-                f"- RR={rr} < 2.0\n"
+                f"- RR={rr} < 2.5\n"
                 "- BTC в нисходящем тренде\n"
-                "- Нет чёткой ликвидности выше для TP\n\n"
+                "- Нет чёткой ликвидности выше для TP\n"
+                "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ если:\n"
                 "- Чёткие higher lows + volume compression\n"
                 "- Коррекция 8%+ от пика завершена\n"
                 "- Ликвидность (EQH) чётко видна выше\n\n"
+                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
+                "- SL ТОЛЬКО за структурный уровень (acc_low, swing low)\n"
+                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
+                "- TP ТОЛЬКО на ликвидность (EQH, swing high, peak)\n"
+                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
                 f"Данные: drawdown={round(drawdown_pct,1)}% range={round(acc_range_pct,1)}% "
                 f"higher_lows={higher_lows} vol_compressed={vol_compressed} "
                 f"vol_expanding={vol_expanding} (объём растёт = выход начался)\n"
                 f"entry={smart_price_fmt(entry)} sl={smart_price_fmt(sl)} tp={smart_price_fmt(tp)} RR={rr}"
                 f"{_self_rules}"
+                f"{_recent_errors}"
             )
             _resp = ask_groq(_wyk_prompt, max_tokens=100)
             if _resp:
@@ -8980,9 +9016,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 entry = smart_round(curr["close"])
                 sl = smart_round(curr["high"] + atr_15m * 0.5)
 
-            # Volume spike — объём в 1.8x выше среднего
+            # Volume spike — объём в 2.0x выше среднего
             avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
-            if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * 1.8:
+            if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * 2.0:
                 continue
 
             engulfing_found = True
@@ -9019,8 +9055,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if risk == 0:
             return None
         rr = round(reward / risk, 2)
-        _last_15_min = _minute >= 45
-        _min_rr = 2.0 if _last_15_min else 1.5
+        _min_rr = 1.5
         if rr < _min_rr:
             return None
 
@@ -9059,13 +9094,14 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
             _fast_sl_pct = round(abs(entry - sl) / entry * 100, 2) if entry > 0 else 0
             _self_rules = get_relevant_rules(symbol, direction)
+            _recent_errors = get_recent_errors(symbol)
             groq_prompt = (
                 "Ты Kill Zone скальпер — торгуешь ТОЛЬКО в London (07-11 UTC) и NY (15-19 UTC) сессии.\n"
                 'Отвечай СТРОГО JSON: {"logic": "макс 10 слов", "valid": true/false}\n\n'
                 "КАК ДУМАТЬ:\n"
                 "1. 15m engulfing + displacement — тело > 65% range, поглощение предыдущей свечи\n"
                 "2. 4h OB или FVG подтверждает зону — институционалы там входили\n"
-                "3. Volume spike 1.8x — реальный интерес на engulfing свече\n"
+                "3. Volume spike 2.0x — реальный интерес на engulfing свече\n"
                 "4. Acceptance — цена закрылась за зоной OB/FVG\n"
                 "5. BTC и 1d тренд совпадают — не иди против рынка\n\n"
                 "БЛОКИРУЙ если:\n"
@@ -9074,13 +9110,19 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 "- Нет OB и нет FVG на 4h — вход без подтверждения зоны\n"
                 "- 1d тренд ПРОТИВ направления\n"
                 "- BTC тренд ПРОТИВ направления\n"
-                "- Вне Kill Zone (London 07-11, NY 15-19 UTC)\n\n"
+                "- Вне Kill Zone (London 07-11, NY 15-19 UTC)\n"
+                "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ если:\n"
-                "- Engulfing чёткий с объёмом 1.8x+\n"
+                "- Engulfing чёткий с объёмом 2.0x+\n"
                 "- 4h OB или FVG подтверждает зону входа\n"
                 f"- RR={rr} >= 2.0\n"
                 "- 1d тренд и BTC в том же направлении\n"
                 "- Сейчас Kill Zone\n\n"
+                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
+                "- SL ТОЛЬКО за структурный уровень (OB edge, FVG edge, engulfing low/high)\n"
+                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
+                "- TP ТОЛЬКО на структурный уровень (OB, FVG, swing point)\n"
+                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
                 f"ДАННЫЕ СЕТАПА:\n"
                 f"Пара: {symbol} Направление: {direction}\n"
                 f"15m engulfing ({_sweep_candles_ago} свечей назад) | Acceptance: {_acceptance}\n"
@@ -9092,6 +9134,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"RR: {rr} | Стоп: {_fast_sl_pct}%"
                 f"{_fast_pat_str}"
                 f"{_self_rules}"
+                f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80)
             if groq_resp:

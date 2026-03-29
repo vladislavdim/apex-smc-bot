@@ -2894,8 +2894,8 @@ async def auto_scan_1h():
     try:
         signals = await _scan_tf("1h", pairs_limit=80)
         logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
-        valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
-        logging.info(f"[auto_scan_1h] Актуальных {len(valid)}/{len(signals)}")
+        valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0) and s.get("confluence_score", 0) >= 60]
+        logging.info(f"[auto_scan_1h] Актуальных (confluence>=60) {len(valid)}/{len(signals)}")
         for sd in sorted(valid, key=lambda x: x.get("confluence_score", 0), reverse=True)[:3]:
             logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
             await _send_signal(sd)
@@ -3883,6 +3883,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Порог 3/3 — только подтверждённые входы
         if timing_score < 3:
+            if _rr_val < 2.5:
+                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: RR {_rr_val:.2f} < 2.5 — не ставим в очередь")
+                return None
             saved = save_to_timing_queue(
                 symbol, direction, timeframe,
                 entry, sl, tp1, tp2, tp3,
