@@ -7591,9 +7591,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             bool(not weekly_warning),  # 1w не против
         ])
         _sw_quality = f" [Q:{_sw_confirms}/6]"
-        # Если менее 2 подтверждений — требуем RR >= 2.0
-        if _sw_confirms < 2 and rr < 2.0:
-            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6, RR={rr} < 2.0 — пропуск")
+        # Если менее 2 подтверждений — блокируем независимо от RR
+        if _sw_confirms < 2:
+            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 2 — пропуск")
             return None
 
         return {
