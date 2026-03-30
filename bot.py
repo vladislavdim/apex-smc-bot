@@ -2939,6 +2939,11 @@ async def _auto_scan_1h_impl():
             regime = detect_market_regime_v2(symbol)
             enabled = regime.get("enabled", ["MTF"])
 
+            # Session liquidity check
+            _liq = check_session_liquidity(symbol, "1h")
+            if not _liq["ok"]:
+                continue
+
             # MTF — если включён для этого режима
             if "MTF" in enabled:
                 sig = full_scan_raw(symbol, "1h", auto=True)
@@ -2984,6 +2989,10 @@ async def _auto_scan_swing_impl():
     blocked = 0
     for symbol in pairs:
         try:
+            _liq_sw = check_session_liquidity(symbol, "4h")
+            if not _liq_sw["ok"]:
+                blocked += 1
+                continue
             r = detect_swing_setup(symbol, "4h")
             if r:
                 found.append(r)
@@ -3018,11 +3027,12 @@ async def _auto_scan_swing_impl():
 
             # AI комментарий
 
+            _sw_tp2_str = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
             text = (
                 f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 4h{htf_text}\n"
                 f"\n"
-                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code>\n"
+                f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code>{_sw_tp2_str}\n"
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
                 f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
                 f"\n"
@@ -3033,11 +3043,12 @@ async def _auto_scan_swing_impl():
             )
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
+            _sw_tp2_val = r.get("tp2", r["tp"])
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "4h", "entry": r["entry"],
                 "sl": r["sl"], "tp1": r["tp"],
-                "tp2": r["tp"], "tp3": r["tp"],
+                "tp2": _sw_tp2_val, "tp3": _sw_tp2_val,
                 "grade": "SWING", "text": text,
                 "confluence_score": int(r["rr"] * 20),
                 "regime": "SWING",
@@ -3064,7 +3075,7 @@ async def _auto_scan_swing_impl():
             # Сохраняем в БД
             save_signal_db(
                 symbol, direction, "SWING",
-                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                r["entry"], r["tp"], _sw_tp2_val, _sw_tp2_val, r["sl"],
                 "4h", 12, "SWING",
                 confluence=int(r["rr"] * 20), regime="SWING"
             )
@@ -3092,6 +3103,9 @@ async def _auto_zone_scan_impl():
     found = []
     for symbol in pairs:
         try:
+            _liq_z = check_session_liquidity(symbol, "4h")
+            if not _liq_z["ok"]:
+                continue
             r = detect_zone_setup(symbol, "4h")
             if r:
                 found.append(r)
@@ -3115,11 +3129,12 @@ async def _auto_zone_scan_impl():
             dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
             htf       = r.get("htf_dir", "")
 
+            _z_tp2_str = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
             text = (
                 f"📦 <b>[ZONE]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 4h | 1d: {htf} | {r['zone']} зона ({r['zone_type']})\n"
                 f"\n"
-                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code>\n"
+                f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code>{_z_tp2_str}\n"
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
                 f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
                 f"\n"
@@ -3130,11 +3145,12 @@ async def _auto_zone_scan_impl():
             )
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
+            _z_tp2_val = r.get("tp2", r["tp"])
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "4h", "entry": r["entry"],
                 "sl": r["sl"], "tp1": r["tp"],
-                "tp2": r["tp"], "tp3": r["tp"],
+                "tp2": _z_tp2_val, "tp3": _z_tp2_val,
                 "grade": "ZONE", "text": text,
                 "confluence_score": int(r["rr"] * 20),
                 "regime": "ZONE",
@@ -3159,7 +3175,7 @@ async def _auto_zone_scan_impl():
 
             save_signal_db(
                 symbol, direction, "ZONE",
-                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                r["entry"], r["tp"], _z_tp2_val, _z_tp2_val, r["sl"],
                 "4h", 12, "ZONE",
                 confluence=int(r["rr"] * 20), regime="ZONE"
             )
@@ -3322,11 +3338,12 @@ async def _auto_wyckoff_scan_impl():
 
             # AI комментарий
 
+            _w_tp2_str = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
             text = (
                 f"🌊 <b>[WYCKOFF]</b> | <b>{symbol}</b> — {dir_label}\n"
                 f"📊 Контекст: 1d | {wyckoff_type}\n"
                 f"\n"
-                f"🎯 TP:   <code>{smart_price_fmt(r['tp'])}</code> ({tp_sign}{r['tp_pct']}%)\n"
+                f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code> ({tp_sign}{r['tp_pct']}%){_w_tp2_str}\n"
                 f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
                 f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
                 f"\n"
@@ -3360,11 +3377,12 @@ async def _auto_wyckoff_scan_impl():
             except Exception:
                 pass
 
+            _w_tp2_val = r.get("tp2", r["tp"])
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "1d", "entry": r["entry"],
                 "sl": r["sl"], "tp1": r["tp"],
-                "tp2": r["tp"], "tp3": r["tp"],
+                "tp2": _w_tp2_val, "tp3": _w_tp2_val,
                 "grade": "WYCKOFF", "text": text,
                 "confluence_score": r["score"],
                 "regime": "WYCKOFF",
@@ -3373,7 +3391,7 @@ async def _auto_wyckoff_scan_impl():
 
             save_signal_db(
                 symbol, direction, "WYCKOFF",
-                r["entry"], r["tp"], r["tp"], r["tp"], r["sl"],
+                r["entry"], r["tp"], _w_tp2_val, _w_tp2_val, r["sl"],
                 "1d", 168, "🌊 WYCKOFF",
                 confluence=r["score"], regime="WYCKOFF"
             )
@@ -3626,21 +3644,24 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         if len(candles) < 20:
             return None
 
-        # ── MUST 1: OB/FVG зона ±ATR×1.0 ──
+        # ── MUST 1: OB/FVG зона ±ATR×vf ──
         try:
             _ob_check = find_ob(candles, direction)
             _fvg_check = find_fvg(candles, direction)
             _atr_check = sum(candles[-i]["high"] - candles[-i]["low"] for i in range(1, 15)) / 14
+            _ap_mtf = get_adaptive_params(symbol, candles)
+            _vf_mtf = _ap_mtf["volatility_factor"]
             _in_ob = (_ob_check and
                       abs(candles[-1]["close"] - (_ob_check["top"] + _ob_check["bottom"]) / 2)
-                      <= _atr_check * 1.0)
+                      <= _atr_check * _vf_mtf)
             _in_fvg = (_fvg_check and
                        abs(candles[-1]["close"] - (_fvg_check["top"] + _fvg_check["bottom"]) / 2)
-                       <= _atr_check * 1.0)
+                       <= _atr_check * _vf_mtf)
             if not _in_ob and not _in_fvg:
                 logging.debug(f"[MTF] {symbol}: цена не у OB/FVG зоны — блок")
                 return None
         except Exception:
+            _ap_mtf = {"adx": 25, "adx_weak": False, "adx_strong": False, "dynamic_confluence": 30}
             pass
 
         # ── MUST 2: Тренд EMA50/EMA20 + структура HH/HL ──
@@ -3655,13 +3676,20 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 _hh_hl = _closes[-1] > _closes[-5] > _closes[-10]
                 _ll_lh = _closes[-1] < _closes[-5] < _closes[-10]
 
+                _mtf_adx_weak = _ap_mtf.get("adx_weak", False)
                 if direction == "BULLISH":
-                    _trend_ok = (_price_4h > _ema50 and _ema20 > _ema50) or _hh_hl
+                    if _mtf_adx_weak:
+                        _trend_ok = _hh_hl or (_ema20 > _ema50)
+                    else:
+                        _trend_ok = (_price_4h > _ema50 and _ema20 > _ema50) or _hh_hl
                     if not _trend_ok:
                         logging.debug(f"[MTF] {symbol}: тренд не подтверждён для LONG — блок")
                         return None
                 else:
-                    _trend_ok = (_price_4h < _ema50 and _ema20 < _ema50) or _ll_lh
+                    if _mtf_adx_weak:
+                        _trend_ok = _ll_lh or (_ema20 < _ema50)
+                    else:
+                        _trend_ok = (_price_4h < _ema50 and _ema20 < _ema50) or _ll_lh
                     if not _trend_ok:
                         logging.debug(f"[MTF] {symbol}: тренд не подтверждён для SHORT — блок")
                         return None

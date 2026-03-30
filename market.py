@@ -694,6 +694,9 @@ def init_db():
         ("learning_id", "INTEGER DEFAULT NULL"),
         ("confluence",  "INTEGER DEFAULT 0"),
         ("regime",      "TEXT DEFAULT 'UNKNOWN'"),
+        ("tp1_hit",     "INTEGER DEFAULT 0"),
+        ("trailing_sl", "REAL DEFAULT NULL"),
+        ("best_price",  "REAL DEFAULT NULL"),
     ]:
         try:
             c.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
@@ -4047,16 +4050,19 @@ def check_pending_signals():
     try:
         conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
         pending = conn.execute(
-            "SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours FROM signals WHERE result='pending'"
+            "SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours, tp1_hit, trailing_sl, best_price FROM signals WHERE result='pending'"
         ).fetchall()
         conn.close()
 
         # Expiry по стратегии (часы)
         _STRATEGY_EXPIRY = {"FAST": 4, "MTF": 72, "SWING": 96, "WYCKOFF": 504}
+        # Trailing коэффициенты: после TP1 переносим SL на entry + X% от (tp1-entry)
+        _TRAIL_COEFF = {"FAST": 0.3, "MTF": 0.4, "SWING": 0.5, "WYCKOFF": 0.5, "ZONE": 0.4}
 
         closed = []
         for row in pending:
-            sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours = row
+            sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours, tp1_hit_flag, trailing_sl, best_price = row
+            tp1_hit_flag = tp1_hit_flag or 0
             prices = get_live_prices()
             current = None
             if symbol in prices:
@@ -4078,36 +4084,97 @@ def check_pending_signals():
             result = None
             hit_tp = None
             _sig_type_check = (signal_type or "").upper()
-            if direction == "BULLISH":
-                if _sig_type_check == "FAST":
-                    # FAST: TP1 и TP2, без TP3
+            _active_sl = trailing_sl if trailing_sl else sl
+
+            # ── Trailing Stop Logic ──
+            if tp1_hit_flag:
+                # TP1 уже достигнут — отслеживаем best_price и trailing SL → TP2
+                _bp = best_price or entry
+                if direction == "BULLISH":
+                    if current > _bp:
+                        _bp = current
                     if current >= tp2:
                         result, hit_tp = "tp2", 2
-                    elif current >= tp1:
-                        result, hit_tp = "tp1", 1
-                    elif current <= sl:
+                    elif current <= _active_sl:
                         result = "sl"
                 else:
-                    # MTF/SWING/WYCKOFF: только одно TP уведомление
-                    if current >= tp1:
-                        result, hit_tp = "tp1", 1
-                    elif current <= sl:
-                        result = "sl"
-            else:
-                if _sig_type_check == "FAST":
-                    # FAST: TP1 и TP2, без TP3
+                    if current < _bp:
+                        _bp = current
                     if current <= tp2:
                         result, hit_tp = "tp2", 2
-                    elif current <= tp1:
-                        result, hit_tp = "tp1", 1
-                    elif current >= sl:
+                    elif current >= _active_sl:
                         result = "sl"
+
+                # Обновляем best_price и trailing_sl
+                _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
+                if direction == "BULLISH":
+                    _new_trail = _bp - abs(tp1 - entry) * _trail_c
+                    if trailing_sl is None or _new_trail > trailing_sl:
+                        trailing_sl = round(_new_trail, 8)
                 else:
-                    # MTF/SWING/WYCKOFF: только одно TP уведомление
-                    if current <= tp1:
-                        result, hit_tp = "tp1", 1
-                    elif current >= sl:
-                        result = "sl"
+                    _new_trail = _bp + abs(entry - tp1) * _trail_c
+                    if trailing_sl is None or _new_trail < trailing_sl:
+                        trailing_sl = round(_new_trail, 8)
+
+                # Сохраняем trailing state
+                try:
+                    _tc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                    _tc.execute("UPDATE signals SET best_price=?, trailing_sl=? WHERE id=?", (_bp, trailing_sl, sig_id))
+                    _tc.commit()
+                    _tc.close()
+                except Exception:
+                    pass
+            else:
+                # TP1 ещё не достигнут — классическая проверка
+                if direction == "BULLISH":
+                    if _sig_type_check == "FAST":
+                        if current >= tp2:
+                            result, hit_tp = "tp2", 2
+                        elif current >= tp1:
+                            result, hit_tp = "tp1", 1
+                        elif current <= sl:
+                            result = "sl"
+                    else:
+                        if current >= tp1:
+                            # TP1 hit — НЕ закрываем, включаем trailing
+                            hit_tp = 1
+                            _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
+                            _new_trail_sl = round(entry + abs(tp1 - entry) * _trail_c, 8)
+                            try:
+                                _tc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                                _tc.execute("UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
+                                            (_new_trail_sl, current, sig_id))
+                                _tc.commit()
+                                _tc.close()
+                                logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
+                            except Exception:
+                                pass
+                        elif current <= sl:
+                            result = "sl"
+                else:
+                    if _sig_type_check == "FAST":
+                        if current <= tp2:
+                            result, hit_tp = "tp2", 2
+                        elif current <= tp1:
+                            result, hit_tp = "tp1", 1
+                        elif current >= sl:
+                            result = "sl"
+                    else:
+                        if current <= tp1:
+                            hit_tp = 1
+                            _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
+                            _new_trail_sl = round(entry - abs(entry - tp1) * _trail_c, 8)
+                            try:
+                                _tc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                                _tc.execute("UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
+                                            (_new_trail_sl, current, sig_id))
+                                _tc.commit()
+                                _tc.close()
+                                logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
+                            except Exception:
+                                pass
+                        elif current >= sl:
+                            result = "sl"
 
             # Expiry: используем estimated_hours или стратегию, fallback 72ч
             _sig_type = (signal_type or "").upper()
@@ -4193,17 +4260,60 @@ def check_pending_signals():
                         sig_id, symbol, direction, entry, sl, result, hours_elapsed, timeframe
                     ))
 
-                # FIX 9: Записываем ошибку в bot_errors при SL
+                # FIX 9: Smart feedback loop при SL
                 if result == "sl":
                     try:
                         _err_conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
                         _sl_pct = round(abs(entry - sl) / entry * 100, 2) if entry else 0
+
+                        # Собираем полный контекст
+                        _sl_ap = get_adaptive_params(symbol)
+                        _sl_regime = "UNKNOWN"
+                        try:
+                            _sl_reg = detect_market_regime_v2(symbol)
+                            _sl_regime = _sl_reg.get("regime", "UNKNOWN")
+                        except Exception:
+                            pass
+                        _sl_hour = datetime.now().hour
+
+                        _sl_details = (
+                            f"SL hit after {round(hours_elapsed,1)}h | SL%={_sl_pct}% | TF={timeframe} | "
+                            f"Type={_sig_type_check} | ADX={_sl_ap['adx']} | VF={_sl_ap['volatility_factor']} | "
+                            f"Regime={_sl_regime} | Hour={_sl_hour}"
+                        )
                         _err_conn.execute(
                             "INSERT INTO bot_errors (error_type, symbol, direction, details, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                            ("SL_HIT", symbol, direction, f"SL hit after {round(hours_elapsed,1)}h | SL%={_sl_pct}% | TF={timeframe} | Type={_sig_type_check}")
+                            ("SL_HIT", symbol, direction, _sl_details)
                         )
                         _err_conn.commit()
                         _err_conn.close()
+
+                        # Groq анализ паттерна SL — создаёт self_rule
+                        try:
+                            _sl_prompt = (
+                                f"Сигнал {symbol} {direction} {_sig_type_check} закрылся по SL через {round(hours_elapsed,1)}ч.\n"
+                                f"Контекст: ADX={_sl_ap['adx']}, VF={_sl_ap['volatility_factor']}, Regime={_sl_regime}, Hour={_sl_hour}\n"
+                                f"SL%={_sl_pct}%, TF={timeframe}\n"
+                                'Ответь JSON: {"rule": "правило в 1 предложении как избежать подобного SL", "confidence": 0.5-1.0}'
+                            )
+                            _sl_resp = ask_groq(_sl_prompt, max_tokens=80)
+                            if _sl_resp:
+                                import json as _j6, re as _r6
+                                _m6 = _r6.search(r'\{[^}]+\}', _sl_resp, _r6.DOTALL)
+                                if _m6:
+                                    _p6 = _j6.loads(_m6.group())
+                                    if _p6.get("rule"):
+                                        _rc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                                        _rc.execute(
+                                            "INSERT INTO self_rules (rule, source, symbol, direction, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                                            (_p6["rule"], f"SL_feedback_{_sig_type_check}", symbol, direction)
+                                        )
+                                        _rc.commit()
+                                        _rc.close()
+                                        logging.info(f"[Feedback] New rule from SL: {_p6['rule'][:60]}")
+                        except Exception:
+                            pass
+
                     except Exception as _err_e:
                         logging.debug(f"[FIX9] bot_errors write: {_err_e}")
 
@@ -7010,6 +7120,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # ATR для фильтра и стопа
         atr = sum(highs[i] - lows[i] for i in range(-14, 0)) / 14
+        _ap_sw = get_adaptive_params(symbol, candles)
+        _vf_sw = _ap_sw["volatility_factor"]
 
         # ── Swing highs/lows (lookback=5) ──
         swing_highs, swing_lows = find_swings(candles, lookback=5)
@@ -7058,7 +7170,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     check_prev["close"] < check_prev["open"]):
                 direction = "BULLISH"
                 entry = smart_round(check["close"])
-                sl    = smart_round(check["low"] - atr * 1.0)
+                sl    = smart_round(check["low"] - atr * _vf_sw)
                 tp    = smart_round(prv_high)
                 logic = "свип лоу ↓ + возврат в диапазон + импульс вверх"
                 break
@@ -7070,7 +7182,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     check_prev["close"] > check_prev["open"]):
                 direction = "BEARISH"
                 entry = smart_round(check["close"])
-                sl    = smart_round(check["high"] + atr * 1.0)
+                sl    = smart_round(check["high"] + atr * _vf_sw)
                 tp    = smart_round(prv_low)
                 logic = "свип хая ↑ + отклонение + импульс вниз"
                 break
@@ -7089,7 +7201,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     if wick > 0.4:
                         direction = "BULLISH"
                         entry = smart_round(last_c["close"])
-                        sl    = smart_round(last_c["low"] - atr * 1.0)
+                        sl    = smart_round(last_c["low"] - atr * _vf_sw)
                         # TP = предыдущий хай свинга
                         tp    = smart_round(last_swing_high)
                         logic = f"EQL sweep — двойной лоу ${eql_level:.4f} выбит → разворот"
@@ -7100,7 +7212,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     if wick > 0.4:
                         direction = "BEARISH"
                         entry = smart_round(last_c["close"])
-                        sl    = smart_round(last_c["high"] + atr * 1.0)
+                        sl    = smart_round(last_c["high"] + atr * _vf_sw)
                         tp    = smart_round(last_swing_low)
                         logic = f"EQH sweep — двойной хай ${eqh_level:.4f} выбит → разворот"
             except Exception:
@@ -7617,6 +7729,12 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 2 — пропуск")
             return None
 
+        # TP2 — extended target
+        if direction == "BULLISH":
+            _sw_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
+        else:
+            _sw_tp2 = smart_round(entry - abs(entry - tp) * 1.5)
+
         return {
             "symbol":    symbol,
             "direction": direction,
@@ -7624,6 +7742,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "entry":     entry,
             "sl":        sl,
             "tp":        tp,
+            "tp2":       _sw_tp2,
             "sl_pct":    sl_pct,
             "tp_pct":    tp_pct,
             "rr":        rr,
@@ -7659,6 +7778,8 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         price = candles[-1]["close"]
         atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+        _ap_zone = get_adaptive_params(symbol, candles)
+        _vf_zone = _ap_zone["volatility_factor"]
 
         # ── 1. Диапазон и зоны ──
         range_candles = candles[-50:]
@@ -7731,7 +7852,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     c = candles[i]
                     c_body = abs(c["close"] - c["open"])
                     c_range = c["high"] - c["low"]
-                    if c_range > 0 and c_body / c_range >= 0.5 and c_body > atr * 1.0:
+                    if c_range > 0 and c_body / c_range >= 0.5 and c_body > atr * _vf_zone:
                         if direction == "BULLISH" and c["close"] > c["open"]:
                             _strong_move = True
                             break
@@ -7964,12 +8085,19 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
+        # TP2 — extended target
+        if direction == "BULLISH":
+            _z_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
+        else:
+            _z_tp2 = smart_round(entry - abs(entry - tp) * 1.5)
+
         return {
             "symbol":    symbol,
             "direction": direction,
             "entry":     entry,
             "sl":        sl,
             "tp":        tp,
+            "tp2":       _z_tp2,
             "rr":        rr,
             "zone_type": zone_type,
             "zone":      "Discount" if direction == "BULLISH" else "Premium",
@@ -8453,10 +8581,12 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["SC", "AR", "ST", "Spring", "SOS"] if p in phases and (p not in ["Spring","SOS"] or phases[p].get("found"))]
 
+        _wyk_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
+
         return {
             "symbol": symbol, "direction": "BULLISH",
             "timeframe": "1d", "entry": entry,
-            "sl": sl, "tp": tp,
+            "sl": sl, "tp": tp, "tp2": _wyk_tp2,
             "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
             "logic": logic, "score": min(score, 100),
             "drawdown_pct": drawdown_pct, "acc_range": acc_range_pct,
@@ -8731,10 +8861,12 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["BC", "AR", "ST", "UTAD", "SOW"] if p in phases and (p not in ["UTAD","SOW"] or phases[p].get("found"))]
 
+        _wyk_d_tp2 = smart_round(entry - abs(entry - tp) * 1.5)
+
         return {
             "symbol": symbol, "direction": "BEARISH",
             "timeframe": "1d", "entry": entry,
-            "sl": sl, "tp": tp,
+            "sl": sl, "tp": tp, "tp2": _wyk_d_tp2,
             "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
             "logic": logic, "score": min(score, 100),
             "pump_pct": pump_pct, "dist_range": dist_range_pct,
@@ -8879,9 +9011,11 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         except Exception:
             pass
 
+        _reac_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
+
         return {
             "symbol": symbol, "direction": "BULLISH",
-            "entry": entry, "sl": sl, "tp": tp, "rr": rr,
+            "entry": entry, "sl": sl, "tp": tp, "tp2": _reac_tp2, "rr": rr,
             "score": 75, "signals": signals,
             "logic": f"Re-accumulation: higher lows + liquidity {smart_price_fmt(liquidity_target)}",
             "drawdown_pct": drawdown_pct, "acc_range": acc_range_pct,
@@ -8976,7 +9110,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
         in_zone = False
         zone_desc = ""
         atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
-        _zone_tol = atr_4h * 1.0  # Допуск ±ATR×1.0
+        _ap_fast = get_adaptive_params(symbol, candles_4h)
+        _zone_tol = atr_4h * _ap_fast["volatility_factor"]  # Допуск ±ATR×vf
 
         if ob_4h:
             zone_bottom = ob_4h["bottom"]
@@ -9241,6 +9376,188 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════
+# ══  Adaptive Parameters — динамические параметры              ══
+# ═══════════════════════════════════════════════════════════════
+
+def get_adaptive_params(symbol: str, candles: list = None) -> dict:
+    """
+    Возвращает адаптивные параметры на основе волатильности, ADX и истории ошибок.
+    volatility_factor: множитель для зон (ATR * vf)
+    adx: сила тренда 0-100
+    dynamic_confluence: мин. confluence с учётом SL серий
+    """
+    result = {
+        "volatility_factor": 1.0,
+        "adx": 25.0,
+        "dynamic_confluence": 30,
+        "adx_strong": False,
+        "adx_weak": False,
+    }
+    try:
+        if candles is None:
+            candles = get_candles(symbol, "4h", 60)
+        if not candles or len(candles) < 20:
+            return result
+
+        # ── Volatility Factor: ATR(14) / ATR(50) ──
+        atr_14 = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+        atr_50 = sum(c["high"] - c["low"] for c in candles[-min(50, len(candles)):]) / min(50, len(candles))
+        if atr_50 > 0:
+            vf = round(atr_14 / atr_50, 2)
+            result["volatility_factor"] = max(0.6, min(vf, 1.8))
+
+        # ── ADX(14) ──
+        if len(candles) >= 20:
+            highs = [c["high"] for c in candles]
+            lows = [c["low"] for c in candles]
+            closes = [c["close"] for c in candles]
+            n = 14
+            plus_dm_list = []
+            minus_dm_list = []
+            tr_list = []
+            for i in range(-n - 5, 0):
+                if i - 1 < -len(candles):
+                    continue
+                high_diff = highs[i] - highs[i - 1]
+                low_diff = lows[i - 1] - lows[i]
+                plus_dm = high_diff if high_diff > low_diff and high_diff > 0 else 0
+                minus_dm = low_diff if low_diff > high_diff and low_diff > 0 else 0
+                plus_dm_list.append(plus_dm)
+                minus_dm_list.append(minus_dm)
+                tr_val = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+                tr_list.append(tr_val)
+
+            if len(tr_list) >= n:
+                atr_adx = sum(tr_list[-n:]) / n
+                plus_di = (sum(plus_dm_list[-n:]) / n) / atr_adx * 100 if atr_adx > 0 else 0
+                minus_di = (sum(minus_dm_list[-n:]) / n) / atr_adx * 100 if atr_adx > 0 else 0
+                dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
+                result["adx"] = round(dx, 1)
+                result["adx_strong"] = dx > 30
+                result["adx_weak"] = dx < 20
+
+        # ── Dynamic Confluence: повышаем после серии SL ──
+        try:
+            conn = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+            sl_count = conn.execute(
+                "SELECT COUNT(*) FROM bot_errors WHERE error_type='SL_HIT' AND created_at > datetime('now', '-24 hours')"
+            ).fetchone()[0]
+            conn.close()
+            if sl_count >= 5:
+                result["dynamic_confluence"] = 45
+            elif sl_count >= 3:
+                result["dynamic_confluence"] = 38
+            else:
+                result["dynamic_confluence"] = 30
+        except Exception:
+            result["dynamic_confluence"] = 30
+
+    except Exception as e:
+        logging.debug(f"get_adaptive_params {symbol}: {e}")
+
+    return result
+
+
+def calc_size_multiplier(adx: float, confluence: int, recent_sl_count: int = 0) -> float:
+    """
+    Рассчитывает множитель размера позиции (0.5x — 1.5x).
+    Высокий ADX + confluence → больше. Серия SL → меньше.
+    """
+    base = 1.0
+    if adx > 35:
+        base += 0.2
+    elif adx < 15:
+        base -= 0.2
+
+    if confluence >= 50:
+        base += 0.2
+    elif confluence < 25:
+        base -= 0.2
+
+    if recent_sl_count >= 3:
+        base -= 0.3
+    elif recent_sl_count >= 2:
+        base -= 0.15
+
+    return round(max(0.5, min(base, 1.5)), 2)
+
+
+def get_btc_correlation(symbol: str, candles_symbol: list = None, candles_btc: list = None) -> dict:
+    """
+    Рассчитывает rolling корреляцию монеты с BTC за 20 свечей.
+    Возвращает: corr (-1..1), level (high/moderate/low), btc_dir
+    """
+    result = {"corr": 0.5, "level": "moderate", "btc_dir": "NEUTRAL", "desc": "нет данных"}
+    try:
+        if candles_btc is None:
+            candles_btc = get_candles("BTCUSDT", "4h", 25)
+        if candles_symbol is None:
+            candles_symbol = get_candles(symbol, "4h", 25)
+        if not candles_btc or not candles_symbol:
+            return result
+        n = min(20, len(candles_btc), len(candles_symbol))
+        if n < 10:
+            return result
+
+        # Returns % changes
+        btc_rets = [(candles_btc[-n + i]["close"] - candles_btc[-n + i - 1]["close"]) / candles_btc[-n + i - 1]["close"]
+                     for i in range(1, n)]
+        sym_rets = [(candles_symbol[-n + i]["close"] - candles_symbol[-n + i - 1]["close"]) / candles_symbol[-n + i - 1]["close"]
+                     for i in range(1, n)]
+
+        # Pearson correlation
+        m_b = sum(btc_rets) / len(btc_rets)
+        m_s = sum(sym_rets) / len(sym_rets)
+        cov = sum((b - m_b) * (s - m_s) for b, s in zip(btc_rets, sym_rets))
+        var_b = sum((b - m_b) ** 2 for b in btc_rets)
+        var_s = sum((s - m_s) ** 2 for s in sym_rets)
+        denom = (var_b * var_s) ** 0.5
+        corr = round(cov / denom, 3) if denom > 0 else 0.0
+
+        # BTC direction
+        btc_dir = "BULLISH" if candles_btc[-1]["close"] > candles_btc[-4]["close"] else "BEARISH"
+
+        level = "high" if abs(corr) > 0.7 else ("moderate" if abs(corr) > 0.4 else "low")
+        result = {
+            "corr": corr,
+            "level": level,
+            "btc_dir": btc_dir,
+            "desc": f"Корр. BTC: {corr:.2f} ({level})"
+        }
+    except Exception as e:
+        logging.debug(f"get_btc_correlation {symbol}: {e}")
+    return result
+
+
+def check_session_liquidity(symbol: str, timeframe: str = "1h") -> dict:
+    """
+    Сравнивает текущий объём сессии с нормой за 20 свечей.
+    ratio < 0.7 → skip (низкая ликвидность).
+    """
+    result = {"ratio": 1.0, "ok": True, "desc": ""}
+    try:
+        candles = get_candles(symbol, timeframe, 25)
+        if not candles or len(candles) < 10:
+            return result
+
+        current_vol = candles[-1].get("volume", 0)
+        avg_vol = sum(c.get("volume", 0) for c in candles[-21:-1]) / 20
+        if avg_vol <= 0:
+            return result
+
+        ratio = round(current_vol / avg_vol, 2)
+        ok = ratio >= 0.7
+        result = {
+            "ratio": ratio,
+            "ok": ok,
+            "desc": f"Vol ratio: {ratio:.2f}x" + ("" if ok else " (LOW)")
+        }
+    except Exception as e:
+        logging.debug(f"check_session_liquidity {symbol}: {e}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
 # ══  SMC Core Check — универсальное ядро проверки              ══
 # ═══════════════════════════════════════════════════════════════
 
@@ -9259,11 +9576,15 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         price = candles[-1]["close"]
         atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
 
+        # ── Adaptive params ──
+        _ap = get_adaptive_params(symbol, candles)
+        _vf = _ap["volatility_factor"]
+
         # ── MUST 1: Зона OB/FVG ──
         ob = find_ob(candles, direction)
         fvg = find_fvg(candles, direction)
-        in_ob = ob and abs(price - (ob["top"] + ob["bottom"]) / 2) <= atr * 1.0
-        in_fvg = fvg and abs(price - (fvg["top"] + fvg["bottom"]) / 2) <= atr * 1.0
+        in_ob = ob and abs(price - (ob["top"] + ob["bottom"]) / 2) <= atr * _vf
+        in_fvg = fvg and abs(price - (fvg["top"] + fvg["bottom"]) / 2) <= atr * _vf
         zone = in_ob or in_fvg
         zone_desc = ""
         if in_ob and ob:
@@ -9274,17 +9595,25 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         if not zone:
             return None
 
-        # ── MUST 2: Тренд (EMA50 + структура HH/HL) ──
+        # ── MUST 2: Тренд (EMA50 + структура HH/HL + ADX) ──
         closes = [c["close"] for c in candles]
         ema50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else closes[-1]
         ema20 = sum(closes[-20:]) / 20
         hh_hl = closes[-1] > closes[-5] > closes[-10] if len(closes) >= 10 else False
         ll_lh = closes[-1] < closes[-5] < closes[-10] if len(closes) >= 10 else False
 
+        _adx = _ap["adx"]
         if direction == "BULLISH":
-            trend = (price > ema50 and ema20 > ema50) or hh_hl
+            # Weak trend (ADX<20): разрешаем LONG даже ниже EMA50 если структура HH/HL
+            if _ap["adx_weak"]:
+                trend = hh_hl or (ema20 > ema50)
+            else:
+                trend = (price > ema50 and ema20 > ema50) or hh_hl
         else:
-            trend = (price < ema50 and ema20 < ema50) or ll_lh
+            if _ap["adx_weak"]:
+                trend = ll_lh or (ema20 < ema50)
+            else:
+                trend = (price < ema50 and ema20 < ema50) or ll_lh
 
         if not trend:
             return None
@@ -9292,11 +9621,11 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         # ── MUST 3: RR (entry/sl/tp из структуры) ──
         if direction == "BULLISH":
             entry = smart_round(price)
-            sl_candidate = ob["bottom"] * 0.998 if in_ob and ob else (fvg["bottom"] * 0.998 if in_fvg and fvg else entry - atr * 1.0)
+            sl_candidate = ob["bottom"] * 0.998 if in_ob and ob else (fvg["bottom"] * 0.998 if in_fvg and fvg else entry - atr * _vf)
             sl = smart_round(max(sl_candidate, entry * 0.96))  # cap 4%
         else:
             entry = smart_round(price)
-            sl_candidate = ob["top"] * 1.002 if in_ob and ob else (fvg["top"] * 1.002 if in_fvg and fvg else entry + atr * 1.0)
+            sl_candidate = ob["top"] * 1.002 if in_ob and ob else (fvg["top"] * 1.002 if in_fvg and fvg else entry + atr * _vf)
             sl = smart_round(min(sl_candidate, entry * 1.04))  # cap 4%
 
         # TP — ближайшая ликвидность
@@ -9312,15 +9641,18 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
                 tp_candidates += [sh[1] for sh in swing_highs if sh[1] > entry * 1.005]
             if eqh and eqh > entry * 1.005:
                 tp_candidates.append(eqh)
-            tp = smart_round(min(tp_candidates)) if tp_candidates else smart_round(entry + atr * 3)
+            tp1 = smart_round(min(tp_candidates)) if tp_candidates else smart_round(entry + atr * 3)
+            tp2 = smart_round(entry + abs(tp1 - entry) * 1.5)
         else:
             tp_candidates = []
             if swing_lows:
                 tp_candidates += [s[1] for s in swing_lows if s[1] < entry * 0.995]
             if eql and eql < entry * 0.995:
                 tp_candidates.append(eql)
-            tp = smart_round(max(tp_candidates)) if tp_candidates else smart_round(entry - atr * 3)
+            tp1 = smart_round(max(tp_candidates)) if tp_candidates else smart_round(entry - atr * 3)
+            tp2 = smart_round(entry - abs(entry - tp1) * 1.5)
 
+        tp = tp1  # основной TP для RR
         risk = abs(entry - sl)
         reward = abs(tp - entry)
         if risk == 0:
@@ -9375,17 +9707,55 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         if confirmations < 2:
             return None
 
+        # ── BTC Correlation Filter ──
+        _btc_corr = {"corr": 0.5, "level": "moderate", "btc_dir": "NEUTRAL"}
+        if symbol != "BTCUSDT":
+            try:
+                _btc_corr = get_btc_correlation(symbol)
+                if _btc_corr["level"] == "high":
+                    # Высокая корреляция — BTC должен подтвердить
+                    if (direction == "BULLISH" and _btc_corr["btc_dir"] == "BEARISH") or \
+                       (direction == "BEARISH" and _btc_corr["btc_dir"] == "BULLISH"):
+                        return None
+                elif _btc_corr["level"] == "moderate":
+                    # Умеренная — не блокируем, но понижаем score
+                    if (direction == "BULLISH" and _btc_corr["btc_dir"] == "BEARISH") or \
+                       (direction == "BEARISH" and _btc_corr["btc_dir"] == "BULLISH"):
+                        confirmations -= 1
+                        if confirmations < 2:
+                            return None
+            except Exception:
+                pass
+
+        # ── Size Multiplier ──
+        _sl_count_24h = 0
+        try:
+            _sc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+            _sl_count_24h = _sc.execute(
+                "SELECT COUNT(*) FROM bot_errors WHERE error_type='SL_HIT' AND created_at > datetime('now', '-24 hours')"
+            ).fetchone()[0]
+            _sc.close()
+        except Exception:
+            pass
+        _size_mult = calc_size_multiplier(_ap["adx"], confirmations * 15, _sl_count_24h)
+
         return {
             "symbol": symbol,
             "direction": direction,
             "entry": entry,
             "sl": sl,
             "tp": tp,
+            "tp1": tp1,
+            "tp2": tp2,
             "rr": rr,
             "zone": zone_desc,
             "score": confirmations,
             "confirms": confirm_details,
             "timeframe": timeframe,
+            "adx": _ap["adx"],
+            "volatility_factor": _vf,
+            "btc_corr": _btc_corr.get("corr", 0.5),
+            "size_mult": _size_mult,
         }
 
     except Exception as e:
