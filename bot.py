@@ -2890,23 +2890,36 @@ async def auto_scan_job():
 
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
-    logging.info("[auto_scan_1h] ЗАПУЩЕН")
     try:
-        signals = await _scan_tf("1h", pairs_limit=80)
-        logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
-        valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0) and s.get("confluence_score", 0) >= 60]
-        logging.info(f"[auto_scan_1h] Актуальных (confluence>=60) {len(valid)}/{len(signals)}")
-        for sd in sorted(valid, key=lambda x: x.get("confluence_score", 0), reverse=True)[:3]:
-            logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
-            await _send_signal(sd)
-            await asyncio.sleep(1)
-        logging.info(f"[auto_scan_1h] Завершён, отправлено {min(len(valid),3)}")
+        await asyncio.wait_for(_auto_scan_1h_impl(), timeout=90)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_scan_1h] таймаут 90с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
+
+async def _auto_scan_1h_impl():
+    logging.info("[auto_scan_1h] ЗАПУЩЕН")
+    signals = await _scan_tf("1h", pairs_limit=80)
+    logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0) and s.get("confluence_score", 0) >= 60]
+    logging.info(f"[auto_scan_1h] Актуальных (confluence>=60) {len(valid)}/{len(signals)}")
+    for sd in sorted(valid, key=lambda x: x.get("confluence_score", 0), reverse=True)[:3]:
+        logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
+        await _send_signal(sd)
+        await asyncio.sleep(1)
+    logging.info(f"[auto_scan_1h] Завершён, отправлено {min(len(valid),3)}")
 
 
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
+    try:
+        await asyncio.wait_for(_auto_scan_swing_impl(), timeout=90)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_scan_swing] таймаут 90с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_scan_swing] ОШИБКА: {e}")
+
+async def _auto_scan_swing_impl():
     logging.info("[auto_scan_swing] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
@@ -3008,6 +3021,14 @@ async def auto_scan_swing():
 
 async def auto_zone_scan():
     """Каждые 20 мин: сканирует зоны Discount/Premium с OB/FVG"""
+    try:
+        await asyncio.wait_for(_auto_zone_scan_impl(), timeout=90)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_zone_scan] таймаут 90с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
+
+async def _auto_zone_scan_impl():
     logging.info("[auto_zone_scan] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
@@ -3185,6 +3206,14 @@ async def auto_scan_mega():
 
 async def auto_wyckoff_scan():
     """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
+    try:
+        await asyncio.wait_for(_auto_wyckoff_scan_impl(), timeout=120)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_wyckoff_scan] таймаут 120с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_wyckoff_scan] ОШИБКА: {e}")
+
+async def _auto_wyckoff_scan_impl():
     logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
     pairs = get_top_pairs(60)
     found = []
@@ -3307,10 +3336,18 @@ async def auto_fast_deal_scan():
     _hour = _now_dt.hour
     _minute = _now_dt.minute
     _time_m = _hour * 60 + _minute
-    if not (510 <= _time_m <= 630 or 990 <= _time_m <= 1110):
+    # Kill Zone: London 07:00-11:00 (420-660) и NY 15:00-19:00 (900-1140)
+    if not (420 <= _time_m <= 660 or 900 <= _time_m <= 1140):
         logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
+    try:
+        await asyncio.wait_for(_auto_fast_deal_scan_impl(_hour, _minute), timeout=55)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_fast_deal_scan] таймаут 55с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_fast_deal_scan] ОШИБКА: {e}")
 
+async def _auto_fast_deal_scan_impl(_hour, _minute):
     logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН (Kill Zone {_hour:02d}:{_minute:02d} UTC)")
     found = []
     for symbol in FAST_PAIRS:
@@ -3425,6 +3462,14 @@ async def auto_fast_deal_scan():
 
 async def auto_accumulation_scan():
     """Каждый час: сканируем все топ-60 на накопление перед пампом"""
+    try:
+        await asyncio.wait_for(_auto_accumulation_scan_impl(), timeout=90)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_accumulation_scan] таймаут 90с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_accumulation_scan] ОШИБКА: {e}")
+
+async def _auto_accumulation_scan_impl():
     pairs = get_top_pairs(60)
     found = []
 
