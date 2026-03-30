@@ -2888,6 +2888,37 @@ async def auto_scan_job():
     pass
 
 
+def pick_best_signal(signals: list) -> dict | None:
+    """
+    Выбирает лучший сигнал из найденных по приоритету и score.
+    WYCKOFF > SWING > MTF > ZONE > FAST
+    """
+    if not signals:
+        return None
+
+    priority_order = {
+        "WYCKOFF": 5,
+        "SWING":   4,
+        "MTF":     3,
+        "ZONE":    2,
+        "FAST":    1,
+    }
+
+    valid = [s for s in signals if s and s.get("rr", 0) >= 1.5]
+    if not valid:
+        return None
+
+    return sorted(
+        valid,
+        key=lambda x: (
+            priority_order.get(x.get("grade", x.get("signal_type", "MTF")), 0),
+            x.get("score", x.get("confluence_score", 0)),
+            x.get("rr", 0)
+        ),
+        reverse=True
+    )[0]
+
+
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
     try:
@@ -2898,16 +2929,43 @@ async def auto_scan_1h():
         logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
 
 async def _auto_scan_1h_impl():
-    logging.info("[auto_scan_1h] ЗАПУЩЕН")
-    signals = await _scan_tf("1h", pairs_limit=80)
-    logging.info(f"[auto_scan_1h] Скан 1h: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=2.0) and s.get("confluence_score", 0) >= 60]
-    logging.info(f"[auto_scan_1h] Актуальных (confluence>=60) {len(valid)}/{len(signals)}")
-    for sd in sorted(valid, key=lambda x: x.get("confluence_score", 0), reverse=True)[:3]:
+    logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
+    pairs = get_top_pairs(60)
+    all_signals = []
+
+    for symbol in pairs:
+        try:
+            # Определяем режим рынка
+            regime = detect_market_regime_v2(symbol)
+            enabled = regime.get("enabled", ["MTF"])
+
+            # MTF — если включён для этого режима
+            if "MTF" in enabled:
+                sig = full_scan_raw(symbol, "1h", auto=True)
+                if sig and sig.get("confluence_score", 0) >= 35:
+                    sig["grade"] = "MTF"
+                    all_signals.append(sig)
+
+            await asyncio.sleep(0.1)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logging.warning(f"[auto_scan_1h] {symbol}: {e}")
+
+    logging.info(f"[auto_scan_1h] Скан: {len(all_signals)} сигналов из {len(pairs)} пар")
+
+    # Фильтрация и сортировка
+    valid = [s for s in all_signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
+    valid.sort(key=lambda x: (x.get("confluence_score", 0), x.get("rr", 0)), reverse=True)
+
+    sent = 0
+    for sd in valid[:3]:
         logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
         await _send_signal(sd)
         await asyncio.sleep(1)
-    logging.info(f"[auto_scan_1h] Завершён, отправлено {min(len(valid),3)}")
+        sent += 1
+    logging.info(f"[auto_scan_1h] Завершён, отправлено {sent}")
 
 
 async def auto_scan_swing():
@@ -3568,42 +3626,45 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         if len(candles) < 20:
             return None
 
-        # ── EMA trend bias — не торговать против тренда ──
+        # ── MUST 1: OB/FVG зона ±ATR×1.0 ──
+        try:
+            _ob_check = find_ob(candles, direction)
+            _fvg_check = find_fvg(candles, direction)
+            _atr_check = sum(candles[-i]["high"] - candles[-i]["low"] for i in range(1, 15)) / 14
+            _in_ob = (_ob_check and
+                      abs(candles[-1]["close"] - (_ob_check["top"] + _ob_check["bottom"]) / 2)
+                      <= _atr_check * 1.0)
+            _in_fvg = (_fvg_check and
+                       abs(candles[-1]["close"] - (_fvg_check["top"] + _fvg_check["bottom"]) / 2)
+                       <= _atr_check * 1.0)
+            if not _in_ob and not _in_fvg:
+                logging.debug(f"[MTF] {symbol}: цена не у OB/FVG зоны — блок")
+                return None
+        except Exception:
+            pass
+
+        # ── MUST 2: Тренд EMA50/EMA20 + структура HH/HL ──
         try:
             _ema_candles = get_candles(symbol, "4h", 60)
             if _ema_candles and len(_ema_candles) >= 50:
                 _closes = [c["close"] for c in _ema_candles]
                 _ema50 = sum(_closes[-50:]) / 50
+                _ema200 = sum(_closes[-200:]) / 200 if len(_closes) >= 200 else _ema50
                 _ema20 = sum(_closes[-20:]) / 20
                 _price_4h = _closes[-1]
+                _hh_hl = _closes[-1] > _closes[-5] > _closes[-10]
+                _ll_lh = _closes[-1] < _closes[-5] < _closes[-10]
 
                 if direction == "BULLISH":
-                    _ema_ok = _price_4h > _ema50 or _ema20 > _ema50
-                    if not _ema_ok:
-                        logging.debug(f"[MTF] {symbol}: цена ниже EMA50 на 4h — блок")
+                    _trend_ok = (_price_4h > _ema50 and _ema20 > _ema50) or _hh_hl
+                    if not _trend_ok:
+                        logging.debug(f"[MTF] {symbol}: тренд не подтверждён для LONG — блок")
                         return None
                 else:
-                    _ema_ok = _price_4h < _ema50 or _ema20 < _ema50
-                    if not _ema_ok:
-                        logging.debug(f"[MTF] {symbol}: цена выше EMA50 на 4h — блок")
+                    _trend_ok = (_price_4h < _ema50 and _ema20 < _ema50) or _ll_lh
+                    if not _trend_ok:
+                        logging.debug(f"[MTF] {symbol}: тренд не подтверждён для SHORT — блок")
                         return None
-        except Exception:
-            pass
-
-        # ── OB/FVG hard block — цена должна быть у зоны ──
-        try:
-            _ob_check = find_ob(candles, direction)
-            _fvg_check = find_fvg(candles, direction)
-            _atr_check = sum(candles[-i]["high"]-candles[-i]["low"] for i in range(1,15)) / 14
-            _in_ob = (_ob_check and
-                     abs(candles[-1]["close"] - (_ob_check["top"]+_ob_check["bottom"])/2)
-                     <= _atr_check * 1.5)
-            _in_fvg = (_fvg_check and
-                      abs(candles[-1]["close"] - (_fvg_check["top"]+_fvg_check["bottom"])/2)
-                      <= _atr_check * 1.5)
-            if not _in_ob and not _in_fvg:
-                logging.debug(f"[MTF] {symbol}: цена не у OB/FVG зоны — блок")
-                return None
         except Exception:
             pass
 
@@ -3718,11 +3779,45 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             return None
         _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (3/4 ТФ)" if _match == 3 else ""
 
+        # ── MTF CONFIRM (нужно 3 из 6) ──
+        _mtf_confirms = 0
+        if _match >= 3:
+            _mtf_confirms += 1                                        # 3/3 ТФ
+        if len(confluence) >= 3:
+            _mtf_confirms += 1                                        # confluence ≥3 сигналов
+        try:
+            _choch_1h = smc_on_tf(symbol, "15m")
+            if _choch_1h and direction in str(_choch_1h).upper():
+                _mtf_confirms += 1                                    # CHoCH/BOS 15m
+        except Exception:
+            pass
+        try:
+            _btc_dir = smc_on_tf("BTCUSDT", "4h") if symbol != "BTCUSDT" else direction
+            if _btc_dir and direction in str(_btc_dir).upper():
+                _mtf_confirms += 1                                    # BTC совпадает
+        except Exception:
+            pass
+        try:
+            _avg_v = sum(c["volume"] for c in candles[-12:]) / 12
+            _v3 = sum(c["volume"] for c in candles[-3:]) / 3
+            if _v3 > _avg_v * 1.2:
+                _mtf_confirms += 1                                    # Volume 3 свечи ≥1.2x
+        except Exception:
+            pass
+        try:
+            _htf_1d_dir = smc_on_tf(symbol, "1d")
+            if _htf_1d_dir and direction in str(_htf_1d_dir).upper():
+                _mtf_confirms += 1                                    # 1d тренд совпадает
+        except Exception:
+            pass
+
+        if _mtf_confirms < 3:
+            logging.debug(f"[MTF] {symbol}: confirms={_mtf_confirms}/6 < 3 — пропуск")
+            return None
+
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
             return None
-
-        # Grade фильтр убран — пропускаем все пары с MTF сигналом
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)

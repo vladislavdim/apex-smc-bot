@@ -7388,16 +7388,21 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if direction == "BEARISH" and tp >= entry:
             return None
 
-        # ── HTF: 1d обязательное подтверждение, 1w — бонус/штраф ──
-        tf_context = "1d" if timeframe == "4h" else "4h"
-        htf_dir = smc_on_tf(symbol, tf_context)
+        # ── HTF: блок только если ОБА (4h И 1d) против ──
+        htf_4h_sw = smc_on_tf(symbol, "4h")
+        htf_1d_sw = smc_on_tf(symbol, "1d")
+        htf_dir = htf_1d_sw  # для совместимости ниже
 
-        # 1d — обязательное подтверждение (hard block)
-        if htf_dir:
-            if direction == "BULLISH" and "BEARISH" in str(htf_dir).upper():
-                return None
-            if direction == "BEARISH" and "BULLISH" in str(htf_dir).upper():
-                return None
+        if direction == "BULLISH":
+            _4h_against = htf_4h_sw and "BEARISH" in str(htf_4h_sw).upper()
+            _1d_against = htf_1d_sw and "BEARISH" in str(htf_1d_sw).upper()
+            if _4h_against and _1d_against:
+                return None  # оба HTF против — блок
+        elif direction == "BEARISH":
+            _4h_against = htf_4h_sw and "BULLISH" in str(htf_4h_sw).upper()
+            _1d_against = htf_1d_sw and "BULLISH" in str(htf_1d_sw).upper()
+            if _4h_against and _1d_against:
+                return None  # оба HTF против — блок
 
         # 1w — дополнительное подтверждение (бонус/штраф, НЕ hard block)
         htf_1w_swing = smc_on_tf(symbol, "1w")
@@ -7581,16 +7586,32 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 12
             est_hours = max(12, min(est_hours, 96))
 
-        # ── SWING Quality Score: подсчёт подтверждений ──
+        # ── SWING Quality Score: подсчёт подтверждений (нужно 2 из 5) ──
+        # Sweep volume ≥1.2x
+        _sw_vol_ok = False
+        try:
+            _sw_avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
+            _sw_vol_ok = candles[-1]["volume"] >= _sw_avg_vol * 1.2
+        except Exception:
+            pass
+        # Displacement ≥0.45
+        _sw_disp_ok = False
+        try:
+            _sw_last = candles[-1]
+            _sw_body = abs(_sw_last["close"] - _sw_last["open"])
+            _sw_range = _sw_last["high"] - _sw_last["low"]
+            _sw_disp_ok = _sw_body / _sw_range >= 0.45 if _sw_range > 0 else False
+        except Exception:
+            pass
+
         _sw_confirms = sum([
-            _swing_rsi_bonus,   # RSI дивергенция
-            _swing_cvd_ok,      # CVD совпадает
-            _swing_fvg_ok,      # FVG в направлении
-            _swing_1h_choch,    # 1h CHoCH после 4h sweep
-            _swing_pd_ok,       # Premium/Discount зона
-            bool(not weekly_warning),  # 1w не против
+            _sw_vol_ok,         # Volume ≥1.2x
+            _sw_disp_ok,        # Displacement ≥0.45
+            _swing_1h_choch,    # CHoCH подтверждает
+            _swing_pd_ok,       # Ликвидность/Premium-Discount
+            _swing_fvg_ok,      # FVG между entry-TP
         ])
-        _sw_quality = f" [Q:{_sw_confirms}/6]"
+        _sw_quality = f" [Q:{_sw_confirms}/5]"
         # Если менее 2 подтверждений — блокируем независимо от RR
         if _sw_confirms < 2:
             logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 2 — пропуск")
@@ -7704,13 +7725,13 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     logging.debug(f"[ZONE] {symbol}: зона протестирована {_test_count} раз — mitigated")
                     return None
 
-                # Strong move away: после создания зоны был сильный импульс
+                # Strong move away: displacement ≥0.5 + body > ATR×1.0
                 _strong_move = False
-                for i in range(-25, -3):
-                    if abs(i) >= len(candles): continue
+                for i in range(max(-len(candles), -25), -3):
                     c = candles[i]
                     c_body = abs(c["close"] - c["open"])
-                    if c_body > atr * 1.5:
+                    c_range = c["high"] - c["low"]
+                    if c_range > 0 and c_body / c_range >= 0.5 and c_body > atr * 1.0:
                         if direction == "BULLISH" and c["close"] > c["open"]:
                             _strong_move = True
                             break
@@ -7719,7 +7740,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                             break
 
                 if not _strong_move:
-                    logging.debug(f"[ZONE] {symbol}: нет сильного импульса от зоны")
+                    logging.debug(f"[ZONE] {symbol}: нет сильного импульса (displacement < 0.5)")
                     return None
 
             except Exception:
@@ -7759,8 +7780,23 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # ── 7. Quality score (минимум 3 из 7) ──
+        # ── 7. Quality score (минимум 3 из 8) ──
         q_score = 0
+
+        # Q0: Wick rejection — тень > тела
+        try:
+            if direction == "BULLISH":
+                _wick_z = candles[-1]["close"] - candles[-1]["low"]
+                _body_z = abs(candles[-1]["close"] - candles[-1]["open"])
+                if _wick_z > _body_z:
+                    q_score += 1
+            else:
+                _wick_z = candles[-1]["high"] - candles[-1]["close"]
+                _body_z = abs(candles[-1]["close"] - candles[-1]["open"])
+                if _wick_z > _body_z:
+                    q_score += 1
+        except Exception:
+            pass
 
         # Q1: CHoCH/BOS на 1h
         try:
@@ -8727,10 +8763,11 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
 
         price_now = candles_1d[-1]["close"]
 
-        # ── 1. Коррекция от пика >= 8% ──
+        # ── 1. Коррекция от пика (5% для BTC/ETH/BNB, 8% для остальных) ──
         price_peak = max(c["high"] for c in candles_1d[-40:-10])
         drawdown_pct = (price_peak - price_now) / price_peak * 100
-        if drawdown_pct < 8:
+        _min_drawdown = 5 if symbol in ["BTCUSDT", "ETHUSDT", "BNBUSDT"] else 8
+        if drawdown_pct < _min_drawdown:
             return None
 
         # ── 2. Боковик последние 10-20 дней (range < 15%) ──
@@ -8787,6 +8824,13 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         signals = ["Higher Lows", "Vol Compression", "Liquidity Above"]
         if vol_expanding:
             signals.append("Vol Expansion")
+
+        # Range tightening — сужение диапазона последних 10 дней
+        _ranges_wy = [c["high"] - c["low"] for c in candles_1d[-10:]]
+        _avg_range_early = sum(_ranges_wy[:5]) / 5 if len(_ranges_wy) >= 5 else 1
+        _avg_range_late = sum(_ranges_wy[5:]) / 5 if len(_ranges_wy) >= 10 else _avg_range_early
+        if _avg_range_late < _avg_range_early * 0.8:
+            signals.append("Range Tightening")
 
         # ── 9. Groq анализ ──
         try:
@@ -8955,6 +8999,16 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not in_zone:
             return None
 
+        # ── MUST: не входить из середины range ──
+        _range_high = max(c["high"] for c in candles_4h[-20:])
+        _range_low = min(c["low"] for c in candles_4h[-20:])
+        _range_mid = (_range_high + _range_low) / 2
+        _range_size = _range_high - _range_low
+        if direction == "BULLISH" and price_now > _range_mid + _range_size * 0.1:
+            return None  # Не входить в лонг из верха range
+        if direction == "BEARISH" and price_now < _range_mid - _range_size * 0.1:
+            return None  # Не входить в шорт из низа range
+
         # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
         candles_1h = get_candles(symbol, "15m", 20)
         if not candles_1h or len(candles_1h) < 3:
@@ -9016,9 +9070,12 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 entry = smart_round(curr["close"])
                 sl = smart_round(curr["high"] + atr_15m * 0.5)
 
-            # Volume spike — объём в 2.0x выше среднего
+            # Volume spike — адаптивный порог (2.0x в сессию, 1.5x вне)
+            import datetime as _dt_fast
+            _fast_hour = _dt_fast.datetime.utcnow().hour
+            _vol_threshold = 2.0 if 8 <= _fast_hour <= 17 else 1.5
             avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
-            if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * 2.0:
+            if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * _vol_threshold:
                 continue
 
             engulfing_found = True
@@ -9181,3 +9238,222 @@ def detect_fast_deal(symbol: str) -> dict | None:
     except Exception as e:
         logging.debug(f"detect_fast_deal {symbol}: {e}")
         return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# ══  SMC Core Check — универсальное ядро проверки              ══
+# ═══════════════════════════════════════════════════════════════
+
+def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = "4h") -> dict | None:
+    """
+    Универсальное ядро SMC проверки.
+    Используется всеми стратегиями.
+
+    MUST: зона + тренд + RR
+    CONFIRMATIONS: импульс + ликвидность + объём + тайминг
+    """
+    try:
+        if not candles or len(candles) < 20:
+            return None
+
+        price = candles[-1]["close"]
+        atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+
+        # ── MUST 1: Зона OB/FVG ──
+        ob = find_ob(candles, direction)
+        fvg = find_fvg(candles, direction)
+        in_ob = ob and abs(price - (ob["top"] + ob["bottom"]) / 2) <= atr * 1.0
+        in_fvg = fvg and abs(price - (fvg["top"] + fvg["bottom"]) / 2) <= atr * 1.0
+        zone = in_ob or in_fvg
+        zone_desc = ""
+        if in_ob and ob:
+            zone_desc = f"OB {smart_price_fmt(ob['bottom'])}-{smart_price_fmt(ob['top'])}"
+        elif in_fvg and fvg:
+            zone_desc = f"FVG {smart_price_fmt(fvg['bottom'])}-{smart_price_fmt(fvg['top'])}"
+
+        if not zone:
+            return None
+
+        # ── MUST 2: Тренд (EMA50 + структура HH/HL) ──
+        closes = [c["close"] for c in candles]
+        ema50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else closes[-1]
+        ema20 = sum(closes[-20:]) / 20
+        hh_hl = closes[-1] > closes[-5] > closes[-10] if len(closes) >= 10 else False
+        ll_lh = closes[-1] < closes[-5] < closes[-10] if len(closes) >= 10 else False
+
+        if direction == "BULLISH":
+            trend = (price > ema50 and ema20 > ema50) or hh_hl
+        else:
+            trend = (price < ema50 and ema20 < ema50) or ll_lh
+
+        if not trend:
+            return None
+
+        # ── MUST 3: RR (entry/sl/tp из структуры) ──
+        if direction == "BULLISH":
+            entry = smart_round(price)
+            sl_candidate = ob["bottom"] * 0.998 if in_ob and ob else (fvg["bottom"] * 0.998 if in_fvg and fvg else entry - atr * 1.0)
+            sl = smart_round(max(sl_candidate, entry * 0.96))  # cap 4%
+        else:
+            entry = smart_round(price)
+            sl_candidate = ob["top"] * 1.002 if in_ob and ob else (fvg["top"] * 1.002 if in_fvg and fvg else entry + atr * 1.0)
+            sl = smart_round(min(sl_candidate, entry * 1.04))  # cap 4%
+
+        # TP — ближайшая ликвидность
+        swing_highs, swing_lows = find_swings(candles, lookback=8)
+        try:
+            eqh, eql = find_equal_highs_lows(candles, lookback=30)
+        except Exception:
+            eqh, eql = None, None
+
+        if direction == "BULLISH":
+            tp_candidates = []
+            if swing_highs:
+                tp_candidates += [sh[1] for sh in swing_highs if sh[1] > entry * 1.005]
+            if eqh and eqh > entry * 1.005:
+                tp_candidates.append(eqh)
+            tp = smart_round(min(tp_candidates)) if tp_candidates else smart_round(entry + atr * 3)
+        else:
+            tp_candidates = []
+            if swing_lows:
+                tp_candidates += [s[1] for s in swing_lows if s[1] < entry * 0.995]
+            if eql and eql < entry * 0.995:
+                tp_candidates.append(eql)
+            tp = smart_round(max(tp_candidates)) if tp_candidates else smart_round(entry - atr * 3)
+
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0:
+            return None
+        rr = round(reward / risk, 2)
+        if rr < 2.0:
+            return None
+
+        # ── CONFIRMATIONS (нужно минимум 2 из 4) ──
+        confirmations = 0
+        confirm_details = []
+
+        # 1. Импульс (displacement ≥0.45)
+        try:
+            last = candles[-1]
+            _body = abs(last["close"] - last["open"])
+            _range = last["high"] - last["low"]
+            _disp = _body / _range >= 0.45 if _range > 0 else False
+            _bull_imp = direction == "BULLISH" and last["close"] > last["open"] and _disp
+            _bear_imp = direction == "BEARISH" and last["close"] < last["open"] and _disp
+            if _bull_imp or _bear_imp:
+                confirmations += 1
+                confirm_details.append("impulse")
+        except Exception:
+            pass
+
+        # 2. Ликвидность как цель
+        if (direction == "BULLISH" and eqh and eqh > entry) or \
+           (direction == "BEARISH" and eql and eql < entry):
+            confirmations += 1
+            confirm_details.append("liquidity")
+
+        # 3. Объём выше среднего
+        try:
+            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
+            if candles[-1]["volume"] > avg_vol * 1.2:
+                confirmations += 1
+                confirm_details.append("volume")
+        except Exception:
+            pass
+
+        # 4. HTF подтверждает
+        try:
+            htf = smc_on_tf(symbol, "1d")
+            if (direction == "BULLISH" and htf == "BULLISH") or \
+               (direction == "BEARISH" and htf == "BEARISH"):
+                confirmations += 1
+                confirm_details.append("htf_1d")
+        except Exception:
+            pass
+
+        if confirmations < 2:
+            return None
+
+        return {
+            "symbol": symbol,
+            "direction": direction,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "rr": rr,
+            "zone": zone_desc,
+            "score": confirmations,
+            "confirms": confirm_details,
+            "timeframe": timeframe,
+        }
+
+    except Exception as e:
+        logging.warning(f"smc_core_check {symbol}: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# ══  Market Regime v2 — определение режима рынка               ══
+# ═══════════════════════════════════════════════════════════════
+
+def detect_market_regime_v2(symbol: str) -> dict:
+    """
+    Определяет режим рынка и включает соответствующие стратегии.
+    trend → MTF + FAST
+    range → SWING + ZONE
+    accumulation → WYCKOFF
+    """
+    try:
+        candles = get_candles(symbol, "4h", 50)
+        if not candles or len(candles) < 20:
+            return {"type": "unknown", "enabled": ["MTF", "ZONE"]}
+
+        closes = [c["close"] for c in candles]
+        highs = [c["high"] for c in candles]
+        lows = [c["low"] for c in candles]
+
+        # Тренд — EMA50 vs EMA20
+        ema50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else closes[-1]
+        ema20 = sum(closes[-20:]) / 20
+        price = closes[-1]
+
+        # Волатильность — ATR vs median ATR
+        atr_now = sum(highs[-i] - lows[-i] for i in range(1, 8)) / 7
+        atr_med = sum(highs[-i] - lows[-i] for i in range(1, 21)) / 20
+        volatility = atr_now > atr_med * 1.2
+
+        # Compression — сужение диапазона
+        range_now = max(highs[-5:]) - min(lows[-5:])
+        range_prev = max(highs[-20:-5]) - min(lows[-20:-5])
+        compression = range_now < range_prev * 0.5
+
+        # Drawdown от пика
+        peak = max(highs[-40:]) if len(highs) >= 40 else max(highs)
+        drawdown = (peak - price) / peak * 100
+
+        # Логика режимов
+        if compression and drawdown >= 5:
+            return {
+                "type": "accumulation",
+                "enabled": ["WYCKOFF", "ZONE"],
+            }
+        elif (price > ema50 and ema20 > ema50) or (price < ema50 and ema20 < ema50):
+            if volatility:
+                return {
+                    "type": "trend",
+                    "enabled": ["MTF", "FAST", "SWING"],
+                }
+            else:
+                return {
+                    "type": "trend_slow",
+                    "enabled": ["MTF", "ZONE"],
+                }
+        else:
+            return {
+                "type": "range",
+                "enabled": ["SWING", "ZONE"],
+            }
+
+    except Exception:
+        return {"type": "unknown", "enabled": ["MTF", "ZONE", "SWING"]}
