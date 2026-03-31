@@ -3426,10 +3426,16 @@ async def auto_fast_deal_scan():
 async def _auto_fast_deal_scan_impl(_hour, _minute):
     logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН (Kill Zone {_hour:02d}:{_minute:02d} UTC)")
 
-    # Кешируем общие данные один раз для всех пар
-    _btc_candles_cache = get_candles("BTCUSDT", "4h", 30)
-    _btc_candles_1h_cache = get_candles("BTCUSDT", "1h", 10)
-    _btc_candles_5m_cache = get_candles("BTCUSDT", "5m", 10)
+    # Загружаем BTC свечи один раз для всех пар
+    _shared_btc_4h = get_candles("BTCUSDT", "4h", 30)
+    _shared_btc_1h = get_candles("BTCUSDT", "1h", 10)
+    _shared_btc_5m = get_candles("BTCUSDT", "5m", 10)
+
+    # Сохраняем в global storage для переиспользования другими функциями
+    if _shared_btc_4h:
+        update_global_candles("BTCUSDT", "4h", _shared_btc_4h)
+    if _shared_btc_1h:
+        update_global_candles("BTCUSDT", "1h", _shared_btc_1h)
 
     found = []
     for symbol in FAST_PAIRS:
@@ -4699,6 +4705,22 @@ async def on_startup(app):
 
     webhook_scheduler.start()
     setup_error_capture()
+
+    # Прогрев кеша при старте (webhook)
+    async def _warmup_cache_wh():
+        try:
+            logging.info("[Cache] Прогрев кеша (webhook)...")
+            top = get_top_pairs(20)
+            candles_map = await fetch_candles_batch(top, "4h", 100)
+            for s, c in candles_map.items():
+                if c:
+                    get_precomputed_indicators(s, "4h")
+                await asyncio.sleep(0.05)
+            logging.info(f"[Cache] Прогрев завершён: {len(candles_map)} пар")
+        except Exception as e:
+            logging.warning(f"[Cache] Ошибка прогрева: {e}")
+
+    asyncio.create_task(_warmup_cache_wh())
     asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))
     logging.info("APEX запущен! (webhook mode)")
 
@@ -4895,6 +4917,22 @@ def main():
             # backup_db_to_github убран из scheduler — вызывает disk I/O ошибки
             # Бэкап происходит только после отправки сигналов
             scheduler.start()
+
+            # Прогрев кеша при старте — загружаем топ пары асинхронно
+            async def _warmup_cache():
+                try:
+                    logging.info("[Cache] Прогрев кеша...")
+                    top = get_top_pairs(20)
+                    candles_map = await fetch_candles_batch(top, "4h", 100)
+                    for s, c in candles_map.items():
+                        if c:
+                            get_precomputed_indicators(s, "4h")
+                        await asyncio.sleep(0.05)
+                    logging.info(f"[Cache] Прогрев завершён: {len(candles_map)} пар")
+                except Exception as e:
+                    logging.warning(f"[Cache] Ошибка прогрева: {e}")
+
+            asyncio.create_task(_warmup_cache())
             asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")
             await dp.start_polling(
