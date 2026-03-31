@@ -923,6 +923,29 @@ _adaptive_params_cache: dict = {}  # {symbol:tf: (timestamp, params)}
 _liquidity_cache: dict = {}        # {symbol: (timestamp, result)}
 _INDICATORS_TTL = 60               # секунд
 
+# ── Global candles storage (in-memory) ──
+_GLOBAL_CANDLES: dict = {}         # {symbol:tf: candles}
+_GLOBAL_CANDLES_TS: dict = {}      # {symbol:tf: timestamp}
+_GLOBAL_CANDLES_TTL = 60           # секунд
+
+
+def update_global_candles(symbol: str, timeframe: str, candles: list):
+    """Обновить глобальный кеш свечей"""
+    _key = f"{symbol}:{timeframe}"
+    import time as _t
+    _GLOBAL_CANDLES[_key] = candles
+    _GLOBAL_CANDLES_TS[_key] = _t.time()
+
+
+def get_global_candles(symbol: str, timeframe: str) -> list:
+    """Получить свечи из глобального кеша"""
+    import time as _t
+    _key = f"{symbol}:{timeframe}"
+    if _key in _GLOBAL_CANDLES:
+        if _t.time() - _GLOBAL_CANDLES_TS.get(_key, 0) < _GLOBAL_CANDLES_TTL:
+            return _GLOBAL_CANDLES[_key]
+    return []
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2027,14 +2050,19 @@ def get_candles(symbol, interval="1h", limit=200):
         if time.time() - ts < cache_ttl and len(cached) >= 20:
             return cached
 
+    # Проверяем global candles storage
+    _gc = get_global_candles(symbol, interval)
+    if _gc and len(_gc) >= 20:
+        candle_cache[cache_key] = (_gc, time.time())
+        return _gc
+
     # 1. Brain Router — Gate.io, KuCoin, Bybit, MEXC, Kraken, CryptoCompare (ротация)
     if _ROUTER_OK:
         try:
             rc = _brain_router.candles(symbol, interval, limit)
-            # Минимум 3 свечи достаточно для проверки цены (check_pending_signals)
-            # Минимум 20 нужно только для SMC анализа — проверяем на вызове
             if rc and len(rc) >= 3:
                 candle_cache[cache_key] = (rc, time.time())
+                update_global_candles(symbol, interval, rc)
                 return rc
         except Exception as e:
             logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
@@ -2057,6 +2085,7 @@ def get_candles(symbol, interval="1h", limit=200):
                             "volume": float(c[5])} for c in data]
                 if len(candles) >= 20:
                     candle_cache[cache_key] = (candles, time.time())
+                    update_global_candles(symbol, interval, candles)
                     return candles
     except Exception as e:
         logging.debug(f"Binance Futures {symbol} {interval}: {e}")
@@ -2077,12 +2106,38 @@ def get_candles(symbol, interval="1h", limit=200):
                             "volume": float(c[5])} for c in data]
                 if len(candles) >= 20:
                     candle_cache[cache_key] = (candles, time.time())
+                    update_global_candles(symbol, interval, candles)
                     return candles
     except Exception as e:
         logging.debug(f"Binance Spot {symbol} {interval}: {e}")
 
     logging.debug(f"Нет свечей для {symbol} {interval}")
     return []
+
+
+async def fetch_candles_batch(symbols: list, timeframe: str = "4h", limit: int = 100) -> dict:
+    """
+    Асинхронная загрузка свечей для списка символов одновременно.
+    Возвращает {symbol: candles}
+    """
+    import asyncio as _asyncio
+
+    async def _fetch_one(sym):
+        try:
+            loop = _asyncio.get_event_loop()
+            candles = await loop.run_in_executor(None, lambda: get_candles(sym, timeframe, limit))
+            return sym, candles
+        except Exception:
+            return sym, []
+
+    tasks = [_fetch_one(s) for s in symbols]
+    results = await _asyncio.gather(*tasks, return_exceptions=True)
+
+    out = {}
+    for r in results:
+        if isinstance(r, tuple) and len(r) == 2 and r[1]:
+            out[r[0]] = r[1]
+    return out
 
 
 def get_orderbook(symbol):
@@ -9559,60 +9614,56 @@ def calc_size_multiplier(adx: float, confluence: int, recent_sl_count: int = 0) 
     return round(max(0.5, min(base, 1.5)), 2)
 
 
-def get_btc_correlation(symbol: str, candles_symbol: list = None, candles_btc: list = None) -> dict:
-    """
-    Рассчитывает rolling корреляцию монеты с BTC за 20 свечей.
-    Возвращает: corr (-1..1), level (high/moderate/low), btc_dir
-    Кеш 5 минут.
-    """
-    import time as _time
-    _now = _time.time()
+def get_btc_correlation(symbol: str, btc_candles: list = None, period: int = 20) -> dict:
+    """Rolling correlation с BTC. btc_candles передаётся снаружи чтобы не делать лишний API запрос."""
+    import time as _t
+    _now = _t.time()
+
+    # Кеш 5 минут
     if symbol in _btc_corr_cache:
         _ct, _cv = _btc_corr_cache[symbol]
         if _now - _ct < 300:
             return _cv
 
-    result = {"corr": 0.5, "level": "moderate", "btc_dir": "NEUTRAL", "desc": "нет данных"}
     try:
-        if candles_btc is None:
-            candles_btc = get_candles("BTCUSDT", "4h", 25)
-        if candles_symbol is None:
-            candles_symbol = get_candles(symbol, "4h", 25)
-        if not candles_btc or not candles_symbol:
-            return result
-        n = min(20, len(candles_btc), len(candles_symbol))
-        if n < 10:
+        if symbol == "BTCUSDT":
+            result = {"corr": 1.0, "level": "high", "btc_dir": "BULLISH", "desc": "BTC itself"}
+            _btc_corr_cache[symbol] = (_now, result)
             return result
 
-        # Returns % changes
-        btc_rets = [(candles_btc[-n + i]["close"] - candles_btc[-n + i - 1]["close"]) / candles_btc[-n + i - 1]["close"]
-                     for i in range(1, n)]
-        sym_rets = [(candles_symbol[-n + i]["close"] - candles_symbol[-n + i - 1]["close"]) / candles_symbol[-n + i - 1]["close"]
-                     for i in range(1, n)]
+        # BTC свечи — используем переданные или берём из кеша
+        if btc_candles is None:
+            btc_candles = get_global_candles("BTCUSDT", "4h")
+            if not btc_candles:
+                btc_candles = get_candles("BTCUSDT", "4h", period + 5)
 
-        # Pearson correlation
-        m_b = sum(btc_rets) / len(btc_rets)
-        m_s = sum(sym_rets) / len(sym_rets)
-        cov = sum((b - m_b) * (s - m_s) for b, s in zip(btc_rets, sym_rets))
-        var_b = sum((b - m_b) ** 2 for b in btc_rets)
-        var_s = sum((s - m_s) ** 2 for s in sym_rets)
-        denom = (var_b * var_s) ** 0.5
-        corr = round(cov / denom, 3) if denom > 0 else 0.0
+        alt_candles = get_candles(symbol, "4h", period + 5)
 
-        # BTC direction
-        btc_dir = "BULLISH" if candles_btc[-1]["close"] > candles_btc[-4]["close"] else "BEARISH"
+        if not alt_candles or not btc_candles or len(alt_candles) < period or len(btc_candles) < period:
+            return {"corr": 0.7, "level": "moderate", "btc_dir": "UNKNOWN", "desc": "нет данных"}
 
-        level = "high" if abs(corr) > 0.7 else ("moderate" if abs(corr) > 0.4 else "low")
-        result = {
-            "corr": corr,
-            "level": level,
-            "btc_dir": btc_dir,
-            "desc": f"Корр. BTC: {corr:.2f} ({level})"
-        }
+        alt_ret = [alt_candles[-i]["close"] / alt_candles[-i - 1]["close"] - 1 for i in range(1, period + 1)]
+        btc_ret = [btc_candles[-i]["close"] / btc_candles[-i - 1]["close"] - 1 for i in range(1, period + 1)]
+
+        n = len(alt_ret)
+        mean_a = sum(alt_ret) / n
+        mean_b = sum(btc_ret) / n
+        cov = sum((alt_ret[i] - mean_a) * (btc_ret[i] - mean_b) for i in range(n)) / n
+        std_a = (sum((x - mean_a) ** 2 for x in alt_ret) / n) ** 0.5
+        std_b = (sum((x - mean_b) ** 2 for x in btc_ret) / n) ** 0.5
+
+        corr = round(cov / (std_a * std_b), 3) if std_a > 0 and std_b > 0 else 0.7
+
+        btc_dir = "BULLISH" if btc_candles[-1]["close"] > btc_candles[-5]["close"] else "BEARISH"
+        level = "high" if corr > 0.85 else "moderate" if corr > 0.3 else "low"
+
+        result = {"corr": corr, "level": level, "btc_dir": btc_dir, "desc": f"Корр. BTC: {corr} ({level})"}
+        _btc_corr_cache[symbol] = (_now, result)
+        return result
+
     except Exception as e:
-        logging.debug(f"get_btc_correlation {symbol}: {e}")
-    _btc_corr_cache[symbol] = (_now, result)
-    return result
+        logging.warning(f"get_btc_correlation {symbol}: {e}")
+        return {"corr": 0.7, "level": "moderate", "btc_dir": "UNKNOWN", "desc": "ошибка"}
 
 
 def check_session_liquidity(symbol: str, timeframe: str = "1h") -> dict:
@@ -9808,7 +9859,8 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         _btc_corr = {"corr": 0.5, "level": "moderate", "btc_dir": "NEUTRAL"}
         if symbol != "BTCUSDT":
             try:
-                _btc_corr = get_btc_correlation(symbol)
+                _btc_cached = get_global_candles("BTCUSDT", "4h")
+                _btc_corr = get_btc_correlation(symbol, btc_candles=_btc_cached if _btc_cached else None)
                 if _btc_corr["level"] == "high":
                     # Высокая корреляция — BTC должен подтвердить
                     if (direction == "BULLISH" and _btc_corr["btc_dir"] == "BEARISH") or \
