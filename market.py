@@ -914,6 +914,15 @@ price_cache = {}
 last_price_update = 0
 candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
+# ── In-memory caches ──
+import threading as _threading
+_CACHE_LOCK = _threading.Lock()
+_INDICATORS_CACHE: dict = {}       # {symbol:tf: (timestamp, indicators)}
+_btc_corr_cache: dict = {}         # {symbol: (timestamp, result)}
+_adaptive_params_cache: dict = {}  # {symbol:tf: (timestamp, params)}
+_liquidity_cache: dict = {}        # {symbol: (timestamp, result)}
+_INDICATORS_TTL = 60               # секунд
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -9376,16 +9385,117 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════
+# ══  Precomputed Indicators Cache                              ══
+# ═══════════════════════════════════════════════════════════════
+
+def get_precomputed_indicators(symbol: str, timeframe: str = "4h") -> dict:
+    """
+    Считает ATR, ADX, EMA один раз и кеширует на 60с.
+    Все стратегии используют этот кеш вместо повторных расчётов.
+    """
+    import time as _t
+    _key = f"{symbol}:{timeframe}"
+    _now = _t.time()
+
+    with _CACHE_LOCK:
+        if _key in _INDICATORS_CACHE:
+            _ct, _cv = _INDICATORS_CACHE[_key]
+            if _now - _ct < _INDICATORS_TTL:
+                return _cv
+
+    result = {}
+    try:
+        candles = get_candles(symbol, timeframe, 100)
+        if not candles or len(candles) < 20:
+            return result
+
+        closes = [c["close"] for c in candles]
+        highs = [c["high"] for c in candles]
+        lows = [c["low"] for c in candles]
+
+        # ATR(14)
+        _n14 = min(14, len(candles))
+        result["atr"] = sum(highs[-i] - lows[-i] for i in range(1, _n14 + 1)) / _n14
+
+        # ATR median(50)
+        _n50 = min(50, len(candles))
+        result["atr_med"] = sum(highs[-i] - lows[-i] for i in range(1, _n50 + 1)) / _n50
+
+        # EMA20, EMA50, EMA200
+        result["ema20"] = sum(closes[-min(20, len(closes)):]) / min(20, len(closes))
+        result["ema50"] = sum(closes[-min(50, len(closes)):]) / min(50, len(closes))
+        result["ema200"] = sum(closes[-min(200, len(closes)):]) / min(200, len(closes))
+
+        # Volatility factor
+        result["volatility_factor"] = round(
+            max(0.6, min(1.8, result["atr"] / result["atr_med"] if result["atr_med"] > 0 else 1.0)), 2
+        )
+
+        # ADX(14)
+        try:
+            _adx_n = min(14, len(candles) - 1)
+            plus_dm = minus_dm = tr_sum = 0
+            for i in range(1, _adx_n + 1):
+                h_diff = highs[-i] - highs[-i - 1]
+                l_diff = lows[-i - 1] - lows[-i]
+                plus_dm += h_diff if h_diff > l_diff and h_diff > 0 else 0
+                minus_dm += l_diff if l_diff > h_diff and l_diff > 0 else 0
+                tr_sum += max(
+                    highs[-i] - lows[-i],
+                    abs(highs[-i] - closes[-i - 1]),
+                    abs(lows[-i] - closes[-i - 1])
+                )
+            atr14 = tr_sum / _adx_n if _adx_n > 0 else 1
+            pdi = (plus_dm / _adx_n) / atr14 * 100 if atr14 > 0 else 0
+            mdi = (minus_dm / _adx_n) / atr14 * 100 if atr14 > 0 else 0
+            result["adx"] = round(abs(pdi - mdi) / (pdi + mdi) * 100, 1) if (pdi + mdi) > 0 else 20
+        except Exception:
+            result["adx"] = 20
+
+        # Volume avg
+        if len(candles) >= 21:
+            result["avg_vol"] = sum(c["volume"] for c in candles[-20:-1]) / 19
+        else:
+            result["avg_vol"] = sum(c["volume"] for c in candles) / len(candles)
+
+        # Price and structure
+        result["price"] = closes[-1]
+        result["hh_hl"] = len(closes) >= 10 and closes[-1] > closes[-5] > closes[-10]
+        result["ll_lh"] = len(closes) >= 10 and closes[-1] < closes[-5] < closes[-10]
+
+        # Trend strength
+        result["trend_strength"] = (
+            "strong" if result["adx"] > 30 else
+            "normal" if result["adx"] > 20 else "weak"
+        )
+        result["adx_strong"] = result["adx"] > 30
+        result["adx_weak"] = result["adx"] < 20
+
+    except Exception as e:
+        logging.warning(f"get_precomputed_indicators {symbol}: {e}")
+
+    with _CACHE_LOCK:
+        _INDICATORS_CACHE[_key] = (_now, result)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
 # ══  Adaptive Parameters — динамические параметры              ══
 # ═══════════════════════════════════════════════════════════════
 
-def get_adaptive_params(symbol: str, candles: list = None) -> dict:
+def get_adaptive_params(symbol: str, candles: list = None, timeframe: str = "4h") -> dict:
     """
-    Возвращает адаптивные параметры на основе волатильности, ADX и истории ошибок.
-    volatility_factor: множитель для зон (ATR * vf)
-    adx: сила тренда 0-100
-    dynamic_confluence: мин. confluence с учётом SL серий
+    Возвращает адаптивные параметры. Использует precomputed indicators + кеш 5 мин.
     """
+    import time as _time
+    _cache_key = f"{symbol}:{timeframe}"
+    _now = _time.time()
+    if _cache_key in _adaptive_params_cache:
+        _ct, _cv = _adaptive_params_cache[_cache_key]
+        if _now - _ct < 300:
+            return _cv
+
     result = {
         "volatility_factor": 1.0,
         "adx": 25.0,
@@ -9394,47 +9504,13 @@ def get_adaptive_params(symbol: str, candles: list = None) -> dict:
         "adx_weak": False,
     }
     try:
-        if candles is None:
-            candles = get_candles(symbol, "4h", 60)
-        if not candles or len(candles) < 20:
-            return result
-
-        # ── Volatility Factor: ATR(14) / ATR(50) ──
-        atr_14 = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
-        atr_50 = sum(c["high"] - c["low"] for c in candles[-min(50, len(candles)):]) / min(50, len(candles))
-        if atr_50 > 0:
-            vf = round(atr_14 / atr_50, 2)
-            result["volatility_factor"] = max(0.6, min(vf, 1.8))
-
-        # ── ADX(14) ──
-        if len(candles) >= 20:
-            highs = [c["high"] for c in candles]
-            lows = [c["low"] for c in candles]
-            closes = [c["close"] for c in candles]
-            n = 14
-            plus_dm_list = []
-            minus_dm_list = []
-            tr_list = []
-            for i in range(-n - 5, 0):
-                if i - 1 < -len(candles):
-                    continue
-                high_diff = highs[i] - highs[i - 1]
-                low_diff = lows[i - 1] - lows[i]
-                plus_dm = high_diff if high_diff > low_diff and high_diff > 0 else 0
-                minus_dm = low_diff if low_diff > high_diff and low_diff > 0 else 0
-                plus_dm_list.append(plus_dm)
-                minus_dm_list.append(minus_dm)
-                tr_val = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-                tr_list.append(tr_val)
-
-            if len(tr_list) >= n:
-                atr_adx = sum(tr_list[-n:]) / n
-                plus_di = (sum(plus_dm_list[-n:]) / n) / atr_adx * 100 if atr_adx > 0 else 0
-                minus_di = (sum(minus_dm_list[-n:]) / n) / atr_adx * 100 if atr_adx > 0 else 0
-                dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
-                result["adx"] = round(dx, 1)
-                result["adx_strong"] = dx > 30
-                result["adx_weak"] = dx < 20
+        # Используем precomputed indicators вместо пересчёта
+        ind = get_precomputed_indicators(symbol, timeframe)
+        if ind:
+            result["volatility_factor"] = ind.get("volatility_factor", 1.0)
+            result["adx"] = ind.get("adx", 25.0)
+            result["adx_strong"] = ind.get("adx_strong", False)
+            result["adx_weak"] = ind.get("adx_weak", False)
 
         # ── Dynamic Confluence: повышаем после серии SL ──
         try:
@@ -9455,6 +9531,7 @@ def get_adaptive_params(symbol: str, candles: list = None) -> dict:
     except Exception as e:
         logging.debug(f"get_adaptive_params {symbol}: {e}")
 
+    _adaptive_params_cache[_cache_key] = (_now, result)
     return result
 
 
@@ -9486,7 +9563,15 @@ def get_btc_correlation(symbol: str, candles_symbol: list = None, candles_btc: l
     """
     Рассчитывает rolling корреляцию монеты с BTC за 20 свечей.
     Возвращает: corr (-1..1), level (high/moderate/low), btc_dir
+    Кеш 5 минут.
     """
+    import time as _time
+    _now = _time.time()
+    if symbol in _btc_corr_cache:
+        _ct, _cv = _btc_corr_cache[symbol]
+        if _now - _ct < 300:
+            return _cv
+
     result = {"corr": 0.5, "level": "moderate", "btc_dir": "NEUTRAL", "desc": "нет данных"}
     try:
         if candles_btc is None:
@@ -9526,14 +9611,23 @@ def get_btc_correlation(symbol: str, candles_symbol: list = None, candles_btc: l
         }
     except Exception as e:
         logging.debug(f"get_btc_correlation {symbol}: {e}")
+    _btc_corr_cache[symbol] = (_now, result)
     return result
 
 
 def check_session_liquidity(symbol: str, timeframe: str = "1h") -> dict:
     """
     Сравнивает текущий объём сессии с нормой за 20 свечей.
-    ratio < 0.7 → skip (низкая ликвидность).
+    ratio < 0.7 → skip (низкая ликвидность). Кеш 5 минут.
     """
+    import time as _time
+    _now = _time.time()
+    _liq_key = f"{symbol}:{timeframe}"
+    if _liq_key in _liquidity_cache:
+        _ct, _cv = _liquidity_cache[_liq_key]
+        if _now - _ct < 300:
+            return _cv
+
     result = {"ratio": 1.0, "ok": True, "desc": ""}
     try:
         candles = get_candles(symbol, timeframe, 25)
@@ -9554,6 +9648,7 @@ def check_session_liquidity(symbol: str, timeframe: str = "1h") -> dict:
         }
     except Exception as e:
         logging.debug(f"check_session_liquidity {symbol}: {e}")
+    _liquidity_cache[_liq_key] = (_now, result)
     return result
 
 
@@ -9573,12 +9668,21 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         if not candles or len(candles) < 20:
             return None
 
-        price = candles[-1]["close"]
-        atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+        # ── Precomputed indicators — без повторных расчётов ──
+        _ind = get_precomputed_indicators(symbol, timeframe)
+        price = _ind.get("price", candles[-1]["close"])
+        atr = _ind.get("atr", sum(c["high"] - c["low"] for c in candles[-14:]) / 14)
+        ema20 = _ind.get("ema20", price)
+        ema50 = _ind.get("ema50", price)
+        hh_hl = _ind.get("hh_hl", False)
+        ll_lh = _ind.get("ll_lh", False)
+        _adx = _ind.get("adx", 20)
+        _vf = _ind.get("volatility_factor", 1.0)
 
-        # ── Adaptive params ──
-        _ap = get_adaptive_params(symbol, candles)
-        _vf = _ap["volatility_factor"]
+        if atr == 0:
+            return None
+
+        _ap = get_adaptive_params(symbol, candles, timeframe)
 
         # ── MUST 1: Зона OB/FVG ──
         ob = find_ob(candles, direction)
@@ -9596,13 +9700,6 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
             return None
 
         # ── MUST 2: Тренд (EMA50 + структура HH/HL + ADX) ──
-        closes = [c["close"] for c in candles]
-        ema50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else closes[-1]
-        ema20 = sum(closes[-20:]) / 20
-        hh_hl = closes[-1] > closes[-5] > closes[-10] if len(closes) >= 10 else False
-        ll_lh = closes[-1] < closes[-5] < closes[-10] if len(closes) >= 10 else False
-
-        _adx = _ap["adx"]
         if direction == "BULLISH":
             # Weak trend (ADX<20): разрешаем LONG даже ниже EMA50 если структура HH/HL
             if _ap["adx_weak"]:

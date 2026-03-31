@@ -3417,21 +3417,27 @@ async def auto_fast_deal_scan():
         logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
     try:
-        await asyncio.wait_for(_auto_fast_deal_scan_impl(_hour, _minute), timeout=55)
+        await asyncio.wait_for(_auto_fast_deal_scan_impl(_hour, _minute), timeout=90)
     except asyncio.TimeoutError:
-        logging.warning("[auto_fast_deal_scan] таймаут 55с — пропускаем цикл")
+        logging.warning("[auto_fast_deal_scan] таймаут 90с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_fast_deal_scan] ОШИБКА: {e}")
 
 async def _auto_fast_deal_scan_impl(_hour, _minute):
     logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН (Kill Zone {_hour:02d}:{_minute:02d} UTC)")
+
+    # Кешируем общие данные один раз для всех пар
+    _btc_candles_cache = get_candles("BTCUSDT", "4h", 30)
+    _btc_candles_1h_cache = get_candles("BTCUSDT", "1h", 10)
+    _btc_candles_5m_cache = get_candles("BTCUSDT", "5m", 10)
+
     found = []
     for symbol in FAST_PAIRS:
         try:
             r = detect_fast_deal(symbol)
             if r:
                 found.append(r)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0)  # отдаём управление event loop
         except Exception as e:
             logging.warning(f"[auto_fast_deal_scan] {symbol}: {e}")
 
