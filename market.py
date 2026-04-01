@@ -9114,11 +9114,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _hour = _now_dt.hour
         _minute = _now_dt.minute
         _time_minutes = _hour * 60 + _minute
-        # Kill Zone сужен: 08:30-10:30 UTC и 16:30-18:30 UTC
+        # Kill Zone timing (используется для бонусов, блокировка в bot.py)
         _in_london_kz = 510 <= _time_minutes <= 810   # 08:30 - 13:30
         _in_ny_kz     = 990 <= _time_minutes <= 1290   # 16:30 - 21:30
-        if not (_in_london_kz or _in_ny_kz):
-            return None
 
         # ── 0. Защита от боковика ──
         _fast_regime = get_market_regime(symbol)
@@ -9209,23 +9207,23 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None  # Не входить в шорт из низа range
 
         # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
-        candles_1h = get_candles(symbol, "15m", 20)
-        if not candles_1h or len(candles_1h) < 3:
+        candles_15m_imp = get_candles(symbol, "15m", 20)
+        if not candles_15m_imp or len(candles_15m_imp) < 3:
             return None
 
-        last_1h = candles_1h[-1]
-        body_1h = abs(last_1h["close"] - last_1h["open"])
-        range_1h = last_1h["high"] - last_1h["low"] if last_1h["high"] != last_1h["low"] else 0.001
-        is_impulse_1h = body_1h / range_1h > 0.4
+        last_15m = candles_15m_imp[-1]
+        body_15m = abs(last_15m["close"] - last_15m["open"])
+        range_15m = last_15m["high"] - last_15m["low"] if last_15m["high"] != last_15m["low"] else 0.001
+        is_impulse_15m = body_15m / range_15m > 0.4
 
-        if direction == "BULLISH" and not (last_1h["close"] > last_1h["open"] and is_impulse_1h):
+        if direction == "BULLISH" and not (last_15m["close"] > last_15m["open"] and is_impulse_15m):
             return None
-        if direction == "BEARISH" and not (last_1h["close"] < last_1h["open"] and is_impulse_1h):
+        if direction == "BEARISH" and not (last_15m["close"] < last_15m["open"] and is_impulse_15m):
             return None
 
         # Volume check на 15m impulse — должен быть выше среднего
-        _avg_vol_1h = sum(c.get("volume", 0) for c in candles_1h[:-1]) / max(len(candles_1h) - 1, 1)
-        if _avg_vol_1h > 0 and last_1h.get("volume", 0) < _avg_vol_1h * 1.1:
+        _avg_vol_15m_imp = sum(c.get("volume", 0) for c in candles_15m_imp[:-1]) / max(len(candles_15m_imp) - 1, 1)
+        if _avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1:
             return None  # Импульс без объёма — ненадёжный
 
         # ── 5. 15m Engulfing + Displacement + Volume Spike ──
@@ -9247,8 +9245,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
             curr_range = curr["high"] - curr["low"]
             prev_body = abs(prev["close"] - prev["open"])
 
-            # Displacement: тело > 65% range
-            if curr_range > 0 and curr_body / curr_range < 0.65:
+            # Displacement: тело > 55% range (адаптировано для 15m)
+            if curr_range > 0 and curr_body / curr_range < 0.55:
                 continue
 
             # Engulfing паттерн
@@ -9269,10 +9267,10 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 entry = smart_round(curr["close"])
                 sl = smart_round(curr["high"] + atr_15m * 0.5)
 
-            # Volume spike — адаптивный порог (2.0x в сессию, 1.5x вне)
+            # Volume spike — адаптивный порог (1.5x в сессию, 1.2x вне)
             import datetime as _dt_fast
             _fast_hour = _dt_fast.datetime.utcnow().hour
-            _vol_threshold = 2.0 if 8 <= _fast_hour <= 17 else 1.5
+            _vol_threshold = 1.5 if 8 <= _fast_hour <= 17 else 1.2
             avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
             if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * _vol_threshold:
                 continue
@@ -9425,12 +9423,12 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "tp_pct":    tp_pct,
             "tp2_pct":   tp2_pct,
             "rr":        rr,
-            "logic":     logic + f" [S:{_fast_score}/7]",
+            "logic":     logic,
             "zone":      zone_desc,
             "direction_1d": direction_1d,
             "ob":        ob_4h,
             "fvg":       fvg_4h,
-            "fast_score": _fast_score,
+            "fast_score": 0,
             "scan_type": "fast",
         }
 
