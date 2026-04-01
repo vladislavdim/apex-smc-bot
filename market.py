@@ -7476,6 +7476,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # ── FVG в направлении сигнала между entry и TP ──
         _swing_fvg_ok = False
+        _sw_dir_fvg = None
         try:
             _sw_dir_fvg = find_fvg(candles, direction)
             if _sw_dir_fvg:

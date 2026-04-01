@@ -3292,7 +3292,7 @@ async def auto_scan_mega():
             # Сохраняем в БД как обычный сигнал с пометкой MEGA
             save_signal_db(
                 symbol, direction, "MEGA",
-                r["entry"], r["tp1"], r["tp2"], r["tp3"], r["sl"],
+                r["entry"], r["tp1"], r.get("tp2", r["tp1"]), r.get("tp3", r["tp1"]), r["sl"],
                 "4h", 24 * 14, "💎 МЕГА",
                 confluence=r["score"], regime="MEGA"
             )
