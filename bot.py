@@ -74,6 +74,21 @@ from market import *
 import os as _os_bot
 DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
 
+# ── Trailing stop columns migration ──
+try:
+    _mig_conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    for _col, _type in [("tp1_hit", "INTEGER DEFAULT 0"),
+                         ("trailing_sl", "REAL DEFAULT 0"),
+                         ("best_price", "REAL DEFAULT 0")]:
+        try:
+            _mig_conn.execute(f"ALTER TABLE signals ADD COLUMN {_col} {_type}")
+        except Exception:
+            pass
+    _mig_conn.commit()
+    _mig_conn.close()
+except Exception:
+    pass
+
 # Fallback флаги — на случай если market.py не экспортировал их
 try: _LEARNING_OK
 except NameError: _LEARNING_OK = False
@@ -2962,10 +2977,19 @@ async def _auto_scan_1h_impl():
 
     # Фильтрация и сортировка
     valid = [s for s in all_signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
-    valid.sort(key=lambda x: (x.get("confluence_score", 0), x.get("rr", 0)), reverse=True)
 
+    # pick_best_signal — приоритизация WYCKOFF>SWING>MTF>ZONE>FAST
     sent = 0
-    for sd in valid[:3]:
+    _best = pick_best_signal(valid)
+    if _best:
+        logging.info(f"[auto_scan_1h] → BEST: {_best.get('symbol')} {_best.get('direction')} grade={_best.get('grade')}")
+        await _send_signal(_best)
+        await asyncio.sleep(1)
+        sent += 1
+    # Остальные топ-2 по confluence
+    _rest = [s for s in valid if s is not _best]
+    _rest.sort(key=lambda x: (x.get("confluence_score", 0), x.get("rr", 0)), reverse=True)
+    for sd in _rest[:2]:
         logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
         await _send_signal(sd)
         await asyncio.sleep(1)
@@ -3293,6 +3317,11 @@ async def _auto_wyckoff_scan_impl():
     found = []
     for symbol in pairs:
         try:
+            # Session liquidity check
+            _liq_w = check_session_liquidity(symbol, "1d")
+            if not _liq_w["ok"]:
+                logging.debug(f"[WYCKOFF] {symbol}: низкая ликвидность ({_liq_w['ratio']}x) — пропускаем")
+                continue
             # LONG — Accumulation Spring
             r = detect_wyckoff_spring(symbol)
             if r:
@@ -3440,6 +3469,10 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
     found = []
     for symbol in FAST_PAIRS:
         try:
+            _liq_fast = check_session_liquidity(symbol)
+            if not _liq_fast["ok"]:
+                logging.debug(f"[FAST] {symbol}: низкая ликвидность ({_liq_fast['ratio']}x) — пропускаем")
+                continue
             r = detect_fast_deal(symbol)
             if r:
                 found.append(r)
