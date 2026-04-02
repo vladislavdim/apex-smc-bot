@@ -2786,6 +2786,21 @@ def _format_channel_signal(sd: dict) -> str:
     return "\n".join(lines)
 
 
+async def _send_with_retry(chat_id, text, parse_mode="HTML", retries=3, **kwargs):
+    """Отправка Telegram сообщения с retry и exponential backoff"""
+    for attempt in range(retries):
+        try:
+            await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
+            return True
+        except Exception as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                logging.warning(f"[Telegram] Retry {attempt+1}/{retries} chat={chat_id}: {e}")
+            else:
+                logging.error(f"[Telegram] Не удалось отправить после {retries} попыток chat={chat_id}: {e}")
+    return False
+
+
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
@@ -2814,20 +2829,16 @@ async def _send_signal(sd):
             return
         _sent_signal_cache[cache_key] = now_ts
     for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, sd["text"], parse_mode="HTML")
+        ok = await _send_with_retry(admin_id, sd["text"], parse_mode="HTML")
+        if ok:
             logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
-        except Exception as e:
-            logging.warning(f"[_send_signal] Ошибка отправки admin {admin_id}: {e}")
     try:
         channel_text = _format_channel_signal(sd)
         scan_type = sd.get("scan_type", "")
-        # Отправляем в главный канал (все стратегии)
-        await bot.send_message(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+        await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
         logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
-        # SWING также в ветку Swing второго канала
         if scan_type == "swing":
-            await bot.send_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+            await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
             logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
@@ -2885,7 +2896,21 @@ async def auto_scan_job():
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
     closed = check_pending_signals()
     for c in closed:
-        if c["is_win"]:
+        if c["result"] == "tp1_hit":
+            # TP1 достигнут — уведомляем о переходе в trailing mode
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"✅ <b>TP1 достигнут!</b> {c['symbol']} {c.get('direction','')}\n"
+                        f"🔄 Стоп перенесён в безубыток: <code>{smart_price_fmt(c.get('entry', 0))}</code>\n"
+                        f"🎯 Trailing SL: <code>{smart_price_fmt(c.get('trailing_sl', 0))}</code>\n"
+                        f"🎯 Ждём TP2: <code>{smart_price_fmt(c.get('tp2', 0))}</code>",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+        elif c["is_win"]:
             tp_icons = {"tp1": "🎯", "tp2": "🎯🎯", "tp3": "🎯🎯🎯"}
             icon = tp_icons.get(c["result"], "✅")
             for admin_id in ADMIN_IDS:
@@ -4625,21 +4650,21 @@ async def on_startup(app):
     webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
 
     # Основные сигналы
-    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=10, jitter=30)
+    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=10, jitter=30,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_zone_scan,       "interval", minutes=20, jitter=60,  max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
     webhook_scheduler.add_job(auto_fast_deal_scan,  "interval", minutes=5,  jitter=30,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600)
-    webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
-    webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10)
+    webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
     # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
     webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
-    webhook_scheduler.add_job(check_alerts,         "interval", minutes=5)
-    webhook_scheduler.add_job(auto_research,        "interval", hours=2)
-    webhook_scheduler.add_job(night_brain_tasks,    "interval", minutes=30, jitter=180)
-    webhook_scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+    webhook_scheduler.add_job(realtime_pump_detector, "interval", minutes=15, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(check_alerts,         "interval", minutes=5,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_research,        "interval", hours=2,    max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(night_brain_tasks,    "interval", minutes=30, jitter=180, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120, max_instances=1, coalesce=True)
 
     # Мозг / самообучение
     async def _weekly_report_job():
@@ -4691,9 +4716,9 @@ async def on_startup(app):
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _learn_self_diag)
             logging.info("[Scheduler] Groq самодиагностика завершена")
-    webhook_scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600)
+    webhook_scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600, max_instances=1, coalesce=True)
 
-    webhook_scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120)
+    webhook_scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120, max_instances=1, coalesce=True)
 
     async def _router_daily_review():
         if _ROUTER_OK:
@@ -4702,8 +4727,8 @@ async def on_startup(app):
             logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
     webhook_scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
 
-    webhook_scheduler.add_job(run_brain_builder_async,     "interval", hours=1,  jitter=300)
-    webhook_scheduler.add_job(run_brain_builder_full_async, "cron",     hour=3,   minute=0)
+    webhook_scheduler.add_job(run_brain_builder_async,     "interval", hours=1,  jitter=300, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(run_brain_builder_full_async, "cron",     hour=3,   minute=0, max_instances=1, coalesce=True)
 
     async def _run_web_learner():
         if _WEB_LEARNER_OK:
@@ -4712,7 +4737,7 @@ async def on_startup(app):
             if results:
                 logging.info(f"[WebLearner] Изучено тем: {len(results)}")
             await backup_db_to_github()
-    webhook_scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300)
+    webhook_scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(_run_web_learner, "date",
         run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
 
@@ -4722,19 +4747,22 @@ async def on_startup(app):
             improvements = await loop.run_in_executor(None, _web_self_improve)
             if improvements:
                 logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
-    webhook_scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800)
+    webhook_scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800, max_instances=1, coalesce=True)
 
     async def _run_autopilot_fast():
         if _AUTOPILOT_OK:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _autopilot_fast)
-    webhook_scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60)
+    webhook_scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)
 
     async def _run_autopilot_deep():
         if _AUTOPILOT_OK:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _autopilot_deep)
-    webhook_scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600)
+    webhook_scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600, max_instances=1, coalesce=True)
+
+    # Backup БД в GitHub — раз в час
+    webhook_scheduler.add_job(backup_db_to_github, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
 
     webhook_scheduler.start()
     setup_error_capture()

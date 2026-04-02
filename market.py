@@ -4213,6 +4213,14 @@ def check_pending_signals():
                                 logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
                             except Exception:
                                 pass
+                            # Добавляем TP1 event для уведомления (без закрытия)
+                            closed.append({
+                                "signal_id": sig_id, "symbol": symbol,
+                                "result": "tp1_hit", "hours": round(hours_elapsed, 1),
+                                "grade": grade, "is_win": False,
+                                "trailing_sl": _new_trail_sl, "tp2": tp2,
+                                "entry": entry, "direction": direction
+                            })
                         elif current <= sl:
                             result = "sl"
                 else:
@@ -4237,6 +4245,14 @@ def check_pending_signals():
                                 logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
                             except Exception:
                                 pass
+                            # Добавляем TP1 event для уведомления (без закрытия)
+                            closed.append({
+                                "signal_id": sig_id, "symbol": symbol,
+                                "result": "tp1_hit", "hours": round(hours_elapsed, 1),
+                                "grade": grade, "is_win": False,
+                                "trailing_sl": _new_trail_sl, "tp2": tp2,
+                                "entry": entry, "direction": direction
+                            })
                         elif current >= sl:
                             result = "sl"
 
@@ -4380,6 +4396,16 @@ def check_pending_signals():
 
                     except Exception as _err_e:
                         logging.debug(f"[FIX9] bot_errors write: {_err_e}")
+
+                # Сохраняем паттерн для обучения (pattern_history)
+                try:
+                    _learn_save_pattern(
+                        symbol, direction, timeframe,
+                        _regime_val, _confluence_val,
+                        result, rr=round(abs(tp1 - entry) / max(abs(entry - sl), 0.0001), 2)
+                    )
+                except Exception as _sp_e:
+                    logging.debug(f"save_pattern: {_sp_e}")
 
                 closed.append({
                     "signal_id": sig_id,
@@ -6494,6 +6520,24 @@ async def night_brain_tasks():
                 logging.info('[NightBrain] brain.db backed up to GitHub')
         except Exception as _be:
             logging.warning(f'[NightBrain] backup skip: {_be}')
+
+        # Очистка старых timing_queue записей (старше 24 часов)
+        try:
+            _cleanup_conn = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+            _tq_deleted = _cleanup_conn.execute(
+                "DELETE FROM timing_queue WHERE status='waiting' AND created_at < datetime('now', '-24 hours')"
+            ).rowcount
+            # Очистка barrier_log — оставляем только последние 1000 записей
+            _cleanup_conn.execute(
+                "DELETE FROM barrier_log WHERE id NOT IN (SELECT id FROM barrier_log ORDER BY id DESC LIMIT 1000)"
+            )
+            _cleanup_conn.commit()
+            _cleanup_conn.close()
+            if _tq_deleted > 0:
+                logging.info(f"[Cleanup] timing_queue: удалено {_tq_deleted} старых записей")
+            logging.info("[Cleanup] barrier_log очищен до 1000 записей")
+        except Exception as _cleanup_e:
+            logging.warning(f"[Cleanup] {_cleanup_e}")
 
     except Exception as e:
         logging.error(f"Night brain error: {e}")
