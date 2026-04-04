@@ -4114,28 +4114,16 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         )
         text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
-        # ── Тайминг входа — если плохой, сохраняем в очередь ──
+        # ── Тайминг входа — пропускаем если слабый (без очереди) ──
         timing = check_entry_timing(candles, direction, entry, timeframe)
         timing_score = timing.get("score", 0) if timing else 0
-        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3, valid={timing.get('valid') if timing else False}")
+        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3")
 
-        # Порог 3/3 — только подтверждённые входы
-        if timing_score < 3:
-            if _rr_val < 2.5:
-                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: RR {_rr_val:.2f} < 2.5 — не ставим в очередь")
-                return None
-            saved = save_to_timing_queue(
-                symbol, direction, timeframe,
-                entry, sl, tp1, tp2, tp3,
-                sig_name, text, timing_score
-            )
-            if saved:
-                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} → СОХРАНЁН В ОЧЕРЕДЬ (score {timing_score}/3)")
-            else:
-                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe} — дубль или ошибка сохранения (score {timing_score}/3)")
-            return None  # Ждём подтверждения тайминга
+        if timing_score < 2:
+            logging.debug(f"[MTF] {symbol}: timing {timing_score}/3 — пропускаем")
+            return None
 
-        # Тайминг ОК — сохраняем в БД только сейчас
+        # Тайминг достаточный — сохраняем в БД
         if auto:
             save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
                            confluence=conf_score, regime="UNKNOWN")
@@ -4619,6 +4607,7 @@ async def on_startup(app):
 
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
+    start_db_writer()
     if BRAIN_BUILDER_AVAILABLE:
         try:
             init_brain_db()
@@ -4658,8 +4647,8 @@ async def on_startup(app):
     webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
-    # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
-    webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
+    # timing_queue отключена — MTF отправляет сигналы напрямую по скору
+    # webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(realtime_pump_detector, "interval", minutes=15, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(check_alerts,         "interval", minutes=5,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_research,        "interval", hours=2,    max_instances=1, coalesce=True)
@@ -4938,6 +4927,7 @@ def main():
             except Exception as _re:
                 logging.warning(f"restore_db_from_github: {_re}")
             init_db()
+            start_db_writer()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
                     init_brain_db()
@@ -4974,7 +4964,8 @@ def main():
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
-            scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
+            # timing_queue отключена — MTF отправляет напрямую
+            # scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
             # backup_db_to_github убран из scheduler — вызывает disk I/O ошибки
             # Бэкап происходит только после отправки сигналов
             scheduler.start()

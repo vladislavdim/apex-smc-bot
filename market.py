@@ -319,8 +319,12 @@ def run_server():
 
 def init_db():
     conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")   # WAL — параллельные записи без блокировок
-    conn.execute("PRAGMA synchronous=NORMAL") # быстрее без потери данных
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA cache_size=10000")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA mmap_size=268435456")
     c = conn.cursor()
 
     c.execute("""CREATE TABLE IF NOT EXISTS signals (
@@ -916,7 +920,59 @@ candle_cache = {}  # {symbol_interval: (candles, timestamp)}
 
 # ── In-memory caches ──
 import threading as _threading
+import queue as _queue
 _CACHE_LOCK = _threading.Lock()
+
+# ── Единая очередь записей в БД ──
+_DB_WRITE_QUEUE = _queue.Queue()
+_DB_WRITER_RUNNING = False
+
+def _db_writer_thread():
+    """Единый поток записи в БД — исключает параллельные записи"""
+    import sqlite3 as _sq3
+    while True:
+        try:
+            task = _DB_WRITE_QUEUE.get(timeout=1)
+            if task is None:
+                break
+            sql, params, callback = task
+            try:
+                conn = _sq3.connect("brain.db", timeout=30)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
+                conn.execute(sql, params or [])
+                conn.commit()
+                conn.close()
+                if callback:
+                    callback(True)
+            except Exception as e:
+                logging.warning(f"[DB Writer] {e}")
+                if callback:
+                    callback(False)
+        except _queue.Empty:
+            continue
+        except Exception as e:
+            logging.error(f"[DB Writer] Fatal: {e}")
+
+def start_db_writer():
+    """Запустить поток записи БД"""
+    global _DB_WRITER_RUNNING
+    if not _DB_WRITER_RUNNING:
+        t = _threading.Thread(target=_db_writer_thread, daemon=True)
+        t.start()
+        _DB_WRITER_RUNNING = True
+        logging.info("[DB Writer] Запущен")
+
+def db_write_async(sql: str, params: tuple = None):
+    """Добавить запись в очередь (не блокирует)"""
+    _DB_WRITE_QUEUE.put((sql, params, None))
+
+def get_db_conn(path: str = "brain.db", timeout: int = 30) -> "sqlite3.Connection":
+    """Получить соединение с БД с WAL + busy_timeout"""
+    conn = sqlite3.connect(path, timeout=timeout, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 _INDICATORS_CACHE: dict = {}       # {symbol:tf: (timestamp, indicators)}
 _btc_corr_cache: dict = {}         # {symbol: (timestamp, result)}
 _adaptive_params_cache: dict = {}  # {symbol:tf: (timestamp, params)}
@@ -4112,7 +4168,7 @@ def get_estimated_time(symbol, timeframe):
 def check_pending_signals():
     """Проверяем открытые сигналы — сработал ли TP/SL"""
     try:
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+        conn = get_db_conn()
         pending = conn.execute(
             "SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours, tp1_hit, trailing_sl, best_price FROM signals WHERE result='pending'"
         ).fetchall()
@@ -4182,7 +4238,7 @@ def check_pending_signals():
 
                 # Сохраняем trailing state
                 try:
-                    _tc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                    _tc = get_db_conn(timeout=10)
                     _tc.execute("UPDATE signals SET best_price=?, trailing_sl=? WHERE id=?", (_bp, trailing_sl, sig_id))
                     _tc.commit()
                     _tc.close()
@@ -4205,7 +4261,7 @@ def check_pending_signals():
                             _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
                             _new_trail_sl = round(entry + abs(tp1 - entry) * _trail_c, 8)
                             try:
-                                _tc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                                _tc = get_db_conn(timeout=10)
                                 _tc.execute("UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
                                             (_new_trail_sl, current, sig_id))
                                 _tc.commit()
@@ -4237,7 +4293,7 @@ def check_pending_signals():
                             _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
                             _new_trail_sl = round(entry - abs(entry - tp1) * _trail_c, 8)
                             try:
-                                _tc = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
+                                _tc = get_db_conn(timeout=10)
                                 _tc.execute("UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
                                             (_new_trail_sl, current, sig_id))
                                 _tc.commit()
