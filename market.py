@@ -7264,7 +7264,7 @@ def find_equal_highs_lows(candles, lookback=20, tolerance=0.002):
 
     return eqh_level, eql_level
 
-def detect_bos_choch(candles: list, direction: str, lookback: int = 10) -> bool:
+def detect_bos_choch(candles: list, direction: str, lookback: int = 15) -> bool:
     """
     Реальная проверка BOS (Break of Structure) или CHoCH (Change of Character).
 
@@ -7321,8 +7321,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         _ap_sw = get_adaptive_params(symbol, candles)
         _vf_sw = _ap_sw["volatility_factor"]
 
-        # ── Swing highs/lows (lookback=5) ──
-        swing_highs, swing_lows = find_swings(candles, lookback=5)
+        # ── Swing highs/lows (lookback=8) ──
+        swing_highs, swing_lows = find_swings(candles, lookback=8)
         if len(swing_highs) < 2 or len(swing_lows) < 2:
             return None
 
@@ -8029,7 +8029,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 _zone_top = ob["top"] if zone_type == "OB" and ob else (fvg["top"] if fvg else zone_level * 1.01)
                 _zone_bot = ob["bottom"] if zone_type == "OB" and ob else (fvg["bottom"] if fvg else zone_level * 0.99)
 
-                for c in candles[-30:-3]:
+                for c in candles[-40:-3]:
                     if _zone_bot <= c["low"] <= _zone_top or _zone_bot <= c["high"] <= _zone_top:
                         _test_count += 1
 
@@ -8039,7 +8039,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
                 # Strong move away: displacement ≥0.5 + body > ATR×1.0
                 _strong_move = False
-                for i in range(max(-len(candles), -25), -3):
+                for i in range(max(-len(candles), -35), -3):
                     c = candles[i]
                     c_body = abs(c["close"] - c["open"])
                     c_range = c["high"] - c["low"]
@@ -8532,8 +8532,8 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         else:
             return None
 
-        # ── 2. БОКОВИК У ОСНОВАНИЯ (последние 20 дней) ──
-        accumulation_candles = candles_1d[-20:]
+        # ── 2. БОКОВИК У ОСНОВАНИЯ (последние 30 дней) ──
+        accumulation_candles = candles_1d[-30:]
         acc_high = max(c["high"] for c in accumulation_candles)
         acc_low  = min(c["low"]  for c in accumulation_candles)
         acc_range_pct = (acc_high - acc_low) / acc_low * 100 if acc_low > 0 else 0
@@ -8666,7 +8666,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 _phase_vols.append(f"AR idx: {phases['AR'].get('idx', '?')}")
             if "ST" in phases:
                 _phase_vols.append(f"ST price: {phases['ST'].get('price', 0):.6f}")
-            _avg_vol_1d = sum(c["volume"] for c in candles_1d[-20:]) / 20 if candles_1d else 0
+            _avg_vol_1d = sum(c["volume"] for c in candles_1d[-30:]) / 30 if candles_1d else 0
             _phase_vols.append(f"avg_vol_1d: {_avg_vol_1d:.0f}")
             _phase_vols.append(f"vol_compression: {vol_compression:.2f}")
 
@@ -8832,8 +8832,8 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         else:
             return None
 
-        # ── 2. БОКОВИК У ВЕРШИНЫ (последние 20 дней) ──
-        distribution_candles = candles_1d[-20:]
+        # ── 2. БОКОВИК У ВЕРШИНЫ (последние 30 дней) ──
+        distribution_candles = candles_1d[-30:]
         dist_high = max(c["high"] for c in distribution_candles)
         dist_low  = min(c["low"]  for c in distribution_candles)
         dist_range_pct = (dist_high - dist_low) / dist_low * 100 if dist_low > 0 else 0
@@ -8948,7 +8948,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             _d_phase_vols = []
             if "BC" in phases:
                 _d_phase_vols.append(f"BC vol: {phases['BC'].get('vol', 0):.0f}")
-            _avg_vol_1d_d = sum(c["volume"] for c in candles_1d[-20:]) / 20 if candles_1d else 0
+            _avg_vol_1d_d = sum(c["volume"] for c in candles_1d[-30:]) / 30 if candles_1d else 0
             _d_phase_vols.append(f"avg_vol_1d: {_avg_vol_1d_d:.0f}")
             _d_phase_vols.append(f"vol_compression: {vol_compression:.2f}")
 
@@ -9093,8 +9093,8 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         if drawdown_pct < _min_drawdown:
             return None
 
-        # ── 2. Боковик последние 10-20 дней (range < 15%) ──
-        acc_candles = candles_1d[-20:]
+        # ── 2. Боковик последние 10-30 дней (range < 15%) ──
+        acc_candles = candles_1d[-30:]
         acc_high = max(c["high"] for c in acc_candles)
         acc_low = min(c["low"] for c in acc_candles)
         acc_range_pct = (acc_high - acc_low) / acc_low * 100
@@ -9358,7 +9358,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         entry = None
         sl = None
 
-        for i in range(1, 5):
+        for i in range(1, 7):  # смотрим 6 свечей назад
             if i >= len(candles_15m): break
             curr = candles_15m[-i]
             prev = candles_15m[-i-1]
