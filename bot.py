@@ -1205,7 +1205,10 @@ async def handle_callback(callback: CallbackQuery):
             losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone() or [0])[0]
             pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
             # Наблюдение — пары в очереди тайминга
-            watchlist = (conn.execute("SELECT COUNT(*) FROM timing_queue WHERE status='waiting'").fetchone() or [0])[0]
+            try:
+                watchlist = (conn.execute("SELECT COUNT(*) FROM timing_queue WHERE status='waiting'").fetchone() or [0])[0]
+            except Exception:
+                watchlist = 0
             top = conn.execute(
                 "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
             ).fetchall()
@@ -1236,13 +1239,12 @@ async def handle_callback(callback: CallbackQuery):
             f"✅ Прибыльных: <b>{wins}</b>\n"
             f"❌ Убыточных: <b>{losses}</b>\n"
             f"⏳ В работе: <b>{pending}</b>\n"
-            f"👁 Наблюдение: <b>{watchlist}</b>\n"
             f"🎯 Win Rate: <b>{wr}%</b>\n\n"
             f"🏆 <b>Лучшие монеты:</b>\n{top_text}"
             f"{err_text}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👁 Наблюдение", callback_data="menu_watchlist"),
+                [InlineKeyboardButton(text="📋 Стратегии", callback_data="menu_strategies"),
                  InlineKeyboardButton(text="🔍 Ошибки", callback_data="menu_errors")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
@@ -1871,53 +1873,67 @@ async def handle_callback(callback: CallbackQuery):
             ])
         )
 
-    elif data == "menu_watchlist":
-        try:
-            import sqlite3 as _sq3
-            conn = _sq3.connect("brain.db", timeout=10)
-            rows = conn.execute(
-                "SELECT symbol, direction, timeframe, timing_score, created_at, expires_at FROM timing_queue WHERE status=\'waiting\' ORDER BY timing_score DESC, created_at DESC"
-            ).fetchall()
-            conn.close()
+    elif data == "menu_strategies":
+        strategies_text = (
+            "📋 <b>Активные стратегии APEX</b>\n\n"
 
-            if not rows:
-                text = (
-                    "👁 <b>Наблюдение</b>\n\n"
-                    "Очередь пуста — нет пар ожидающих подтверждения\n\n"
-                    "<i>Здесь появятся пары у которых хороший сигнал но тайминг ещё не подтверждён (3/3)</i>"
-                )
-            else:
-                lines = ["👁 <b>Наблюдение</b> — ждут подтверждения\n"]
-                for r in rows:
-                    symbol, direction, tf, score, created, expires = r
-                    dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-                    bar = "🟩" * score + "⬜" * (3 - score)
-                    lines.append(f"<b>{symbol}</b> — {dir_label} [{tf}]")
-                    lines.append(f"  {bar} {score}/3 тайминг")
-                    lines.append("")
-                text = "\n".join(lines)
-                text += f"\n<i>Как только пара достигнет 3/3 — придёт сигнал автоматически</i>"
-                if len(text) > 3800:
-                    lines_cut = ["<b>Наблюдение</b> — ждут подтверждения\n"]
-                    for r in rows:
-                        symbol, direction, tf, score, created, expires = r
-                        dir_label = "LONG" if direction == "BULLISH" else "SHORT"
-                        lines_cut.append(f"<b>{symbol}</b> {dir_label} {tf} {score}/3")
-                    lines_cut.append(f"\n<i>Всего {len(rows)} пар. Сигнал придёт при 3/3</i>")
-                    text = "\n".join(lines_cut)
+            "⚡ <b>FAST</b> — скальп в Kill Zone\n"
+            "• Kill Zone: 08:30-13:30 / 16:30-21:30 UTC\n"
+            "• 4h OB/FVG зона ± ATR×VF\n"
+            "• 15m engulfing + displacement ≥ 0.55\n"
+            "• Volume spike ≥ 1.5x\n"
+            "• Acceptance (close за зоной)\n"
+            "• No middle range фильтр\n"
+            "• RR ≥ 1.5\n\n"
 
-            await callback.message.edit_text(
-                text, parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist")],
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_stats")]
-                ])
-            )
-        except Exception as e:
-            if "message is not modified" in str(e):
-                await callback.answer("Очередь не изменилась", show_alert=False)
-            else:
-                await callback.message.edit_text(f"Ошибка: {e}")
+            "📐 <b>MTF</b> — Multi TimeFrame\n"
+            "• HTF: 4h + 1d тренд (оба против = блок)\n"
+            "• Зона: Discount (LONG) / Premium (SHORT)\n"
+            "• OB/FVG ± ATR×VF\n"
+            "• BOS/CHoCH на 15m (+score)\n"
+            "• Score: volume + BTC + сессия (мин 1/3)\n"
+            "• confluence ≥ 35\n"
+            "• RR ≥ 2.0\n\n"
+
+            "🔄 <b>SWING</b> — sweep & reverse\n"
+            "• Sweep EQH/EQL ИЛИ реакция от OB\n"
+            "• HTF: 4h + 1d (оба против = блок)\n"
+            "• Reaction speed ≤ 3 свечи\n"
+            "• Quality ≥ 2/5 (vol, disp, CHoCH, P/D, FVG)\n"
+            "• SL cap 4%\n"
+            "• RR ≥ 2.0 (Variant 2: ≥ 2.5)\n\n"
+
+            "📦 <b>ZONE</b> — зона интереса\n"
+            "• OB/FVG unmitigated (≤ 2 теста)\n"
+            "• Strong move away disp ≥ 0.5\n"
+            "• Discount/Premium зона\n"
+            "• Wick rejection (тень > тело)\n"
+            "• Q-score ≥ 4/8\n"
+            "• RR ≥ 2.0\n\n"
+
+            "🌊 <b>WYCKOFF</b> — Re-accumulation\n"
+            "• Higher lows (накопление)\n"
+            "• Volume compression → expansion\n"
+            "• Drawdown ≥ 5% (BTC/ETH/BNB) / 8%\n"
+            "• Range tightening\n"
+            "• EQH ликвидность как TP\n"
+            "• RR ≥ 2.5\n\n"
+
+            "🧠 <b>Общее ядро (smc_core_check)</b>\n"
+            "• MUST: зона + тренд EMA50 + RR\n"
+            "• CONFIRM: импульс + ликвидность + объём + HTF\n"
+            "• ADX-адаптивный тренд\n"
+            "• BTC корреляция фильтр\n"
+            "• Session liquidity ≥ 0.7x\n"
+        )
+
+        await callback.message.edit_text(
+            strategies_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_strategies")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_stats")]
+            ])
+        )
 
     elif data == "menu_wins":
         try:
