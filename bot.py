@@ -4099,9 +4099,60 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 ["свип", "sweep", "импульс", "накопл", "ликвидн", "пробой", "ob ", "fvg"])]
             groq_logic = "\n".join(logic_lines[:3]) if logic_lines else "структурный вход по SMC"
 
+        # ── HTF hard block: 4h + 1d оба против = нет сделки ──
+        try:
+            _htf_4h = smc_on_tf(symbol, "4h")
+            _htf_1d_raw = smc_on_tf(symbol, "1d")
+            if direction == "BULLISH":
+                if _htf_4h == "BEARISH" and _htf_1d_raw == "BEARISH":
+                    logging.debug(f"[MTF] {symbol}: HTF 4h+1d BEARISH — LONG блок")
+                    return None
+            elif direction == "BEARISH":
+                if _htf_4h == "BULLISH" and _htf_1d_raw == "BULLISH":
+                    logging.debug(f"[MTF] {symbol}: HTF 4h+1d BULLISH — SHORT блок")
+                    return None
+        except Exception:
+            _htf_4h, _htf_1d_raw = None, None
+
+        # ── Score: дополнительные подтверждения ──
+        _mtf_score = 0
+
+        # Volume spike на последних 3 свечах
+        try:
+            _avg_vol_s = sum(c.get("volume", 0) for c in candles[-20:-1]) / 19
+            _vol_3 = sum(c.get("volume", 0) for c in candles[-3:]) / 3
+            if _avg_vol_s > 0 and _vol_3 > _avg_vol_s * 1.2:
+                _mtf_score += 1
+        except Exception:
+            pass
+
+        # BTC в том же направлении
+        try:
+            _btc_c_s = get_candles("BTCUSDT", "1h", 5)
+            if _btc_c_s and len(_btc_c_s) >= 3:
+                _btc_dir_s = "BULLISH" if _btc_c_s[-1]["close"] > _btc_c_s[-3]["close"] else "BEARISH"
+                if _btc_dir_s == direction:
+                    _mtf_score += 1
+        except Exception:
+            pass
+
+        # Активная сессия (Лондон/NY)
+        import datetime as _dt_mtf
+        _mtf_hour = _dt_mtf.datetime.utcnow().hour
+        if 8 <= _mtf_hour <= 17:
+            _mtf_score += 1
+
+        if _mtf_score < 1:
+            logging.debug(f"[MTF] {symbol}: score {_mtf_score}/3 — нет доп подтверждений")
+            return None
+
+        _signal_strength = "🔥 Сильный" if _mtf_score >= 3 else "✅ Норм" if _mtf_score >= 2 else "⚡ Базовый"
+        _htf_label = f"{_htf_4h or '?'}/{_htf_1d_raw or '?'}"
+
         text = (
             f"📐 <b>[MTF]</b> | <b>{symbol}</b> — {dir_label}\n"
             f"📊 Контекст: {tf_label}{(' | ' + _weak_mtf_warn) if _weak_mtf_warn else ''}\n"
+            f"📊 Сила: {_signal_strength} | HTF: {_htf_label}\n"
             f"\n"
             f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
             f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
@@ -4114,16 +4165,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         )
         text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
-        # ── Тайминг входа — пропускаем если слабый (без очереди) ──
-        timing = check_entry_timing(candles, direction, entry, timeframe)
-        timing_score = timing.get("score", 0) if timing else 0
-        logging.info(f"[full_scan_raw] {symbol} {direction} {timeframe}: timing_score={timing_score}/3")
-
-        if timing_score < 2:
-            logging.debug(f"[MTF] {symbol}: timing {timing_score}/3 — пропускаем")
-            return None
-
-        # Тайминг достаточный — сохраняем в БД
+        # Сохраняем в БД
         if auto:
             save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
                            confluence=conf_score, regime="UNKNOWN")
