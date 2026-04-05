@@ -7264,6 +7264,40 @@ def find_equal_highs_lows(candles, lookback=20, tolerance=0.002):
 
     return eqh_level, eql_level
 
+def detect_bos_choch(candles: list, direction: str, lookback: int = 10) -> bool:
+    """
+    Реальная проверка BOS (Break of Structure) или CHoCH (Change of Character).
+
+    BULLISH BOS: цена пробила предыдущий swing high → структура сломана вверх
+    BEARISH BOS: цена пробила предыдущий swing low → структура сломана вниз
+
+    Возвращает True если структура подтверждает направление.
+    """
+    try:
+        if not candles or len(candles) < lookback + 3:
+            return False
+
+        price = candles[-1]["close"]
+
+        # Берём свечи исключая последние 3 (текущее движение)
+        _hist = candles[-(lookback + 3):-3]
+        if not _hist:
+            return False
+
+        if direction == "BULLISH":
+            _prev_high = max(c["high"] for c in _hist)
+            return price > _prev_high
+
+        elif direction == "BEARISH":
+            _prev_low = min(c["low"] for c in _hist)
+            return price < _prev_low
+
+        return False
+
+    except Exception:
+        return False
+
+
 def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     """
     Ловит swing сетапы: sweep экстремума → CHoCH → вход.
@@ -7589,19 +7623,11 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # ── 1h CHoCH после 4h sweep ──
+        # ── 1h CHoCH/BOS после 4h sweep ──
         _swing_1h_choch = False
         try:
-            if timeframe == "4h":
-                _c1h = get_candles(symbol, "1h", 20)
-                if _c1h and len(_c1h) >= 10:
-                    _sh1h, _sl1h = find_swings(_c1h, lookback=3)
-                    _cl1h = classify_swings(_sh1h, _sl1h)
-                    _ev1h = detect_events(_c1h, _cl1h)
-                    _swing_1h_choch = any(
-                        e.get("direction") == direction and e.get("type") in ("CHoCH", "BOS")
-                        for e in _ev1h
-                    )
+            _c1h_sw = get_candles(symbol, "1h", 30)
+            _swing_1h_choch = detect_bos_choch(_c1h_sw, direction, lookback=8) if _c1h_sw else False
         except Exception:
             pass
 
@@ -8084,10 +8110,10 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # Q1: CHoCH/BOS на 1h
+        # Q1: CHoCH/BOS на 1h (реальная проверка структуры)
         try:
-            dir_1h = smc_on_tf(symbol, "1h")
-            if dir_1h and direction in str(dir_1h).upper():
+            _c1h_zone = get_candles(symbol, "1h", 30)
+            if _c1h_zone and detect_bos_choch(_c1h_zone, direction, lookback=8):
                 q_score += 1
         except Exception:
             pass
