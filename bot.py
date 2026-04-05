@@ -3883,9 +3883,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             _mtf_confirms += 1                                        # 3/3 ТФ
         if len(confluence) >= 3:
             _mtf_confirms += 1                                        # confluence ≥3 сигналов
+        # Реальный BOS/CHoCH на 15m
         try:
-            _choch_1h = smc_on_tf(symbol, "15m")
-            if _choch_1h and direction in str(_choch_1h).upper():
+            _c15m_bos = get_candles(symbol, "15m", 30)
+            if _c15m_bos and detect_bos_choch(_c15m_bos, direction, lookback=10):
                 _mtf_confirms += 1                                    # CHoCH/BOS 15m
         except Exception:
             pass
