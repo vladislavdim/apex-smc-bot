@@ -9219,11 +9219,6 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _in_london_kz = 510 <= _time_minutes <= 810   # 08:30 - 13:30
         _in_ny_kz     = 990 <= _time_minutes <= 1290   # 16:30 - 21:30
 
-        # ── 0. Защита от боковика ──
-        _fast_regime = get_market_regime(symbol)
-        if isinstance(_fast_regime, dict) and _fast_regime.get("mode") == "SIDEWAYS":
-            return None
-
         # ── 1. BTC направление ──
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
         btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
