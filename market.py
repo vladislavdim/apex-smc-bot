@@ -7682,7 +7682,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if risk == 0:
             return None
         rr_check = reward / risk
-        if rr_check < 2.0 or rr_check > 6.0:
+        if rr_check < 2.0 or rr_check > 10.0:
             return None
 
         # ── Фильтр — цель должна быть реальной ──
@@ -7765,10 +7765,11 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # ── Dead hours penalty для SWING (22:00-06:00 UTC) ──
         from datetime import datetime as _dt_sw
         _sw_hour = _dt_sw.utcnow().hour
-        if 22 <= _sw_hour or _sw_hour <= 5:
-            if rr < 2.5:
-                logging.info(f"[SWING Dead Zone] {symbol}: RR {rr} < 2.5 в мёртвые часы — пропускаем")
-                return None
+        _is_dead_hours = 22 <= _sw_hour or _sw_hour <= 5
+        _rr_min = 2.0 if _is_dead_hours else 1.8
+        if rr_check < _rr_min:
+            logging.info(f"[SWING] {symbol}: RR {rr_check} < {_rr_min} {'(dead hours)' if _is_dead_hours else ''} — пропускаем")
+            return None
 
         # ── Groq анализирует реальную картину сетапа ──
         try:
@@ -8196,7 +8197,11 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        if q_score < 5:
+        # Адаптивный порог — при высокой волатильности достаточно 3
+        _zone_ap = get_adaptive_params(symbol, candles)
+        _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0
+        _q_min = 3 if _zone_vf > 1.2 else 4
+        if q_score < _q_min:
             return None  # Недостаточно подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
@@ -8276,11 +8281,24 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # TP2 — extended target
-        if direction == "BULLISH":
-            _z_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
-        else:
-            _z_tp2 = smart_round(entry - abs(entry - tp) * 1.5)
+        # TP2 — extended target (swing-based, fallback ATR)
+        try:
+            _z_sh, _z_sl = find_swings(candles, lookback=12)
+            if direction == "BULLISH":
+                _tp2_cands = [s[1] for s in _z_sh if s[1] > tp * 1.005]
+                _z_tp2 = smart_round(min(_tp2_cands)) if _tp2_cands else smart_round(entry + abs(tp - entry) * 1.5)
+            else:
+                _tp2_cands = [s[1] for s in _z_sl if s[1] < tp * 0.995]
+                _z_tp2 = smart_round(max(_tp2_cands)) if _tp2_cands else smart_round(entry - abs(entry - tp) * 1.5)
+        except Exception:
+            _z_tp2 = smart_round(tp + atr * 2) if direction == "BULLISH" else smart_round(tp - atr * 2)
+
+        # Защита — tp2 должен отличаться от tp1 минимум на 0.3%
+        if abs(_z_tp2 - tp) / max(tp, 0.0001) < 0.003:
+            if direction == "BULLISH":
+                _z_tp2 = smart_round(tp + atr * 1.5)
+            else:
+                _z_tp2 = smart_round(tp - atr * 1.5)
 
         return {
             "symbol":    symbol,
@@ -8522,7 +8540,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         drawdown_pct = (price_peak - price_now) / price_peak * 100 if price_peak > 0 else 0
 
         # Для BTC порог снижен до 12% (BTC редко падает на 20%)
-        _wyckoff_min_drawdown = 10 if symbol == "BTCUSDT" else 16
+        _wyckoff_min_drawdown = 7 if symbol == "BTCUSDT" else 12
         if drawdown_pct >= 35:
             score += 30
             signals.append(f"✅ Глубокий даунтренд -{drawdown_pct:.0f}% от пика")
@@ -8592,7 +8610,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             signals.append(f"✅ Объём сжался {vol_compression:.0%} (тихое накопление)")
 
         # ── Минимальный порог ──
-        if score < 65:
+        if score < 50:
             return None
         # Требуем Spring И SOS одновременно (AND, не OR)
         if not spring_found or not sos_found:
@@ -8886,7 +8904,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             score += 15
             signals.append(f"✅ Объём сжался {vol_compression:.0%} (тихое распределение)")
 
-        if score < 65:
+        if score < 50:
             return None
         # Требуем UTAD И SOW одновременно (AND, не OR)
         if not utad_found or not sow_found:
@@ -9089,7 +9107,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         # ── 1. Коррекция от пика (5% для BTC/ETH/BNB, 8% для остальных) ──
         price_peak = max(c["high"] for c in candles_1d[-40:-10])
         drawdown_pct = (price_peak - price_now) / price_peak * 100
-        _min_drawdown = 5 if symbol in ["BTCUSDT", "ETHUSDT", "BNBUSDT"] else 8
+        _min_drawdown = 3 if symbol in ["BTCUSDT", "ETHUSDT", "BNBUSDT"] else 5
         if drawdown_pct < _min_drawdown:
             return None
 
@@ -9249,14 +9267,19 @@ def detect_fast_deal(symbol: str) -> dict | None:
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
         btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
 
-        # ── 2. 4h+1h consensus (вместо 1d) ──
+        # ── 2. 4h+1h consensus (мягкий — один из двух достаточно) ──
         direction_4h = smc_on_tf(symbol, "4h")
         direction_1h = smc_on_tf(symbol, "1h")
-        if not direction_4h or not direction_1h:
+        if not direction_4h and not direction_1h:
             return None
-        if direction_4h != direction_1h:
-            return None  # 4h и 1h расходятся — не входим
-        direction_1d = direction_4h  # используем как direction для дальнейшей логики
+        # Берём направление: приоритет 4h, fallback 1h
+        direction_1d = direction_4h or direction_1h
+        # Блокируем только если оба ПРОТИВ друг друга
+        if direction_4h and direction_1h and direction_4h != direction_1h:
+            # Расхождение — не блокируем, но фиксируем
+            _tf_consensus = False
+        else:
+            _tf_consensus = True
 
         # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
         if symbol != "BTCUSDT":
@@ -9318,15 +9341,15 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not in_zone:
             return None
 
-        # ── MUST: не входить из середины range ──
+        # ── Middle range — мягкая проверка (score, не блок) ──
         _range_high = max(c["high"] for c in candles_4h[-20:])
         _range_low = min(c["low"] for c in candles_4h[-20:])
         _range_mid = (_range_high + _range_low) / 2
         _range_size = _range_high - _range_low
-        if direction == "BULLISH" and price_now > _range_mid + _range_size * 0.1:
-            return None  # Не входить в лонг из верха range
-        if direction == "BEARISH" and price_now < _range_mid - _range_size * 0.1:
-            return None  # Не входить в шорт из низа range
+        _in_premium = price_now > _range_mid + _range_size * 0.1
+        _in_discount = price_now < _range_mid - _range_size * 0.1
+        _no_middle_ok = (direction == "BULLISH" and not _in_premium) or \
+                        (direction == "BEARISH" and not _in_discount)
 
         # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
         candles_15m_imp = get_candles(symbol, "15m", 20)
