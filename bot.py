@@ -3886,49 +3886,32 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
             return None
 
-       # 1h — минимум 3/4 ТФ (15m+1h+4h должны совпасть, 1d только контекст)
-        _match = mtf.get("match_count", 0)
-        if timeframe == "1h" and _match < 3:
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (match_count {_match} < 3)")
-            return None
-        _weak_mtf_warn = "⚠️ Слабое MTF подтверждение (3/4 ТФ)" if _match == 3 else ""
+        # ══════════════════════════════════════
+        # 🔴 ОСНОВА — 3/3 ТФ обязательно (15m+1h+4h)
+        # ══════════════════════════════════════
+        _dir_15m = smc_on_tf(symbol, "15m")
+        _dir_1h  = smc_on_tf(symbol, "1h")
+        _dir_4h  = smc_on_tf(symbol, "4h")
+        _dir_1d  = smc_on_tf(symbol, "1d")  # контекст
 
-        # ── MTF CONFIRM (нужно 3 из 6) ──
-        _mtf_confirms = 0
-        if _match >= 3:
-            _mtf_confirms += 1                                        # 3/3 ТФ
-        if len(confluence) >= 3:
-            _mtf_confirms += 1                                        # confluence ≥3 сигналов
-        # Реальный BOS/CHoCH на 15m
-        try:
-            _c15m_bos = get_candles(symbol, "15m", 30)
-            if _c15m_bos and detect_bos_choch(_c15m_bos, direction, lookback=10):
-                _mtf_confirms += 1                                    # CHoCH/BOS 15m
-        except Exception:
-            pass
-        try:
-            _btc_dir = smc_on_tf("BTCUSDT", "4h") if symbol != "BTCUSDT" else direction
-            if _btc_dir and direction in str(_btc_dir).upper():
-                _mtf_confirms += 1                                    # BTC совпадает
-        except Exception:
-            pass
-        try:
-            _avg_v = sum(c["volume"] for c in candles[-12:]) / 12
-            _v3 = sum(c["volume"] for c in candles[-3:]) / 3
-            if _v3 > _avg_v * 1.2:
-                _mtf_confirms += 1                                    # Volume 3 свечи ≥1.2x
-        except Exception:
-            pass
-        try:
-            _htf_1d_dir = smc_on_tf(symbol, "1d")
-            if _htf_1d_dir and direction in str(_htf_1d_dir).upper():
-                _mtf_confirms += 1                                    # 1d тренд совпадает
-        except Exception:
-            pass
-
-        if _mtf_confirms < 3:
-            logging.debug(f"[MTF] {symbol}: confirms={_mtf_confirms}/6 < 3 — пропуск")
+        _tf_match = sum([
+            _dir_15m == direction,
+            _dir_1h  == direction,
+            _dir_4h  == direction,
+        ])
+        if _tf_match < 3:
+            logging.debug(f"[MTF] {symbol}: только {_tf_match}/3 ТФ совпали — пропускаем")
             return None
+
+        # 1d как контекст (не блокирует, Groq знает)
+        _htf_1d_agrees = _dir_1d == direction
+
+        # HTF hard block — только если 4h И 1d оба против
+        if _dir_4h and _dir_1d and _dir_4h != direction and _dir_1d != direction:
+            logging.debug(f"[MTF] {symbol}: HTF 4h+1d оба против — блок")
+            return None
+
+        _weak_mtf_warn = ""  # 3/3 обязательно, слабого MTF быть не может
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
@@ -4069,6 +4052,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 "- BTC подтверждает направление\n\n"
                 f"Данные: Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
                 f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
+                f"1d тренд (контекст, не блокирует): {_dir_1d}\n"
+                f"ТФ совпадение: {_tf_match}/3 (15m={_dir_15m} 1h={_dir_1h} 4h={_dir_4h})\n"
                 f"MTF: {mtf.get('match_count',0)}/3 | 1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
                 f"RR: {levels.get('rr',0)} | Стоп: {_sl_pct_mtf}% | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
                 f"Режим: {regime_val} | {_btc_str}\n"
@@ -4116,68 +4101,89 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 ["свип", "sweep", "импульс", "накопл", "ликвидн", "пробой", "ob ", "fvg"])]
             groq_logic = "\n".join(logic_lines[:3]) if logic_lines else "структурный вход по SMC"
 
-        # ── HTF hard block: 4h + 1d оба против = нет сделки ──
-        try:
-            _htf_4h = smc_on_tf(symbol, "4h")
-            _htf_1d_raw = smc_on_tf(symbol, "1d")
-            if direction == "BULLISH":
-                if _htf_4h == "BEARISH" and _htf_1d_raw == "BEARISH":
-                    logging.debug(f"[MTF] {symbol}: HTF 4h+1d BEARISH — LONG блок")
-                    return None
-            elif direction == "BEARISH":
-                if _htf_4h == "BULLISH" and _htf_1d_raw == "BULLISH":
-                    logging.debug(f"[MTF] {symbol}: HTF 4h+1d BULLISH — SHORT блок")
-                    return None
-        except Exception:
-            _htf_4h, _htf_1d_raw = None, None
-
-        # ── Score: дополнительные подтверждения ──
+        # ══════════════════════════════════════
+        # 🟢 ДОП — score минимум 1/4
+        # ══════════════════════════════════════
         _mtf_score = 0
+        _mtf_score_vol = False
+        _mtf_score_btc = False
+        _mtf_score_session = False
+        _mtf_score_bos = False
 
-        # Volume spike на последних 3 свечах
+        # Volume spike ≥1.2x
         try:
-            _avg_vol_s = sum(c.get("volume", 0) for c in candles[-20:-1]) / 19
-            _vol_3 = sum(c.get("volume", 0) for c in candles[-3:]) / 3
-            if _avg_vol_s > 0 and _vol_3 > _avg_vol_s * 1.2:
+            _avg_vol_m = sum(c["volume"] for c in candles[-20:-1]) / 19
+            if _avg_vol_m > 0 and candles[-1]["volume"] > _avg_vol_m * 1.2:
                 _mtf_score += 1
+                _mtf_score_vol = True
         except Exception:
             pass
 
-        # BTC в том же направлении
+        # BTC совпадает
         try:
-            _btc_c_s = get_candles("BTCUSDT", "1h", 5)
-            if _btc_c_s and len(_btc_c_s) >= 3:
-                _btc_dir_s = "BULLISH" if _btc_c_s[-1]["close"] > _btc_c_s[-3]["close"] else "BEARISH"
-                if _btc_dir_s == direction:
+            _btc_m = get_candles("BTCUSDT", "1h", 5)
+            if _btc_m and len(_btc_m) >= 3:
+                _btc_dir_m = "BULLISH" if _btc_m[-1]["close"] > _btc_m[-3]["close"] else "BEARISH"
+                if _btc_dir_m == direction:
                     _mtf_score += 1
+                    _mtf_score_btc = True
         except Exception:
             pass
 
-        # Активная сессия (Лондон/NY)
-        import datetime as _dt_mtf
-        _mtf_hour = _dt_mtf.datetime.utcnow().hour
-        if 8 <= _mtf_hour <= 17:
+        # Активная сессия (London/NY)
+        import datetime as _dt_m
+        _h_m = _dt_m.datetime.utcnow().hour
+        if 8 <= _h_m <= 17:
             _mtf_score += 1
+            _mtf_score_session = True
 
+        # BOS/CHoCH на 15m
+        try:
+            _c15m_m = get_candles(symbol, "15m", 30)
+            if _c15m_m and detect_bos_choch(_c15m_m, direction, lookback=15):
+                _mtf_score += 1
+                _mtf_score_bos = True
+        except Exception:
+            pass
+
+        # Минимум 1 из 4 доп подтверждений
         if _mtf_score < 1:
-            logging.debug(f"[MTF] {symbol}: score {_mtf_score}/3 — нет доп подтверждений")
+            logging.debug(f"[MTF] {symbol}: score {_mtf_score}/4 — пропускаем")
             return None
 
         _signal_strength = "🔥 Сильный" if _mtf_score >= 3 else "✅ Норм" if _mtf_score >= 2 else "⚡ Базовый"
-        _htf_label = f"{_htf_4h or '?'}/{_htf_1d_raw or '?'}"
+
+        # ══════════════════════════════════════
+        # 📝 ТЕКСТ СИГНАЛА
+        # ══════════════════════════════════════
+        _must_text = f"15m+1h+4h {direction} | {_tf_match}/3 ТФ ✅"
+        _1d_text = f"1d: {'✅' if _htf_1d_agrees else '⚠️'} {_dir_1d or '?'} (контекст)"
+
+        _confirm_items = []
+        if _mtf_score_vol:     _confirm_items.append("📊 Объём")
+        if _mtf_score_btc:     _confirm_items.append("₿ BTC")
+        if _mtf_score_session: _confirm_items.append("⏰ Сессия")
+        if _mtf_score_bos:     _confirm_items.append("🔄 BOS")
+        _confirm_text = " | ".join(_confirm_items) if _confirm_items else "—"
+
+        _sl_pct_txt = round(abs(entry - sl) / entry * 100, 2) if entry > 0 else 0
+        _dir_emoji = "🟢 LONG" if direction == "BULLISH" else "🔴 SHORT"
 
         text = (
-            f"📐 <b>[MTF]</b> | <b>{symbol}</b> — {dir_label}\n"
-            f"📊 Контекст: {tf_label}{(' | ' + _weak_mtf_warn) if _weak_mtf_warn else ''}\n"
-            f"📊 Сила: {_signal_strength} | HTF: {_htf_label}\n"
-            f"\n"
-            f"🎯 TP:  <code>{smart_price_fmt(tp1)}</code>\n"
-            f"💰 Вход: <code>{smart_price_fmt(entry)}</code>\n"
-            f"🛑 Стоп: <code>{smart_price_fmt(sl)}</code>\n"
-            f"\n"
-            f"📈 Логика:\n{groq_logic}\n"
-            f"\n"
-            f"⚡ Риск: {risk_level}\n"
+            f"📐 <b>MTF</b> | {symbol} — {_dir_emoji}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📌 Основа: {_must_text}\n"
+            f"📋 {_1d_text}\n"
+            f"✅ Доп: {_mtf_score}/4 — {_confirm_text}\n"
+            f"💪 Сила: {_signal_strength}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🎯 Вход:  <code>{smart_price_fmt(entry)}</code>\n"
+            f"🛑 Стоп:  <code>{smart_price_fmt(sl)}</code>  ({_sl_pct_txt}%)\n"
+            f"🎯 TP1:   <code>{smart_price_fmt(tp1)}</code>\n"
+            f"🎯 TP2:   <code>{smart_price_fmt(tp2)}</code>\n"
+            f"📊 RR:    {levels.get('rr', 0)}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📈 Логика: {groq_logic}\n"
             f"⏱ Горизонт: {groq_time}"
         )
         text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
