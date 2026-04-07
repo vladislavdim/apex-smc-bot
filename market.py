@@ -7453,12 +7453,12 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         tp = smart_round(last_swing_low)
                         logic = f"Реакция от OB {smart_price_fmt(_ob_bear['bottom'])}–{smart_price_fmt(_ob_bear['top'])}"
 
-                # Variant 2: минимум RR 2.5 (строже чем sweep)
+                # Variant 2: минимум RR 2.0
                 if direction and entry and sl and tp:
                     _v2_risk = abs(entry - sl)
                     _v2_reward = abs(tp - entry)
-                    if _v2_risk > 0 and _v2_reward / _v2_risk < 2.5:
-                        logging.info(f"[SWING V2] {symbol}: RR {_v2_reward/_v2_risk:.2f} < 2.5 — пропуск")
+                    if _v2_risk > 0 and _v2_reward / _v2_risk < 2.0:
+                        logging.info(f"[SWING V2] {symbol}: RR {_v2_reward/_v2_risk:.2f} < 2.0 — пропуск")
                         return None
             except Exception:
                 pass
@@ -7481,7 +7481,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         if _in_zone_rc:
                             _reaction_candles += 1
 
-                    if _reaction_candles > 3:
+                    if _reaction_candles > 5:
                         logging.debug(f"[SWING] {symbol}: цена тупит у зоны {_reaction_candles} свечей — слабый сетап")
                         direction = None
                         entry = None
@@ -7766,7 +7766,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         from datetime import datetime as _dt_sw
         _sw_hour = _dt_sw.utcnow().hour
         _is_dead_hours = 22 <= _sw_hour or _sw_hour <= 5
-        _rr_min = 2.0 if _is_dead_hours else 1.8
+        _rr_min = 1.8 if _is_dead_hours else 1.5
         if rr_check < _rr_min:
             logging.info(f"[SWING] {symbol}: RR {rr_check} < {_rr_min} {'(dead hours)' if _is_dead_hours else ''} — пропускаем")
             return None
@@ -8200,7 +8200,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # Адаптивный порог — при высокой волатильности достаточно 3
         _zone_ap = get_adaptive_params(symbol, candles)
         _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0
-        _q_min = 3 if _zone_vf > 1.2 else 4
+        _q_min = 4 if _zone_vf > 1.2 else 5
         if q_score < _q_min:
             return None  # Недостаточно подтверждений
 
@@ -9318,7 +9318,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         zone_desc = ""
         atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
         _ap_fast = get_adaptive_params(symbol, candles_4h)
-        _zone_tol = atr_4h * _ap_fast["volatility_factor"]  # Допуск ±ATR×vf
+        _zone_tol = atr_4h * _ap_fast["volatility_factor"] * 1.5  # Допуск ±ATR×vf×1.5
 
         if ob_4h:
             zone_bottom = ob_4h["bottom"]
@@ -9357,14 +9357,6 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None
 
         last_15m = candles_15m_imp[-1]
-        body_15m = abs(last_15m["close"] - last_15m["open"])
-        range_15m = last_15m["high"] - last_15m["low"] if last_15m["high"] != last_15m["low"] else 0.001
-        is_impulse_15m = body_15m / range_15m > 0.4
-
-        if direction == "BULLISH" and not (last_15m["close"] > last_15m["open"] and is_impulse_15m):
-            return None
-        if direction == "BEARISH" and not (last_15m["close"] < last_15m["open"] and is_impulse_15m):
-            return None
 
         # Volume check на 15m impulse — должен быть выше среднего
         _avg_vol_15m_imp = sum(c.get("volume", 0) for c in candles_15m_imp[:-1]) / max(len(candles_15m_imp) - 1, 1)
@@ -9381,7 +9373,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         entry = None
         sl = None
 
-        for i in range(1, 7):  # смотрим 6 свечей назад
+        for i in range(1, 11):  # смотрим 10 свечей назад
             if i >= len(candles_15m): break
             curr = candles_15m[-i]
             prev = candles_15m[-i-1]
@@ -9391,7 +9383,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             prev_body = abs(prev["close"] - prev["open"])
 
             # Displacement: тело > 55% range (адаптировано для 15m)
-            if curr_range > 0 and curr_body / curr_range < 0.55:
+            if curr_range > 0 and curr_body / curr_range < 0.45:
                 continue
 
             # Engulfing паттерн
@@ -9415,7 +9407,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             # Volume spike — адаптивный порог (1.5x в сессию, 1.2x вне)
             import datetime as _dt_fast
             _fast_hour = _dt_fast.datetime.utcnow().hour
-            _vol_threshold = 1.5 if 8 <= _fast_hour <= 17 else 1.2
+            _vol_threshold = 1.3 if 8 <= _fast_hour <= 17 else 1.1
             avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
             if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * _vol_threshold:
                 continue
