@@ -7321,8 +7321,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         _ap_sw = get_adaptive_params(symbol, candles)
         _vf_sw = _ap_sw["volatility_factor"]
 
-        # ── Swing highs/lows (lookback=8) ──
-        swing_highs, swing_lows = find_swings(candles, lookback=8)
+        # ── Swing highs/lows (lookback=12) ──
+        swing_highs, swing_lows = find_swings(candles, lookback=12)
         if len(swing_highs) < 2 or len(swing_lows) < 2:
             return None
 
@@ -7584,7 +7584,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         try:
             if lookback_i <= 2:
                 pass  # Быстрая реакция — ОК
-            elif lookback_i >= 6:
+            elif lookback_i >= 10:
                 return None  # Слишком долгое восстановление после sweep
         except Exception:
             pass
@@ -7660,14 +7660,13 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # Если sweep был давно — цена могла уйти далеко от входа
         current_price = candles[-1]["close"]
-        if abs(current_price - entry) > atr * 2:
+        if abs(current_price - entry) > atr * 4:
             return None
 
         # ── Проверка противоположного OB между entry и TP ──
         _adj_tp = check_opposing_ob(candles, direction, entry, tp)
-        if _adj_tp is None:
-            return None  # Противоположный OB блокирует TP
-        tp = _adj_tp
+        if _adj_tp is not None:
+            tp = _adj_tp  # Корректируем TP но не блокируем
 
         # SL cap — не дальше 4% от entry
         _sl_max_pct = 0.04
