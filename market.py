@@ -9419,11 +9419,13 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if not engulfing_found or entry is None:
             return None
 
-        # ── Acceptance — цена закрылась выше/ниже зоны OB/FVG ──
+        # ── Acceptance — проверяем на свече engulfing (не текущей) ──
+        _eng_idx = _sweep_candles_ago if '_sweep_candles_ago' in dir() else 1
+        _eng_candle = candles_15m[-_eng_idx] if _eng_idx < len(candles_15m) else candles_15m[-1]
         if ob_4h and direction == "BULLISH":
-            _acceptance = candles_15m[-1]["close"] > ob_4h["top"]
+            _acceptance = _eng_candle["close"] > ob_4h["top"]
         elif ob_4h and direction == "BEARISH":
-            _acceptance = candles_15m[-1]["close"] < ob_4h["bottom"]
+            _acceptance = _eng_candle["close"] < ob_4h["bottom"]
         else:
             _acceptance = True  # Нет OB — не блокируем
 
