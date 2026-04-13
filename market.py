@@ -7521,8 +7521,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = candles[-lookback_i] if lookback_i <= len(candles) else candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * 1.0:
-                return None  # Объём < 1.2×avg — ненадёжный sweep
+            if avg_vol > 0 and sweep_vol < avg_vol * 0.7:
+                return None  # Объём < 0.7×avg — совсем слабый sweep
         except Exception:
             pass
 
@@ -7716,34 +7716,20 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             elif direction == "BEARISH" and "BULLISH" in _1w_str:
                 weekly_warning = "⚠️ 1w BULLISH — осторожно с шортом"
 
-        # ── Дополнительно: проверяем 15m подтверждение ──
+        # ── Дополнительно: 15m подтверждение (бонус, не блок) ──
+        _swing_15m_confirms = False
         try:
             candles_15m = get_candles(symbol, "15m", 20)
             if candles_15m and len(candles_15m) >= 5:
                 last_15m = candles_15m[-1]
-                prev_15m = candles_15m[-2]
-                # Импульсная свеча на 15m
                 body_15m = abs(last_15m["close"] - last_15m["open"])
                 range_15m = last_15m["high"] - last_15m["low"] if last_15m["high"] != last_15m["low"] else 0.001
                 is_impulse_15m = body_15m / range_15m > 0.6
 
-                # Бонус +1 если 15m подтверждает направление
                 if direction == "BULLISH" and last_15m["close"] > last_15m["open"] and is_impulse_15m:
-                    pass  # Подтверждение есть
+                    _swing_15m_confirms = True
                 elif direction == "BEARISH" and last_15m["close"] < last_15m["open"] and is_impulse_15m:
-                    pass  # Подтверждение есть
-
-                # Проверяем 5m подтверждение
-                candles_5m = get_candles(symbol, "5m", 10)
-                if candles_5m and len(candles_5m) >= 3:
-                    last_5m = candles_5m[-1]
-                    body_5m = abs(last_5m["close"] - last_5m["open"])
-                    range_5m = last_5m["high"] - last_5m["low"] if last_5m["high"] != last_5m["low"] else 0.001
-                    is_impulse_5m = body_5m / range_5m > 0.6
-                    if direction == "BULLISH" and last_5m["close"] < last_5m["open"] and is_impulse_5m:
-                        return None  # 5m медвежья против лонга — пропускаем
-                    if direction == "BEARISH" and last_5m["close"] > last_5m["open"] and is_impulse_5m:
-                        return None  # 5m бычья против шорта — пропускаем
+                    _swing_15m_confirms = True
         except Exception:
             pass
 
@@ -7770,7 +7756,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             logging.info(f"[SWING] {symbol}: RR {rr_check} < {_rr_min} {'(dead hours)' if _is_dead_hours else ''} — пропускаем")
             return None
 
-        # ── Groq анализирует реальную картину сетапа ──
+        # ── Groq анализирует реальную картину сетапа (бонус, не блокирует) ──
+        _swing_groq_ok = False
         try:
             last_candles_summary = []
             for c in candles[-5:]:
@@ -7868,10 +7855,11 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     if json_match:
                         clean = json_match.group()
                     parsed = _json.loads(clean)
-                    # Groq как фильтр — если явно valid=false, блокируем
-                    if not parsed.get("valid", True):
-                        logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
-                        return None
+                    # Groq как бонус — valid=true добавляет к quality, не блокирует
+                    if parsed.get("valid", True):
+                        _swing_groq_ok = True
+                    else:
+                        logging.info(f"[SWING Groq] {symbol}: Groq не подтвердил (soft, не блок)")
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
                         logic = str(parsed["logic"]).strip()
                     if parsed.get("hours") and str(parsed["hours"]).isdigit():
@@ -7913,11 +7901,13 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             _swing_1h_choch,    # CHoCH подтверждает
             _swing_pd_ok,       # Ликвидность/Premium-Discount
             _swing_fvg_ok,      # FVG между entry-TP
+            _swing_groq_ok,     # Groq подтвердил
+            _swing_15m_confirms,  # 15m импульс совпадает
         ])
-        _sw_quality = f" [Q:{_sw_confirms}/5]"
-        # Если менее 2 подтверждений — блокируем независимо от RR
-        if _sw_confirms < 2:
-            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 2 — пропуск")
+        _sw_quality = f" [Q:{_sw_confirms}/7]"
+        # Минимум 1 из 7 подтверждений
+        if _sw_confirms < 1:
+            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/7 < 1 — пропуск")
             return None
 
         # TP2 — extended target
