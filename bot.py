@@ -4146,8 +4146,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception:
             pass
 
-        # Минимум 1 из 4 доп подтверждений
-        if _mtf_score < 1:
+        # Минимум 2 из 4 доп подтверждений
+        if _mtf_score < 2:
             logging.debug(f"[MTF] {symbol}: score {_mtf_score}/4 — пропускаем")
             return None
 
