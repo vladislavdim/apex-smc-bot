@@ -156,6 +156,11 @@ def init_learning():
         ("confirmed_by",    "INTEGER DEFAULT 0"),
         ("contradicted_by", "INTEGER DEFAULT 0"),
         ("updated_at",      "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        # Контекст нужен, чтобы правило от одной стратегии не влияло
+        # случайно на все остальные.
+        ("symbol",          "TEXT DEFAULT ''"),
+        ("direction",       "TEXT DEFAULT ''"),
+        ("strategy",        "TEXT DEFAULT ''"),
     ]:
         try: conn.execute(f"ALTER TABLE self_rules ADD COLUMN {_col} {_def}")
         except: pass
@@ -604,7 +609,7 @@ def should_skip_symbol(symbol: str, direction: str) -> tuple[bool, str]:
                 SELECT COUNT(DISTINCT signal_type) as strat_count, COUNT(*) as total_sl
                 FROM signals
                 WHERE symbol=? AND direction=? AND result='sl'
-                AND created_at >= datetime('now', '-48 hours')
+                AND COALESCE(closed_at, created_at) >= datetime('now', '-48 hours')
             """, (symbol, direction)).fetchone()
             if cross and cross[0] >= 2:
                 conn.close()
@@ -782,6 +787,18 @@ def _init_new_tables():
         result     TEXT, rr REAL DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    # В старых версиях market.py создавалась другая таблица pattern_history.
+    # Доводим её до схемы matcher-а вместо тихого падения save_pattern().
+    for _col, _def in [
+        ("symbol", "TEXT"), ("timeframe", "TEXT"), ("direction", "TEXT"),
+        ("regime", "TEXT"), ("confluence", "INTEGER DEFAULT 0"),
+        ("hour_utc", "INTEGER"), ("weekday", "INTEGER"),
+        ("result", "TEXT"), ("rr", "REAL DEFAULT 0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE pattern_history ADD COLUMN {_col} {_def}")
+        except Exception:
+            pass
     conn.execute("""CREATE TABLE IF NOT EXISTS btc_correlation (
         symbol      TEXT PRIMARY KEY,
         corr_coef   REAL DEFAULT 0,
@@ -836,7 +853,7 @@ def find_similar_patterns(symbol: str, direction: str, timeframe: str,
             SELECT result, rr FROM pattern_history
             WHERE symbol=? AND direction=? AND timeframe=?
             AND ABS(confluence - ?) <= 10
-            AND result != 'PENDING'
+            AND result IN ('tp1', 'tp2', 'tp3', 'sl')
             ORDER BY id DESC LIMIT 30
         """, (symbol, direction, timeframe, confluence)).fetchall()
 
@@ -846,7 +863,7 @@ def find_similar_patterns(symbol: str, direction: str, timeframe: str,
                 SELECT result, rr FROM pattern_history
                 WHERE direction=? AND regime=? AND timeframe=?
                 AND ABS(confluence - ?) <= 15
-                AND result != 'PENDING'
+                AND result IN ('tp1', 'tp2', 'tp3', 'sl')
                 ORDER BY id DESC LIMIT 50
             """, (direction, regime, timeframe, confluence)).fetchall()
         conn.close()
@@ -901,7 +918,7 @@ def decay_old_rules():
         conn = sqlite3.connect(DB_PATH)
         cutoff = (datetime.now() - timedelta(days=14)).isoformat()
 
-        # Ослабляем старые правила
+        # Ослабляем старые auto-правила.
         conn.execute("""
             UPDATE auto_rules
             SET confidence = MAX(0.1, confidence - 0.1)
@@ -912,6 +929,23 @@ def decay_old_rules():
         conn.execute("""
             UPDATE auto_rules SET active = 0
             WHERE confidence < 0.2 AND active = 1
+        """)
+
+        # self_rules были главным источником бесконечного накопления: раньше
+        # decay их вообще не касался. Не удаляем правила, а выключаем только
+        # давно не подтверждённые слабые записи.
+        conn.execute("""
+            UPDATE self_rules
+            SET confidence = MAX(0.1, confidence - 0.05),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE active = 1
+              AND confidence < 0.75
+              AND COALESCE(updated_at, created_at) < ?
+              AND COALESCE(confirmed_by, 0) = 0
+        """, (cutoff,))
+        conn.execute("""
+            UPDATE self_rules SET active = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE active = 1 AND confidence < 0.2
         """)
 
         # То же для error_patterns
@@ -1225,10 +1259,14 @@ def analyze_closed_trade(signal_id: int):
 
         # Если Groq предлагает правило — создаём его
         if rule_type and rule_text and confidence >= 0.65:
+            _strategy = next((name for name in ("MTF", "SWING", "FAST", "WYCKOFF", "ZONE")
+                              if name in str(grade or "").upper()), "")
             conn.execute("""INSERT OR IGNORE INTO self_rules
-                (rule_type, rule_text, confidence, source, created_at, active)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
-                (rule_type.lower(), rule_text, confidence, "groq_trade_analysis"))
+                (category, rule, rule_type, rule_text, confidence, source,
+                 symbol, direction, strategy, created_at, updated_at, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)""",
+                (rule_type.lower(), rule_text, rule_type.lower(), rule_text, confidence,
+                 "groq_trade_analysis", symbol, direction, _strategy))
             logging.info(f"[Learning] Groq создал правило [{rule_type}]: {rule_text[:60]}")
 
         conn.commit()
