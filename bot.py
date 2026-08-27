@@ -70,6 +70,18 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ── Импортируем всю рыночную логику из market.py ──
 from market import *
 
+# Финальная проверка внешнего рыночного контекста. Она вызывается только после
+# того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
+try:
+    from core.signal_quality_gate import (
+        mark_candidate_not_sent as _mark_candidate_not_sent,
+        review_signal_candidate as _review_signal_candidate,
+    )
+    _SIGNAL_QUALITY_GATE_OK = True
+except Exception as _quality_gate_import_error:
+    _SIGNAL_QUALITY_GATE_OK = False
+    logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
+
 # Путь к базе данных
 import os as _os_bot
 DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
@@ -2820,9 +2832,24 @@ async def _send_with_retry(chat_id, text, parse_mode="HTML", retries=3, **kwargs
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
+    if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
+        review = await _review_signal_candidate(sd, ask_groq)
+        sd["_external_quality_reviewed"] = True
+        sd["_external_quality_review"] = review
+        decision = review.get("decision", "APPROVE")
+        logging.info(
+            "[SignalQualityGate] %s %s → %s confidence=%.2f sources=%s reasons=%s",
+            sd.get("symbol"), sd.get("direction"), decision,
+            review.get("confidence", 0.0),
+            review.get("context", {}).get("available_sources", []),
+            review.get("reasons", []),
+        )
+        if decision in ("WAIT", "REJECT"):
+            await asyncio.to_thread(_mark_candidate_not_sent, sd, decision)
+            return False
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
-        return
+        return False
     now_ts = time.time()
     cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
     try:
@@ -2859,7 +2886,7 @@ async def _send_signal(sd):
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     # backup только по расписанию (раз в час) — не после каждого сигнала
-    pass
+    return True
 
 
 async def _scan_tf(timeframe: str, pairs_limit: int = 50):
@@ -3590,6 +3617,24 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
             # Сохраняем в БД с tp1 и tp2 отдельно для частичного закрытия
             _f_tp1 = r.get("tp1", r["tp"])
             _f_tp2 = r.get("tp2", r["tp"])
+            _fast_sd = {
+                "symbol": symbol, "direction": direction, "timeframe": "5m",
+                "entry": r["entry"], "sl": r["sl"], "tp1": _f_tp1,
+                "tp2": _f_tp2, "tp3": _f_tp2, "rr": r.get("rr"),
+                "grade": "FAST", "scan_type": "fast",
+                "confluence_score": int(r["rr"] * 20), "regime": "FAST",
+            }
+            if _SIGNAL_QUALITY_GATE_OK:
+                _fast_review = await _review_signal_candidate(_fast_sd, ask_groq)
+                logging.info(
+                    "[SignalQualityGate] FAST %s %s → %s confidence=%.2f sources=%s reasons=%s",
+                    symbol, direction, _fast_review.get("decision", "APPROVE"),
+                    _fast_review.get("confidence", 0.0),
+                    _fast_review.get("context", {}).get("available_sources", []),
+                    _fast_review.get("reasons", []),
+                )
+                if _fast_review.get("decision") in ("WAIT", "REJECT"):
+                    continue
             save_signal_db(
                 symbol, direction, "FAST",
                 r["entry"], _f_tp1, _f_tp2, _f_tp2, r["sl"],
