@@ -4795,7 +4795,6 @@ async def on_startup(app):
     webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
     # timing_queue отключена — MTF отправляет сигналы напрямую по скору
     # webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(realtime_pump_detector, "interval", minutes=15, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(check_alerts,         "interval", minutes=5,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_research,        "interval", hours=2,    max_instances=1, coalesce=True)
     webhook_scheduler.add_job(night_brain_tasks,    "interval", minutes=30, jitter=180, max_instances=1, coalesce=True)
@@ -4995,16 +4994,10 @@ async def on_shutdown(app):
 
 def main():
     # Файловый лок — предотвращает запуск двух инстансов
-    # Удаляем старый lock от предыдущего контейнера Render перед созданием нового
-    import fcntl, os as _os_lock
+    # Нельзя удалять lock-файл: старый процесс продолжает держать lock на уже
+    # удалённом inode, и второй polling-инстанс тогда запускается параллельно.
+    import fcntl
     _lock_path = "/tmp/apex_bot.lock"
-    try:
-        _os_lock.remove(_lock_path)
-        logging.info("Старый lock файл удалён — перезапуск контейнера")
-    except FileNotFoundError:
-        pass
-    except Exception as _le:
-        logging.warning(f"Не смог удалить lock: {_le}")
     lock_file = open(_lock_path, "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -5107,7 +5100,6 @@ def main():
             scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
             # backup_db_to_github убран из heartbeat-цикла — вызывает disk I/O ошибки
             # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
-            scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             if _LEARNING_OK:
                 # В polling-режиме раньше не было ни decay, ни пересмотра

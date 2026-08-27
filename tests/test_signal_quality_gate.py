@@ -40,6 +40,14 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("EXTERNAL MARKET CONTEXT", captured[0])
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["rr"]), (100, 95, 110, 2))
 
+    async def test_groq_cannot_replace_candidate_levels(self):
+        candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "WYCKOFF", "entry": 100, "sl": 95, "tp1": 110, "tp2": 120, "tp3": 130, "rr": 2}
+        def ask(prompt, tokens):
+            return '{"valid": true, "decision": "APPROVE", "target": 999999, "reasons": ["ok"]}'
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), patch("core.signal_quality_gate.persist_context"):
+            await review_signal_candidate(candidate, ask)
+        self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["tp2"], candidate["tp3"], candidate["rr"]), (100, 95, 110, 120, 130, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

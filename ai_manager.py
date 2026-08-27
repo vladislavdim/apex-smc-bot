@@ -114,25 +114,15 @@ class AIManager:
     def _init_models(self) -> Dict[str, AIModel]:
         """Инициализация доступных моделей"""
         return {
-            "llama-3.1-8b-instant": AIModel(
-                name="llama-3.1-8b-instant",
+            "openai/gpt-oss-20b": AIModel(
+                name="openai/gpt-oss-20b",
                 max_tokens=8192,
                 cost_per_1k_tokens=0.05
             ),
-            "llama-3.3-70b-versatile": AIModel(
-                name="llama-3.3-70b-versatile", 
+            "openai/gpt-oss-120b": AIModel(
+                name="openai/gpt-oss-120b",
                 max_tokens=8192,
                 cost_per_1k_tokens=0.59
-            ),
-            "llama-3.1-70b-versatile": AIModel(
-                name="llama-3.1-70b-versatile",
-                max_tokens=8192,
-                cost_per_1k_tokens=0.59
-            ),
-            "mixtral-8x7b-32768": AIModel(
-                name="mixtral-8x7b-32768",
-                max_tokens=32768,
-                cost_per_1k_tokens=0.27
             )
         }
     
@@ -290,10 +280,8 @@ class AIManager:
         """
         # Пробуем последовательно модели
         model_priority = [
-            "llama-3.1-8b-instant",
-            "llama-3.3-70b-versatile", 
-            "llama-3.1-70b-versatile",
-            "mixtral-8x7b-32768"
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
         ]
         
         for model in model_priority:

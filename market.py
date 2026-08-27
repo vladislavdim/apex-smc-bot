@@ -292,6 +292,7 @@ def get_api_status_text():
     return "\n".join(lines)
 
 from aiohttp import ClientSession as _ClientSession, ClientTimeout as _ClientTimeout
+from core.groq_models import configured_groq_models, is_model_unavailable_error
 _timeout = _ClientTimeout(total=30, connect=10)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -818,7 +819,7 @@ def extract_and_save_profile(user_id, user_name, message, ai_response):
 Сообщение: {message}
 {{"profile": "1-2 предложения о стиле торговли", "coins": "монеты через запятую", "preferences": "таймфрейм, стиль, риск"}}"""
         r = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=configured_groq_models()[0],
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200
         )
@@ -3134,31 +3135,9 @@ async def realtime_pump_detector():
                 price_change = (candles[-1]["close"] - candles[-4]["close"]) / candles[-4]["close"] * 100
 
                 if vol_spike >= 3 and abs(price_change) >= 1.5:
-                    direction = "🚀 ПАМП" if price_change > 0 else "💥 ДАМП"
-                    p = candles[-1]["close"]
-                    if p < 0.0001:
-                        ps = f"${p:.8f}"
-                    elif p < 0.01:
-                        ps = f"${p:.6f}"
-                    elif p < 1:
-                        ps = f"${p:.4f}"
-                    else:
-                        ps = f"${p:,.2f}"
-
                     pump_alerted.add(symbol)
-                    # Снимаем алерт через 30 мин
+                    # Internal detector only: no Telegram pump/dump alert.
                     asyncio.get_running_loop().call_later(1800, lambda s=symbol: pump_alerted.discard(s))
-
-                    if ADMIN_ID:
-                        await bot.send_message(
-                            ADMIN_ID,
-                            f"{direction} ДЕТЕКТОР\n\n"
-                            f"⚡️ <b>{symbol}</b> | {ps}\n"
-                            f"📊 Объём x{vol_spike:.1f} от среднего\n"
-                            f"📈 Изменение цены: {price_change:+.2f}% за 15 мин\n"
-                            f"⏰ {datetime.now().strftime('%H:%M:%S')}",
-                            parse_mode="HTML"
-                        )
                 await asyncio.sleep(0.2)
             except:
                 pass
@@ -5828,57 +5807,58 @@ def ask_groq(prompt, max_tokens=800):
     if len(prompt) > 6000:
         prompt = prompt[:5000] + "\n[промпт сокращён для экономии токенов]"
 
-    models = [
-        "llama-3.1-8b-instant",
-        "llama3-8b-8192",
-        "gemma2-9b-it",
-    ]
+    models = configured_groq_models()
 
     active_keys = [k for k in GROQ_KEYS if k]
     if not active_keys:
         logging.error("Groq: нет активных ключей")
         return None
 
-    for attempt in range(len(active_keys) * len(models)):
-        key_index = (_groq_key_index + attempt) % len(active_keys)
-
-        key = active_keys[key_index]
-        model = models[(attempt // len(active_keys)) % len(models)]
-
-        rl_time = _key_rate_limited.get(key_index, 0)
-        if time.time() - rl_time < 60:
-            _groq_key_index = (key_index + 1) % len(active_keys)
+    rate_limited = 0
+    tried_request = False
+    for model in models:
+        # A 404 is tied to the model, not to an individual API key.  Trying it
+        # with every key only creates misleading "all keys exhausted" logs.
+        model_unavailable = False
+        for offset in range(len(active_keys)):
+            key_index = (_groq_key_index + offset) % len(active_keys)
+            if time.time() - _key_rate_limited.get(key_index, 0) < 60:
+                rate_limited += 1
+                continue
+            tried_request = True
+            try:
+                client = Groq(api_key=active_keys[key_index])
+                r = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    timeout=30,
+                )
+                _track_tokens(len(prompt) // 4 + max_tokens)
+                _groq_key_index = (key_index + 1) % len(active_keys)
+                return r.choices[0].message.content
+            except Exception as e:
+                err_str = str(e).lower()
+                if is_model_unavailable_error(e):
+                    logging.warning("Groq model %s недоступна; пробую fallback", model)
+                    model_unavailable = True
+                    break
+                if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
+                    _key_rate_limited[key_index] = time.time()
+                    rate_limited += 1
+                    logging.warning("Groq rate limit ключ %s — блокирую на 60с", key_index + 1)
+                    continue
+                if "401" in err_str or "403" in err_str or "invalid api key" in err_str:
+                    logging.error("Groq ключ %s отклонён или не имеет доступа", key_index + 1)
+                    continue
+                logging.error("Groq error (ключ %s, модель %s): %s", key_index + 1, model, e)
+        if model_unavailable:
             continue
 
-
-
-        try:
-            client = Groq(api_key=key)
-            r = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                timeout=30,
-            )
-            _track_tokens(len(prompt) // 4 + max_tokens)
-            _groq_key_index = (key_index + 1) % len(active_keys)
-            return r.choices[0].message.content
-        except Exception as e:
-            err_str = str(e).lower()
-            if "rate_limit" in err_str or "429" in err_str or "rate limit" in err_str:
-                # Блокируем ключ на 60 секунд и СРАЗУ переходим к следующему
-                _key_rate_limited[key_index] = time.time()
-                logging.warning(f"Groq rate limit ключ {key_index+1} — блокирую на 60с, переключаю...")
-                continue  # сразу следующий ключ без sleep
-            elif "model" in err_str and ("not found" in err_str or "decommissioned" in err_str):
-                logging.warning(f"Модель {model} недоступна, пробую следующую")
-                continue
-            else:
-                logging.error(f"Groq error (ключ {key_index+1}): {e}")
-                time.sleep(1)
-                continue
-
-    logging.error("Groq: все ключи временно исчерпаны")
+    if rate_limited and rate_limited >= len(active_keys) and tried_request:
+        logging.error("Groq: все доступные ключи получили rate limit; повтор через 60с")
+    else:
+        logging.error("Groq недоступен: проверьте GROQ_MODEL/доступ ключа; ключи не помечены исчерпанными")
     return None
 
 # ===== APEX BRAIN v2 — АВТОНОМНОЕ САМООБУЧЕНИЕ =====
@@ -8829,7 +8809,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа и накоплении/дистрибуции. "
                 "Оцени качество Wyckoff Spring сетапа. "
-                f'Ответь СТРОГО JSON: {{"target": число_цены, "target_pct": процент, "logic": "макс 15 слов", "valid": true/false}}\n\n'
+                f'Ответь СТРОГО JSON: {{"logic": "макс 15 слов", "valid": true/false}}\n\n'
                 "БЛОКИРУЙ (valid: false) если:\n"
                 "- Spring или SOS отсутствуют или слабые\n"
                 "- Объём на Spring не выше среднего\n"
@@ -8844,11 +8824,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 "- Объём снижается в боковике (накопление завершается)\n"
                 "- Цена у или ниже Creek — идеальный вход\n"
                 "- TP = уровень AR (автоматический ралли) или выше\n\n"
-                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
-                "- SL ТОЛЬКО за структурный уровень (SC low, Spring low, acc_low)\n"
-                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
-                "- TP ТОЛЬКО на структурный уровень (AR high, Creek, swing point)\n"
-                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
+                "УРОВНИ УЖЕ РАССЧИТАНЫ СТРАТЕГИЕЙ. НИКОГДА НЕ МЕНЯЙ entry, SL или TP.\n\n"
                 f"Данные: Пара: {symbol} Цена: {price_now}\n"
                 f"SC лоу: {phases['SC']['price']:.6f} | AR хай: {ar_price:.6f}\n"
                 f"Пик до падения: {price_peak:.6f} | Даунтренд: -{drawdown_pct:.0f}%\n"
@@ -8874,8 +8850,6 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                     if not parsed.get("valid", True):
                         logging.info(f"[WYCKOFF Groq] {symbol} LONG: Groq отклонил сигнал")
                         return None
-                    if parsed.get("target") and float(parsed["target"]) > entry:
-                        tp = float(parsed["target"])
                     if parsed.get("logic"):
                         logic = str(parsed["logic"]).strip()
         except Exception:
@@ -8884,7 +8858,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         if not logic:
             logic = f"Spring после SC+AR+ST — разворот Wyckoff"
 
-        # ── Clamp Groq TP: LONG от entry×1.05 до entry×1.50 ──
+        # Structural target only; Groq is not allowed to modify it.
         tp = max(tp, entry * 1.05)
         tp = min(tp, entry * 1.50)
         tp = round(tp, 8)
@@ -9112,7 +9086,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             groq_prompt = (
                 "Ты SMC трейдер специализирующийся на методе Вайкоффа Distribution (дистрибуция). "
                 "Оцени качество Wyckoff Distribution сетапа для SHORT. "
-                f'Ответь СТРОГО JSON: {{"target": число_цены, "target_pct": процент_падения, "logic": "макс 15 слов", "valid": true/false}}\n\n'
+                f'Ответь СТРОГО JSON: {{"logic": "макс 15 слов", "valid": true/false}}\n\n'
                 "БЛОКИРУЙ (valid: false) если:\n"
                 "- UTAD или SOW отсутствуют или слабые\n"
                 "- Объём на UTAD не выше среднего\n"
@@ -9126,11 +9100,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 "- Объём снижается у вершины (дистрибуция завершается)\n"
                 "- Цена у или выше Ice Line — идеальный SHORT\n"
                 "- TP = уровень AR лоу или ниже\n\n"
-                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
-                "- SL ТОЛЬКО за структурный уровень (BC high, UTAD high, dist_high)\n"
-                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
-                "- TP ТОЛЬКО на структурный уровень (AR low, Ice Line, swing point)\n"
-                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
+                "УРОВНИ УЖЕ РАССЧИТАНЫ СТРАТЕГИЕЙ. НИКОГДА НЕ МЕНЯЙ entry, SL или TP.\n\n"
                 f"Данные: Пара: {symbol} Цена: {price_now}\n"
                 f"BC хай: {phases['BC']['price']:.6f} | AR лоу: {ar_price:.6f}\n"
                 f"Основание до роста: {price_bottom:.6f} | Рост: +{pump_pct:.0f}%\n"
@@ -9156,8 +9126,6 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                     if not parsed.get("valid", True):
                         logging.info(f"[WYCKOFF Groq] {symbol} SHORT: Groq отклонил сигнал")
                         return None
-                    if parsed.get("target") and float(parsed["target"]) < entry:
-                        tp = float(parsed["target"])
                     if parsed.get("logic"):
                         logic = str(parsed["logic"]).strip()
         except Exception:
@@ -9166,7 +9134,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         if not logic:
             logic = f"UTAD после BC+AR+ST — дистрибуция Wyckoff"
 
-        # ── Clamp Groq TP: SHORT от entry×0.50 до entry×0.95 ──
+        # Structural target only; Groq is not allowed to modify it.
         tp = min(tp, entry * 0.95)
         tp = max(tp, entry * 0.50)
         tp = round(tp, 8)
@@ -9295,7 +9263,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
             _recent_errors = get_recent_errors(symbol)
             _wyk_prompt = (
                 "Ты SMC трейдер эксперт по накоплению Вайкоффа.\n"
-                'Отвечай СТРОГО JSON: {"logic": "макс 15 слов", "target": цена_числом, "valid": true/false}\n\n'
+                'Отвечай СТРОГО JSON: {"logic": "макс 15 слов", "valid": true/false}\n\n'
                 "КАК ДУМАТЬ:\n"
                 "1. Higher lows = покупатели накапливают позиции\n"
                 "2. Volume compression = умные деньги поглощают продажи тихо\n"
@@ -9312,11 +9280,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 "- Чёткие higher lows + volume compression\n"
                 "- Коррекция 8%+ от пика завершена\n"
                 "- Ликвидность (EQH) чётко видна выше\n\n"
-                "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
-                "- SL ТОЛЬКО за структурный уровень (acc_low, swing low)\n"
-                "- ЗАПРЕЩЕНО: SL = entry ± X% (математические стопы не работают)\n"
-                "- TP ТОЛЬКО на ликвидность (EQH, swing high, peak)\n"
-                "- Если нет структуры для SL — НЕ ВХОДИТЬ\n\n"
+                "УРОВНИ УЖЕ РАССЧИТАНЫ СТРАТЕГИЕЙ. НИКОГДА НЕ МЕНЯЙ entry, SL или TP.\n\n"
                 f"Данные: drawdown={round(drawdown_pct,1)}% range={round(acc_range_pct,1)}% "
                 f"higher_lows={higher_lows} vol_compressed={vol_compressed} "
                 f"vol_expanding={vol_expanding} (объём растёт = выход начался)\n"
@@ -9331,13 +9295,10 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 if _m:
                     _p = _j.loads(_m.group())
                     if not _p.get("valid", True): return None
-                    if _p.get("target") and float(_p["target"]) > entry:
-                        tp = smart_round(float(_p["target"]))
         except Exception:
             pass
 
-        # Groq мог изменить цель: пересчитываем RR и проценты уже по
-        # фактическому TP, иначе в Telegram и learning уходят ложные данные.
+        # TP remains the structural liquidity target calculated above.
         risk = abs(entry - sl)
         reward = abs(tp - entry)
         if risk == 0:
