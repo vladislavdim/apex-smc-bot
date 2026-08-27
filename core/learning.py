@@ -1168,11 +1168,11 @@ def _groq_call(prompt: str, max_tokens: int = 600) -> str:
     """Вызов Groq API — используется для всех аналитических задач"""
     try:
         import os, requests
+        from core.groq_models import configured_groq_models
         key = os.environ.get("GROQ_API_KEY", "")
         if not key:
             return ""
-        models = ["llama-3.1-8b-instant", "llama-3.1-70b-specdec", "gemma2-9b-it"]
-        for model in models:
+        for model in configured_groq_models():
             try:
                 r = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
