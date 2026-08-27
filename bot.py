@@ -2860,32 +2860,48 @@ async def _send_signal(sd):
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             _cd.close()
             logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
-            return
-        _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-        _cd.commit()
+            return False
         _cd.close()
     except Exception as _cde:
         logging.warning(f"[_send_signal] cooldown DB ошибка: {_cde}")
         last_sent = _sent_signal_cache.get(cache_key, 0)
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
-            return
-        _sent_signal_cache[cache_key] = now_ts
+            return False
+        # Значение кладём в fallback-кэш только после подтверждённой отправки.
+        pass
+    delivered = False
     for admin_id in ADMIN_IDS:
         ok = await _send_with_retry(admin_id, sd["text"], parse_mode="HTML")
         if ok:
+            delivered = True
             logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
     try:
         channel_text = _format_channel_signal(sd)
         scan_type = sd.get("scan_type", "")
-        await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
-        logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
+        main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+        delivered = delivered or main_ok
+        if main_ok:
+            logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
         if scan_type == "swing":
-            await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
-            logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
+            swing_ok = await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+            delivered = delivered or swing_ok
+            if swing_ok:
+                logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
-    # backup только по расписанию (раз в час) — не после каждого сигнала
+    if not delivered:
+        logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
+        return False
+    try:
+        import sqlite3 as _sq3
+        _cd = _sq3.connect("brain.db", timeout=10)
+        _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
+        _cd.commit()
+        _cd.close()
+    except Exception as _cde:
+        logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
+        _sent_signal_cache[cache_key] = now_ts
     return True
 
 
@@ -3503,14 +3519,15 @@ async def _auto_wyckoff_scan_impl():
 
 
 async def auto_fast_deal_scan():
-    """Каждые 5 мин: 5m скальпинг — Kill Zone 07:00-11:00 и 15:00-19:00 UTC"""
+    """Каждые 5 мин: только ликвидные окна London/NY для точного FAST."""
     from datetime import datetime as _dt
     _now_dt = _dt.utcnow()
     _hour = _now_dt.hour
     _minute = _now_dt.minute
     _time_m = _hour * 60 + _minute
-    # Kill Zone: London 07:00-11:00 (420-660) и NY 15:00-19:00 (900-1140)
-    if not (420 <= _time_m <= 660 or 900 <= _time_m <= 1140):
+    # London 08:30-11:30 и NY 16:30-19:30 UTC. Это не лимит
+    # количества сделок, а требование ликвидности для скальпа.
+    if not (510 <= _time_m <= 690 or 990 <= _time_m <= 1170):
         logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
     try:
@@ -3604,7 +3621,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
             try:
                 _cdc = _sq3.connect("brain.db", timeout=10)
                 _cdrow = _cdc.execute(
-                    "SELECT 1 FROM signals WHERE symbol=? AND signal_type='FAST' AND timestamp > datetime('now', '-30 minutes') LIMIT 1",
+                    "SELECT 1 FROM signals WHERE symbol=? AND signal_type='FAST' AND created_at > datetime('now', '-30 minutes') LIMIT 1",
                     (symbol,)
                 ).fetchone()
                 _cdc.close()
@@ -3758,6 +3775,16 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             return None
 
         direction = mtf["direction"]
+
+        # После повторных стопов на одной паре разными стратегиями не
+        # пытаемся сразу открыть ещё одну сделку в том же направлении.
+        try:
+            _skip_symbol, _skip_reason = should_skip_symbol(symbol, direction)
+            if _skip_symbol:
+                logging.info(f"[MTF] {symbol} {direction} — блок обучения: {_skip_reason}")
+                return None
+        except Exception:
+            pass
 
         # Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает
         if symbol != "BTCUSDT":
@@ -3926,9 +3953,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             pass
 
         # Минимальный порог confluence по таймфрейму
-        min_conf = {"1h": 4, "4h": 3, "1d": 3, "1w": 2}
-        if len(confluence) < min_conf.get(timeframe, 3):
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (confluence {len(confluence)} < {min_conf.get(timeframe,3)})")
+        # Предупреждения не являются подтверждениями. Для редких точных MTF
+        # сетапов нужны реальные положительные confluence.
+        _positive_confluence = [c for c in confluence if c.lstrip().startswith(("✅", "🎯", "🔥", "🚀"))]
+        min_conf = {"1h": 4, "4h": 4, "1d": 4, "1w": 3}
+        if len(_positive_confluence) < min_conf.get(timeframe, 4):
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (positive confluence {len(_positive_confluence)} < {min_conf.get(timeframe,4)})")
             return None
 
         # ══════════════════════════════════════
@@ -3948,12 +3978,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             logging.debug(f"[MTF] {symbol}: только {_tf_match}/3 ТФ совпали — пропускаем")
             return None
 
-        # 1d как контекст (не блокирует, Groq знает)
+        # Для редких сделок дневной тренд должен подтверждать направление.
         _htf_1d_agrees = _dir_1d == direction
-
-        # HTF hard block — только если 4h И 1d оба против
-        if _dir_4h and _dir_1d and _dir_4h != direction and _dir_1d != direction:
-            logging.debug(f"[MTF] {symbol}: HTF 4h+1d оба против — блок")
+        if _dir_1d and not _htf_1d_agrees:
+            logging.debug(f"[MTF] {symbol}: 1d против направления — блок")
             return None
 
         _weak_mtf_warn = ""  # 3/3 обязательно, слабого MTF быть не может
@@ -3978,8 +4006,15 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         tp3   = levels["tp3"]
         # RR — контекст для Groq
         _rr_val = levels.get("rr", 0)
-        if _rr_val < 2.0:
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} < 2.0 — пропускаем")
+        if not 2.0 <= _rr_val <= 4.0:
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} вне диапазона 2.0–4.0 — пропускаем")
+            return None
+
+        # OTE/структурный entry обязан быть рядом с текущей ценой. Не
+        # отправляем отложенный сетап как будто это вход прямо сейчас.
+        _atr_entry = sum(c["high"] - c["low"] for c in candles[-14:]) / min(14, len(candles))
+        if abs(price - entry) > _atr_entry * 0.75:
+            logging.debug(f"[MTF] {symbol}: entry слишком далеко от текущей цены")
             return None
 
         # VWAP — контекст для Groq
@@ -3990,7 +4025,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         wr_str = f"{win_rate:.0f}% WR" if win_rate > 0 else "нет истории"
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
-        conf_score = len(confluence) * 15  # приблизительный score
+        conf_score = len(_positive_confluence) * 15
         # save_signal_db вызывается ниже — только после проверки тайминга
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
@@ -4066,8 +4101,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             # Pattern history для Groq
             _pat_str = ""
             try:
-                _pat = _learn_patterns(symbol, direction, timeframe,
-                                       regime_val, conf_score)
+                _pat = get_similar_patterns(symbol, direction, timeframe,
+                                            regime_val, conf_score)
                 if _pat.get("found") and _pat.get("samples", 0) >= 3:
                     _pat_str = (f"\nИстория похожих: {_pat['samples']} сделок, "
                                 f"WR: {_pat['win_rate']:.0f}%, avg RR: {_pat['avg_rr']:.1f}, "
@@ -4075,7 +4110,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             except Exception:
                 pass
             _sl_pct_mtf = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
-            _self_rules = get_relevant_rules(symbol, direction)
+            _self_rules = get_relevant_rules(symbol, direction, "MTF")
             groq_prompt = (
                 "Ты профессиональный SMC трейдер с 10-летним стажем. "
                 "Торгуешь только лучшие сетапы — лучше пропустить 10 хороших чем взять 1 плохой. "
@@ -4191,8 +4226,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception:
             pass
 
-        # Минимум 2 из 4 доп подтверждений
-        if _mtf_score < 2:
+        # Для редких MTF-сетапов нужны минимум 3 из 4 подтверждений,
+        # включая реальную структуру (BOS/CHoCH), а не только сессию.
+        if _mtf_score < 3 or not _mtf_score_bos:
             logging.debug(f"[MTF] {symbol}: score {_mtf_score}/4 — пропускаем")
             return None
 
@@ -4238,7 +4274,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
                            confluence=conf_score, regime="UNKNOWN")
 
-        return {"symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
+        return {"symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "rr": _rr_val, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
 
     except Exception as e:
         logging.error(f"full_scan_raw error {symbol}: {e}")
@@ -4749,7 +4785,7 @@ async def on_startup(app):
     webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
 
     # Основные сигналы
-    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=10, jitter=30,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_zone_scan,       "interval", minutes=20, jitter=60,  max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
@@ -5055,7 +5091,7 @@ def main():
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
-            scheduler.add_job(auto_scan_job, "interval", minutes=10, jitter=30)        # проверка закрытых
+            scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
             scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
             scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
             scheduler.add_job(auto_zone_scan, "interval", minutes=20, jitter=60, max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
@@ -5073,6 +5109,11 @@ def main():
             # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
             scheduler.add_job(realtime_pump_detector, "interval", minutes=15)
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+            if _LEARNING_OK:
+                # В polling-режиме раньше не было ни decay, ни пересмотра
+                # правил — self_rules только росли.
+                scheduler.add_job(_learn_decay, "cron", hour=4, minute=30, timezone="UTC")
+                scheduler.add_job(_learn_review_rules, "interval", days=3, max_instances=1, coalesce=True)
             # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
             # timing_queue отключена — MTF отправляет напрямую
             # scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
