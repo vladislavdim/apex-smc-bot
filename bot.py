@@ -82,16 +82,6 @@ except Exception as _quality_gate_import_error:
     _SIGNAL_QUALITY_GATE_OK = False
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
 
-try:
-    from core.signal_budget import (
-        record_signal_delivery as _record_signal_delivery,
-        weekly_budget_status as _weekly_budget_status,
-    )
-    _SIGNAL_BUDGET_OK = True
-except Exception as _signal_budget_import_error:
-    _SIGNAL_BUDGET_OK = False
-    logging.warning(f"Signal budget недоступен: {_signal_budget_import_error}")
-
 # Путь к базе данных
 import os as _os_bot
 DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
@@ -2857,16 +2847,6 @@ async def _send_signal(sd):
         if decision in ("WAIT", "REJECT"):
             await asyncio.to_thread(_mark_candidate_not_sent, sd, decision)
             return False
-    if _SIGNAL_BUDGET_OK:
-        budget = await asyncio.to_thread(_weekly_budget_status, sd)
-        if not budget.get("allowed", True):
-            logging.info(
-                "[SignalBudget] %s %s: недельный лимит %s/%s — пропускаем",
-                sd.get("symbol"), budget.get("strategy"), budget.get("used"), budget.get("limit"),
-            )
-            if _SIGNAL_QUALITY_GATE_OK:
-                await asyncio.to_thread(_mark_candidate_not_sent, sd, "WAIT")
-            return False
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         return False
@@ -2922,8 +2902,6 @@ async def _send_signal(sd):
     except Exception as _cde:
         logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
         _sent_signal_cache[cache_key] = now_ts
-    if _SIGNAL_BUDGET_OK:
-        await asyncio.to_thread(_record_signal_delivery, sd, sd.get("_external_quality_review"))
     return True
 
 
