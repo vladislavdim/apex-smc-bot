@@ -82,6 +82,16 @@ except Exception as _quality_gate_import_error:
     _SIGNAL_QUALITY_GATE_OK = False
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
 
+try:
+    from core.signal_budget import (
+        record_signal_delivery as _record_signal_delivery,
+        weekly_budget_status as _weekly_budget_status,
+    )
+    _SIGNAL_BUDGET_OK = True
+except Exception as _signal_budget_import_error:
+    _SIGNAL_BUDGET_OK = False
+    logging.warning(f"Signal budget недоступен: {_signal_budget_import_error}")
+
 # Путь к базе данных
 import os as _os_bot
 DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
@@ -2841,11 +2851,21 @@ async def _send_signal(sd):
             "[SignalQualityGate] %s %s → %s confidence=%.2f sources=%s reasons=%s",
             sd.get("symbol"), sd.get("direction"), decision,
             review.get("confidence", 0.0),
-            review.get("context", {}).get("available_sources", []),
+            review.get("context", {}).get("data_quality", {}).get("available_sources", []),
             review.get("reasons", []),
         )
         if decision in ("WAIT", "REJECT"):
             await asyncio.to_thread(_mark_candidate_not_sent, sd, decision)
+            return False
+    if _SIGNAL_BUDGET_OK:
+        budget = await asyncio.to_thread(_weekly_budget_status, sd)
+        if not budget.get("allowed", True):
+            logging.info(
+                "[SignalBudget] %s %s: недельный лимит %s/%s — пропускаем",
+                sd.get("symbol"), budget.get("strategy"), budget.get("used"), budget.get("limit"),
+            )
+            if _SIGNAL_QUALITY_GATE_OK:
+                await asyncio.to_thread(_mark_candidate_not_sent, sd, "WAIT")
             return False
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
@@ -2902,6 +2922,8 @@ async def _send_signal(sd):
     except Exception as _cde:
         logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
         _sent_signal_cache[cache_key] = now_ts
+    if _SIGNAL_BUDGET_OK:
+        await asyncio.to_thread(_record_signal_delivery, sd, sd.get("_external_quality_review"))
     return True
 
 
@@ -3161,6 +3183,9 @@ async def _auto_scan_swing_impl():
                 "confluence_score": int(r["rr"] * 20),
                 "regime": "SWING",
                 "scan_type": "swing",
+                "technical_evidence": {key: r.get(key) for key in (
+                    "logic", "htf_dir", "htf_1w", "weekly_warning", "confirms", "ob", "fvg"
+                ) if r.get(key) is not None},
             }
 
             # Проверка актуальности цены входа
@@ -3263,6 +3288,9 @@ async def _auto_zone_scan_impl():
                 "confluence_score": int(r["rr"] * 20),
                 "regime": "ZONE",
                 "scan_type": "zone",
+                "technical_evidence": {key: r.get(key) for key in (
+                    "logic", "zone", "zone_type", "q_score", "htf_dir"
+                ) if r.get(key) is not None},
             }
 
             if not _is_entry_still_valid(sd, max_drift_pct=2.0):
@@ -3500,6 +3528,9 @@ async def _auto_wyckoff_scan_impl():
                 "confluence_score": r["score"],
                 "regime": "WYCKOFF",
                 "scan_type": "wyckoff",
+                "technical_evidence": {key: r.get(key) for key in (
+                    "logic", "phases", "spring", "sos", "drawdown_pct", "acc_range", "ob", "fvg"
+                ) if r.get(key) is not None},
             }
 
             save_signal_db(
@@ -3640,6 +3671,9 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
                 "tp2": _f_tp2, "tp3": _f_tp2, "rr": r.get("rr"),
                 "grade": "FAST", "scan_type": "fast",
                 "confluence_score": int(r["rr"] * 20), "regime": "FAST",
+                "technical_evidence": {key: r.get(key) for key in (
+                    "logic", "zone", "direction_1d", "ob", "fvg"
+                ) if r.get(key) is not None},
             }
             if _SIGNAL_QUALITY_GATE_OK:
                 _fast_review = await _review_signal_candidate(_fast_sd, ask_groq)
@@ -3647,7 +3681,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
                     "[SignalQualityGate] FAST %s %s → %s confidence=%.2f sources=%s reasons=%s",
                     symbol, direction, _fast_review.get("decision", "APPROVE"),
                     _fast_review.get("confidence", 0.0),
-                    _fast_review.get("context", {}).get("available_sources", []),
+                    _fast_review.get("context", {}).get("data_quality", {}).get("available_sources", []),
                     _fast_review.get("reasons", []),
                 )
                 if _fast_review.get("decision") in ("WAIT", "REJECT"):
@@ -4274,7 +4308,24 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
                            confluence=conf_score, regime="UNKNOWN")
 
-        return {"symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text, "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "rr": _rr_val, "timeframe": timeframe, "confluence_score": conf_score, "regime": "UNKNOWN"}
+        return {
+            "symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text,
+            "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2,
+            "tp3": tp3, "sl": sl, "rr": _rr_val, "timeframe": timeframe,
+            "confluence_score": conf_score, "regime": "UNKNOWN",
+            "scan_type": "mtf",
+            "technical_evidence": {
+                "timeframe_alignment": {"15m": _dir_15m, "1h": _dir_1h, "4h": _dir_4h, "1d": _dir_1d},
+                "mtf_match": _tf_match,
+                "positive_confluence": _positive_confluence[:8],
+                "confirmation_score": _mtf_score,
+                "bos_choch": _mtf_score_bos,
+                "btc_confirmed": _mtf_score_btc,
+                "volume_confirmed": _mtf_score_vol,
+                "ob": ob,
+                "fvg": fvg,
+            },
+        }
 
     except Exception as e:
         logging.error(f"full_scan_raw error {symbol}: {e}")
