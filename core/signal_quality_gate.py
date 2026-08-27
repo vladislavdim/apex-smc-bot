@@ -11,7 +11,8 @@ import re
 import sqlite3
 from typing import Any, Callable
 
-from core.external_market_context import collect_external_market_context
+from external_sources.aggregator import collect_external_context, format_external_context
+from external_sources.storage import persist_context
 
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
@@ -164,8 +165,10 @@ async def review_signal_candidate(
     Failures are deliberately fail-open so an unavailable external provider or
     Groq key never silently replaces the existing APEX strategy decision.
     """
-    context = await collect_external_market_context(str(candidate.get("symbol", "")))
     view = _candidate_view(candidate)
+    context = await collect_external_context(str(candidate.get("symbol", "")), str(view.get("direction", "")))
+    strategy = str(view.get("strategy") or "").upper()
+    external_block = format_external_context(context, strategy)
     prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
 
 The APEX strategy has already calculated direction, entry, SL, TP and RR.
@@ -173,17 +176,17 @@ You MUST NOT recalculate, edit or propose replacements for those values.
 Use external data as contextual evidence, not as fixed hard-coded veto rules.
 Judge whether derivatives positioning and smart-money context support the candidate,
 contradict it strongly, or require waiting. Missing providers alone are not a reason
-to reject. Prefer REJECT only for a meaningful directional contradiction or clear
-crowded/unstable conditions; explain the concrete evidence.
+to reject. A material conflict must result in valid=false and decision=REJECT or WAIT.
+Do not treat Ethereum-wide data as pair-specific evidence for another chain.
 
 CANDIDATE:
 {json.dumps(view, ensure_ascii=False, default=str)}
 
-EXTERNAL_CONTEXT:
-{json.dumps(context, ensure_ascii=False, default=str)}
+{external_block}
 
 Return JSON only:
 {{
+  "valid": true,
   "decision": "APPROVE|WAIT|REJECT",
   "confidence": 0.0,
   "reasons": ["specific evidence"],
@@ -200,6 +203,10 @@ Return JSON only:
         raw = None
 
     review = _normalize_review(_extract_json(raw), raw)
+    parsed = _extract_json(raw)
+    if parsed and parsed.get("valid") is False and review["decision"] == "APPROVE":
+        review["decision"] = "REJECT"
     review["context"] = context
+    await asyncio.to_thread(persist_context, context, strategy, True, review.get("decision"))
     await asyncio.to_thread(_persist_review, candidate, context, review)
     return review
