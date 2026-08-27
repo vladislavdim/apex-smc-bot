@@ -5,6 +5,15 @@ from core.signal_quality_gate import _candidate_view, _extract_json, _normalize_
 from external_sources.models import empty_context
 
 
+def empty_news(symbol="BTCUSDT"):
+    return {
+        "symbol": symbol, "risk_level": "LOW", "phase": "NORMAL",
+        "nearest_critical_event": None, "critical_events": [], "headlines": [],
+        "prediction": "no_directional_prediction", "news_data_unavailable": True,
+        "data_quality": {"available_sources": [], "failed_sources": [], "age_seconds": None},
+    }
+
+
 class SignalQualityGateTests(unittest.TestCase):
     def test_extracts_fenced_json(self):
         parsed = _extract_json('```json\n{"decision":"REJECT","confidence":0.8}\n```')
@@ -34,19 +43,32 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
         def ask(prompt, tokens):
             captured.append(prompt)
             return '{"valid": false, "decision": "APPROVE", "confidence": 0.8, "reasons": ["conflict"]}'
-        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), patch("core.signal_quality_gate.persist_context"):
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
+             patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"):
             review = await review_signal_candidate(candidate, ask)
         self.assertEqual(review["decision"], "REJECT")
         self.assertIn("EXTERNAL MARKET CONTEXT", captured[0])
+        self.assertIn("NEWS RISK CONTEXT", captured[0])
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["rr"]), (100, 95, 110, 2))
 
     async def test_groq_cannot_replace_candidate_levels(self):
         candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "WYCKOFF", "entry": 100, "sl": 95, "tp1": 110, "tp2": 120, "tp3": 130, "rr": 2}
         def ask(prompt, tokens):
             return '{"valid": true, "decision": "APPROVE", "target": 999999, "reasons": ["ok"]}'
-        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), patch("core.signal_quality_gate.persist_context"):
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
+             patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"):
             await review_signal_candidate(candidate, ask)
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["tp2"], candidate["tp3"], candidate["rr"]), (100, 95, 110, 120, 130, 2))
+
+    async def test_low_confidence_approval_waits(self):
+        candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "MTF", "entry": 100, "sl": 95, "tp1": 110, "rr": 2}
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
+             patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"):
+            review = await review_signal_candidate(candidate, lambda *_: '{"valid":true,"decision":"APPROVE","confidence":0.4}')
+        self.assertEqual(review["decision"], "WAIT")
 
 
 if __name__ == "__main__":
