@@ -1317,48 +1317,32 @@ async def handle_callback(callback: CallbackQuery):
             top_rules = []
             macro_summary = bb_rules = macro_time = ""
 
-        cat_emoji = {
-            "entry": "🎯", "exit": "🏁", "filter": "🔍",
-            "timing": "⏱", "risk": "💰", "avoid": "⛔️",
-            "best_setup": "🌟", "market": "📊"
-        }
-
         macro_block = (
-            f"\n📊 <b>Последний макро анализ</b> ({macro_time}):\n"
+            f"\n📰 <b>Последняя макро-сводка</b> ({macro_time}):\n"
             f"<i>{macro_summary}</i>\n"
         ) if macro_summary else ""
 
-        recent_knowledge = ""
-
         await callback.message.edit_text(
-            f"🧠 <b>Мозг APEX</b>\n"
+            f"🧠 <b>Мозг APEX — состояние</b>\n"
             f"{'━'*24}\n\n"
+            f"📚 Записей знаний: <b>{knowledge_count}</b>\n"
+            f"📈 SMC-паттернов: <b>{pattern_count}</b>\n"
             f"📌 Торговых правил: <b>{rule_count}</b>\n"
             f"⛔️ Антипаттернов: <b>{avoid_count}</b>\n"
-            f"👁 Наблюдений: <b>{obs_count}</b>\n"
+            f"👁 Наблюдений рынка: <b>{obs_count}</b>\n"
             f"🗂 Моделей монет: <b>{model_count}</b>\n"
-            f"📚 Знаний (Groq): <b>{knowledge_count}</b>\n"
-            f"📈 SMC паттернов: <b>{pattern_count}</b>\n"
-            f"🪙 Правил по монетам: <b>{coin_count}</b>\n"
-            f"{macro_block}"
-            f"{recent_knowledge}\n"
-            f"<i>🔄 Groq обучается каждый час: SMC, макро, новости, сделки, веб-поиск</i>",
+            f"🪙 Пар с историей: <b>{coin_count}</b>\n"
+            f"{macro_block}\n"
+            f"<i>Обновление автоматическое: результаты сделок, новости и "
+            f"веб-контекст сохраняются в brain.db. Groq использует этот "
+            f"контекст, но не переобучает свои базовые веса.</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⚡️ Обучить сейчас", callback_data="brain_learn_now"),
-                 InlineKeyboardButton(text="🌍 Макро анализ", callback_data="brain_macro")],
-                [InlineKeyboardButton(text="🏅 Точность грейдов", callback_data="brain_grade_accuracy"),
-                 InlineKeyboardButton(text="📋 Анализ сделок", callback_data="brain_trade_analysis")],
-                [InlineKeyboardButton(text="🔍 Диагноз ошибок", callback_data="brain_diagnosis"),
-                 InlineKeyboardButton(text="📊 Анализ логов", callback_data="brain_logs")],
-                [InlineKeyboardButton(text="🌐 Веб-знания", callback_data="brain_web_knowledge"),
-                 InlineKeyboardButton(text="📚 История обучения", callback_data="menu_evolution")],
-                [InlineKeyboardButton(text="🤖 Автопилот", callback_data="brain_autopilot"),
-                 InlineKeyboardButton(text="🔌 Плагин Groq", callback_data="brain_extensions")],
-                [InlineKeyboardButton(text="📡 Надёжность источников", callback_data="brain_router_sources"),
-                 InlineKeyboardButton(text="🧩 Роутер инсайты", callback_data="brain_router_insights")],
-                [InlineKeyboardButton(text="📅 Стратегия роутера", callback_data="brain_router_strategy"),
-                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
+                [InlineKeyboardButton(text="🏅 Качество сигналов", callback_data="brain_grade_accuracy"),
+                 InlineKeyboardButton(text="📋 Разбор сделок", callback_data="brain_trade_analysis")],
+                [InlineKeyboardButton(text="📚 История обновлений", callback_data="menu_evolution"),
+                 InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_brain")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
             ])
         )
 
