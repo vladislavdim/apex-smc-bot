@@ -64,6 +64,7 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review["decision"], "REJECT")
         self.assertIn("EXTERNAL MARKET CONTEXT", captured[0])
         self.assertIn("NEWS RISK CONTEXT", captured[0])
+        self.assertIn("MARKET MEMORY", captured[0])
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["rr"]), (100, 95, 110, 2))
 
     async def test_groq_cannot_replace_candidate_levels(self):

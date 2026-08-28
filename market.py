@@ -181,6 +181,21 @@ except Exception as e:
     _learn_whale_ctx = lambda *a: ""
     _learn_news_impact = lambda *a: ""
 
+# Durable market memory — facts from historical signal snapshots.
+try:
+    from market_memory import (
+        capture_snapshot as _memory_capture_snapshot,
+        close_snapshot as _memory_close_snapshot,
+        record_price as _memory_record_price,
+    )
+    _MARKET_MEMORY_OK = True
+except Exception as _memory_import_error:
+    _MARKET_MEMORY_OK = False
+    _memory_capture_snapshot = lambda *args, **kwargs: None
+    _memory_close_snapshot = lambda *args, **kwargs: None
+    _memory_record_price = lambda *args, **kwargs: None
+    logging.warning("market_memory unavailable: %s", _memory_import_error)
+
 # Web Learner — автономный поиск знаний
 try:
     from web_learner import (
@@ -4116,6 +4131,30 @@ def full_scan(symbol, timeframe="1h"):
         return None
 
 
+def _capture_market_memory_snapshot(sig_id, symbol, signal_type, direction, timeframe,
+                                    entry, sl, tp1, tp2, tp3, confluence, regime):
+    """Background persistence only; it never blocks signal delivery."""
+    if not _MARKET_MEMORY_OK:
+        return
+    try:
+        timeframes = [timeframe]
+        for higher_tf in ("4h", "1d"):
+            if higher_tf not in timeframes:
+                timeframes.append(higher_tf)
+        candles_by_timeframe = {}
+        for tf in timeframes:
+            candles = get_candles(symbol, tf, 120 if tf == timeframe else 80)
+            if candles:
+                candles_by_timeframe[tf] = candles
+        _memory_capture_snapshot(
+            sig_id, symbol, signal_type, direction, timeframe, entry, sl,
+            tp1, tp2, tp3, confluence or 0, regime or "UNKNOWN",
+            candles_by_timeframe,
+        )
+    except Exception as exc:
+        logging.debug("[MarketMemory] background snapshot %s: %s", symbol, exc)
+
+
 def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade, confluence=0, regime="UNKNOWN"):
     """Persist a delivered signal; learning starts only after entry activation."""
     learning_id = None
@@ -4162,6 +4201,13 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
             _lifecycle_register_waiting(conn, sig_id)
             conn.commit()
             conn.close()
+            if _MARKET_MEMORY_OK:
+                threading.Thread(
+                    target=_capture_market_memory_snapshot,
+                    args=(sig_id, symbol, signal_type, direction, timeframe, entry, sl,
+                          tp1, tp2, tp3, confluence, regime),
+                    daemon=True,
+                ).start()
             logging.info(f"Signal saved awaiting entry: {symbol} {direction} (ID: {sig_id})")
             return sig_id, learning_id
         except Exception as e:
@@ -4265,6 +4311,10 @@ def check_pending_signals():
                     _lc.close()
                 except Exception as _lc_error:
                     logging.warning("[SignalLifecycle] state read %s: %s", sig_id, _lc_error)
+
+            # Price-path learning begins only after the advertised entry was activated.
+            if _MARKET_MEMORY_OK and lifecycle_state == _LIFECYCLE_ACTIVE:
+                _memory_record_price(sig_id, current)
 
             # The current 5m candle can include price action from before the
             # signal was delivered or activated.  Candle high/low becomes safe
@@ -4451,6 +4501,8 @@ def check_pending_signals():
                 result = "expired"
 
             if result:
+                if _MARKET_MEMORY_OK:
+                    _memory_close_snapshot(sig_id, result, current)
                 conn2 = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
                 conn2.execute(
                     "UPDATE signals SET result=?, closed_at=CURRENT_TIMESTAMP WHERE id=?",
