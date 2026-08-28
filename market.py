@@ -4296,8 +4296,6 @@ def check_pending_signals():
                     logging.debug(f"check_pending_signals router fallback {symbol}: {_re}")
             if current is None:
                 continue
-            if _MARKET_MEMORY_OK:
-                _memory_record_price(sig_id, current)
             created = datetime.fromisoformat(created_at)
             hours_elapsed = (datetime.now() - created).total_seconds() / 3600
 
@@ -4313,6 +4311,10 @@ def check_pending_signals():
                     _lc.close()
                 except Exception as _lc_error:
                     logging.warning("[SignalLifecycle] state read %s: %s", sig_id, _lc_error)
+
+            # Price-path learning begins only after the advertised entry was activated.
+            if _MARKET_MEMORY_OK and lifecycle_state == _LIFECYCLE_ACTIVE:
+                _memory_record_price(sig_id, current)
 
             # The current 5m candle can include price action from before the
             # signal was delivered or activated.  Candle high/low becomes safe
