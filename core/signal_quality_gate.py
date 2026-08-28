@@ -16,6 +16,7 @@ from external_sources.models import empty_context
 from external_sources.storage import persist_context
 from news_context.aggregator import collect_news_context, format_news_context
 from news_context.storage import persist_news_context
+from market_memory import build_memory_context, format_market_memory_context
 
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
@@ -93,7 +94,13 @@ def _normalize_review(data: dict[str, Any] | None, raw: str | None) -> dict[str,
     }
 
 
-def _persist_review(candidate: dict[str, Any], context: dict[str, Any], news: dict[str, Any], review: dict[str, Any]) -> None:
+def _persist_review(
+    candidate: dict[str, Any],
+    context: dict[str, Any],
+    news: dict[str, Any],
+    memory: dict[str, Any],
+    review: dict[str, Any],
+) -> None:
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -110,12 +117,15 @@ def _persist_review(candidate: dict[str, Any], context: dict[str, Any], news: di
             risks_json TEXT,
             context_json TEXT,
             news_context_json TEXT,
+            market_memory_json TEXT,
             degraded INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_signal_reviews)")}
         if "news_context_json" not in columns:
             conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN news_context_json TEXT")
+        if "market_memory_json" not in columns:
+            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN market_memory_json TEXT")
         view = _candidate_view(candidate)
         candidate_key = hashlib.sha256(
             json.dumps(view, sort_keys=True, default=str).encode("utf-8")
@@ -123,8 +133,8 @@ def _persist_review(candidate: dict[str, Any], context: dict[str, Any], news: di
         conn.execute(
             """INSERT INTO ai_signal_reviews
                (candidate_key, symbol, strategy, direction, timeframe, decision,
-                confidence, reasons_json, risks_json, context_json, news_context_json, degraded)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, reasons_json, risks_json, context_json, news_context_json, market_memory_json, degraded)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 candidate_key,
                 view.get("symbol"),
@@ -137,6 +147,7 @@ def _persist_review(candidate: dict[str, Any], context: dict[str, Any], news: di
                 json.dumps(review.get("risks", []), ensure_ascii=False),
                 json.dumps(context, ensure_ascii=False, default=str),
                 json.dumps(news, ensure_ascii=False, default=str),
+                json.dumps(memory, ensure_ascii=False, default=str),
                 int(bool(review.get("degraded"))),
             ),
         )
@@ -173,8 +184,14 @@ async def review_signal_candidate(
         "data_quality": {"available_sources": [], "failed_sources": [type(news_result).__name__]},
     }
     strategy = str(view.get("strategy") or "").upper()
+    memory = await asyncio.to_thread(
+        build_memory_context,
+        str(view.get("symbol") or ""), strategy,
+        str(view.get("direction") or ""), str(view.get("timeframe") or ""),
+    )
     external_block = format_external_context(context, strategy)
     news_block = format_news_context(news)
+    memory_block = format_market_memory_context(memory)
     prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
 
 The APEX strategy has already calculated direction, entry, SL, TP and RR.
@@ -193,6 +210,8 @@ CANDIDATE:
 {external_block}
 
 {news_block}
+
+{memory_block}
 
 Return JSON only:
 {{
@@ -226,7 +245,8 @@ Return JSON only:
         review["risks"].append(f"Groq approval confidence below {min_confidence:.2f}")
     review["context"] = context
     review["news_context"] = news
+    review["market_memory"] = memory
     await asyncio.to_thread(persist_context, context, strategy, True, review.get("decision"))
     await asyncio.to_thread(persist_news_context, news, strategy, review.get("decision"))
-    await asyncio.to_thread(_persist_review, candidate, context, news, review)
+    await asyncio.to_thread(_persist_review, candidate, context, news, memory, review)
     return review
