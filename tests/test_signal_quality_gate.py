@@ -37,6 +37,19 @@ class SignalQualityGateTests(unittest.TestCase):
 
 
 class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_external_data_and_groq_failure_preserve_apex_candidate(self):
+        candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "MTF", "entry": 100, "sl": 95, "tp1": 110, "rr": 2}
+        context = empty_context("BTCUSDT")
+        context["external_data_unavailable"] = True
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=context)), \
+             patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate._persist_review"):
+            review = await review_signal_candidate(candidate, lambda *_: None)
+        self.assertEqual(review["decision"], "APPROVE")
+        self.assertTrue(review["degraded"])
+        self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"]), (100, 95, 110))
+
     async def test_external_block_reaches_groq_and_valid_false_rejects(self):
         candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "MTF", "entry": 100, "sl": 95, "tp1": 110, "rr": 2}
         captured = []
@@ -45,7 +58,8 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
             return '{"valid": false, "decision": "APPROVE", "confidence": 0.8, "reasons": ["conflict"]}'
         with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
              patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
-             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"):
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate._persist_review"):
             review = await review_signal_candidate(candidate, ask)
         self.assertEqual(review["decision"], "REJECT")
         self.assertIn("EXTERNAL MARKET CONTEXT", captured[0])
@@ -58,7 +72,8 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
             return '{"valid": true, "decision": "APPROVE", "target": 999999, "reasons": ["ok"]}'
         with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
              patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
-             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"):
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate._persist_review"):
             await review_signal_candidate(candidate, ask)
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["tp2"], candidate["tp3"], candidate["rr"]), (100, 95, 110, 120, 130, 2))
 
@@ -66,7 +81,8 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
         candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "MTF", "entry": 100, "sl": 95, "tp1": 110, "rr": 2}
         with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
              patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news())), \
-             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"):
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate._persist_review"):
             review = await review_signal_candidate(candidate, lambda *_: '{"valid":true,"decision":"APPROVE","confidence":0.4}')
         self.assertEqual(review["decision"], "WAIT")
 

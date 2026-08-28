@@ -24,6 +24,7 @@ import os
 import ast
 import requests
 from datetime import datetime, timedelta
+from core.groq_models import configured_groq_models, is_model_unavailable_error
 
 # ── WAL патч ──
 
@@ -65,7 +66,7 @@ GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
 
 # ─── Groq вызов с retry и правильными моделями ────────────────
 # Актуальные модели Groq на март 2026:
-_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.1-8b-instant", "llama-3.1-8b-instant"]
+_GROQ_MODELS = configured_groq_models()
 # Глобальный кулдаун для autopilot — не спамим Groq
 _AP_LAST_GROQ_CALL = 0
 _AP_GROQ_COOLDOWN = 30  # секунд между вызовами из autopilot
@@ -117,7 +118,7 @@ def _groq(prompt: str, max_tokens: int = 800) -> str:
                     logging.warning(f"[Autopilot] Rate limit ключ {key_index+1}, переключаю на {key_index+2}...")
                     time.sleep(wait)
                     continue  # следующий ключ
-                elif any(x in err for x in ["decommissioned", "not exist", "model_not_found", "does not exist"]):
+                elif is_model_unavailable_error(e):
                     logging.warning(f"[Autopilot] Модель {model} недоступна")
                     break  # следующая модель
                 else:

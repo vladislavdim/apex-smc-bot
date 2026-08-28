@@ -1,6 +1,8 @@
 name: APEX AI Auto-Fix
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       error_log:
@@ -14,10 +16,34 @@ on:
       - '*.db'
 
 jobs:
-  ai-fix:
-    # Не запускаем если это коммит от самого AI Fix (избегаем бесконечный цикл)
-    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, 'AI fix') && !contains(github.event.head_commit.message, 'brain.db backup')"
+  quality:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Compile project
+        run: python3 -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
+
+  ai-fix:
+    # AI mutation is an explicit manual recovery action, never a side effect of push.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,20 +52,21 @@ jobs:
           persist-credentials: true
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
 
       - name: Install deps
-        run: pip install groq
+        run: pip install -r requirements.txt
 
       - name: Check syntax
         id: syntax
         run: |
-          if python3 -m py_compile bot.py 2>/tmp/err.txt; then
-            echo "ok=true" >> $GITHUB_OUTPUT
+          if python3 -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' . 2>/tmp/err.txt; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
           else
-            echo "ok=false" >> $GITHUB_OUTPUT
+            echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fix syntax error
@@ -56,7 +83,9 @@ jobs:
         run: python3 .github/scripts/fix_error.py
 
       - name: Verify
-        run: python3 -m py_compile bot.py && echo "Syntax OK"
+        run: |
+          python3 -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+          python3 -m unittest discover -s tests -v
 
       - name: Commit fix
         run: |

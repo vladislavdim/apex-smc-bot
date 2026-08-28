@@ -73,14 +73,18 @@ from market import *
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
 try:
-    from core.signal_quality_gate import (
-        mark_candidate_not_sent as _mark_candidate_not_sent,
-        review_signal_candidate as _review_signal_candidate,
-    )
+    from core.signal_quality_gate import review_signal_candidate as _review_signal_candidate
     _SIGNAL_QUALITY_GATE_OK = True
 except Exception as _quality_gate_import_error:
     _SIGNAL_QUALITY_GATE_OK = False
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
+
+try:
+    from core.signal_integrity import validate_candidate as _validate_signal_candidate
+    _SIGNAL_INTEGRITY_OK = True
+except Exception as _signal_integrity_import_error:
+    _SIGNAL_INTEGRITY_OK = False
+    logging.error(f"Signal integrity validator недоступен: {_signal_integrity_import_error}")
 
 # Путь к базе данных
 import os as _os_bot
@@ -1076,27 +1080,27 @@ async def handle_callback(callback: CallbackQuery):
     elif data.startswith("scan_"):
         symbol = data.replace("scan_", "")
         await callback.message.edit_text(f"🔍 Анализирую {symbol}...")
-        sig = full_scan(symbol)
+        sig = await asyncio.get_running_loop().run_in_executor(
+            None, full_scan_raw, symbol, "1h", False
+        )
 
         mem = get_user_memory(user_id)
         risk_text = ""
         if mem["deposit"] > 0 and sig:
-            prices = get_live_prices()
-            if symbol in prices:
-                price = prices[symbol]["price"]
-                sl_price = price * 0.985
-                rc = calc_risk(mem["deposit"], mem["risk"], price, sl_price)
-                if rc:
-                    risk_text = (
-                        f"\n\n💰 <b>Риск-менеджмент:</b>\n"
-                        f"Риск в $: <b>${rc['risk_amount']}</b>\n"
-                        f"Размер позиции: <b>${rc['position_size']:.0f}</b>\n"
-                        f"Рекомендуемое плечо: <b>x{rc['leverage']}</b>"
-                    )
+            rc = calc_risk(
+                mem["deposit"], mem["risk"], sig.get("entry"), sig.get("sl")
+            )
+            if rc:
+                risk_text = (
+                    f"\n\n💰 <b>Риск-менеджмент:</b>\n"
+                    f"Риск в $: <b>${rc['risk_amount']}</b>\n"
+                    f"Размер позиции: <b>${rc['position_size']:.0f}</b>\n"
+                    f"Рекомендуемое плечо: <b>x{rc['leverage']}</b>"
+                )
 
         if sig:
             await callback.message.edit_text(
-                sig + risk_text,
+                sig["text"] + risk_text,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🔙 К монетам", callback_data="menu_scan")]
@@ -2829,9 +2833,66 @@ async def _send_with_retry(chat_id, text, parse_mode="HTML", retries=3, **kwargs
     return False
 
 
+def _signal_type_from_candidate(sd: dict) -> str:
+    scan_type = str(sd.get("scan_type") or "").upper()
+    grade = str(sd.get("grade") or sd.get("signal_type") or "MTF").upper()
+    aliases = {
+        "MTF": "MTF", "SWING": "SWING", "ZONE": "ZONE",
+        "FAST": "FAST", "FAST_DEAL": "FAST", "WYCKOFF": "WYCKOFF",
+        "MEGA": "MEGA",
+    }
+    return aliases.get(scan_type, aliases.get(grade, "MTF"))
+
+
+def _persist_delivered_signal(sd: dict):
+    """Persist only a candidate that passed review and reached Telegram."""
+    if sd.get("_signal_persisted"):
+        return sd.get("_signal_id")
+    signal_type = _signal_type_from_candidate(sd)
+    default_hours = {
+        "FAST": 1, "MTF": 72, "SWING": 12, "ZONE": 12,
+        "WYCKOFF": 168, "MEGA": 336,
+    }
+    result = save_signal_db(
+        sd.get("symbol"), sd.get("direction"), signal_type,
+        sd.get("entry"), sd.get("tp1", sd.get("tp")),
+        sd.get("tp2", sd.get("tp1", sd.get("tp"))),
+        sd.get("tp3", sd.get("tp2", sd.get("tp1", sd.get("tp")))),
+        sd.get("sl"), sd.get("timeframe", "1h"),
+        sd.get("estimated_hours", default_hours.get(signal_type, 72)),
+        sd.get("grade", signal_type),
+        confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
+        regime=sd.get("regime", signal_type) or signal_type,
+    )
+    signal_id = result[0] if isinstance(result, tuple) else result
+    if signal_id:
+        sd["_signal_persisted"] = True
+        sd["_signal_id"] = signal_id
+    else:
+        logging.error("[SignalLifecycle] Telegram delivered but persistence failed: %s", sd.get("symbol"))
+    return signal_id
+
+
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
+    if not _SIGNAL_INTEGRITY_OK:
+        logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
+        return False
+    try:
+        _integrity_prices = get_live_prices()
+        _integrity_current = _integrity_prices.get(sd.get("symbol", ""), {}).get("price")
+    except Exception:
+        _integrity_current = None
+    integrity = _validate_signal_candidate(sd, _integrity_current)
+    if not integrity.get("valid"):
+        logging.error(
+            "[SignalIntegrity] %s %s blocked: %s",
+            sd.get("symbol"), sd.get("direction"), integrity.get("errors"),
+        )
+        return False
+    if integrity.get("warnings"):
+        logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
     if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
         review = await _review_signal_candidate(sd, ask_groq)
         sd["_external_quality_reviewed"] = True
@@ -2845,7 +2906,6 @@ async def _send_signal(sd):
             review.get("reasons", []),
         )
         if decision in ("WAIT", "REJECT"):
-            await asyncio.to_thread(_mark_candidate_not_sent, sd, decision)
             return False
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
@@ -2877,13 +2937,23 @@ async def _send_signal(sd):
             delivered = True
             logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
     try:
-        channel_text = _format_channel_signal(sd)
-        scan_type = sd.get("scan_type", "")
-        main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
-        delivered = delivered or main_ok
-        if main_ok:
-            logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
+        scan_type = str(sd.get("scan_type", "")).lower()
+        if scan_type == "fast":
+            fast_ok = await _send_with_retry(
+                SIGNAL_CHANNEL_SWING, sd["text"], parse_mode="HTML",
+                message_thread_id=FAST_DEAL_THREAD_ID,
+            )
+            delivered = delivered or fast_ok
+            if fast_ok:
+                logging.info("[_send_signal] Отправлено в FAST thread: %s", sd.get("symbol"))
+        else:
+            channel_text = _format_channel_signal(sd)
+            main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+            delivered = delivered or main_ok
+            if main_ok:
+                logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
         if scan_type == "swing":
+            channel_text = _format_channel_signal(sd)
             swing_ok = await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
             delivered = delivered or swing_ok
             if swing_ok:
@@ -2893,6 +2963,7 @@ async def _send_signal(sd):
     if not delivered:
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
         return False
+    await asyncio.to_thread(_persist_delivered_signal, sd)
     try:
         import sqlite3 as _sq3
         _cd = _sq3.connect("brain.db", timeout=10)
@@ -2928,26 +2999,34 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
 
 
 def _is_entry_still_valid(sig_data: dict, max_drift_pct: float = 2.0) -> bool:
-    """Проверяет актуальность цены входа. Если цена ушла >max_drift_pct% — сигнал устарел."""
+    """Reject malformed or materially stale entries without moving levels."""
     try:
         entry = sig_data.get("entry", 0)
         if not entry:
-            return True
+            return False
         prices = get_live_prices()
         symbol = sig_data.get("symbol", "")
         current = prices.get(symbol, {}).get("price", 0)
         if not current:
-            return True
-        direction = sig_data.get("direction", "BULLISH")
-        if direction == "BULLISH" and current > entry * (1 + max_drift_pct / 100):
-            logging.info(f"[Актуальность] {symbol} цена ушла вверх — сигнал устарел")
             return False
-        if direction == "BEARISH" and current < entry * (1 - max_drift_pct / 100):
-            logging.info(f"[Актуальность] {symbol} цена ушла вниз — сигнал устарел")
+        integrity = _validate_signal_candidate(sig_data, current)
+        if not integrity.get("valid"):
+            logging.info(
+                "[Актуальность] %s отклонён: %s",
+                symbol, integrity.get("errors"),
+            )
+            return False
+        drift = abs(float(current) - float(entry)) / float(entry) * 100
+        if drift > max_drift_pct:
+            logging.info(
+                "[Актуальность] %s drift %.2f%% > %.2f%% — сигнал устарел",
+                symbol, drift, max_drift_pct,
+            )
             return False
         return True
-    except Exception:
-        return True
+    except Exception as exc:
+        logging.warning("[Актуальность] validation error: %s", exc)
+        return False
 
 
 async def auto_scan_job():
@@ -3067,17 +3146,17 @@ async def _auto_scan_1h_impl():
     _best = pick_best_signal(valid)
     if _best:
         logging.info(f"[auto_scan_1h] → BEST: {_best.get('symbol')} {_best.get('direction')} grade={_best.get('grade')}")
-        await _send_signal(_best)
+        delivered = await _send_signal(_best)
         await asyncio.sleep(1)
-        sent += 1
+        sent += int(bool(delivered))
     # Остальные топ-2 по confluence
     _rest = [s for s in valid if s is not _best]
     _rest.sort(key=lambda x: (x.get("confluence_score", 0), x.get("rr", 0)), reverse=True)
     for sd in _rest[:2]:
         logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
-        await _send_signal(sd)
+        delivered = await _send_signal(sd)
         await asyncio.sleep(1)
-        sent += 1
+        sent += int(bool(delivered))
     logging.info(f"[auto_scan_1h] Завершён, отправлено {sent}")
 
 
@@ -3183,17 +3262,10 @@ async def _auto_scan_swing_impl():
                     continue
             except Exception:
                 pass
-            # Сохраняем в БД
-            save_signal_db(
-                symbol, direction, "SWING",
-                r["entry"], r["tp"], _sw_tp2_val, _sw_tp2_val, r["sl"],
-                "4h", 12, "SWING",
-                confluence=int(r["rr"] * 20), regime="SWING"
-            )
-
-            await _send_signal(sd)
-            logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
-            await backup_db_to_github()
+            delivered = await _send_signal(sd)
+            if delivered:
+                logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
+                await backup_db_to_github()
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -3287,15 +3359,9 @@ async def _auto_zone_scan_impl():
             except Exception:
                 pass
 
-            save_signal_db(
-                symbol, direction, "ZONE",
-                r["entry"], r["tp"], _z_tp2_val, _z_tp2_val, r["sl"],
-                "4h", 12, "ZONE",
-                confluence=int(r["rr"] * 20), regime="ZONE"
-            )
-
-            await _send_signal(sd)
-            logging.info(f"[ZoneScan] {symbol} {direction} RR={r['rr']} zone={r['zone']} → отправлен")
+            delivered = await _send_signal(sd)
+            if delivered:
+                logging.info(f"[ZoneScan] {symbol} {direction} RR={r['rr']} zone={r['zone']} → отправлен")
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -3376,16 +3442,29 @@ async def auto_scan_mega():
                 f"⏱ Горизонт: 1-2 дня"
             )
 
-            if ADMIN_ID:
-                await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
-
-            # Сохраняем в БД как обычный сигнал с пометкой MEGA
-            save_signal_db(
-                symbol, direction, "MEGA",
-                r["entry"], r["tp1"], r.get("tp2", r["tp1"]), r.get("tp3", r["tp1"]), r["sl"],
-                "4h", 24 * 14, "💎 МЕГА",
-                confluence=r["score"], regime="MEGA"
-            )
+            candidate = {
+                "symbol": symbol,
+                "direction": direction,
+                "scan_type": "MEGA",
+                "grade": "MEGA",
+                "timeframe": "4h",
+                "entry": r["entry"],
+                "sl": r["sl"],
+                "tp1": r["tp1"],
+                "tp2": r.get("tp2", r["tp1"]),
+                "tp3": r.get("tp3", r.get("tp2", r["tp1"])),
+                "rr": abs(r["tp1"] - r["entry"]) / max(abs(r["entry"] - r["sl"]), 1e-12),
+                "estimated_hours": 24 * 14,
+                "confluence_score": r["score"],
+                "regime": "MEGA",
+                "text": text,
+                "technical_evidence": {
+                    "score": r.get("score"),
+                    "days_in_range": r.get("days_in_range"),
+                    "signals": r.get("signals", []),
+                },
+            }
+            await _send_signal(candidate)
             await asyncio.sleep(2)
         except Exception as e:
             logging.error(f"auto_scan_mega send {r.get('symbol')}: {e}")
@@ -3511,16 +3590,10 @@ async def _auto_wyckoff_scan_impl():
                 ) if r.get(key) is not None},
             }
 
-            save_signal_db(
-                symbol, direction, "WYCKOFF",
-                r["entry"], r["tp"], _w_tp2_val, _w_tp2_val, r["sl"],
-                "1d", 168, "🌊 WYCKOFF",
-                confluence=r["score"], regime="WYCKOFF"
-            )
-
-            await _send_signal(sd)
-            logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
-            await backup_db_to_github()
+            delivered = await _send_signal(sd)
+            if delivered:
+                logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
+                await backup_db_to_github()
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -3653,44 +3726,11 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
                     "logic", "zone", "direction_1d", "ob", "fvg"
                 ) if r.get(key) is not None},
             }
-            if _SIGNAL_QUALITY_GATE_OK:
-                _fast_review = await _review_signal_candidate(_fast_sd, ask_groq)
-                logging.info(
-                    "[SignalQualityGate] FAST %s %s → %s confidence=%.2f sources=%s reasons=%s",
-                    symbol, direction, _fast_review.get("decision", "APPROVE"),
-                    _fast_review.get("confidence", 0.0),
-                    _fast_review.get("context", {}).get("data_quality", {}).get("available_sources", []),
-                    _fast_review.get("reasons", []),
-                )
-                if _fast_review.get("decision") in ("WAIT", "REJECT"):
-                    continue
-            save_signal_db(
-                symbol, direction, "FAST",
-                r["entry"], _f_tp1, _f_tp2, _f_tp2, r["sl"],
-                "5m", 1, "⚡ FAST",
-                confluence=int(r["rr"] * 20), regime="FAST"
-            )
-
-            # Отправляем только в ветку Fast deal
-            try:
-                await bot.send_message(
-                    SIGNAL_CHANNEL_SWING,
-                    text,
-                    parse_mode="HTML",
-                    message_thread_id=FAST_DEAL_THREAD_ID
-                )
+            _fast_sd["text"] = text
+            delivered = await _send_signal(_fast_sd)
+            if delivered:
                 logging.info(f"[FastDeal] {symbol} {direction} RR={r['rr']} → отправлен")
-            except Exception as e:
-                logging.error(f"[FastDeal] send error: {e}")
-
-            # Также отправляем тебе в личку
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(admin_id, text, parse_mode="HTML")
-                except Exception:
-                    pass
-
-            await backup_db_to_github()
+                await backup_db_to_github()
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -4281,16 +4321,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         )
         text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
-        # Сохраняем в БД
-        if auto:
-            save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
-                           confluence=conf_score, regime="UNKNOWN")
-
         return {
             "symbol": symbol, "grade": sig_name, "grade_emoji": sig_emoji, "text": text,
             "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2,
             "tp3": tp3, "sl": sl, "rr": _rr_val, "timeframe": timeframe,
             "confluence_score": conf_score, "regime": "UNKNOWN",
+            "estimated_hours": est_hours,
             "scan_type": "mtf",
             "technical_evidence": {
                 "timeframe_alignment": {"15m": _dir_15m, "1h": _dir_1h, "4h": _dir_4h, "1d": _dir_1d},
@@ -4308,6 +4344,11 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
     except Exception as e:
         logging.error(f"full_scan_raw error {symbol}: {e}")
         return None
+
+
+# Conversational and button-triggered scans must use this same canonical MTF
+# candidate builder; market.py keeps only a callback to avoid circular imports.
+register_raw_scan_handler(full_scan_raw)
 
 
 # ===== АВТО-ПАТЧ GITHUB =====
@@ -5001,9 +5042,10 @@ async def recheck_timing_queue():
                         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
                         "grade": grade, "text": updated_text,
                     }
-                    await _send_signal(sd)
-                    remove_from_timing_queue(queue_id)
-                    logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3, RR {_rr_now:.2f})")
+                    delivered = await _send_signal(sd)
+                    if delivered:
+                        remove_from_timing_queue(queue_id)
+                        logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3, RR {_rr_now:.2f})")
 
             except Exception as e:
                 logging.warning(f"[TimingQueue] {symbol}: {e}")

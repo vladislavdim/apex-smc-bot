@@ -15,6 +15,8 @@ _CRITICAL = (
     "non-farm", "nonfarm", "unemployment rate", "fomc", "federal funds rate",
     "fed chair", "powell", "gross domestic product", "gdp", "core pce",
     "personal consumption expenditures", "producer price index", "ppi",
+    "ism manufacturing", "ism services", "pmi", "retail sales",
+    "jolts", "jobless claims", "central bank decision",
 )
 _GLOBAL_NEWS = (
     "bitcoin", "crypto", "federal reserve", "fed ", "interest rate", "inflation",
@@ -49,7 +51,8 @@ def _is_critical(event: dict[str, Any]) -> bool:
     title = str(event.get("title", "")).lower()
     impact = str(event.get("impact", "")).lower()
     country = str(event.get("country", "")).upper()
-    return (not country or country == "USD") and any(word in title for word in _CRITICAL) and impact not in {"low", "holiday"}
+    global_scope = not country or country in {"USD", "US", "ALL", "GLOBAL"}
+    return global_scope and any(word in title for word in _CRITICAL) and impact not in {"low", "holiday"}
 
 
 def _phase(minutes: int) -> str:

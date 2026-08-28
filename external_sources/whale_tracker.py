@@ -10,7 +10,9 @@ SOURCE = "crypto_whale_tracker"
 
 
 def ethereum_assets() -> set[str]:
-    return {"ETHUSDT", "LINKUSDT", "UNIUSDT", "PEPEUSDT", "SHIBUSDT", "AAVEUSDT", "CRVUSDT", "LDOUSDT", "ENAUSDT", "ONDOUSDT"}
+    # Upstream currently decodes ETH, WETH and stablecoins only.  Do not claim
+    # token coverage that its README lists merely as roadmap work.
+    return {"ETHUSDT"}
 
 
 async def collect(symbol: str) -> dict:
@@ -22,7 +24,12 @@ async def collect(symbol: str) -> dict:
     key = os.getenv("WHALE_TRACKER_API_KEY")
     headers = {"X-API-Key": key} if key else None
     async def fetch():
-        return await http_client.get_json(f"{base}/transactions", params={"symbol": symbol.replace("USDT", ""), "limit": 100}, headers=headers)
+        # Upstream FastAPI names the filter `token`, not `symbol`.
+        return await http_client.get_json(
+            f"{base}/transactions",
+            params={"token": symbol.replace("USDT", ""), "limit": 100},
+            headers=headers,
+        )
     try:
         payload, status, age = await cache.get_or_fetch(f"{SOURCE}:{symbol}", 600, 3600, fetch)
         return {"source": SOURCE, "status": status, "age_seconds": age, "payload": payload}

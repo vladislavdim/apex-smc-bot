@@ -21,7 +21,9 @@ import os as _os
 _THIS_DIR = _os.path.dirname(_os.path.abspath(__file__))
 _PARENT_DIR = _os.path.dirname(_THIS_DIR)
 # Пробуем: корень репо (если в core/), потом текущую папку
-if _os.path.exists(_os.path.join(_PARENT_DIR, "brain.db")) or _os.path.exists(_os.path.join(_PARENT_DIR, "bot.py")):
+if _os.environ.get("APEX_BRAIN_DB_PATH"):
+    DB_PATH = _os.environ["APEX_BRAIN_DB_PATH"]
+elif _os.path.exists(_os.path.join(_PARENT_DIR, "brain.db")) or _os.path.exists(_os.path.join(_PARENT_DIR, "bot.py")):
     DB_PATH = _os.path.join(_PARENT_DIR, "brain.db")
 else:
     DB_PATH = _os.path.join(_THIS_DIR, "brain.db")
@@ -302,6 +304,7 @@ def init_learning():
 
     # Загружаем базу SMC/Smart Money знаний при первом запуске
     _seed_smc_knowledge()
+    _reconcile_orphan_pending_learning()
 
 
 def _seed_smc_knowledge():
@@ -421,20 +424,22 @@ def close_signal(signal_id: int, result: str, hit_tp: int = 0):
                 WHERE {_id_col}=?""", (result, hit_tp, rr, hours_open, now, signal_id))
             conn.commit()
 
-            # Обновляем статистику по монете
+            resolved_trade = result in {"tp1", "tp2", "tp3", "sl"}
+            # Expired/cancelled rows remain useful audit records but are not
+            # wins or losses and must not distort WR/session learning.
             _update_stats(conn, symbol)
-            # Обновляем сессионную статистику
-            _update_session(conn, created, result)
-            # Учимся на ошибке если SL
-            if result == "sl":
-                _record_error_pattern(conn, symbol, direction, tf, confluence, regime)
-                _check_auto_rules(conn, symbol, direction, result)
+            if resolved_trade:
+                _update_session(conn, created, result)
+                if result == "sl":
+                    _record_error_pattern(conn, symbol, direction, tf, confluence, regime)
+                    _check_auto_rules(conn, symbol, direction, result)
 
             logging.info(f"[Learning] Сигнал {signal_id} закрыт: {symbol} {result} R={rr:.1f}")
 
-            # Groq автоматически анализирует каждую закрытую сделку
-            import threading
-            threading.Thread(target=analyze_closed_trade, args=(signal_id,), daemon=True).start()
+            # Groq learns only from an activated trade with an observable TP/SL.
+            if resolved_trade:
+                import threading
+                threading.Thread(target=analyze_closed_trade, args=(signal_id,), daemon=True).start()
 
     except Exception as e:
         logging.error(f"close_signal: {e}")
@@ -442,7 +447,8 @@ def close_signal(signal_id: int, result: str, hit_tp: int = 0):
 
 def _update_stats(conn, symbol):
     rows = conn.execute(
-        "SELECT result FROM signal_log WHERE symbol=? AND result!='PENDING'", (symbol,)
+        "SELECT result FROM signal_log WHERE symbol=? AND result IN ('tp1','tp2','tp3','sl')",
+        (symbol,),
     ).fetchall()
     total = len(rows)
     wins  = sum(1 for r in rows if r[0].startswith("tp"))
@@ -451,16 +457,61 @@ def _update_stats(conn, symbol):
     tp2   = sum(1 for r in rows if r[0] == "tp2")
     tp3   = sum(1 for r in rows if r[0] == "tp3")
     sl    = sum(1 for r in rows if r[0] == "sl")
-    exp   = sum(1 for r in rows if r[0] == "expired")
+    exp = conn.execute(
+        "SELECT COUNT(*) FROM signal_log WHERE symbol=? AND result='expired'",
+        (symbol,),
+    ).fetchone()[0]
     wr    = wins / total * 100 if total > 0 else 0
     rr_rows = conn.execute(
-        "SELECT rr_achieved FROM signal_log WHERE symbol=? AND rr_achieved!=0", (symbol,)
+        """SELECT rr_achieved FROM signal_log
+           WHERE symbol=? AND result IN ('tp1','tp2','tp3','sl')
+             AND rr_achieved!=0""",
+        (symbol,),
     ).fetchall()
     avg_rr = sum(r[0] for r in rr_rows) / len(rr_rows) if rr_rows else 0
     conn.execute("""INSERT OR REPLACE INTO signal_stats
         (symbol,total,wins,losses,tp1_hits,tp2_hits,tp3_hits,sl_hits,expired,win_rate,avg_rr,last_updated)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (symbol,total,wins,losses,tp1,tp2,tp3,sl,exp,wr,avg_rr,datetime.now().isoformat()))
+
+
+def _reconcile_orphan_pending_learning() -> None:
+    """Neutralize legacy PENDING rows that are not linked to an open signal.
+
+    Older scanner versions created learning rows before ranking, quality-gate
+    approval and Telegram delivery.  Keeping them as PENDING pollutes pattern
+    queries forever.  We preserve the rows and mark them cancelled; nothing is
+    deleted and resolved historical outcomes are untouched.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """SELECT id, symbol FROM signal_log
+               WHERE result='PENDING'
+                 AND id NOT IN (
+                     SELECT learning_id FROM signals
+                     WHERE result='pending' AND learning_id IS NOT NULL
+                 )"""
+        ).fetchall()
+        if not rows:
+            conn.close()
+            return
+        ids = [row[0] for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"""UPDATE signal_log
+                SET result='cancelled', closed_at=CURRENT_TIMESTAMP,
+                    notes=TRIM(COALESCE(notes, '') || ' legacy_orphan_reconciled')
+                WHERE id IN ({placeholders})""",
+            ids,
+        )
+        for symbol in sorted({row[1] for row in rows if row[1]}):
+            _update_stats(conn, symbol)
+        conn.commit()
+        conn.close()
+        logging.warning("[Learning] reconciled %s orphan PENDING rows", len(rows))
+    except Exception as exc:
+        logging.warning("[Learning] orphan reconciliation skipped: %s", exc)
 
 
 def _update_session(conn, created_at: str, result: str):
@@ -646,7 +697,9 @@ def get_signal_context(symbol: str) -> str:
     try:
         conn = sqlite3.connect(DB_PATH)
         best = conn.execute(
-            "SELECT result, COUNT(*) as cnt FROM signal_log WHERE symbol=? AND result!='PENDING' GROUP BY result ORDER BY cnt DESC LIMIT 1",
+            """SELECT result, COUNT(*) as cnt FROM signal_log
+               WHERE symbol=? AND result IN ('tp1','tp2','tp3','sl')
+               GROUP BY result ORDER BY cnt DESC LIMIT 1""",
             (symbol,)
         ).fetchone()
         if best:
@@ -676,7 +729,9 @@ def run_self_analysis():
         # Сигналы за последние 7 дней
         week_ago = (datetime.now() - timedelta(days=7)).isoformat()
         rows = conn.execute(
-            "SELECT symbol,direction,result,rr_achieved,hours_open,confluence,grade FROM signal_log WHERE created_at>? AND result!='PENDING'",
+            """SELECT symbol,direction,result,rr_achieved,hours_open,confluence,grade
+               FROM signal_log WHERE created_at>?
+               AND result IN ('tp1','tp2','tp3','sl')""",
             (week_ago,)
         ).fetchall()
 
@@ -1291,7 +1346,7 @@ def groq_build_strategy():
             SELECT symbol, direction, timeframe, regime, confluence, grade,
                    result, rr_achieved, hours_open
             FROM signal_log
-            WHERE result != 'PENDING'
+            WHERE result IN ('tp1','tp2','tp3','sl')
             ORDER BY id DESC LIMIT 200
         """).fetchall()
 
@@ -1492,7 +1547,7 @@ def get_groq_trade_insight(symbol: str, direction: str, grade: str,
         conn = sqlite3.connect(DB_PATH)
         hist = conn.execute("""
             SELECT result, confluence, regime FROM signal_log
-            WHERE symbol=? AND result!='PENDING'
+            WHERE symbol=? AND result IN ('tp1','tp2','tp3','sl')
             ORDER BY id DESC LIMIT 5
         """, (symbol,)).fetchall()
         conn.close()
@@ -1534,7 +1589,7 @@ def groq_whale_context(symbol: str, volume_spike: float, direction: str) -> str:
         # Есть ли у нас история с этой монетой при похожих объёмах?
         hist = conn.execute("""
             SELECT result FROM signal_log
-            WHERE symbol=? AND result!='PENDING'
+            WHERE symbol=? AND result IN ('tp1','tp2','tp3','sl')
             ORDER BY id DESC LIMIT 10
         """, (symbol,)).fetchall()
         conn.close()
@@ -1634,6 +1689,7 @@ def groq_weekly_report():
             SELECT symbol, direction, result, timeframe, hours_open
             FROM signal_log
             WHERE created_at >= datetime('now', '-7 days')
+              AND result IN ('tp1','tp2','tp3','sl')
         """).fetchall()
 
         if not week_stats:

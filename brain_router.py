@@ -13,6 +13,7 @@ Groq учится какие источники работают, строит w
 import os, sqlite3, time, logging, requests, json, threading
 from datetime import datetime, timedelta
 from typing import Optional
+from core.groq_models import configured_groq_models, is_model_unavailable_error
 
 # ── WAL патч ──
 
@@ -198,8 +199,7 @@ def _groq(prompt: str, max_tokens: int = 300, system: str = "") -> str:
         # Лимит 80k токенов в день из роутера
         if _groq_tokens_today > 80000:
             return ""
-    models = ["llama-3.1-8b-instant", "llama-3.1-70b-specdec", "gemma2-9b-it"]
-    for model in models:
+    for model in configured_groq_models():
         for attempt in range(2):
             try:
                 msgs = []
@@ -219,7 +219,7 @@ def _groq(prompt: str, max_tokens: int = 300, system: str = "") -> str:
                 if "429" in err:
                     time.sleep(20 * (attempt + 1))
                     continue
-                if "model" in err.lower():
+                if is_model_unavailable_error(e):
                     break
                 return ""
     return ""

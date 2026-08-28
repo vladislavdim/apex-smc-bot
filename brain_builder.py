@@ -20,6 +20,7 @@ import time
 import re
 from datetime import datetime
 from groq import Groq
+from core.groq_models import configured_groq_models, is_model_unavailable_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -564,16 +565,20 @@ def ask_groq(prompt, max_tokens=600):
     if not groq_client:
         logging.error("Groq client не инициализирован")
         return None
-    try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens
-        )
-        return r.choices[0].message.content.strip()
-    except Exception as e:
-        logging.error(f"Groq error: {e}")
-        return None
+    for model in configured_groq_models():
+        try:
+            r = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+            )
+            return r.choices[0].message.content.strip()
+        except Exception as exc:
+            if is_model_unavailable_error(exc):
+                logging.warning("Groq model unavailable: %s", model)
+                continue
+            logging.error("Groq error (%s): %s", model, exc)
+    return None
 
 
 # ──────────────────────────────────────────────

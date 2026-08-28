@@ -8,9 +8,3 @@ services:
     buildFilter:
       ignoredPaths:
         - brain.db
-        - core/learning.py
-        - core/smc_engine.py
-        - apex_autopilot.py
-        - groq_extensions.py
-        - brain_router.py
-        - web_learner.py
