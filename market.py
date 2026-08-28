@@ -42,6 +42,29 @@ for _p in [_os_path.path.join(_BASE_DIR, "core"), _BASE_DIR]:
         _sys.path.insert(0, _p)
 
 try:
+    from signal_lifecycle import (
+        ACTIVE as _LIFECYCLE_ACTIVE,
+        CANCELLED as _LIFECYCLE_CANCELLED,
+        WAITING_ENTRY as _LIFECYCLE_WAITING,
+        activated_at_for as _lifecycle_activated_at_for,
+        barrier_hits as _lifecycle_barrier_hits,
+        entry_touched as _lifecycle_entry_touched,
+        mark_active as _lifecycle_mark_active,
+        mark_finished as _lifecycle_mark_finished,
+        register_waiting as _lifecycle_register_waiting,
+        state_for as _lifecycle_state_for,
+        touch as _lifecycle_touch,
+    )
+    _SIGNAL_LIFECYCLE_OK = True
+except Exception as _lifecycle_import_error:
+    _SIGNAL_LIFECYCLE_OK = False
+    _LIFECYCLE_ACTIVE = "active"
+    _LIFECYCLE_CANCELLED = "cancelled"
+    _LIFECYCLE_WAITING = "waiting_entry"
+    _lifecycle_activated_at_for = lambda *_args, **_kwargs: None
+    logging.error("signal_lifecycle unavailable: %s", _lifecycle_import_error)
+
+try:
     from smc_engine import (
         get_candles_smart, multi_tf_analysis as _smc_multi_tf,
         find_swings as _smc_find_swings, classify_swings as _smc_classify_swings,
@@ -3282,6 +3305,20 @@ def analyze_trade_type(symbol, trade_type="swing"):
         return None
 
 
+_RAW_SCAN_HANDLER = None
+
+
+def register_raw_scan_handler(handler):
+    """Register the canonical MTF candidate builder owned by bot.py.
+
+    This keeps conversational/manual analysis on exactly the same strategy
+    implementation as the automatic scanner without introducing a circular
+    import between the two legacy modules.
+    """
+    global _RAW_SCAN_HANDLER
+    _RAW_SCAN_HANDLER = handler
+
+
 def full_scan(symbol, timeframe="1h"):
     """Полный SMC анализ с мультитаймфреймом + все новые фильтры"""
     try:
@@ -3985,9 +4022,6 @@ def full_scan(symbol, timeframe="1h"):
         time_str = f"~{est_hours}ч" if est_hours < 24 else f"~{est_hours//24}дн"
         wr_str = f"{win_rate:.0f}% WR" if win_rate > 0 else "нет истории"
 
-        save_signal_db(symbol, direction, "MTF", entry, tp1, tp2, tp3, sl, timeframe, est_hours, mtf["grade"],
-                       confluence=total_weight, regime=regime.get("mode","UNKNOWN") if isinstance(regime, dict) else str(regime))
-
         # ── 6. AI комментарий к сигналу — с учётом правил самообучения ──
         brain_ctx = get_brain_context(symbol, direction)
         signal_comment = generate_signal_comment(
@@ -4083,10 +4117,11 @@ def full_scan(symbol, timeframe="1h"):
 
 
 def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, timeframe, est_hours, grade, confluence=0, regime="UNKNOWN"):
-    """Сохраняем сигнал в обе таблицы: signals (трекинг) + signal_log (обучение)"""
+    """Persist a delivered signal; learning starts only after entry activation."""
     learning_id = None
-    # Проверяем основной журнал до создания learning-записи. Иначе каждый
-    # дубликат оставлял вечный PENDING в signal_log.
+    if not _SIGNAL_LIFECYCLE_OK:
+        logging.error("save_signal_db: lifecycle module unavailable — persistence blocked")
+        return None, None
     try:
         _pre = sqlite3.connect("brain.db", timeout=10, check_same_thread=False)
         existing = _pre.execute(
@@ -4099,15 +4134,6 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
             return None, None
     except Exception as _pre_error:
         logging.warning(f"save_signal_db precheck: {_pre_error}")
-    try:
-        # Сохраняем в learning.py signal_log для Groq-анализа
-        if _LEARNING_OK:
-            learning_id = _learn_save_signal(
-                symbol, direction, grade, entry, sl, tp1, tp2, tp3,
-                timeframe, confluence, regime, signal_type
-            )
-    except Exception as e:
-        logging.warning(f"save_signal learning: {e}")
 
     for _attempt in range(5):
         try:
@@ -4132,10 +4158,11 @@ def save_signal_db(symbol, direction, signal_type, entry, tp1, tp2, tp3, sl, tim
                         CURRENT_TIMESTAMP, NULL, ?, ?, ?)
             """, (symbol, direction, signal_type, entry, tp1, tp2, tp3, sl,
                   timeframe, est_hours, grade, learning_id, confluence, regime))
-            conn.commit()
             sig_id = cursor.lastrowid
+            _lifecycle_register_waiting(conn, sig_id)
+            conn.commit()
             conn.close()
-            logging.info(f"Signal saved: {symbol} {direction} (ID: {sig_id})")
+            logging.info(f"Signal saved awaiting entry: {symbol} {direction} (ID: {sig_id})")
             return sig_id, learning_id
         except Exception as e:
             if "locked" in str(e).lower() and _attempt < 4:
@@ -4190,7 +4217,10 @@ def check_pending_signals():
     try:
         conn = get_db_conn()
         pending = conn.execute(
-            "SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours, tp1_hit, trailing_sl, best_price FROM signals WHERE result='pending'"
+            """SELECT id, symbol, direction, entry, tp1, tp2, tp3, sl,
+                      timeframe, grade, created_at, signal_type, estimated_hours,
+                      tp1_hit, trailing_sl, best_price, confluence, regime, learning_id
+               FROM signals WHERE result='pending'"""
         ).fetchall()
         conn.close()
 
@@ -4200,10 +4230,12 @@ def check_pending_signals():
         _TRAIL_COEFF = {"FAST": 0.3, "MTF": 0.4, "SWING": 0.5, "WYCKOFF": 0.5, "ZONE": 0.4}
 
         closed = []
+        prices = get_live_prices()
         for row in pending:
-            sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe, grade, created_at, signal_type, estimated_hours, tp1_hit_flag, trailing_sl, best_price = row
+            (sig_id, symbol, direction, entry, tp1, tp2, tp3, sl, timeframe,
+             grade, created_at, signal_type, estimated_hours, tp1_hit_flag,
+             trailing_sl, best_price, confluence, regime, learning_id_value) = row
             tp1_hit_flag = tp1_hit_flag or 0
-            prices = get_live_prices()
             current = None
             if symbol in prices:
                 current = prices[symbol]["price"]
@@ -4221,31 +4253,129 @@ def check_pending_signals():
             created = datetime.fromisoformat(created_at)
             hours_elapsed = (datetime.now() - created).total_seconds() / 3600
 
+            lifecycle_state = _LIFECYCLE_ACTIVE
+            lifecycle_activated_at = None
+            if _SIGNAL_LIFECYCLE_OK:
+                try:
+                    _lc = get_db_conn(timeout=10)
+                    lifecycle_state = _lifecycle_state_for(_lc, sig_id)
+                    lifecycle_activated_at = _lifecycle_activated_at_for(_lc, sig_id)
+                    _lifecycle_touch(_lc, sig_id)
+                    _lc.commit()
+                    _lc.close()
+                except Exception as _lc_error:
+                    logging.warning("[SignalLifecycle] state read %s: %s", sig_id, _lc_error)
+
+            # The current 5m candle can include price action from before the
+            # signal was delivered or activated.  Candle high/low becomes safe
+            # only after one full five-minute boundary since activation.
+            interval_low = interval_high = current
+            use_interval = lifecycle_state == _LIFECYCLE_ACTIVE
+            if lifecycle_activated_at:
+                try:
+                    activated = datetime.fromisoformat(lifecycle_activated_at)
+                    use_interval = (datetime.now() - activated).total_seconds() >= 300
+                except (TypeError, ValueError):
+                    use_interval = False
+            if use_interval:
+                try:
+                    _obs = get_candles(symbol, "5m", 3)
+                    if _obs:
+                        interval_low = min(float(_obs[-1]["low"]), current)
+                        interval_high = max(float(_obs[-1]["high"]), current)
+                except Exception:
+                    pass
+
+            _sig_type_check = (signal_type or "").upper()
+            _expiry_h = _STRATEGY_EXPIRY.get(_sig_type_check, estimated_hours or 72)
+
+            if lifecycle_state == _LIFECYCLE_WAITING:
+                invalidated = (
+                    direction == "BULLISH" and current <= sl
+                ) or (
+                    direction == "BEARISH" and current >= sl
+                )
+                target_passed = (
+                    direction == "BULLISH" and current >= tp1
+                ) or (
+                    direction == "BEARISH" and current <= tp1
+                )
+                if invalidated or target_passed or hours_elapsed > _expiry_h:
+                    reason = (
+                        "stop_reached_before_confirmed_entry" if invalidated else
+                        "target_reached_without_entry" if target_passed else
+                        "entry_not_filled_before_expiry"
+                    )
+                    _cc = get_db_conn(timeout=10)
+                    _cc.execute(
+                        "UPDATE signals SET result='cancelled', closed_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (sig_id,),
+                    )
+                    if _SIGNAL_LIFECYCLE_OK:
+                        _lifecycle_mark_finished(_cc, sig_id, _LIFECYCLE_CANCELLED, reason)
+                    _cc.commit(); _cc.close()
+                    logging.info("[SignalLifecycle] %s cancelled unfilled: %s", symbol, reason)
+                    closed.append({
+                        "signal_id": sig_id, "symbol": symbol, "result": "cancelled",
+                        "hours": round(hours_elapsed, 1), "grade": grade,
+                        "is_win": False, "reason": reason,
+                    })
+                    continue
+
+                if not _lifecycle_entry_touched(
+                    direction, entry, current=current
+                ):
+                    continue
+
+                # Start the learning record only after the advertised entry is
+                # observed.  This removes rejected/unselected/unfilled rows
+                # from Groq's ground truth.
+                new_learning_id = None
+                if _LEARNING_OK:
+                    try:
+                        new_learning_id = _learn_save_signal(
+                            symbol, direction, grade, entry, sl, tp1, tp2, tp3,
+                            timeframe, confluence or 0, regime or "UNKNOWN", signal_type or "",
+                        )
+                    except Exception as _learning_start_error:
+                        logging.warning("[SignalLifecycle] learning activation %s: %s", symbol, _learning_start_error)
+                _ac = get_db_conn(timeout=10)
+                _ac.execute(
+                    "UPDATE signals SET learning_id=? WHERE id=?",
+                    (new_learning_id, sig_id),
+                )
+                if _SIGNAL_LIFECYCLE_OK:
+                    _lifecycle_mark_active(_ac, sig_id)
+                _ac.commit(); _ac.close()
+                logging.info("[SignalLifecycle] %s entry activated at %s", symbol, entry)
+                # Never infer entry→TP/SL ordering from the activation bar.
+                continue
+
             result = None
             hit_tp = None
-            _sig_type_check = (signal_type or "").upper()
             _active_sl = trailing_sl if trailing_sl else sl
 
             # ── Trailing Stop Logic ──
             if tp1_hit_flag:
-                # TP1 уже достигнут — отслеживаем best_price и trailing SL → TP2
+                # TP1 уже достигнут — отслеживаем best_price и trailing SL → TP2.
+                # Используем high/low интерва, а не только текущий snapshot.
                 _bp = best_price or entry
                 if direction == "BULLISH":
-                    if current > _bp:
-                        _bp = current
-                    if current >= tp2:
-                        result, hit_tp = "tp2", 2
-                    elif current <= _active_sl:
-                        # TP1 уже зафиксирован, поэтому trailing-выход не
-                        # должен портить WR и обучение как обычный SL.
-                        result, hit_tp = "tp1", 1
+                    _bp = max(_bp, interval_high)
                 else:
-                    if current < _bp:
-                        _bp = current
-                    if current <= tp2:
-                        result, hit_tp = "tp2", 2
-                    elif current >= _active_sl:
-                        result, hit_tp = "tp1", 1
+                    _bp = min(_bp, interval_low)
+
+                _hits = _lifecycle_barrier_hits(
+                    direction, _active_sl, tp1, tp2, interval_low, interval_high
+                )
+                if _hits["sl"] and _hits["tp2"]:
+                    # Порядок внутри 5m свечи неизвестен: не завышаем WR.
+                    result, hit_tp = "tp1", 1
+                elif _hits["tp2"]:
+                    result, hit_tp = "tp2", 2
+                elif _hits["sl"]:
+                    # TP1 уже зафиксирован, trailing-выход не является SL.
+                    result, hit_tp = "tp1", 1
 
                 # Обновляем best_price и trailing_sl
                 _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
@@ -4267,76 +4397,52 @@ def check_pending_signals():
                 except Exception:
                     pass
             else:
-                # TP1 ещё не достигнут — классическая проверка
-                if direction == "BULLISH":
-                    if _sig_type_check == "FAST":
-                        if current >= tp2:
-                            result, hit_tp = "tp2", 2
-                        elif current >= tp1:
-                            result, hit_tp = "tp1", 1
-                        elif current <= sl:
-                            result = "sl"
+                # TP1 ещё не достигнут. При одновременном касании SL и TP
+                # внутри одной 5m свечи засчитываем SL: иначе WR будет завышен.
+                _hits = _lifecycle_barrier_hits(
+                    direction, sl, tp1, tp2, interval_low, interval_high
+                )
+                if _hits["sl"]:
+                    result = "sl"
+                elif _sig_type_check == "FAST":
+                    if _hits["tp2"]:
+                        result, hit_tp = "tp2", 2
+                    elif _hits["tp1"]:
+                        result, hit_tp = "tp1", 1
+                elif _hits["tp2"]:
+                    # Сигнал был активен до этого интерва, поэтому TP2
+                    # невозможен без предварительного прохода TP1.
+                    result, hit_tp = "tp2", 2
+                elif _hits["tp1"]:
+                    # TP1 hit — НЕ закрываем, включаем trailing.
+                    hit_tp = 1
+                    _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
+                    if direction == "BULLISH":
+                        _new_trail_sl = round(entry + abs(tp1 - entry) * _trail_c, 8)
+                        _new_best = interval_high
                     else:
-                        if current >= tp1:
-                            # TP1 hit — НЕ закрываем, включаем trailing
-                            hit_tp = 1
-                            _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
-                            _new_trail_sl = round(entry + abs(tp1 - entry) * _trail_c, 8)
-                            try:
-                                _tc = get_db_conn(timeout=10)
-                                _tc.execute("UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
-                                            (_new_trail_sl, current, sig_id))
-                                _tc.commit()
-                                _tc.close()
-                                logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
-                            except Exception:
-                                pass
-                            # Добавляем TP1 event для уведомления (без закрытия)
-                            closed.append({
-                                "signal_id": sig_id, "symbol": symbol,
-                                "result": "tp1_hit", "hours": round(hours_elapsed, 1),
-                                "grade": grade, "is_win": False,
-                                "trailing_sl": _new_trail_sl, "tp2": tp2,
-                                "entry": entry, "direction": direction
-                            })
-                            # Не даём expiry в том же цикле отменить уже
-                            # активированный trailing.
-                            continue
-                        elif current <= sl:
-                            result = "sl"
-                else:
-                    if _sig_type_check == "FAST":
-                        if current <= tp2:
-                            result, hit_tp = "tp2", 2
-                        elif current <= tp1:
-                            result, hit_tp = "tp1", 1
-                        elif current >= sl:
-                            result = "sl"
-                    else:
-                        if current <= tp1:
-                            hit_tp = 1
-                            _trail_c = _TRAIL_COEFF.get(_sig_type_check, 0.4)
-                            _new_trail_sl = round(entry - abs(entry - tp1) * _trail_c, 8)
-                            try:
-                                _tc = get_db_conn(timeout=10)
-                                _tc.execute("UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
-                                            (_new_trail_sl, current, sig_id))
-                                _tc.commit()
-                                _tc.close()
-                                logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
-                            except Exception:
-                                pass
-                            # Добавляем TP1 event для уведомления (без закрытия)
-                            closed.append({
-                                "signal_id": sig_id, "symbol": symbol,
-                                "result": "tp1_hit", "hours": round(hours_elapsed, 1),
-                                "grade": grade, "is_win": False,
-                                "trailing_sl": _new_trail_sl, "tp2": tp2,
-                                "entry": entry, "direction": direction
-                            })
-                            continue
-                        elif current >= sl:
-                            result = "sl"
+                        _new_trail_sl = round(entry - abs(entry - tp1) * _trail_c, 8)
+                        _new_best = interval_low
+                    try:
+                        _tc = get_db_conn(timeout=10)
+                        _tc.execute(
+                            "UPDATE signals SET tp1_hit=1, trailing_sl=?, best_price=? WHERE id=?",
+                            (_new_trail_sl, _new_best, sig_id),
+                        )
+                        _tc.commit()
+                        _tc.close()
+                        logging.info(f"[Trailing] {symbol} TP1 hit! Trail SL → {_new_trail_sl}")
+                    except Exception:
+                        pass
+                    closed.append({
+                        "signal_id": sig_id, "symbol": symbol,
+                        "result": "tp1_hit", "hours": round(hours_elapsed, 1),
+                        "grade": grade, "is_win": False,
+                        "trailing_sl": _new_trail_sl, "tp2": tp2,
+                        "entry": entry, "direction": direction,
+                    })
+                    # Не даём expiry в том же цикле отменить trailing.
+                    continue
 
             # Expiry: используем estimated_hours или стратегию, fallback 72ч
             _sig_type = (signal_type or "").upper()
@@ -4350,6 +4456,8 @@ def check_pending_signals():
                     "UPDATE signals SET result=?, closed_at=CURRENT_TIMESTAMP WHERE id=?",
                     (result, sig_id)
                 )
+                if _SIGNAL_LIFECYCLE_OK:
+                    _lifecycle_mark_finished(conn2, sig_id, "closed", result)
                 # Сохраняем learning_id если есть
                 learning_id = conn2.execute(
                     "SELECT learning_id FROM signals WHERE id=?", (sig_id,)
@@ -4521,7 +4629,7 @@ def check_pending_signals():
         return []
 
 def _learn_analyze_by_symbol(symbol, direction, entry, result, hours, timeframe):
-    """Fallback: сохраняем в signal_log и анализируем если нет learning_id"""
+    """Close a matching legacy learning row without fabricating trade levels."""
     try:
         if not _LEARNING_OK:
             return
@@ -4536,10 +4644,10 @@ def _learn_analyze_by_symbol(symbol, direction, entry, result, hours, timeframe)
         if row:
             _learn_close_signal(row[0], result)
         else:
-            # Создаём запись для анализа
-            l_id = _learn_save_signal(symbol, direction, "AUTO", entry, entry*0.98, entry*1.02, entry*1.03, entry*1.04, timeframe, 0, "UNKNOWN", "auto")
-            if l_id:
-                _learn_close_signal(l_id, result)
+            logging.warning(
+                "[Learning] no activated record for %s; result %s is not synthesized",
+                symbol, result,
+            )
     except Exception as e:
         logging.warning(f"_learn_analyze_by_symbol: {e}")
 
@@ -7238,9 +7346,12 @@ def ask_ai(user_id, user_name, user_message):
         # Если нашли монету — запускаем full_scan вместо болтовни
         if found_symbol:
             try:
-                scan_result = full_scan(found_symbol)
+                scan_result = (
+                    _RAW_SCAN_HANDLER(found_symbol, "1h", False)
+                    if _RAW_SCAN_HANDLER else None
+                )
                 if scan_result:
-                    return scan_result
+                    return scan_result.get("text") if isinstance(scan_result, dict) else scan_result
                 else:
                     # Нет сигнала — объясняем почему
                     price_data = prices.get(found_symbol)

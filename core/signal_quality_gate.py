@@ -146,37 +146,6 @@ def _persist_review(candidate: dict[str, Any], context: dict[str, Any], news: di
         logging.warning("[SignalQualityGate] review persistence failed: %s", exc)
 
 
-def mark_candidate_not_sent(candidate: dict[str, Any], decision: str) -> None:
-    """Keep an AI-rejected candidate out of pending trade monitoring.
-
-    Several legacy scanners persist a candidate immediately before calling the
-    sender.  Updating only that newest matching pending row preserves its audit
-    history while preventing it from being treated as a live trade.
-    """
-    status = "ai_wait" if str(decision).upper() == "WAIT" else "ai_rejected"
-    try:
-        view = _candidate_view(candidate)
-        conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
-        strategy = str(view.get("strategy") or "").upper()
-        strategy = {"FAST_DEAL": "FAST", "SWING": "SWING", "ZONE": "ZONE", "WYCKOFF": "WYCKOFF"}.get(strategy, strategy)
-        row = conn.execute(
-            """SELECT id FROM signals
-               WHERE symbol=? AND direction=? AND timeframe=?
-                 AND UPPER(signal_type)=? AND result='pending'
-               ORDER BY id DESC LIMIT 1""",
-            (view.get("symbol"), view.get("direction"), view.get("timeframe"), strategy),
-        ).fetchone()
-        if row:
-            conn.execute(
-                "UPDATE signals SET result=?, closed_at=CURRENT_TIMESTAMP WHERE id=?",
-                (status, row[0]),
-            )
-            conn.commit()
-        conn.close()
-    except Exception as exc:
-        logging.warning("[SignalQualityGate] candidate status update failed: %s", exc)
-
-
 async def review_signal_candidate(
     candidate: dict[str, Any],
     ask_groq: Callable[..., str | None],
