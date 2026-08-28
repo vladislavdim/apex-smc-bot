@@ -28,6 +28,17 @@ class NewsContextTests(unittest.TestCase):
         context = normalize_news_context("ETHUSDT", calendar, [], now=now)
         self.assertEqual((context["risk_level"], context["phase"]), ("HIGH", "RELEASE_WINDOW"))
 
+    def test_global_scope_critical_event_is_included(self):
+        calendar = [{
+            "title": "ISM Manufacturing PMI", "country": "ALL", "date": "08-28-2026",
+            "time": "10:00am", "impact": "High", "forecast": "", "previous": "",
+            "actual": "",
+        }]
+        now = datetime(2026, 8, 28, 13, 15, tzinfo=timezone.utc)
+        context = normalize_news_context("BTCUSDT", calendar, [], now=now)
+        self.assertEqual(context["phase"], "PRE_EVENT")
+        self.assertEqual(context["nearest_critical_event"]["title"], "ISM Manufacturing PMI")
+
     def test_old_unrelated_headline_is_removed(self):
         rows = [{"title": "Local company opens office", "source": "x", "age_seconds": 10}]
         context = normalize_news_context("SOLUSDT", [], rows, now=datetime.now(timezone.utc))

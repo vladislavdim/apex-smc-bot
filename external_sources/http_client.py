@@ -15,7 +15,7 @@ class ExternalHTTPError(RuntimeError):
 
 
 class ExternalHTTPClient:
-    def __init__(self, timeout_seconds: float = 7.0, retries: int = 2, concurrency: int = 6) -> None:
+    def __init__(self, timeout_seconds: float = 4.0, retries: int = 1, concurrency: int = 6) -> None:
         self.timeout_seconds = timeout_seconds
         self.retries = retries
         self._semaphore = asyncio.Semaphore(concurrency)

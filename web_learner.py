@@ -4,10 +4,10 @@ Groq сам решает что искать, ищет, анализирует �
 """
 import requests, sqlite3, logging, json, os, time, re
 from datetime import datetime
+from core.groq_models import configured_groq_models
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain.db")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ═══════════════════════════════════════════════════════════════
 # ИНИЦИАЛИЗАЦИЯ
@@ -54,26 +54,30 @@ def init_web_learner_db():
 def _groq(prompt: str, max_tokens_val: int = 800) -> str:
     if not GROQ_API_KEY:
         return ""
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens_val,
-                "temperature": 0.3,
-            },
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            timeout=30
-        )
-        data = r.json()
-        if "choices" not in data:
-            logging.warning(f"web_learner groq: {data.get('error', {}).get('message', 'no choices')}")
-            return ""
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logging.warning(f"web_learner groq: {e}")
-        return ""
+    for model in configured_groq_models():
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens_val,
+                    "temperature": 0.3,
+                },
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                timeout=30,
+            )
+            data = r.json()
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"].strip()
+            logging.warning(
+                "web_learner groq %s: %s",
+                model,
+                data.get("error", {}).get("message", "no choices"),
+            )
+        except Exception as exc:
+            logging.warning("web_learner groq %s: %s", model, exc)
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════
