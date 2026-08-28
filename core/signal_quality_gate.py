@@ -16,7 +16,11 @@ from external_sources.models import empty_context
 from external_sources.storage import persist_context
 from news_context.aggregator import collect_news_context, format_news_context
 from news_context.storage import persist_news_context
-from market_memory import build_memory_context, format_market_memory_context
+
+try:
+    from .market_memory import build_memory_context, format_market_memory_context
+except ImportError:  # market.py also supports loading core/ as a direct module path
+    from market_memory import build_memory_context, format_market_memory_context
 
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
