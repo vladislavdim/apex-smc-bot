@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .sources import collect_calendar, collect_headlines
+from .official_macro import collect as collect_official_actuals
 
 
 _CRITICAL = (
@@ -127,11 +128,15 @@ def normalize_news_context(
 
 
 async def collect_news_context(symbol: str) -> dict[str, Any]:
-    raw = await asyncio.gather(collect_calendar(), collect_headlines(), return_exceptions=True)
+    raw = await asyncio.gather(
+        collect_calendar(), collect_headlines(), collect_official_actuals(),
+        return_exceptions=True,
+    )
     calendar: list[dict[str, Any]] = []
     headlines: list[dict[str, Any]] = []
     statuses: list[tuple[str, str, int | None]] = []
     failed: list[str] = []
+    official_actuals: dict[str, Any] = {}
     if isinstance(raw[0], Exception):
         failed.append(f"macro_calendar:{type(raw[0]).__name__}")
     else:
@@ -142,7 +147,17 @@ async def collect_news_context(symbol: str) -> dict[str, Any]:
     else:
         headlines, status, age = raw[1]
         statuses.append(("crypto_rss", status, age))
+    if isinstance(raw[2], Exception):
+        failed.append(f"bls_official_actuals:{type(raw[2]).__name__}")
+    elif isinstance(raw[2], dict) and raw[2].get("status") in {"fresh", "cached", "stale_fallback"}:
+        official_actuals = raw[2].get("actuals", {})
+        statuses.append(("bls_official_actuals", raw[2].get("status"), raw[2].get("age_seconds")))
+    elif not isinstance(raw[2], dict):
+        failed.append("bls_official_actuals:invalid_response")
+    else:
+        failed.append(f"bls_official_actuals:{raw[2].get('status', 'unavailable')}")
     context = normalize_news_context(symbol, calendar, headlines)
+    context["official_macro_actuals"] = official_actuals
     context["data_quality"] = {
         "available_sources": [name for name, _, _ in statuses],
         "failed_sources": failed,
@@ -164,8 +179,9 @@ def format_news_context(context: dict[str, Any]) -> str:
         f"- Critical event: {event.get('title', 'none')}",
         f"- Minutes until event: {event.get('minutes_until', 'n/a')}",
         f"- Forecast / previous / actual: {event.get('forecast') or 'unknown'} / {event.get('previous') or 'unknown'} / {event.get('actual') or 'unknown'}",
+        f"- Official published macro actuals (BLS): {context.get('official_macro_actuals') or 'unavailable'}",
         f"- Headlines: {headlines or 'none'}",
         f"- Prediction: {context.get('prediction')}",
         f"- Data quality: available={quality.get('available_sources', [])}; failed={quality.get('failed_sources', [])}; age={quality.get('age_seconds')}",
-        "Instructions: scheduled macro news is volatility risk, not a directional prediction. Never invent the release value or market reaction. News is an additional quality filter and cannot independently create a trade.",
+        "Instructions: scheduled macro news is volatility risk, not a directional prediction. Official BLS observations may be delayed or revised and describe published history, not the next release. Never invent the release value or market reaction. News is an additional quality filter and cannot independently create a trade.",
     ])

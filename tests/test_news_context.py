@@ -58,8 +58,9 @@ class NewsContextTests(unittest.TestCase):
 class NewsContextAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_sources_unavailable_is_fail_open_context(self):
         with patch("news_context.aggregator.collect_calendar", new=AsyncMock(side_effect=TimeoutError())), \
-             patch("news_context.aggregator.collect_headlines", new=AsyncMock(side_effect=ConnectionError())):
+             patch("news_context.aggregator.collect_headlines", new=AsyncMock(side_effect=ConnectionError())), \
+             patch("news_context.aggregator.collect_official_actuals", new=AsyncMock(side_effect=TimeoutError())):
             context = await collect_news_context("BTCUSDT")
         self.assertTrue(context["news_data_unavailable"])
         self.assertEqual(context["risk_level"], "LOW")
-        self.assertEqual(len(context["data_quality"]["failed_sources"]), 2)
+        self.assertEqual(len(context["data_quality"]["failed_sources"]), 3)
