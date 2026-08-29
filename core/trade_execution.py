@@ -597,6 +597,23 @@ def execute_approved_candidate(
                 ),
             )
 
+        # Telegram delivery stays fail-open, but real money is fail-closed.
+        review = candidate.get("_external_quality_review")
+        try:
+            min_groq = float(os.environ.get("AUTO_TRADING_MIN_GROQ_CONFIDENCE", os.environ.get("GROQ_MIN_APPROVAL_CONFIDENCE", "0.70")))
+        except ValueError:
+            min_groq = 0.70
+        min_groq = max(0.0, min(1.0, min_groq)); groq_error = ""
+        if not candidate.get("_external_quality_reviewed") or not isinstance(review, dict): groq_error = "missing Groq quality review"
+        elif bool(review.get("degraded")): groq_error = "degraded Groq quality review"
+        elif str(review.get("decision", "")).upper() != "APPROVE": groq_error = f"Groq decision is {review.get('decision', 'missing')}"
+        else:
+            try: confidence = float(review.get("confidence", 0))
+            except (TypeError, ValueError): confidence = 0
+            if confidence < min_groq: groq_error = f"Groq confidence {confidence:.2f} below {min_groq:.2f}"
+        if groq_error:
+            return _store_execution(db_path, signal_id, config, candidate, "BLOCKED_GROQ_GUARD", error=groq_error)
+
         client = client or BinanceFuturesClient(config)
         if not client.is_one_way_mode():
             return _store_execution(
