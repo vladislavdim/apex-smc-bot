@@ -1375,10 +1375,55 @@ async def handle_callback(callback: CallbackQuery):
                     _exec_label = "LIVE включена"
                 else:
                     _exec_label = "LIVE не подтверждена"
+                _account = _exec_state.get("account") or {}
+                if _account.get("available"):
+                    _wallet = float(_account.get("wallet_balance", 0) or 0)
+                    _available = float(_account.get("available_balance", 0) or 0)
+                    _pnl = _account.get("pnl") or {}
+                    if _pnl.get("available"):
+                        _net = float(_pnl.get("net_trading_pnl", 0) or 0)
+                        _profit = float(_pnl.get("gross_profit", 0) or 0)
+                        _loss = float(_pnl.get("gross_loss", 0) or 0)
+                        _fees = float(_pnl.get("commission", 0) or 0) + float(_pnl.get("funding", 0) or 0)
+                        _recent_lines = []
+                        for _item in (_pnl.get("recent") or [])[:5]:
+                            _amount = float(_item.get("amount", 0) or 0)
+                            _sign = "+" if _amount >= 0 else ""
+                            _event_time = int(_item.get("time", 0) or 0)
+                            _event_date = (
+                                datetime.utcfromtimestamp(_event_time / 1000).strftime("%d.%m %H:%M")
+                                if _event_time else "—"
+                            )
+                            _recent_lines.append(
+                                f"• <code>{_item.get('symbol', 'FUTURES')}</code> "
+                                f"<b>{_sign}${_amount:.4f}</b> · {_event_date} UTC"
+                            )
+                        _recent_block = (
+                            "\n<b>Последние закрытия:</b>\n" + "\n".join(_recent_lines)
+                            if _recent_lines else "\nПоследних закрытий пока нет."
+                        )
+                        _pnl_block = (
+                            f"📊 P&amp;L за 7 дней: <b>{'+' if _net >= 0 else ''}${_net:.4f}</b>\n"
+                            f"✅ Плюс: <b>+${_profit:.4f}</b> ({int(_pnl.get('positive_count', 0) or 0)}) · "
+                            f"❌ Минус: <b>-${abs(_loss):.4f}</b> ({int(_pnl.get('negative_count', 0) or 0)})\n"
+                            f"💸 Комиссии/funding: <b>{'+' if _fees >= 0 else ''}${_fees:.4f}</b>"
+                            f"{_recent_block}\n"
+                        )
+                    else:
+                        _pnl_block = "📊 P&amp;L за 7 дней: <b>история временно недоступна</b>\n"
+                    _account_block = (
+                        f"💰 Futures-баланс: <b>${_wallet:.4f}</b> · свободно <b>${_available:.4f}</b>\n"
+                        f"{_pnl_block}"
+                    )
+                elif _exec_live:
+                    _account_block = "💰 Futures-баланс: <b>недоступен — проверь API Futures</b>\n"
+                else:
+                    _account_block = ""
                 execution_block = (
                     f"\n⚙️ Автоторговля: <b>{_exec_label}</b>\n"
                     f"🛡 Риск: <b>{_exec_state.get('risk_pct', 0)}%</b> · "
                     f"плечо: <b>x{_exec_state.get('leverage', 1)}</b>\n"
+                    f"{_account_block}"
                 )
             except Exception:
                 execution_block = "\n⚙️ Автоторговля: <b>статус недоступен</b>\n"

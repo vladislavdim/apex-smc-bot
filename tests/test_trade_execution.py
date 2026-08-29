@@ -11,6 +11,7 @@ from core.trade_execution import (
     SymbolRules,
     build_order_plan,
     execute_approved_candidate,
+    execution_status,
     reconcile_live_executions,
 )
 
@@ -141,6 +142,18 @@ class RecordingSession:
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
+        if url.endswith("/fapi/v3/balance"):
+            return RecordingResponse([{
+                "asset": "USDT", "balance": "11.25",
+                "availableBalance": "10.75", "crossUnPnl": "0.50",
+            }])
+        if url.endswith("/fapi/v1/income"):
+            return RecordingResponse([
+                {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "1.20", "asset": "USDT", "time": 2000, "tranId": 2},
+                {"symbol": "ETHUSDT", "incomeType": "REALIZED_PNL", "income": "-0.30", "asset": "USDT", "time": 1000, "tranId": 1},
+                {"symbol": "BTCUSDT", "incomeType": "COMMISSION", "income": "-0.05", "asset": "USDT", "time": 2000, "tranId": 3},
+                {"symbol": "", "incomeType": "TRANSFER", "income": "10", "asset": "USDT", "time": 500, "tranId": 4},
+            ])
         if url.endswith("/fapi/v1/algoOrder") and method == "POST":
             return RecordingResponse({"algoId": 42, "algoStatus": "NEW"})
         return RecordingResponse({})
@@ -306,6 +319,28 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(params["triggerPrice"], "95")
         self.assertEqual(params["clientAlgoId"], "apex_s_10")
         self.assertNotIn("stopPrice", params)
+
+    def test_live_status_shows_actual_wallet_and_net_pnl_without_transfers(self):
+        session = RecordingSession()
+        client = BinanceFuturesClient(live_config(), session=session)
+
+        status = execution_status(
+            self.db_path, config=live_config(), client=client,
+        )
+
+        account = status["account"]
+        self.assertTrue(account["available"])
+        self.assertEqual(account["wallet_balance"], 11.25)
+        self.assertEqual(account["available_balance"], 10.75)
+        self.assertEqual(account["pnl"]["gross_profit"], 1.2)
+        self.assertEqual(account["pnl"]["gross_loss"], -0.3)
+        self.assertEqual(account["pnl"]["commission"], -0.05)
+        self.assertEqual(account["pnl"]["net_trading_pnl"], 0.85)
+        self.assertEqual(account["pnl"]["positive_count"], 1)
+        self.assertEqual(account["pnl"]["negative_count"], 1)
+        requested_paths = [call[1] for call in session.calls]
+        self.assertTrue(any(path.endswith("/fapi/v3/balance") for path in requested_paths))
+        self.assertTrue(any(path.endswith("/fapi/v1/income") for path in requested_paths))
 
 
 if __name__ == "__main__":
