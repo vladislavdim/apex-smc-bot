@@ -13,6 +13,7 @@ import hmac
 import logging
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP
@@ -35,6 +36,9 @@ except ImportError:  # direct core/ import compatibility
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
 LIVE_CONFIRMATION = "ENABLE_LIVE_BINANCE_FUTURES"
 _TRUTHY = {"1", "true", "yes", "on"}
+_ACCOUNT_STATUS_TTL_SECONDS = 30.0
+_account_status_lock = threading.Lock()
+_account_status_cache: tuple[float, dict[str, Any]] | None = None
 
 
 def _env_bool(value: Any, default: bool = False) -> bool:
@@ -379,10 +383,32 @@ class BinanceFuturesClient:
         self._rules_cache[symbol] = (time.time(), rules)
         return rules
 
-    def available_usdt(self) -> float:
+    def usdt_balance_details(self) -> dict[str, float]:
+        """Return actual USD-M wallet and available balances from Binance."""
         balances = self._request("GET", "/fapi/v3/balance", signed=True)
         usdt = next((row for row in balances if row.get("asset") == "USDT"), None)
-        return float(usdt.get("availableBalance", 0)) if usdt else 0.0
+        if not usdt:
+            return {
+                "wallet_balance": 0.0,
+                "available_balance": 0.0,
+                "cross_unrealized_pnl": 0.0,
+            }
+        return {
+            "wallet_balance": float(usdt.get("balance", 0) or 0),
+            "available_balance": float(usdt.get("availableBalance", 0) or 0),
+            "cross_unrealized_pnl": float(usdt.get("crossUnPnl", 0) or 0),
+        }
+
+    def available_usdt(self) -> float:
+        return self.usdt_balance_details()["available_balance"]
+
+    def income_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent USD-M income records (Binance defaults to seven days)."""
+        result = self._request(
+            "GET", "/fapi/v1/income", {"limit": max(1, min(int(limit), 1000))},
+            signed=True,
+        )
+        return result if isinstance(result, list) else []
 
     def mark_price(self, symbol: str) -> float:
         result = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
@@ -905,9 +931,96 @@ def reconcile_live_executions(
     return outcomes
 
 
-def execution_status(db_path: str = DB_PATH) -> dict[str, Any]:
+def _income_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize trading P&L without treating wallet transfers as profit."""
+    realized: list[dict[str, Any]] = []
+    commission = 0.0
+    funding = 0.0
+    for row in rows:
+        try:
+            amount = float(row.get("income", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        income_type = str(row.get("incomeType", "")).upper()
+        asset = str(row.get("asset", "USDT")).upper()
+        if asset != "USDT":
+            continue
+        if income_type == "REALIZED_PNL":
+            realized.append({
+                "symbol": str(row.get("symbol", "") or "FUTURES"),
+                "amount": amount,
+                "time": int(row.get("time", 0) or 0),
+                "transaction_id": str(row.get("tranId", "") or ""),
+            })
+        elif income_type == "COMMISSION":
+            commission += amount
+        elif income_type == "FUNDING_FEE":
+            funding += amount
+
+    realized.sort(key=lambda item: item["time"], reverse=True)
+    gross_profit = sum(item["amount"] for item in realized if item["amount"] > 0)
+    gross_loss = sum(item["amount"] for item in realized if item["amount"] < 0)
+    realized_total = gross_profit + gross_loss
+    return {
+        "available": True,
+        "period": "7d",
+        "gross_profit": round(gross_profit, 8),
+        "gross_loss": round(gross_loss, 8),
+        "realized_pnl": round(realized_total, 8),
+        "commission": round(commission, 8),
+        "funding": round(funding, 8),
+        "net_trading_pnl": round(realized_total + commission + funding, 8),
+        "positive_count": sum(1 for item in realized if item["amount"] > 0),
+        "negative_count": sum(1 for item in realized if item["amount"] < 0),
+        "recent": realized[:5],
+    }
+
+
+def _live_account_status(
+    config: ExecutionConfig,
+    client: BinanceFuturesClient | None = None,
+) -> dict[str, Any]:
+    """Fetch a bounded, cached live account summary for Telegram."""
+    global _account_status_cache
+
+    def fetch(active_client: BinanceFuturesClient) -> dict[str, Any]:
+        balance = active_client.usdt_balance_details()
+        try:
+            pnl = _income_summary(active_client.income_history(limit=1000))
+        except Exception as exc:
+            logging.warning("[AutoTrading] P&L history unavailable: %s", exc)
+            pnl = {"available": False, "error": str(exc)[:300], "period": "7d"}
+        return {
+            "available": True,
+            **balance,
+            "pnl": pnl,
+        }
+
+    # Explicit clients are used by tests and diagnostics and must not share a
+    # process-global cache with the real configured Binance account.
+    if client is not None:
+        return fetch(client)
+
+    now = time.monotonic()
+    with _account_status_lock:
+        if _account_status_cache and now - _account_status_cache[0] < _ACCOUNT_STATUS_TTL_SECONDS:
+            return dict(_account_status_cache[1])
+        try:
+            value = fetch(BinanceFuturesClient(config))
+        except Exception as exc:
+            logging.warning("[AutoTrading] account status unavailable: %s", exc)
+            value = {"available": False, "error": str(exc)[:300]}
+        _account_status_cache = (time.monotonic(), value)
+        return dict(value)
+
+
+def execution_status(
+    db_path: str = DB_PATH,
+    config: ExecutionConfig | None = None,
+    client: BinanceFuturesClient | None = None,
+) -> dict[str, Any]:
     """Safe status summary for Telegram; never exposes credentials."""
-    config = ExecutionConfig.from_env()
+    config = config or ExecutionConfig.from_env()
     summary = {
         "enabled": config.enabled,
         "mode": config.mode,
@@ -915,6 +1028,7 @@ def execution_status(db_path: str = DB_PATH) -> dict[str, Any]:
         "leverage": config.leverage,
         "risk_pct": config.risk_pct,
         "counts": {},
+        "account": {"available": False},
     }
     try:
         ensure_execution_schema(db_path)
@@ -925,4 +1039,6 @@ def execution_status(db_path: str = DB_PATH) -> dict[str, Any]:
         conn.close()
     except Exception as exc:
         summary["error"] = str(exc)
+    if config.live_armed:
+        summary["account"] = _live_account_status(config, client=client)
     return summary
