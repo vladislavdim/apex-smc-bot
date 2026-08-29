@@ -4852,6 +4852,37 @@ async def backup_db_to_github():
         logging.warning(f"backup_db_to_github: {e}")
 
 
+async def _apply_trade_learning_baseline_reset():
+    """Apply the one-time post-integrity reset before any scanner starts."""
+    try:
+        from core.trade_baseline_reset import apply_trade_baseline_reset
+
+        result = await asyncio.to_thread(apply_trade_baseline_reset, DB_PATH)
+        if result.get("blocked"):
+            logging.critical(
+                "Trade baseline reset blocked by %s active live execution(s)",
+                result.get("active_live_executions", 0),
+            )
+            return result
+        if result.get("applied"):
+            logging.warning(
+                "Trade/Telegram learning baseline reset applied: removed=%s",
+                sum(result.get("removed", {}).values()),
+            )
+            # Persist both the clean baseline and its migration marker. A
+            # later deploy can then never restore the legacy statistics.
+            try:
+                await asyncio.wait_for(backup_db_to_github(), timeout=30)
+            except asyncio.TimeoutError:
+                logging.warning("Trade baseline DB backup timed out; local reset remains active")
+        return result
+    except Exception as exc:
+        # Reset failure must never prevent Telegram or the scanner from
+        # starting. The missing marker causes a safe retry on the next start.
+        logging.exception("Trade baseline reset failed safely: %s", exc)
+        return {"applied": False, "error": str(exc)}
+
+
 # ===== BRAIN BUILDER ИНТЕГРАЦИЯ =====
 try:
     from brain_builder import (
@@ -4967,6 +4998,7 @@ async def on_startup(app):
             logging.info("init_learning() — миграции применены")
         except Exception as _ile:
             logging.warning(f"init_learning: {_ile}")
+    await _apply_trade_learning_baseline_reset()
     if _WEB_LEARNER_OK:
         _web_init_db()
     threading.Thread(target=get_top_pairs, daemon=True).start()
@@ -5284,6 +5316,7 @@ def main():
                     init_learning()
                 except Exception as _ile:
                     logging.warning(f"init_learning: {_ile}")
+            await _apply_trade_learning_baseline_reset()
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
             threading.Thread(target=get_top_pairs, daemon=True).start()
