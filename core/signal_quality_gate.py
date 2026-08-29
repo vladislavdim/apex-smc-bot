@@ -19,8 +19,12 @@ from news_context.storage import persist_news_context
 
 try:
     from .market_memory import build_memory_context, format_market_memory_context
+    from .historical_zones import build_zone_context, format_zone_context
+    from .outcome_learning import build_learning_context, format_learning_context
 except ImportError:  # market.py also supports loading core/ as a direct module path
     from market_memory import build_memory_context, format_market_memory_context
+    from historical_zones import build_zone_context, format_zone_context
+    from outcome_learning import build_learning_context, format_learning_context
 
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
@@ -103,6 +107,8 @@ def _persist_review(
     context: dict[str, Any],
     news: dict[str, Any],
     memory: dict[str, Any],
+    zones: dict[str, Any],
+    learning: dict[str, Any],
     review: dict[str, Any],
 ) -> None:
     try:
@@ -122,6 +128,8 @@ def _persist_review(
             context_json TEXT,
             news_context_json TEXT,
             market_memory_json TEXT,
+            historical_zones_json TEXT,
+            closed_loop_json TEXT,
             degraded INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
@@ -130,6 +138,10 @@ def _persist_review(
             conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN news_context_json TEXT")
         if "market_memory_json" not in columns:
             conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN market_memory_json TEXT")
+        if "historical_zones_json" not in columns:
+            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN historical_zones_json TEXT")
+        if "closed_loop_json" not in columns:
+            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN closed_loop_json TEXT")
         view = _candidate_view(candidate)
         candidate_key = hashlib.sha256(
             json.dumps(view, sort_keys=True, default=str).encode("utf-8")
@@ -137,8 +149,9 @@ def _persist_review(
         conn.execute(
             """INSERT INTO ai_signal_reviews
                (candidate_key, symbol, strategy, direction, timeframe, decision,
-                confidence, reasons_json, risks_json, context_json, news_context_json, market_memory_json, degraded)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, reasons_json, risks_json, context_json, news_context_json,
+                market_memory_json, historical_zones_json, closed_loop_json, degraded)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 candidate_key,
                 view.get("symbol"),
@@ -152,6 +165,8 @@ def _persist_review(
                 json.dumps(context, ensure_ascii=False, default=str),
                 json.dumps(news, ensure_ascii=False, default=str),
                 json.dumps(memory, ensure_ascii=False, default=str),
+                json.dumps(zones, ensure_ascii=False, default=str),
+                json.dumps(learning, ensure_ascii=False, default=str),
                 int(bool(review.get("degraded"))),
             ),
         )
@@ -193,9 +208,15 @@ async def review_signal_candidate(
         str(view.get("symbol") or ""), strategy,
         str(view.get("direction") or ""), str(view.get("timeframe") or ""),
     )
+    zones = await asyncio.to_thread(build_zone_context, str(view.get("symbol") or ""), view.get("entry"), str(view.get("timeframe") or ""))
+    evidence_candidate = dict(candidate)
+    evidence_candidate["_external_quality_review"] = {"context": context, "news_context": news, "historical_zones": zones}
+    learning = await asyncio.to_thread(build_learning_context, evidence_candidate)
     external_block = format_external_context(context, strategy)
     news_block = format_news_context(news)
     memory_block = format_market_memory_context(memory)
+    zone_block = format_zone_context(zones)
+    learning_block = format_learning_context(learning)
     prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
 
 The APEX strategy has already calculated direction, entry, SL, TP and RR.
@@ -207,6 +228,10 @@ in valid=false and decision=REJECT or WAIT. A scheduled critical release is vola
 risk, never proof of direction. Prefer WAIT during a high-risk release window unless
 the supplied evidence specifically justifies approval. Never invent forecast or actual values.
 Do not treat Ethereum-wide data as pair-specific evidence for another chain.
+Historical zones describe prior reactions only and MUST NOT replace the already
+calculated entry, SL or TP. Closed-loop evidence is statistical context, not
+permission to invent a new strategy. Do not propose or activate a new strategy
+unless new_strategy_research_ready=true.
 
 CANDIDATE:
 {json.dumps(view, ensure_ascii=False, default=str)}
@@ -216,6 +241,10 @@ CANDIDATE:
 {news_block}
 
 {memory_block}
+
+{zone_block}
+
+{learning_block}
 
 Return JSON only:
 {{
@@ -250,7 +279,9 @@ Return JSON only:
     review["context"] = context
     review["news_context"] = news
     review["market_memory"] = memory
+    review["historical_zones"] = zones
+    review["closed_loop_learning"] = learning
     await asyncio.to_thread(persist_context, context, strategy, True, review.get("decision"))
     await asyncio.to_thread(persist_news_context, news, strategy, review.get("decision"))
-    await asyncio.to_thread(_persist_review, candidate, context, news, memory, review)
+    await asyncio.to_thread(_persist_review, candidate, context, news, memory, zones, learning, review)
     return review

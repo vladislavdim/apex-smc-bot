@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import crypto_monitor, exchange_fallback, smart_money, whale_tracker
+from . import (btc_mempool, crypto_monitor, defillama, exchange_fallback,
+               hyperliquid, live_tape, oli, smart_money, whale_tracker)
 from .models import empty_context, number
+from .pair_registry import get_pair, refresh_pair_registry
 
 
 # Maximum age at which a value may influence Groq. Adapters may retain an
@@ -17,6 +19,8 @@ _MAX_USABLE_AGE = {
     crypto_monitor.SOURCE: 120,
     whale_tracker.SOURCE: 900,
     smart_money.SOURCE: 3600,
+    live_tape.SOURCE: 120, hyperliquid.SOURCE: 120,
+    btc_mempool.SOURCE: 900, oli.SOURCE: 86400, defillama.SOURCE: 21600,
 }
 _COLLECT_TIMEOUT_SECONDS = 10.0
 
@@ -83,6 +87,10 @@ def _metadata(result: dict[str, Any]) -> dict[str, Any]:
         "age_seconds": _age(result),
     }
 
+def _source_value(target: dict[str, Any], result: dict[str, Any], values: dict[str, Any]) -> None:
+    target.setdefault("source_values", {})[str(result.get("source", "unknown"))] = {
+        **values, "status": result.get("status"), "age_seconds": _age(result)}
+
 
 def _apply_futures(context: dict[str, Any], result: dict[str, Any]) -> None:
     if not _usable(result):
@@ -95,6 +103,7 @@ def _apply_futures(context: dict[str, Any], result: dict[str, Any]) -> None:
     oi_values = (data.get("oi"), data.get("oi_1h"), data.get("oi_4h"))
     if any(value is not None for value in oi_values):
         target = context["open_interest"]
+        _source_value(target, result, {"value": data.get("oi"), "change_1h_pct": data.get("oi_1h"), "change_4h_pct": data.get("oi_4h")})
         for key, value in (
             ("value", data.get("oi")),
             ("change_1h_pct", data.get("oi_1h")),
@@ -112,6 +121,7 @@ def _apply_futures(context: dict[str, Any], result: dict[str, Any]) -> None:
 
     rate = data.get("funding")
     if rate is not None:
+        _source_value(context["funding"], result, {"rate": rate})
         context["funding"].update({
             "rate": rate,
             "extreme": abs(rate) >= 0.001,
@@ -123,6 +133,7 @@ def _apply_futures(context: dict[str, Any], result: dict[str, Any]) -> None:
     short_liq = number(data.get("short_liq"))
     if long_liq is not None or short_liq is not None:
         long_liq, short_liq = long_liq or 0.0, short_liq or 0.0
+        _source_value(context["liquidations"], result, {"long_usd": long_liq, "short_usd": short_liq})
         context["liquidations"].update({
             "long_usd": long_liq,
             "short_usd": short_liq,
@@ -135,6 +146,10 @@ def _apply_futures(context: dict[str, Any], result: dict[str, Any]) -> None:
 
     buy, sell = number(data.get("buy")), number(data.get("sell"))
     if buy is not None or sell is not None:
+        _source_value(context["large_orders"], result, {
+            "buy_pressure": buy, "sell_pressure": sell,
+            "bias": _bias(buy, sell), "method": data.get("order_flow_method"),
+        })
         context["large_orders"].update({
             "buy_pressure": buy,
             "sell_pressure": sell,
@@ -213,6 +228,46 @@ def _apply_smart_money(context: dict[str, Any], result: dict[str, Any]) -> None:
         **_metadata(result),
     })
 
+def _apply_live_tape(context: dict[str, Any], result: dict[str, Any]) -> None:
+    if not _usable(result) or not isinstance(result.get("normalized"), dict): return
+    data = result["normalized"]
+    buy, sell = number(data.get("buy_usd_60s")), number(data.get("sell_usd_60s"))
+    long_liq, short_liq = number(data.get("long_liq_usd_300s")) or 0.0, number(data.get("short_liq_usd_300s")) or 0.0
+    context["live_tape"].update({"buy_usd_60s": buy or 0.0, "sell_usd_60s": sell or 0.0,
+        "long_liq_usd_300s": long_liq, "short_liq_usd_300s": short_liq,
+        "bias": _bias(buy, sell), "sources": sorted((data.get("sources") or {}).keys()),
+        "source_values": data.get("sources") or {}, "age_seconds": _age(result), "status": result.get("status")})
+    if buy is not None or sell is not None:
+        _source_value(context["large_orders"], result, {
+            "buy_pressure": buy, "sell_pressure": sell,
+            "bias": _bias(buy, sell), "method": "public_websocket_taker_flow_60s",
+        })
+        context["large_orders"].update({"buy_pressure": buy, "sell_pressure": sell, "bias": _bias(buy, sell), "method": "public_websocket_taker_flow_60s", **_metadata(result)})
+    if long_liq or short_liq:
+        _source_value(context["liquidations"], result, {"long_usd": long_liq, "short_usd": short_liq})
+        context["liquidations"].update({"long_usd": long_liq, "short_usd": short_liq,
+            "dominance": "long" if long_liq > short_liq else "short" if short_liq > long_liq else "unknown", **_metadata(result)})
+    sources = data.get("sources") or {}
+    ois = [number(row.get("oi")) for row in sources.values() if isinstance(row, dict) and number(row.get("oi")) is not None]
+    fundings = [number(row.get("funding")) for row in sources.values() if isinstance(row, dict) and number(row.get("funding")) is not None]
+    if ois:
+        value = sum(ois); _source_value(context["open_interest"], result, {"value": value}); context["open_interest"].update({"value": value, **_metadata(result)})
+    if fundings:
+        rate = sum(fundings) / len(fundings); _source_value(context["funding"], result, {"rate": rate})
+        context["funding"].update({"rate": rate, "extreme": abs(rate) >= 0.001, "bias": "crowded_longs" if rate > 0 else "crowded_shorts" if rate < 0 else "neutral", **_metadata(result)})
+
+def _apply_onchain(context, result):
+    if not _usable(result) or not isinstance(result.get("normalized"), dict): return
+    data, target, source = result["normalized"], context["onchain_activity"], str(result.get("source"))
+    if source == btc_mempool.SOURCE:
+        target.update({"btc_large_transfers_usd": data.get("large_transfer_usd"), "btc_large_transfer_count": data.get("large_transfer_count", 0)})
+    elif source == oli.SOURCE: target["oli_labels"] = data.get("labels") or []
+    if source not in target["sources"]: target["sources"].append(source)
+    target.update({"status": result.get("status"), "age_seconds": _age(result)})
+
+def _apply_slow_regime(context, result):
+    if _usable(result) and isinstance(result.get("normalized"), dict): context["slow_regime"].update({**result["normalized"], **_metadata(result)})
+
 
 def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
     quality = context["data_quality"]
@@ -227,17 +282,28 @@ def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
     # One directional vote per independent source. Exchange flow and whale
     # activity from the same tracker must not be double-counted.
     source_votes: dict[str, str] = {}
+
+    def add_vote(source: str | None, bias: str | None) -> None:
+        if not source or bias not in {"bullish", "bearish"}:
+            return
+        previous = source_votes.get(source)
+        if previous and previous != bias:
+            conflict = f"CONFLICT: {source} has contradictory normalized fields"
+            if conflict not in context["conflicts"]:
+                context["conflicts"].append(conflict)
+            source_votes.pop(source, None)
+        elif source not in source_votes:
+            source_votes[source] = bias
+
     for field_name in ("large_orders", "exchange_flow", "whale_activity", "smart_money"):
         field = context[field_name]
-        source, bias = field.get("source"), field.get("bias")
-        if source and bias in {"bullish", "bearish"}:
-            previous = source_votes.get(source)
-            if previous and previous != bias:
-                context["conflicts"].append(
-                    f"CONFLICT: {source} has contradictory normalized fields"
-                )
-            else:
-                source_votes[source] = bias
+        source_values = field.get("source_values")
+        if isinstance(source_values, dict) and source_values:
+            for source, values in source_values.items():
+                if isinstance(values, dict):
+                    add_vote(source, values.get("bias"))
+        else:
+            add_vote(field.get("source"), field.get("bias"))
 
     bullish = sum(v == "bullish" for v in source_votes.values())
     bearish = sum(v == "bearish" for v in source_votes.values())
@@ -275,11 +341,21 @@ def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
 async def collect_external_context(symbol: str, direction: str | None = None) -> dict[str, Any]:
     symbol = (symbol or "").upper().replace("/", "")
     context = empty_context(symbol)
+    await _bounded_collect("pair_registry", refresh_pair_registry([symbol]))
+    pair = get_pair(symbol)
+    context["pair_coverage"] = {provider: {"supported": bool(pair.get(f"{provider}_supported")),
+        "status": pair.get(f"{provider}_status", "unverified"), "symbol": pair.get(f"{provider}_symbol")}
+        for provider in ("gate", "binance", "bybit", "hyperliquid")}
     raw_results = await asyncio.gather(
         _bounded_collect(exchange_fallback.SOURCE, exchange_fallback.collect(symbol)),
         _bounded_collect(crypto_monitor.SOURCE, crypto_monitor.collect(symbol)),
         _bounded_collect(whale_tracker.SOURCE, whale_tracker.collect(symbol)),
         _bounded_collect(smart_money.SOURCE, smart_money.collect(symbol)),
+        _bounded_collect(hyperliquid.SOURCE, hyperliquid.collect(symbol)),
+        _bounded_collect(live_tape.SOURCE, live_tape.collect(symbol)),
+        _bounded_collect(btc_mempool.SOURCE, btc_mempool.collect(symbol)),
+        _bounded_collect(oli.SOURCE, oli.collect(symbol)),
+        _bounded_collect(defillama.SOURCE, defillama.collect(symbol)),
     )
     normalized_results: list[dict[str, Any]] = []
     for raw in raw_results:
@@ -299,8 +375,8 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
         normalized_results.append(result)
         _status(context, result)
 
-    # Public exchanges are the no-key fallback. A configured crypto-monitor
-    # is applied second and overrides only fields it actually supplies.
+    for result in normalized_results:
+        if result.get("source") == hyperliquid.SOURCE: _apply_futures(context, result)
     for result in normalized_results:
         if result.get("source") == exchange_fallback.SOURCE:
             _apply_futures(context, result)
@@ -312,6 +388,9 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
             _apply_whale(context, result)
         elif source == smart_money.SOURCE:
             _apply_smart_money(context, result)
+        elif source == live_tape.SOURCE: _apply_live_tape(context, result)
+        elif source in {btc_mempool.SOURCE, oli.SOURCE}: _apply_onchain(context, result)
+        elif source == defillama.SOURCE: _apply_slow_regime(context, result)
 
     context["_source_results"] = normalized_results
     return _finish(context, direction)
@@ -336,6 +415,10 @@ def format_external_context(context: dict[str, Any], strategy: str | None = None
         _line("Exchange Flow", context["exchange_flow"], ("inflow_usd", "outflow_usd", "bias")),
         _line("Whale Activity", context["whale_activity"], ("buy_usd", "sell_usd", "bias", "confidence")),
         _line("Smart Money", context["smart_money"], ("buy_usd", "sell_usd", "bias", "confidence", "method")),
+        _line("Live Market Tape", context["live_tape"], ("buy_usd_60s", "sell_usd_60s", "long_liq_usd_300s", "short_liq_usd_300s", "bias")),
+        f"- On-chain Activity: {context['onchain_activity']}",
+        f"- Slow Regime (DefiLlama): {context['slow_regime']}",
+        f"- Pair coverage: {context['pair_coverage']}",
         f"- Data age: {quality['age_seconds']} seconds",
         f"- Source quality: available={quality['available_sources']}; failed={quality['failed_sources']}; status={quality['source_status']}",
         f"- Conflicts: {context['conflicts'] or 'none'}",

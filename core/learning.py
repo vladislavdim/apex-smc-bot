@@ -1350,8 +1350,12 @@ def groq_build_strategy():
             ORDER BY id DESC LIMIT 200
         """).fetchall()
 
-        if len(rows) < 10:
-            conn.close(); return "Мало данных для стратегии"
+        try:
+            minimum_results = max(20, int(os.environ.get("NEW_STRATEGY_MIN_CLOSED_TRADES", "30")))
+        except ValueError:
+            minimum_results = 30
+        if len(rows) < minimum_results:
+            conn.close(); return f"Мало данных для решения о новой стратегии: {len(rows)}/{minimum_results}"
 
         # Статистика
         wins = [r for r in rows if r[6].startswith("tp")]

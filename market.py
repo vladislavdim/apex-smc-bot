@@ -202,6 +202,13 @@ except Exception as _memory_import_error:
     _memory_record_price = lambda *args, **kwargs: None
     logging.warning("market_memory unavailable: %s", _memory_import_error)
 
+try:
+    from outcome_learning import close_learning_loop as _close_learning_loop
+    _OUTCOME_LOOP_OK=True
+except Exception as _outcome_loop_import_error:
+    _close_learning_loop=lambda *args,**kwargs:None;_OUTCOME_LOOP_OK=False
+    logging.warning("outcome_learning unavailable: %s",_outcome_loop_import_error)
+
 # Web Learner — автономный поиск знаний
 try:
     from web_learner import (
@@ -4558,6 +4565,9 @@ def check_pending_signals():
             if result:
                 if _MARKET_MEMORY_OK:
                     _memory_close_snapshot(sig_id, result, current)
+                if _OUTCOME_LOOP_OK:
+                    try:_close_learning_loop(sig_id,result,DB_PATH)
+                    except Exception as exc:logging.debug("[ClosedLoop] close %s: %s",sig_id,exc)
                 conn2 = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
                 conn2.execute(
                     "UPDATE signals SET result=?, closed_at=CURRENT_TIMESTAMP WHERE id=?",

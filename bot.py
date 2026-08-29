@@ -85,6 +85,15 @@ except Exception as _quality_gate_import_error:
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
 
 try:
+    from core.outcome_learning import capture_signal_evidence as _capture_signal_evidence
+    from core.market_intelligence import (refresh_market_intelligence as _refresh_market_intelligence,
+        start_market_intelligence as _start_market_intelligence, stop_market_intelligence as _stop_market_intelligence)
+    _MARKET_INTELLIGENCE_OK = True
+except Exception as _market_intelligence_import_error:
+    _capture_signal_evidence=lambda *args,**kwargs:None;_refresh_market_intelligence=None;_start_market_intelligence=None;_stop_market_intelligence=None;_MARKET_INTELLIGENCE_OK=False
+    logging.warning("Market intelligence unavailable: %s", _market_intelligence_import_error)
+
+try:
     from core.signal_integrity import validate_candidate as _validate_signal_candidate
     _SIGNAL_INTEGRITY_OK = True
 except Exception as _signal_integrity_import_error:
@@ -3096,6 +3105,9 @@ async def _send_signal(sd):
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
         return False
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
+    if signal_id:
+        try: await asyncio.to_thread(_capture_signal_evidence, signal_id, sd, DB_PATH)
+        except Exception as exc: logging.warning("[ClosedLoop] capture signal %s: %s", signal_id, exc)
     if signal_id and _TRADE_EXECUTION_OK:
         execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
         logging.info(
@@ -5015,6 +5027,11 @@ async def keepalive_heartbeat():
     except Exception as e:
         logging.error(f"Heartbeat: {e}")
 
+async def market_intelligence_job():
+    if not _MARKET_INTELLIGENCE_OK:return
+    try:await _refresh_market_intelligence(get_top_pairs(60),get_candles)
+    except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
+
 async def on_startup(app):
     # Логирование конфигурации при старте
     logging.info(f"WEBHOOK_URL = {os.environ.get('WEBHOOK_URL', 'НЕТ')}")
@@ -5047,6 +5064,7 @@ async def on_startup(app):
     if _WEB_LEARNER_OK:
         _web_init_db()
     threading.Thread(target=get_top_pairs, daemon=True).start()
+    if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(60),get_candles))
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
     if WEBHOOK_URL:
@@ -5063,6 +5081,7 @@ async def on_startup(app):
     # Основные сигналы
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(market_intelligence_job,"interval",minutes=20,jitter=60,max_instances=1,coalesce=True)
     webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_zone_scan,       "interval", minutes=20, jitter=60,  max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
@@ -5267,6 +5286,9 @@ async def on_startup_diagnose(app):
     logging.info("[SelfGrow] Стартовая диагностика завершена")
 
 async def on_shutdown(app):
+    if _MARKET_INTELLIGENCE_OK:
+        try:await _stop_market_intelligence()
+        except Exception:pass
     logging.info("APEX остановлен")
 
 
@@ -5365,11 +5387,13 @@ def main():
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
             threading.Thread(target=get_top_pairs, daemon=True).start()
+            if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(60),get_candles))
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
             scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
+            scheduler.add_job(market_intelligence_job,"interval",minutes=20,jitter=60,max_instances=1,coalesce=True)
             scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
             scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
             scheduler.add_job(auto_zone_scan, "interval", minutes=20, jitter=60, max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
@@ -5419,6 +5443,7 @@ def main():
                 bot,
                 allowed_updates=dp.resolve_used_update_types()
             )
+            if _MARKET_INTELLIGENCE_OK:await _stop_market_intelligence()
 
         # Watchdog — перезапускаем polling если упал
         max_restarts = 10

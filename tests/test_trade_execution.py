@@ -24,6 +24,10 @@ CANDIDATE = {
     "tp1": 110,
     "tp2": 115,
     "rr": 2,
+    "_external_quality_reviewed": True,
+    "_external_quality_review": {
+        "decision": "APPROVE", "confidence": 0.9, "degraded": False,
+    },
 }
 
 RULES = SymbolRules(
@@ -219,6 +223,32 @@ class TradeExecutionTests(unittest.TestCase):
         config = live_config(live_confirmation="yes")
         result = execute_approved_candidate(CANDIDATE, 1, db_path=self.db_path, config=config)
         self.assertEqual(result["status"], "LIVE_NOT_ARMED")
+
+    def test_live_mode_rejects_candidate_without_groq_review_before_exchange(self):
+        candidate = {
+            key: value for key, value in CANDIDATE.items()
+            if not key.startswith("_external_quality_review")
+        }
+        client = FakeClient()
+        result = execute_approved_candidate(
+            candidate, 101, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_GROQ_GUARD")
+        self.assertEqual(client.calls, [])
+
+    def test_live_mode_rejects_degraded_groq_approval_before_exchange(self):
+        candidate = {
+            **CANDIDATE,
+            "_external_quality_review": {
+                "decision": "APPROVE", "confidence": 0.99, "degraded": True,
+            },
+        }
+        client = FakeClient()
+        result = execute_approved_candidate(
+            candidate, 102, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_GROQ_GUARD")
+        self.assertEqual(client.calls, [])
 
     def test_paper_mode_records_without_exchange(self):
         config = ExecutionConfig(enabled=True, mode="paper", paper_balance_usdt=1000)
