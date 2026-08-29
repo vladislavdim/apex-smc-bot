@@ -378,7 +378,13 @@ def find_fvg(candles: list, direction: str):
 
 def smc_tf(symbol: str, interval: str) -> dict:
     res = get_candles_smart(symbol, interval, 150)
-    candles = res["candles"]
+    raw_candles = res["candles"]
+    # Public exchange candle endpoints normally include the currently forming
+    # candle as the final item.  Market structure must never be confirmed from
+    # that mutable bar: it can show a BOS/CHoCH intrabar and disappear before
+    # close.  Keep live price handling in market.py and use only confirmed bars
+    # for structural direction here.
+    candles = raw_candles[:-1] if len(raw_candles) > 1 else []
     if len(candles) < 20:
         return {"direction":None,"source":res["source"],"quality":res["quality"],
                 "error":res.get("error",""),"candles":[]}
