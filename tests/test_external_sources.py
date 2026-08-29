@@ -116,7 +116,10 @@ class ExternalSourceTests(unittest.IsolatedAsyncioTestCase):
              patch("external_sources.aggregator.live_tape.collect", new=unavailable), \
              patch("external_sources.aggregator.btc_mempool.collect", new=unavailable), \
              patch("external_sources.aggregator.oli.collect", new=unavailable), \
-             patch("external_sources.aggregator.defillama.collect", new=unavailable):
+             patch("external_sources.aggregator.defillama.collect", new=unavailable), \
+             patch("external_sources.aggregator.deribit_options.collect", new=unavailable), \
+             patch("external_sources.aggregator.coinmetrics.collect", new=unavailable), \
+             patch("external_sources.aggregator.dex_liquidity.collect", new=unavailable):
             context = await collect_external_context("BTCUSDT", "BULLISH")
         self.assertTrue(context["external_data_unavailable"])
         self.assertTrue(any("public_futures" in item for item in context["data_quality"]["failed_sources"]))

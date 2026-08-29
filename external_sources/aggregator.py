@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import (btc_mempool, crypto_monitor, defillama, exchange_fallback,
-               hyperliquid, live_tape, oli, smart_money, whale_tracker)
+from . import (btc_mempool, coinmetrics, crypto_monitor, defillama,
+               deribit_options, dex_liquidity, exchange_fallback, hyperliquid,
+               live_tape, oli, smart_money, whale_tracker)
 from .models import empty_context, number
 from .pair_registry import get_pair, refresh_pair_registry
 
@@ -21,6 +22,9 @@ _MAX_USABLE_AGE = {
     smart_money.SOURCE: 3600,
     live_tape.SOURCE: 120, hyperliquid.SOURCE: 120,
     btc_mempool.SOURCE: 900, oli.SOURCE: 86400, defillama.SOURCE: 21600,
+    deribit_options.SOURCE: 1800,
+    coinmetrics.SOURCE: 21600,
+    dex_liquidity.SOURCE: 1800,
 }
 _COLLECT_TIMEOUT_SECONDS = 10.0
 
@@ -269,6 +273,15 @@ def _apply_slow_regime(context, result):
     if _usable(result) and isinstance(result.get("normalized"), dict): context["slow_regime"].update({**result["normalized"], **_metadata(result)})
 
 
+def _apply_nondirectional_context(
+    context: dict[str, Any], result: dict[str, Any], target: str,
+) -> None:
+    """Expose risk/regime evidence to Groq without adding a direction vote."""
+    if not _usable(result) or not isinstance(result.get("normalized"), dict):
+        return
+    context[target].update({**result["normalized"], **_metadata(result)})
+
+
 def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
     quality = context["data_quality"]
     usable_ages = [
@@ -356,6 +369,9 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
         _bounded_collect(btc_mempool.SOURCE, btc_mempool.collect(symbol)),
         _bounded_collect(oli.SOURCE, oli.collect(symbol)),
         _bounded_collect(defillama.SOURCE, defillama.collect(symbol)),
+        _bounded_collect(deribit_options.SOURCE, deribit_options.collect(symbol)),
+        _bounded_collect(coinmetrics.SOURCE, coinmetrics.collect(symbol)),
+        _bounded_collect(dex_liquidity.SOURCE, dex_liquidity.collect(symbol)),
     )
     normalized_results: list[dict[str, Any]] = []
     for raw in raw_results:
@@ -391,6 +407,12 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
         elif source == live_tape.SOURCE: _apply_live_tape(context, result)
         elif source in {btc_mempool.SOURCE, oli.SOURCE}: _apply_onchain(context, result)
         elif source == defillama.SOURCE: _apply_slow_regime(context, result)
+        elif source == deribit_options.SOURCE:
+            _apply_nondirectional_context(context, result, "options_context")
+        elif source == coinmetrics.SOURCE:
+            _apply_nondirectional_context(context, result, "network_activity")
+        elif source == dex_liquidity.SOURCE:
+            _apply_nondirectional_context(context, result, "dex_liquidity")
 
     context["_source_results"] = normalized_results
     return _finish(context, direction)
@@ -418,6 +440,19 @@ def format_external_context(context: dict[str, Any], strategy: str | None = None
         _line("Live Market Tape", context["live_tape"], ("buy_usd_60s", "sell_usd_60s", "long_liq_usd_300s", "short_liq_usd_300s", "bias")),
         f"- On-chain Activity: {context['onchain_activity']}",
         f"- Slow Regime (DefiLlama): {context['slow_regime']}",
+        _line("Options (Deribit)", context.get("options_context", {}), (
+            "underlying_price", "put_call_oi_ratio", "put_call_volume_ratio",
+            "positioning", "dvol", "dvol_change_1h",
+        )),
+        _line("Network Activity (Coin Metrics)", context.get("network_activity", {}), (
+            "asset", "active_addresses", "active_addresses_change_1d_pct",
+            "transaction_count", "adjusted_transfer_usd",
+            "adjusted_transfer_usd_change_1d_pct",
+        )),
+        _line("Verified DEX Liquidity", context.get("dex_liquidity", {}), (
+            "chain", "dex", "liquidity_usd", "volume_24h_usd",
+            "liquidity_risk", "price_change_24h_pct",
+        )),
         f"- Pair coverage: {context['pair_coverage']}",
         f"- Data age: {quality['age_seconds']} seconds",
         f"- Source quality: available={quality['available_sources']}; failed={quality['failed_sources']}; status={quality['source_status']}",
@@ -433,7 +468,9 @@ def format_external_context(context: dict[str, Any], strategy: str | None = None
         "not automatic bans. Read liquidations by dominant liquidated side and exchange flows "
         "as risk context. Use whale/smart-money evidence only when both fresh and sufficiently "
         "confident. A material technical/external conflict requires valid=false with a clear "
-        "logged reason."
+        "logged reason. Options positioning, Coin Metrics network activity and verified-contract "
+        "DEX liquidity are regime/risk evidence only: they cannot create a signal, vote for trade "
+        "direction, or override technical levels."
     )
     if strategy:
         hints = {
