@@ -106,10 +106,17 @@ class ExternalSourceTests(unittest.IsolatedAsyncioTestCase):
 
         unavailable = AsyncMock(return_value={"source": "x", "status": "not_configured"})
         with patch("external_sources.aggregator._COLLECT_TIMEOUT_SECONDS", 0.01), \
+             patch("external_sources.aggregator.refresh_pair_registry", new=AsyncMock(return_value={})), \
+             patch("external_sources.aggregator.get_pair", return_value={}), \
              patch("external_sources.aggregator.exchange_fallback.collect", new=slow), \
              patch("external_sources.aggregator.crypto_monitor.collect", new=unavailable), \
              patch("external_sources.aggregator.whale_tracker.collect", new=unavailable), \
-             patch("external_sources.aggregator.smart_money.collect", new=unavailable):
+             patch("external_sources.aggregator.smart_money.collect", new=unavailable), \
+             patch("external_sources.aggregator.hyperliquid.collect", new=unavailable), \
+             patch("external_sources.aggregator.live_tape.collect", new=unavailable), \
+             patch("external_sources.aggregator.btc_mempool.collect", new=unavailable), \
+             patch("external_sources.aggregator.oli.collect", new=unavailable), \
+             patch("external_sources.aggregator.defillama.collect", new=unavailable):
             context = await collect_external_context("BTCUSDT", "BULLISH")
         self.assertTrue(context["external_data_unavailable"])
         self.assertTrue(any("public_futures" in item for item in context["data_quality"]["failed_sources"]))
@@ -229,6 +236,16 @@ class ExternalSourceTests(unittest.IsolatedAsyncioTestCase):
         context["smart_money"].update({"bias": "bearish", "source": "deepbluealpha"})
         result = _finish(context, "BULLISH")
         self.assertTrue(any("CONFLICT" in item for item in result["conflicts"]))
+        self.assertEqual(result["external_bias"], "neutral")
+
+    def test_overwritten_field_still_exposes_rest_vs_live_tape_conflict(self):
+        context = empty_context("BTCUSDT")
+        context["large_orders"]["source_values"] = {
+            "public_futures": {"bias": "bullish"},
+            "live_market_tape": {"bias": "bearish"},
+        }
+        result = _finish(context, "BULLISH")
+        self.assertTrue(any("independent external sources disagree" in item for item in result["conflicts"]))
         self.assertEqual(result["external_bias"], "neutral")
 
     def test_single_source_cannot_create_technical_conflict(self):
