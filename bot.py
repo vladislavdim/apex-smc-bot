@@ -69,6 +69,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ── Импортируем всю рыночную логику из market.py ──
 from market import *
+from market import get_recent_errors as _market_recent_errors
+from market import get_relevant_rules as _market_relevant_rules
+from core.session_clock import fast_session
+from core.trade_views import fetch_trades as _fetch_trade_view_rows
+from core.trade_views import format_trade_view as _format_trade_view
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
@@ -85,6 +90,18 @@ try:
 except Exception as _signal_integrity_import_error:
     _SIGNAL_INTEGRITY_OK = False
     logging.error(f"Signal integrity validator недоступен: {_signal_integrity_import_error}")
+
+try:
+    from core.trade_execution import (
+        ensure_execution_schema as _ensure_execution_schema,
+        execute_approved_candidate as _execute_approved_candidate,
+        execution_status as _execution_status,
+        reconcile_live_executions as _reconcile_live_executions,
+    )
+    _TRADE_EXECUTION_OK = True
+except Exception as _trade_execution_import_error:
+    _TRADE_EXECUTION_OK = False
+    logging.error("Optional trade execution unavailable: %s", _trade_execution_import_error)
 
 # Путь к базе данных
 import os as _os_bot
@@ -204,15 +221,14 @@ def get_binance_klines(symbol, interval, limit=200):
 
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades"),
+         InlineKeyboardButton(text="✅ По тейку", callback_data="menu_take_closed"),
+         InlineKeyboardButton(text="🛑 По стопу", callback_data="menu_stop_closed")],
         [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
-        [InlineKeyboardButton(text="🔍 Сканировать рынок", callback_data="menu_scan"),
-         InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats")],
-        [InlineKeyboardButton(text="📰 Новости", callback_data="menu_news"),
-         InlineKeyboardButton(text="📦 Накопления", callback_data="menu_pump")],
-        [InlineKeyboardButton(text="🏆 Удачные сделки", callback_data="menu_wins"),
-         InlineKeyboardButton(text="🔍 Ошибки бота", callback_data="menu_errors")],
-        [InlineKeyboardButton(text="🧠 Мозг APEX", callback_data="menu_brain")]
+        [InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats"),
+         InlineKeyboardButton(text="📰 Новости", callback_data="menu_news")],
+        [InlineKeyboardButton(text="🧠 Система APEX", callback_data="menu_brain")]
     ])
 
 def tf_keyboard():
@@ -869,6 +885,30 @@ async def handle_callback(callback: CallbackQuery):
     if data == "menu_back":
         await callback.message.edit_text("Главное меню 👇", reply_markup=main_menu())
 
+    elif data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:
+        category = {
+            "menu_active_trades": "active",
+            "menu_take_closed": "take",
+            "menu_stop_closed": "stop",
+        }[data]
+        try:
+            rows = await asyncio.to_thread(_fetch_trade_view_rows, DB_PATH, category, 12)
+            text = _format_trade_view(category, rows)
+        except Exception as exc:
+            logging.error("Telegram trade view %s: %s", category, exc)
+            text = "⚠️ Не удалось прочитать историю сделок. Сканер продолжает работать."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades"),
+                 InlineKeyboardButton(text="✅ Тейки", callback_data="menu_take_closed"),
+                 InlineKeyboardButton(text="🛑 Стопы", callback_data="menu_stop_closed")],
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
     elif data == "menu_scan":
         try:
             await callback.message.edit_text(
@@ -1321,6 +1361,29 @@ async def handle_callback(callback: CallbackQuery):
             f"\n📰 <b>Последняя макро-сводка</b> ({macro_time}):\n"
             f"<i>{macro_summary}</i>\n"
         ) if macro_summary else ""
+        if _TRADE_EXECUTION_OK:
+            try:
+                _exec_state = await asyncio.to_thread(_execution_status, DB_PATH)
+                _exec_mode = str(_exec_state.get("mode", "paper")).upper()
+                _exec_enabled = bool(_exec_state.get("enabled"))
+                _exec_live = bool(_exec_state.get("live_armed"))
+                if not _exec_enabled:
+                    _exec_label = "выключена (без ордеров)"
+                elif _exec_mode == "PAPER":
+                    _exec_label = "paper — виртуальные позиции"
+                elif _exec_live:
+                    _exec_label = "LIVE включена"
+                else:
+                    _exec_label = "LIVE не подтверждена"
+                execution_block = (
+                    f"\n⚙️ Автоторговля: <b>{_exec_label}</b>\n"
+                    f"🛡 Риск: <b>{_exec_state.get('risk_pct', 0)}%</b> · "
+                    f"плечо: <b>x{_exec_state.get('leverage', 1)}</b>\n"
+                )
+            except Exception:
+                execution_block = "\n⚙️ Автоторговля: <b>статус недоступен</b>\n"
+        else:
+            execution_block = "\n⚙️ Автоторговля: <b>модуль недоступен</b>\n"
 
         await callback.message.edit_text(
             f"🧠 <b>Мозг APEX — состояние</b>\n"
@@ -1332,7 +1395,7 @@ async def handle_callback(callback: CallbackQuery):
             f"👁 Наблюдений рынка: <b>{obs_count}</b>\n"
             f"🗂 Моделей монет: <b>{model_count}</b>\n"
             f"🪙 Пар с историей: <b>{coin_count}</b>\n"
-            f"{macro_block}\n"
+            f"{execution_block}{macro_block}\n"
             f"<i>Обновление автоматическое: результаты сделок, новости и "
             f"веб-контекст сохраняются в brain.db. Groq использует этот "
             f"контекст, но не переобучает свои базовые веса.</i>",
@@ -1868,7 +1931,6 @@ async def handle_callback(callback: CallbackQuery):
         await callback.message.edit_text(evo_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_evolution")],
-                [InlineKeyboardButton(text="🧠 Запустить обучение", callback_data="brain_learn_now")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
             ])
         )
@@ -1877,54 +1939,50 @@ async def handle_callback(callback: CallbackQuery):
         strategies_text = (
             "📋 <b>Активные стратегии APEX</b>\n\n"
 
-            "⚡ <b>FAST</b> — скальп в Kill Zone\n"
-            "• Kill Zone: 08:30-13:30 / 16:30-21:30 UTC\n"
-            "• 4h OB/FVG зона ± ATR×VF\n"
-            "• 15m engulfing + displacement ≥ 0.55\n"
-            "• Volume spike ≥ 1.5x\n"
+            "⚡ <b>FAST</b> — 4h контекст + 15m вход\n"
+            "• London/NY Kill Zone с учётом DST\n"
+            "• 4h OB/FVG в Discount/Premium\n"
+            "• 15m engulfing + displacement ≥ 0.65\n"
+            "• Volume spike ≥ 2.0x\n"
             "• Acceptance (close за зоной)\n"
             "• No middle range фильтр\n"
-            "• RR ≥ 1.5\n\n"
+            "• Цели по 15m swing liquidity · RR 2.0–4.0\n\n"
 
             "📐 <b>MTF</b> — Multi TimeFrame\n"
-            "• HTF: 4h + 1d тренд (оба против = блок)\n"
-            "• Зона: Discount (LONG) / Premium (SHORT)\n"
-            "• OB/FVG ± ATR×VF\n"
-            "• BOS/CHoCH на 15m (+score)\n"
-            "• Score: volume + BTC + сессия (мин 1/3)\n"
-            "• confluence ≥ 35\n"
-            "• RR ≥ 2.0\n\n"
+            "• 1h + 4h в одну сторону; 1d подтверждает\n"
+            "• BOS/CHoCH на закрытой 15m свече\n"
+            "• Свежий OB/FVG пересекает OTE 0.62–0.79\n"
+            "• SL за impulse/zone; TP по liquidity/swing\n"
+            "• RR 2.0–4.0\n\n"
 
             "🔄 <b>SWING</b> — sweep & reverse\n"
             "• Sweep EQH/EQL ИЛИ реакция от OB\n"
             "• HTF: 4h + 1d (оба против = блок)\n"
-            "• Reaction speed ≤ 3 свечи\n"
-            "• Quality ≥ 2/5 (vol, disp, CHoCH, P/D, FVG)\n"
-            "• SL cap 4%\n"
-            "• RR ≥ 2.0 (Variant 2: ≥ 2.5)\n\n"
+            "• Volume + displacement + CHoCH/P-D/FVG/15m\n"
+            "• Quality ≥ 3/6\n"
+            "• SL за sweep/OB; шире 4% = отказ, не cap\n"
+            "• TP на swing liquidity · RR 2.0–4.0\n\n"
 
             "📦 <b>ZONE</b> — зона интереса\n"
             "• OB/FVG unmitigated (≤ 2 теста)\n"
             "• Strong move away disp ≥ 0.5\n"
-            "• Discount/Premium зона\n"
-            "• Wick rejection (тень > тело)\n"
-            "• Q-score ≥ 4/8\n"
-            "• RR ≥ 2.0\n\n"
+            "• Нижние/верхние 30% диапазона; середина = отказ\n"
+            "• Отбой + закрытый 1h BOS/CHoCH\n"
+            "• Q-score ≥ 4/8 при high volatility, иначе ≥ 5/8\n"
+            "• TP на swing level · RR ≥ 2.0\n\n"
 
-            "🌊 <b>WYCKOFF</b> — Re-accumulation\n"
-            "• Higher lows (накопление)\n"
-            "• Volume compression → expansion\n"
-            "• Drawdown ≥ 5% (BTC/ETH/BNB) / 8%\n"
-            "• Range tightening\n"
-            "• EQH ликвидность как TP\n"
-            "• RR ≥ 2.5\n\n"
+            "🌊 <b>WYCKOFF</b> — accumulation/distribution\n"
+            "• Spring+SOS или UTAD+SOW обязательны\n"
+            "• Volume/range compression и подтверждённые фазы\n"
+            "• SL за Spring/SC или UTAD/BC\n"
+            "• TP по AR/range Fibonacci extension\n"
+            "• RR 2.0–4.0; re-accumulation 2.5–4.0\n\n"
 
-            "🧠 <b>Общее ядро (smc_core_check)</b>\n"
-            "• MUST: зона + тренд EMA50 + RR\n"
-            "• CONFIRM: импульс + ликвидность + объём + HTF\n"
-            "• ADX-адаптивный тренд\n"
-            "• BTC корреляция фильтр\n"
-            "• Session liquidity ≥ 0.7x\n"
+            "🧠 <b>Общий контроль</b>\n"
+            "• Структура только по закрытым свечам\n"
+            "• Центральная проверка RR ≥ 2.0 и порядка уровней\n"
+            "• Groq видит strategy + self_rules + errors + external/news/history\n"
+            "• Groq может только APPROVE/WAIT/REJECT; уровни не меняет\n"
         )
 
         await callback.message.edit_text(
@@ -2857,6 +2915,44 @@ def _persist_delivered_signal(sd: dict):
     return signal_id
 
 
+def _has_pending_signal_for_symbol(symbol: str) -> bool:
+    """One active thesis per pair, without imposing a weekly trade quota."""
+    if not symbol:
+        return False
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
+        row = conn.execute(
+            "SELECT id FROM signals WHERE symbol=? AND result='pending' LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        conn.close()
+        return bool(row)
+    except Exception as exc:
+        logging.warning("[SignalArbiter] pending-position check failed: %s", exc)
+        return False
+
+
+def _attach_learning_evidence(sd: dict) -> None:
+    """Give the single final Groq gate factual rules/errors without changing levels."""
+    strategy = _signal_type_from_candidate(sd)
+    evidence = dict(sd.get("technical_evidence") or {})
+    try:
+        evidence["self_rules"] = (
+            _market_relevant_rules(sd.get("symbol", ""), sd.get("direction", ""), strategy).strip()
+            or "no_relevant_self_rules"
+        )[:2000]
+    except Exception:
+        evidence["self_rules"] = "self_rules_unavailable"
+    try:
+        evidence["recent_bot_errors"] = (
+            _market_recent_errors(sd.get("symbol", ""), limit=5).strip()
+            or "no_recent_bot_errors"
+        )[:2000]
+    except Exception:
+        evidence["recent_bot_errors"] = "bot_errors_unavailable"
+    sd["technical_evidence"] = evidence
+
+
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
@@ -2877,6 +2973,13 @@ async def _send_signal(sd):
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
+    if not sd.get("_signal_id") and _has_pending_signal_for_symbol(sd.get("symbol", "")):
+        logging.info(
+            "[SignalArbiter] %s blocked: an existing pending thesis already owns the pair",
+            sd.get("symbol"),
+        )
+        return False
+    _attach_learning_evidence(sd)
     if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
         review = await _review_signal_candidate(sd, ask_groq)
         sd["_external_quality_reviewed"] = True
@@ -2947,7 +3050,13 @@ async def _send_signal(sd):
     if not delivered:
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
         return False
-    await asyncio.to_thread(_persist_delivered_signal, sd)
+    signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
+    if signal_id and _TRADE_EXECUTION_OK:
+        execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
+        logging.info(
+            "[AutoTrading] signal=%s symbol=%s status=%s",
+            signal_id, sd.get("symbol"), execution.get("status"),
+        )
     try:
         import sqlite3 as _sq3
         _cd = _sq3.connect("brain.db", timeout=10)
@@ -3050,6 +3159,22 @@ async def auto_scan_job():
     pass
 
 
+async def auto_trade_reconcile_job():
+    """Protect filled live entries; a disabled/paper configuration is a no-op."""
+    if not _TRADE_EXECUTION_OK:
+        return
+    try:
+        outcomes = await asyncio.to_thread(_reconcile_live_executions, db_path=DB_PATH)
+        for outcome in outcomes:
+            logging.info(
+                "[AutoTrading] reconcile signal=%s status=%s",
+                outcome.get("signal_id"), outcome.get("status"),
+            )
+    except Exception as exc:
+        # Exchange failures must never stop scanners or Telegram handlers.
+        logging.error("[AutoTrading] reconciliation failed safely: %s", exc)
+
+
 def pick_best_signal(signals: list) -> dict | None:
     """
     Выбирает лучший сигнал из найденных по приоритету и score.
@@ -3125,18 +3250,13 @@ async def _auto_scan_1h_impl():
     # Фильтрация и сортировка
     valid = [s for s in all_signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
 
-    # pick_best_signal — приоритизация WYCKOFF>SWING>MTF>ZONE>FAST
+    # Rank for delivery, but do not impose a per-scan or weekly trade quota.
     sent = 0
-    _best = pick_best_signal(valid)
-    if _best:
-        logging.info(f"[auto_scan_1h] → BEST: {_best.get('symbol')} {_best.get('direction')} grade={_best.get('grade')}")
-        delivered = await _send_signal(_best)
-        await asyncio.sleep(1)
-        sent += int(bool(delivered))
-    # Остальные топ-2 по confluence
-    _rest = [s for s in valid if s is not _best]
-    _rest.sort(key=lambda x: (x.get("confluence_score", 0), x.get("rr", 0)), reverse=True)
-    for sd in _rest[:2]:
+    valid.sort(
+        key=lambda item: (item.get("confluence_score", 0), item.get("rr", 0)),
+        reverse=True,
+    )
+    for sd in valid:
         logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
         delivered = await _send_signal(sd)
         await asyncio.sleep(1)
@@ -3185,7 +3305,7 @@ async def _auto_scan_swing_impl():
     found.sort(key=lambda x: x["rr"], reverse=True)
     logging.info(f"[auto_scan_swing] Swing scan 4h: найдено {len(found)} сетапов")
 
-    for r in found[:2]:  # максимум 2 сигнала за раз
+    for r in found:
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -3214,18 +3334,20 @@ async def _auto_scan_swing_impl():
             )
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
-            _sw_tp2_val = r.get("tp2", r["tp"])
+            _sw_tp2_val = r.get("tp2") or r["tp"]
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "4h", "entry": r["entry"],
                 "sl": r["sl"], "tp1": r["tp"],
                 "tp2": _sw_tp2_val, "tp3": _sw_tp2_val,
+                "rr": r.get("rr"),
                 "grade": "SWING", "text": text,
                 "confluence_score": int(r["rr"] * 20),
                 "regime": "SWING",
                 "scan_type": "swing",
                 "technical_evidence": {key: r.get(key) for key in (
-                    "logic", "htf_dir", "htf_1w", "weekly_warning", "confirms", "ob", "fvg"
+                    "logic", "htf_dir", "htf_1w", "weekly_warning", "confirms",
+                    "funding_warning", "ob", "fvg"
                 ) if r.get(key) is not None},
             }
 
@@ -3289,7 +3411,7 @@ async def _auto_zone_scan_impl():
 
     found.sort(key=lambda x: x["rr"], reverse=True)
 
-    for r in found[:3]:
+    for r in found:
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -3307,23 +3429,24 @@ async def _auto_zone_scan_impl():
                 f"\n"
                 f"📈 Логика: {r['logic']}\n"
                 f"\n"
-                f"⭐ Quality: {r['q_score']}/7 | RR: {r['rr']}\n"
+                f"⭐ Quality: {r['q_score']}/8 | RR: {r['rr']}\n"
                 f"⏱ Горизонт: ~{r.get('est_hours', 12)}ч"
             )
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
-            _z_tp2_val = r.get("tp2", r["tp"])
+            _z_tp2_val = r.get("tp2") or r["tp"]
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "4h", "entry": r["entry"],
                 "sl": r["sl"], "tp1": r["tp"],
                 "tp2": _z_tp2_val, "tp3": _z_tp2_val,
+                "rr": r.get("rr"),
                 "grade": "ZONE", "text": text,
                 "confluence_score": int(r["rr"] * 20),
                 "regime": "ZONE",
                 "scan_type": "zone",
                 "technical_evidence": {key: r.get(key) for key in (
-                    "logic", "zone", "zone_type", "q_score", "htf_dir"
+                    "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning"
                 ) if r.get(key) is not None},
             }
 
@@ -3356,7 +3479,7 @@ async def auto_scan_1d():
     signals = await _scan_tf("1d", pairs_limit=20)
     logging.info(f"Скан 1d: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=5.0)]
-    for sd in valid[:2]:
+    for sd in valid:
         await _send_signal(sd)
         await asyncio.sleep(1)
 
@@ -3366,7 +3489,7 @@ async def auto_scan_1w():
     signals = await _scan_tf("1w", pairs_limit=15)
     logging.info(f"Скан 1w: сигналов {len(signals)}")
     valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=8.0)]
-    for sd in valid[:2]:
+    for sd in valid:
         await _send_signal(sd)
         await asyncio.sleep(1)
 
@@ -3401,7 +3524,7 @@ async def auto_scan_mega():
     found.sort(key=lambda x: x["score"], reverse=True)
     logging.info(f"Мега-скан: найдено {len(found)} сигналов")
 
-    for r in found[:3]:
+    for r in found:
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -3498,7 +3621,7 @@ async def _auto_wyckoff_scan_impl():
     found.sort(key=lambda x: x["score"], reverse=True)
     logging.info(f"[auto_wyckoff_scan] Wyckoff scan: найдено {len(found)}")
 
-    for r in found[:2]:
+    for r in found:
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -3559,12 +3682,13 @@ async def _auto_wyckoff_scan_impl():
             except Exception:
                 pass
 
-            _w_tp2_val = r.get("tp2", r["tp"])
+            _w_tp2_val = r.get("tp2") or r["tp"]
             sd = {
                 "symbol": symbol, "direction": direction,
                 "timeframe": "1d", "entry": r["entry"],
                 "sl": r["sl"], "tp1": r["tp"],
                 "tp2": _w_tp2_val, "tp3": _w_tp2_val,
+                "rr": r.get("rr"),
                 "grade": "WYCKOFF", "text": text,
                 "confluence_score": r["score"],
                 "regime": "WYCKOFF",
@@ -3586,25 +3710,23 @@ async def _auto_wyckoff_scan_impl():
 
 async def auto_fast_deal_scan():
     """Каждые 5 мин: только ликвидные окна London/NY для точного FAST."""
-    from datetime import datetime as _dt
-    _now_dt = _dt.utcnow()
+    from datetime import datetime as _dt, timezone as _timezone
+    _now_dt = _dt.now(_timezone.utc)
     _hour = _now_dt.hour
     _minute = _now_dt.minute
-    _time_m = _hour * 60 + _minute
-    # London 08:30-11:30 и NY 16:30-19:30 UTC. Это не лимит
-    # количества сделок, а требование ликвидности для скальпа.
-    if not (510 <= _time_m <= 690 or 990 <= _time_m <= 1170):
+    _session = fast_session(_now_dt)
+    if not _session:
         logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
     try:
-        await asyncio.wait_for(_auto_fast_deal_scan_impl(_hour, _minute), timeout=90)
+        await asyncio.wait_for(_auto_fast_deal_scan_impl(_hour, _minute, _session), timeout=90)
     except asyncio.TimeoutError:
         logging.warning("[auto_fast_deal_scan] таймаут 90с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_fast_deal_scan] ОШИБКА: {e}")
 
-async def _auto_fast_deal_scan_impl(_hour, _minute):
-    logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН (Kill Zone {_hour:02d}:{_minute:02d} UTC)")
+async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
+    logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН ({_session}, {_hour:02d}:{_minute:02d} UTC)")
 
     # Загружаем BTC свечи один раз для всех пар
     _shared_btc_4h = get_candles("BTCUSDT", "4h", 30)
@@ -3637,7 +3759,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
     found.sort(key=lambda x: x["rr"], reverse=True)
     logging.info(f"Fast Deal scan: найдено {len(found)}")
 
-    for r in found[:2]:
+    for r in found:
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -3650,7 +3772,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
             _fast_tp2_pct = r.get("tp2_pct", r["tp_pct"])
             text = (
                 f"⚡ <b>[FAST]</b> | <b>{symbol}</b> — {dir_label}\n"
-                f"📊 Контекст: 5m | 1d: {r['direction_1d']}\n"
+                f"📊 Контекст: 4h | Сетап: 15m | Контроль: 5m | 1d: {r['direction_1d']}\n"
                 f"\n"
                 f"🎯 TP1:  <code>{smart_price_fmt(_fast_tp1)}</code> (+{r['tp_pct']}%)\n"
                 f"🎯 TP2:  <code>{smart_price_fmt(_fast_tp2)}</code> (+{_fast_tp2_pct}%)\n"
@@ -3666,7 +3788,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа (1.5% для скальпинга)
-            if not _is_entry_still_valid(r, max_drift_pct=1.5):
+            if not _is_entry_still_valid(r, max_drift_pct=r.get("entry_drift_pct", 0.5)):
                 continue
 
             # Блокируем если сделка уже открыта
@@ -3701,13 +3823,13 @@ async def _auto_fast_deal_scan_impl(_hour, _minute):
             _f_tp1 = r.get("tp1", r["tp"])
             _f_tp2 = r.get("tp2", r["tp"])
             _fast_sd = {
-                "symbol": symbol, "direction": direction, "timeframe": "5m",
+                "symbol": symbol, "direction": direction, "timeframe": "15m",
                 "entry": r["entry"], "sl": r["sl"], "tp1": _f_tp1,
                 "tp2": _f_tp2, "tp3": _f_tp2, "rr": r.get("rr"),
                 "grade": "FAST", "scan_type": "fast",
                 "confluence_score": int(r["rr"] * 20), "regime": "FAST",
                 "technical_evidence": {key: r.get(key) for key in (
-                    "logic", "zone", "direction_1d", "ob", "fvg"
+                    "logic", "zone", "direction_1d", "funding_warning", "ob", "fvg"
                 ) if r.get(key) is not None},
             }
             _fast_sd["text"] = text
@@ -3834,9 +3956,11 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                         return None  # не лонгуем альты когда BTC падает на 1h
             except Exception:
                 pass
-        candles = get_candles(symbol, timeframe, 100)
-        if len(candles) < 20:
+        raw_candles = get_candles(symbol, timeframe, 101)
+        if len(raw_candles) < 21:
             return None
+        live_price = raw_candles[-1]["close"]
+        candles = get_confirmed_candles(raw_candles)
 
         # ── MUST 1: OB/FVG зона ±ATR×vf ──
         try:
@@ -3846,29 +3970,39 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             _ap_mtf = get_adaptive_params(symbol, candles)
             _vf_mtf = _ap_mtf["volatility_factor"]
             _in_ob = (_ob_check and
-                      abs(candles[-1]["close"] - (_ob_check["top"] + _ob_check["bottom"]) / 2)
+                      abs(live_price - (_ob_check["top"] + _ob_check["bottom"]) / 2)
                       <= _atr_check * _vf_mtf)
             _in_fvg = (_fvg_check and
-                       abs(candles[-1]["close"] - (_fvg_check["top"] + _fvg_check["bottom"]) / 2)
+                       abs(live_price - (_fvg_check["top"] + _fvg_check["bottom"]) / 2)
                        <= _atr_check * _vf_mtf)
             if not _in_ob and not _in_fvg:
                 logging.debug(f"[MTF] {symbol}: цена не у OB/FVG зоны — блок")
                 return None
-        except Exception:
-            _ap_mtf = {"adx": 25, "adx_weak": False, "adx_strong": False, "dynamic_confluence": 30}
-            pass
+        except Exception as _mtf_zone_error:
+            logging.warning("[MTF] %s: обязательная проверка OB/FVG недоступна: %s", symbol, _mtf_zone_error)
+            return None
 
         # ── MUST 2: Тренд EMA50/EMA20 + структура HH/HL ──
         try:
-            _ema_candles = get_candles(symbol, "4h", 60)
+            _ema_candles = get_confirmed_candles(get_candles(symbol, "4h", 61))
             if _ema_candles and len(_ema_candles) >= 50:
                 _closes = [c["close"] for c in _ema_candles]
-                _ema50 = sum(_closes[-50:]) / 50
-                _ema200 = sum(_closes[-200:]) / 200 if len(_closes) >= 200 else _ema50
-                _ema20 = sum(_closes[-20:]) / 20
+                _ema50 = ema_value(_closes, 50)
+                _ema20 = ema_value(_closes, 20)
+                if _ema20 is None or _ema50 is None:
+                    return None
                 _price_4h = _closes[-1]
-                _hh_hl = _closes[-1] > _closes[-5] > _closes[-10]
-                _ll_lh = _closes[-1] < _closes[-5] < _closes[-10]
+                _mtf_highs, _mtf_lows = find_swings(_ema_candles, lookback=5)
+                _hh_hl = (
+                    len(_mtf_highs) >= 2 and len(_mtf_lows) >= 2
+                    and _mtf_highs[-1][1] > _mtf_highs[-2][1]
+                    and _mtf_lows[-1][1] > _mtf_lows[-2][1]
+                )
+                _ll_lh = (
+                    len(_mtf_highs) >= 2 and len(_mtf_lows) >= 2
+                    and _mtf_highs[-1][1] < _mtf_highs[-2][1]
+                    and _mtf_lows[-1][1] < _mtf_lows[-2][1]
+                )
 
                 _mtf_adx_weak = _ap_mtf.get("adx_weak", False)
                 if direction == "BULLISH":
@@ -3887,17 +4021,21 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                     if not _trend_ok:
                         logging.debug(f"[MTF] {symbol}: тренд не подтверждён для SHORT — блок")
                         return None
-        except Exception:
-            pass
+            else:
+                return None
+        except Exception as _mtf_trend_error:
+            logging.warning("[MTF] %s: обязательная проверка тренда недоступна: %s", symbol, _mtf_trend_error)
+            return None
 
         # ── Premium/Discount зона — реальный расчёт ──
         try:
-            _pd_candles = get_candles(symbol, "4h", 50)
+            _pd_raw = get_candles(symbol, "4h", 51)
+            _pd_candles = get_confirmed_candles(_pd_raw)
             if _pd_candles and len(_pd_candles) >= 20:
                 _pd_high = max(c["high"] for c in _pd_candles[-20:])
                 _pd_low = min(c["low"] for c in _pd_candles[-20:])
                 _pd_mid = (_pd_high + _pd_low) / 2
-                _pd_price = _pd_candles[-1]["close"]
+                _pd_price = _pd_raw[-1]["close"]
 
                 if direction == "BULLISH" and _pd_price > _pd_mid:
                     logging.debug(f"[MTF] {symbol}: цена в Premium зоне — LONG заблокирован")
@@ -3905,10 +4043,11 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 elif direction == "BEARISH" and _pd_price < _pd_mid:
                     logging.debug(f"[MTF] {symbol}: цена в Discount зоне — SHORT заблокирован")
                     return None
-        except Exception:
-            pass
+        except Exception as _mtf_pd_error:
+            logging.warning("[MTF] %s: обязательная Premium/Discount проверка недоступна: %s", symbol, _mtf_pd_error)
+            return None
 
-        price = candles[-1]["close"]
+        price = live_price
         ob = find_ob(candles, direction)
         fvg = find_fvg(candles, direction)
         ob_data = get_orderbook(symbol)
@@ -3998,20 +4137,21 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             return None
 
         # ══════════════════════════════════════
-        # 🔴 ОСНОВА — 3/3 ТФ обязательно (15m+1h+4h)
+        # 🔴 ОСНОВА — 1h+4h direction, 15m closed-bar structure trigger
         # ══════════════════════════════════════
         _dir_15m = smc_on_tf(symbol, "15m")
         _dir_1h  = smc_on_tf(symbol, "1h")
         _dir_4h  = smc_on_tf(symbol, "4h")
         _dir_1d  = smc_on_tf(symbol, "1d")  # контекст
 
-        _tf_match = sum([
-            _dir_15m == direction,
-            _dir_1h  == direction,
-            _dir_4h  == direction,
-        ])
-        if _tf_match < 3:
-            logging.debug(f"[MTF] {symbol}: только {_tf_match}/3 ТФ совпали — пропускаем")
+        _tf_match = sum([_dir_15m == direction, _dir_1h == direction, _dir_4h == direction])
+        _core_tf_match = sum([_dir_1h == direction, _dir_4h == direction])
+        # Hierarchical MTF: 4h defines structure, 1h defines the setup and
+        # 15m confirms that the pullback has ended.  Requiring 15m to remain
+        # trend-aligned throughout the pullback rejects the very entries the
+        # lower timeframe is supposed to time.
+        if _core_tf_match < 2:
+            logging.debug(f"[MTF] {symbol}: 1h/4h не совпадают — пропускаем")
             return None
 
         # Для редких сделок дневной тренд должен подтверждать направление.
@@ -4020,7 +4160,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
             logging.debug(f"[MTF] {symbol}: 1d против направления — блок")
             return None
 
-        _weak_mtf_warn = ""  # 3/3 обязательно, слабого MTF быть не может
+        _weak_mtf_warn = ""  # 1h/4h mandatory; 15m is the closed-bar trigger.
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
         if timeframe not in ("1h", "4h"):
@@ -4153,22 +4293,22 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 f'Ответь СТРОГО JSON: {{\"logic\": \"причина входа макс 15 слов\", \"hours\": число, \"valid\": true/false}}\n\n'
                 "ПРАВИЛА БЛОКИРОВКИ (верни valid: false если):\n"
                 f"- RR < 2.0 — риск не оправдан (RR сейчас: {levels.get('rr',0)})\n"
-                f"- Стоп > 3% от входа (стоп сейчас: {_sl_pct_mtf}%)\n"
+                f"- Стоп не находится за структурной инвалидацией (стоп сейчас: {_sl_pct_mtf}%)\n"
                 "- Цена не у структурного уровня (OB/FVG/swing)\n"
-                "- HTF (4h/1d) против направления сигнала\n"
+                "- 4h или 1d против направления сигнала\n"
                 "- Нет чёткого CHoCH или BOS подтверждающего вход\n"
                 "- Рынок в боковике без импульса\n"
-                "- Финансирование > 0.1% против направления\n\n"
+                "- Экстремальный funding — предупреждение, но не самостоятельный запрет\n\n"
                 "ПРАВИЛА ПОДТВЕРЖДЕНИЯ (valid: true если):\n"
                 "- Цена чётко в OB или FVG зоне\n"
-                "- 15m, 1h, 4h все в одном направлении\n"
+                "- 1h и 4h согласованы, а закрытая 15m свеча дала BOS/CHoCH триггер\n"
                 "- Есть CHoCH или BOS после sweep ликвидности\n"
                 "- RR ≥ 2.0, стоп за структурным уровнем\n"
                 "- TP на реальном уровне (предыдущий swing, OB, ликвидность)\n"
                 "- BTC подтверждает направление\n\n"
                 f"Данные: Пара: {symbol} ТФ: {tf_label} Направление: {direction}\n"
                 f"Вход: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp1)}\n"
-                f"1d тренд (контекст, не блокирует): {_dir_1d}\n"
+                f"1d тренд (обязательный HTF-фильтр): {_dir_1d}\n"
                 f"ТФ совпадение: {_tf_match}/3 (15m={_dir_15m} 1h={_dir_1h} 4h={_dir_4h})\n"
                 f"MTF: {mtf.get('match_count',0)}/3 | 1d: {htf_1d} | 1w: {htf_1w} {_1w_warn}\n"
                 f"RR: {levels.get('rr',0)} | Стоп: {_sl_pct_mtf}% | Fear&Greed: {fg_val} | Funding: {fund_val}\n"
@@ -4179,7 +4319,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 f"{_pat_str}"
                 f"{_self_rules}"
             )
-            groq_response = ask_groq(groq_prompt, max_tokens=100)
+            groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
             if groq_response and len(groq_response) > 5:
                 try:
                     import json as _json, re as _re
@@ -4255,7 +4395,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # BOS/CHoCH на 15m
         try:
-            _c15m_m = get_candles(symbol, "15m", 30)
+            _c15m_m = get_confirmed_candles(get_candles(symbol, "15m", 31))
             if _c15m_m and detect_bos_choch(_c15m_m, direction, lookback=15):
                 _mtf_score += 1
                 _mtf_score_bos = True
@@ -4273,7 +4413,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # ══════════════════════════════════════
         # 📝 ТЕКСТ СИГНАЛА
         # ══════════════════════════════════════
-        _must_text = f"15m+1h+4h {direction} | {_tf_match}/3 ТФ ✅"
+        _must_text = f"1h+4h {direction} | 15m BOS/CHoCH ✅"
         _1d_text = f"1d: {'✅' if _htf_1d_agrees else '⚠️'} {_dir_1d or '?'} (контекст)"
 
         _confirm_items = []
@@ -4807,6 +4947,11 @@ async def on_startup(app):
 
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
+    if _TRADE_EXECUTION_OK:
+        try:
+            _ensure_execution_schema(DB_PATH)
+        except Exception as _execution_schema_error:
+            logging.error("trade execution schema: %s", _execution_schema_error)
     start_db_writer()
     if BRAIN_BUILDER_AVAILABLE:
         try:
@@ -4840,12 +4985,13 @@ async def on_startup(app):
 
     # Основные сигналы
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_zone_scan,       "interval", minutes=20, jitter=60,  max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
     webhook_scheduler.add_job(auto_fast_deal_scan,  "interval", minutes=5,  jitter=30,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600, max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_accumulation_scan, "interval", hours=1, max_instances=1, coalesce=True)
+    # Pump/accumulation detector notifications are intentionally not scheduled.
     webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
     # timing_queue отключена — MTF отправляет сигналы напрямую по скору
     # webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
@@ -5121,6 +5267,11 @@ def main():
             except Exception as _re:
                 logging.warning(f"restore_db_from_github: {_re}")
             init_db()
+            if _TRADE_EXECUTION_OK:
+                try:
+                    _ensure_execution_schema(DB_PATH)
+                except Exception as _execution_schema_error:
+                    logging.error("trade execution schema: %s", _execution_schema_error)
             start_db_writer()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
@@ -5140,6 +5291,7 @@ def main():
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
+            scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
             scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
             scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
             scheduler.add_job(auto_zone_scan, "interval", minutes=20, jitter=60, max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
@@ -5147,7 +5299,7 @@ def main():
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
-            scheduler.add_job(auto_accumulation_scan, "interval", hours=1)
+            # Pump/accumulation detector notifications are intentionally not scheduled.
             scheduler.add_job(auto_fast_deal_scan, "interval", minutes=5, jitter=30, max_instances=1, coalesce=True)  # Fast Deal 5m
             scheduler.add_job(auto_wyckoff_scan, "interval", hours=4, jitter=600)     # Wyckoff Spring — каждые 4ч
             scheduler.add_job(auto_research, "interval", hours=2)

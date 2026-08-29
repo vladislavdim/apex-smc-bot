@@ -42,6 +42,12 @@ for _p in [_os_path.path.join(_BASE_DIR, "core"), _BASE_DIR]:
         _sys.path.insert(0, _p)
 
 try:
+    from session_clock import fast_session as _fast_session
+except Exception as _session_clock_error:
+    logging.error("session_clock unavailable; FAST scanner will stay disabled: %s", _session_clock_error)
+    _fast_session = lambda *_args, **_kwargs: None
+
+try:
     from signal_lifecycle import (
         ACTIVE as _LIFECYCLE_ACTIVE,
         CANCELLED as _LIFECYCLE_CANCELLED,
@@ -1045,6 +1051,94 @@ def get_global_candles(symbol: str, timeframe: str) -> list:
     return []
 
 
+def get_confirmed_candles(candles: list) -> list:
+    """Return immutable, closed candles from an exchange candle response.
+
+    Providers normally return the currently forming candle as the last row.
+    Strategies may use that row's close as an indicative live price, but BOS,
+    CHoCH, sweeps, displacement and important zones must be calculated from
+    completed bars only.
+    """
+    if not candles or len(candles) < 2:
+        return []
+    return candles[:-1]
+
+
+def ema_value(values: list, period: int) -> float | None:
+    """Return a standard exponentially weighted moving average value."""
+    if not values or period <= 0 or len(values) < period:
+        return None
+    value = sum(values[:period]) / period
+    alpha = 2.0 / (period + 1.0)
+    for price in values[period:]:
+        value = float(price) * alpha + value * (1.0 - alpha)
+    return value
+
+
+def average_true_range(candles: list, period: int = 14) -> float | None:
+    """Return ATR from completed candles without inventing a price level."""
+    if not candles or period <= 0 or len(candles) < period + 1:
+        return None
+    true_ranges = []
+    for index in range(1, len(candles)):
+        candle = candles[index]
+        previous_close = float(candles[index - 1]["close"])
+        true_ranges.append(max(
+            float(candle["high"]) - float(candle["low"]),
+            abs(float(candle["high"]) - previous_close),
+            abs(float(candle["low"]) - previous_close),
+        ))
+    return sum(true_ranges[-period:]) / period
+
+
+def select_structural_targets(
+    entry: float,
+    sl: float,
+    candidates: list,
+    direction: str,
+    min_rr: float,
+    max_rr: float,
+) -> tuple[float | None, float | None]:
+    """Select TP1/TP2 only from supplied market-anchored levels.
+
+    The function never creates a percentage target.  TP1 is the nearest level
+    whose reward/risk is inside the strategy envelope; TP2 is the next supplied
+    level beyond TP1 (if one exists).
+    """
+    risk = abs(float(entry) - float(sl))
+    if risk <= 0:
+        return None, None
+
+    levels = []
+    for value in candidates:
+        try:
+            level = float(value)
+        except (TypeError, ValueError):
+            continue
+        if level <= 0:
+            continue
+        if direction == "BULLISH" and level <= entry:
+            continue
+        if direction == "BEARISH" and level >= entry:
+            continue
+        if not any(abs(level - existing) <= max(abs(level), 1.0) * 1e-9 for existing in levels):
+            levels.append(level)
+
+    levels.sort(key=lambda level: abs(level - entry))
+    tp1_index = None
+    for index, level in enumerate(levels):
+        rr = abs(level - entry) / risk
+        if min_rr <= rr <= max_rr:
+            tp1_index = index
+            break
+    if tp1_index is None:
+        return None, None
+
+    tp1 = levels[tp1_index]
+    tp2 = levels[tp1_index + 1] if tp1_index + 1 < len(levels) else None
+    return smart_round(tp1), smart_round(tp2) if tp2 is not None else None
+
+
 
 # ═══════════════════════════════════════════════════════════════
 # OPEN INTEREST + FUNDING RATE + LIQUIDATION DATA
@@ -1764,262 +1858,186 @@ def check_entry_timing(candles, direction, entry_price, timeframe="1h"):
     }
 
 def calc_smart_levels(candles, direction, price, timeframe="1h"):
-    """
-    Расчёт SL/TP по реальной рыночной структуре (SMC):
-    - SL: за swing low/high + буфер 0.3%
-    - TP1: ближайшая зона ликвидности (скопление стопов)
-    - TP2: следующий OB или FVG
-    - TP3: дальний swing high/low или x2 диапазона
-    Fallback на математический расчёт если структуры нет.
+    """Build MTF levels from confirmed structure; never fabricate a level.
+
+    Entry is the overlap between an unmitigated OB/FVG and the 0.62-0.79
+    Fibonacci OTE of the latest confirmed impulse. SL is placed beyond the
+    protected swing and selected zone with an ATR buffer. Targets come only
+    from confirmed swings, liquidity pools, opposing zones or Fibonacci
+    extensions anchored to that same impulse.
     """
     try:
-        if not candles or len(candles) < 20:
-            raise ValueError("мало свечей")
+        if direction not in ("BULLISH", "BEARISH"):
+            raise ValueError("unknown direction")
+        if not candles or len(candles) < 30 or not price or price <= 0:
+            raise ValueError("insufficient confirmed candles")
 
-        # Получаем структуру
         raw_highs, raw_lows = find_swings(candles, lookback=8)
-        # find_swings возвращает (idx, price) или просто price — нормализуем
-        highs = [h[1] if isinstance(h, (tuple, list)) else h for h in raw_highs]
-        lows  = [l[1] if isinstance(l, (tuple, list)) else l for l in raw_lows]
-        ob   = find_ob(candles, direction)
-        fvg  = find_fvg(candles, direction)
-        heatmap = get_liquidity_heatmap(candles)
-        # Передаём состояние зоны вызывающему коду: MTF не должен выдавать
-        # «первый тест» для OB, который уже был полностью проторгован.
-        mitigated = False
+        if not raw_highs or not raw_lows:
+            raise ValueError("confirmed swing structure is absent")
 
-        closes = [c["close"] for c in candles]
-        candle_highs = [c["high"] for c in candles]
-        candle_lows  = [c["low"]  for c in candles]
+        # Use the most recent completed impulse in the strategy direction.
+        impulse_low = impulse_high = None
+        if direction == "BULLISH":
+            for high_index, high_price in reversed(raw_highs):
+                preceding_lows = [item for item in raw_lows if item[0] < high_index]
+                if preceding_lows and high_price > preceding_lows[-1][1]:
+                    impulse_low = float(preceding_lows[-1][1])
+                    impulse_high = float(high_price)
+                    break
+        else:
+            for low_index, low_price in reversed(raw_lows):
+                preceding_highs = [item for item in raw_highs if item[0] < low_index]
+                if preceding_highs and preceding_highs[-1][1] > low_price:
+                    impulse_high = float(preceding_highs[-1][1])
+                    impulse_low = float(low_price)
+                    break
 
-        # Буфер зависит от таймфрейма
-        buf_map = {"5m": 0.002, "15m": 0.003, "1h": 0.004, "4h": 0.006, "1d": 0.010}
-        buf = buf_map.get(timeframe, 0.004)
+        if impulse_low is None or impulse_high is None or impulse_high <= impulse_low:
+            raise ValueError("confirmed directional impulse is absent")
+
+        atr = average_true_range(candles, 14)
+        if not atr or atr <= 0:
+            raise ValueError("ATR is unavailable")
+
+        impulse_range = impulse_high - impulse_low
+        if direction == "BULLISH":
+            ote_entry = impulse_high - impulse_range * 0.705
+            ote_low = impulse_high - impulse_range * 0.79
+            ote_high = impulse_high - impulse_range * 0.62
+        else:
+            ote_entry = impulse_low + impulse_range * 0.705
+            ote_low = impulse_low + impulse_range * 0.62
+            ote_high = impulse_low + impulse_range * 0.79
+
+        def _zone_mitigated(zone):
+            """A zone is fresh only when no later confirmed candle retested it."""
+            origin = zone.get("index")
+            if not isinstance(origin, int):
+                return True
+            bottom = float(zone["bottom"])
+            top = float(zone["top"])
+            # OB displacement/FVG formation uses the next candle, so begin
+            # checking after it. The live candle is not in ``candles``.
+            for candle in candles[origin + 2:]:
+                if float(candle["low"]) <= top and float(candle["high"]) >= bottom:
+                    return True
+            return False
+
+        # Entry must be both a real imbalance/order block and a Fibonacci OTE.
+        zone_candidates = []
+        for zone_kind, zone in (("OB", find_ob(candles, direction)),
+                                ("FVG", find_fvg(candles, direction))):
+            if not zone or _zone_mitigated(zone):
+                continue
+            overlap_low = max(float(zone["bottom"]), ote_low)
+            overlap_high = min(float(zone["top"]), ote_high)
+            if overlap_low > overlap_high:
+                continue
+            # Preserve the 0.705 anchor where possible; otherwise use the
+            # nearest boundary of the genuine zone/OTE overlap.
+            level = min(max(ote_entry, overlap_low), overlap_high)
+            zone_candidates.append((abs(float(price) - level), zone_kind, zone, level))
+
+        if not zone_candidates:
+            raise ValueError("no fresh OB/FVG overlap with OTE")
+        _, zone_kind, entry_zone, entry_raw = min(
+            zone_candidates,
+            key=lambda item: (item[0], 0 if item[1] == "OB" else 1),
+        )
+        entry = smart_round(entry_raw)
+
+        heatmap = get_liquidity_heatmap(candles) or {}
+        buffer = atr * ({"1h": 0.25, "4h": 0.30}.get(timeframe, 0.25))
 
         if direction == "BULLISH":
-            # --- ENTRY: OTE Fibonacci 0.705 вместо OB ---
-            if len(lows) >= 1 and len(highs) >= 1:
-                swing_low = min(lows[-3:]) if len(lows) >= 3 else min(lows)
-                swing_high = max(highs[-3:]) if len(highs) >= 3 else max(highs)
-                ote_entry = swing_low + (swing_high - swing_low) * 0.705
-                entry = smart_round(ote_entry)
-            else:
-                entry = smart_round(ob["top"] if ob else price)
-
-            # --- Mitigation check: если OB уже протестирован — блокируем ---
-            if ob:
-                ob_top = ob["top"]
-                ob_bottom = ob["bottom"]
-                _mitigated = False
-                for _mc in candles[-20:-1]:
-                    if _mc["low"] <= ob_top and _mc["high"] >= ob_bottom:
-                        _mitigated = True
-                        break
-                if _mitigated:
-                    mitigated = True
-                    logging.info(f"[calc_smart_levels] OB mitigated BULLISH")
-
-            # --- SL: за значимый swing low (второй если есть) ---
-            atr_sl = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
-            sl_swing = sorted([l for l in lows if l < entry * 0.999], reverse=True)
-            sl_candidates = []
-
-            if len(sl_swing) >= 2:
-                # Берём ближайший swing low (симметрично SHORT)
-                sl_candidates.append(sl_swing[0] * (1 - buf))
-            elif sl_swing:
-                # Только один — берём его
-                sl_candidates.append(sl_swing[0] * (1 - buf))
-
-            # Зона ликвидности ниже (только если > 1.5% от входа)
-            buy_stops = heatmap.get("nearest_buy_stops")
-            buy_stops_price = buy_stops["price"] if isinstance(buy_stops, dict) else buy_stops
-            if buy_stops_price and buy_stops_price < entry * 0.985:
-                sl_candidates.append(buy_stops_price * (1 - buf))
-
-            # FIX 6: Сначала ищем OB на 4h если нет свингов на 1h
-            if not sl_candidates:
-                try:
-                    candles_4h = get_candles(symbol, "4h", 50) if symbol else None
-                    ob_4h = find_ob(candles_4h, direction) if candles_4h else None
-                    if ob_4h and direction == "BULLISH":
-                        sl_candidates.append(ob_4h["bottom"] * (1 - buf))
-                    elif ob_4h and direction == "BEARISH":
-                        sl_candidates.append(ob_4h["top"] * (1 + buf))
-                except Exception:
-                    pass
-            # Только если совсем нет структуры — ATR×1.0 (не 2.0)
-            if not sl_candidates:
-                sl_candidates.append(entry - atr_sl * 1.0)
-
-            # Берём самый дальний кандидат (за реальной структурой)
-            sl_raw = min(sl_candidates)
-
-            # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
-            max_sl_pct = {"1h": 0.03, "4h": 0.05, "1d": 0.10, "1w": 0.15}
-            max_sl = entry * (1 - max_sl_pct.get(timeframe, 0.03))
-            sl = smart_round(max(sl_raw, max_sl))
-            # FIX 3: SL cap 4% от входа
-            _swing_sl_cap = entry * 0.96
-            sl = max(sl, _swing_sl_cap)
-
-
-
-
-            # --- TP1: зона ликвидности или swing high ---
-            tp1_candidates = []
+            stop_anchors = [impulse_low, float(entry_zone["bottom"])]
+            # Long stops sit below sell-side liquidity, never below buy stops.
             sell_stops = heatmap.get("nearest_sell_stops")
-            sell_stops_price = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
-            if sell_stops_price and sell_stops_price > entry * 1.005:
-                tp1_candidates.append(sell_stops_price)
-
-            # Swing highs выше входа
-            tp_swings = sorted([h for h in highs if h > entry * 1.005])
-            if tp_swings:
-                tp1_candidates.append(tp_swings[0])
-
-            # FVG верхняя граница
-            if fvg and fvg["top"] > entry * 1.005:
-                tp1_candidates.append(fvg["top"])
-
-            # Психологические уровни — если нет структуры
-            if not tp1_candidates:
-                # Находим ближайший круглый уровень выше
-                magnitude = 10 ** (len(str(int(entry))) - 2)  # для BTC=1000, SOL=1, XRP=0.01
-                psych_tp1 = entry + magnitude
-                while psych_tp1 <= entry * 1.005:
-                    psych_tp1 += magnitude
-                tp1_candidates.append(smart_round(psych_tp1))
-
-            # TP1 = ближайший структурный уровень
-            tp1 = smart_round(min(tp1_candidates))
-
-            # --- TP2: следующий swing high или психологический уровень ---
-            tp2_swings = sorted([h for h in highs if h > tp1 * 1.005])
-            tp2_candidates = []
-            if tp2_swings:
-                tp2_candidates.append(tp2_swings[0])
-
-            # Следующий психологический уровень после TP1
-            magnitude2 = 10 ** (len(str(int(entry))) - 2)
-            psych_tp2 = tp1 + magnitude2
-            while psych_tp2 <= tp1 * 1.005:
-                psych_tp2 += magnitude2
-            tp2_candidates.append(smart_round(psych_tp2))
-
-            # TP2 = следующий структурный уровень после TP1
-            tp2 = smart_round(min(tp2_candidates))
-
-            # TP3 = TP2
-            tp3 = tp2
-
-        else:  # BEARISH
-            # --- ENTRY: OTE Fibonacci 0.705 вместо OB ---
-            if len(lows) >= 1 and len(highs) >= 1:
-                swing_low = min(lows[-3:]) if len(lows) >= 3 else min(lows)
-                swing_high = max(highs[-3:]) if len(highs) >= 3 else max(highs)
-                ote_entry = swing_high - (swing_high - swing_low) * 0.705
-                entry = smart_round(ote_entry)
-            else:
-                entry = smart_round(ob["bottom"] if ob else price)
-
-            # --- Mitigation check: если OB уже протестирован — блокируем ---
-            if ob:
-                ob_top = ob["top"]
-                ob_bottom = ob["bottom"]
-                _mitigated = False
-                for _mc in candles[-20:-1]:
-                    if _mc["low"] <= ob_top and _mc["high"] >= ob_bottom:
-                        _mitigated = True
-                        break
-                if _mitigated:
-                    mitigated = True
-                    logging.info(f"[calc_smart_levels] OB mitigated BEARISH")
-
-            # --- SL: за ближайшей структурной зоной выше входа ---
-            atr_sl_b = sum(candle_highs[-14:][i] - candle_lows[-14:][i] for i in range(min(14, len(candles)))) / 14
-            sl_candidates = []
-
-            # Ближайший swing high выше входа
-            sl_swing = sorted([h for h in highs if h > entry * 1.001])
-            if sl_swing:
-                # Берём первый (ближайший) swing high
-                sl_candidates.append(sl_swing[0] * (1 + buf))
-
-            # OB top выше входа
-            if ob and ob["top"] > entry:
-                sl_candidates.append(ob["top"] * (1 + buf))
-
-            # Sell stops выше входа (зона ликвидности)
-            sell_stops = heatmap.get("nearest_sell_stops")
-            sell_stops_price2 = sell_stops["price"] if isinstance(sell_stops, dict) else sell_stops
-            if sell_stops_price2 and sell_stops_price2 > entry * 1.005:
-                sl_candidates.append(sell_stops_price2 * (1 + buf))
-
-            # Fallback: ATR * 1.5
-            if not sl_candidates:
-                sl_candidates.append(entry + atr_sl_b * 1.0)
-
-            # Берём ближайший кандидат (минимальный риск)
-            sl_raw = min(sl_candidates)
-
-            # Ограничение: стоп не дальше 8% для 1h/4h, 15% для 1d/1w
-            max_sl_pct = {"1h": 0.03, "4h": 0.05, "1d": 0.10, "1w": 0.15}
-            max_sl = entry * (1 + max_sl_pct.get(timeframe, 0.03))
-            sl = smart_round(min(sl_raw, max_sl))
-            # FIX 3: SL cap 4% от входа
-            _swing_sl_cap_b = entry * 1.04
-            sl = min(sl, _swing_sl_cap_b)
-            # --- TP1: ближайшая зона ликвидности ниже ---
-            tp1_candidates = []
+            sell_stop_price = sell_stops.get("price") if isinstance(sell_stops, dict) else sell_stops
+            if sell_stop_price and sell_stop_price < entry and abs(float(sell_stop_price) - impulse_low) <= atr:
+                stop_anchors.append(float(sell_stop_price))
+            sl = smart_round(min(stop_anchors) - buffer)
+        else:
+            stop_anchors = [impulse_high, float(entry_zone["top"])]
+            # Short stops sit above buy-side liquidity, never above sell stops.
             buy_stops = heatmap.get("nearest_buy_stops")
-            buy_stops_price2 = buy_stops["price"] if isinstance(buy_stops, dict) else buy_stops
-            if buy_stops_price2 and buy_stops_price2 < entry * 0.995:
-                tp1_candidates.append(buy_stops_price2)
-            tp_swings = [l for l in lows if l < entry * 0.995]
-            if tp_swings:
-                tp1_candidates.append(max(tp_swings))
-            if fvg and fvg["bottom"] < entry * 0.995:
-                tp1_candidates.append(fvg["bottom"])
-            tp1 = smart_round(max(tp1_candidates)) if tp1_candidates else smart_round(entry * 0.95)
+            buy_stop_price = buy_stops.get("price") if isinstance(buy_stops, dict) else buy_stops
+            if buy_stop_price and buy_stop_price > entry and abs(float(buy_stop_price) - impulse_high) <= atr:
+                stop_anchors.append(float(buy_stop_price))
+            sl = smart_round(max(stop_anchors) + buffer)
 
-            # TP2: следующая зона ликвидности ниже TP1
-            tp2_swings = sorted([l for l in lows if l < tp1 * 0.99], reverse=True)
-            risk_val_b = abs(entry - sl) if sl else entry * 0.02
-            tp2 = smart_round(max(tp2_swings[:2])) if len(tp2_swings) >= 2 else smart_round(entry - risk_val_b * 5)
-
-            # TP3 = TP2 (убираем третий тейк)
-            tp3 = tp2
-
-        # Если нет структуры выше/ниже для TP — используем математику для TP
-        # но SL оставляем структурный
         risk = abs(entry - sl)
-        reward = abs(tp1 - entry)
+        if risk <= 0:
+            raise ValueError("invalid structural stop")
+        # Reject excessive or noise-tight risk. Never move a valid structural
+        # invalidation inward merely to manufacture acceptable RR.
+        max_stop_atr = {"1h": 3.0, "4h": 3.5}.get(timeframe, 3.0)
+        if risk < atr * 0.20 or risk > atr * max_stop_atr:
+            raise ValueError("structural stop is outside the risk envelope")
 
-        if risk == 0:
-            raise ValueError("risk == 0")
+        target_candidates = []
+        if direction == "BULLISH":
+            target_candidates.extend(float(value) for _, value in raw_highs)
+            target_candidates.extend((
+                impulse_low + impulse_range * 1.272,
+                impulse_low + impulse_range * 1.618,
+            ))
+            wanted_liquidity = "buy_stops"
+            opposing_direction = "BEARISH"
+        else:
+            target_candidates.extend(float(value) for _, value in raw_lows)
+            target_candidates.extend((
+                impulse_high - impulse_range * 1.272,
+                impulse_high - impulse_range * 1.618,
+            ))
+            wanted_liquidity = "sell_stops"
+            opposing_direction = "BULLISH"
 
-        rr = round(reward / risk, 2)
+        for level in heatmap.get("levels", []):
+            if isinstance(level, dict) and level.get("type") == wanted_liquidity:
+                target_candidates.append(level.get("price"))
 
-        # Если TP слишком близко — дополняем математикой
-        if rr < 2.0:
-            return None  # Минимум RR 2.0 — качество важнее количества
+        for opposing_zone in (
+            find_ob(candles, opposing_direction),
+            find_fvg(candles, opposing_direction),
+        ):
+            if opposing_zone:
+                target_candidates.extend((opposing_zone.get("bottom"), opposing_zone.get("top")))
 
+        tp1, tp2 = select_structural_targets(
+            entry=entry,
+            sl=sl,
+            candidates=target_candidates,
+            direction=direction,
+            min_rr=2.0,
+            max_rr=4.0,
+        )
+        if tp1 is None or tp2 is None:
+            raise ValueError("two structural targets are unavailable")
+        if abs(tp2 - entry) / risk > 6.0:
+            raise ValueError("second structural target is too distant")
+
+        tp3 = tp2  # legacy DB/message field; the strategy has two real exits.
+        rr = round(abs(tp1 - entry) / risk, 2)
         return {
-            "entry": entry, "sl": sl,
-            "tp1": tp1, "tp2": tp2, "tp3": tp3,
-            "sl_pct": round(abs(entry - sl) / entry * 100, 2),
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "sl_pct": round(risk / entry * 100, 2),
             "tp1_pct": round(abs(tp1 - entry) / entry * 100, 2),
             "tp2_pct": round(abs(tp2 - entry) / entry * 100, 2),
             "tp3_pct": round(abs(tp3 - entry) / entry * 100, 2),
             "rr": rr,
-            "mitigated": mitigated,
-            "source": "structure"
+            "mitigated": False,
+            "entry_zone": zone_kind,
+            "source": f"structure+fib_ote+{zone_kind.lower()}",
         }
 
-    except Exception as e:
-        logging.debug(f"calc_smart_levels fallback ({direction} {timeframe}): {e}")
-        # Нет структурных уровней — блокируем (математические стопы запрещены)
+    except Exception as error:
+        logging.debug("calc_smart_levels rejected (%s %s): %s", direction, timeframe, error)
         return None
 
 def format_market():
@@ -2533,17 +2551,33 @@ def find_ob(candles, direction):
     for i in range(len(candles) - 2, max(0, len(candles) - 25), -1):
         c = candles[i]
         if direction == "BULLISH" and c["close"] < c["open"]:
-            return {"top": max(c["open"], c["close"]), "bottom": min(c["open"], c["close"])}
+            return {
+                "top": max(c["open"], c["close"]),
+                "bottom": min(c["open"], c["close"]),
+                "index": i,
+            }
         if direction == "BEARISH" and c["close"] > c["open"]:
-            return {"top": max(c["open"], c["close"]), "bottom": min(c["open"], c["close"])}
+            return {
+                "top": max(c["open"], c["close"]),
+                "bottom": min(c["open"], c["close"]),
+                "index": i,
+            }
     return None
 
 def find_fvg(candles, direction):
     for i in range(len(candles) - 3, max(1, len(candles) - 20), -1):
         if direction == "BULLISH" and candles[i+1]["low"] > candles[i-1]["high"]:
-            return {"top": candles[i+1]["low"], "bottom": candles[i-1]["high"]}
+            return {
+                "top": candles[i+1]["low"],
+                "bottom": candles[i-1]["high"],
+                "index": i,
+            }
         if direction == "BEARISH" and candles[i+1]["high"] < candles[i-1]["low"]:
-            return {"top": candles[i-1]["low"], "bottom": candles[i+1]["high"]}
+            return {
+                "top": candles[i-1]["low"],
+                "bottom": candles[i+1]["high"],
+                "index": i,
+            }
     return None
 
 def check_opposing_ob(candles, direction, entry, tp):
@@ -2620,7 +2654,7 @@ def smc_on_tf(symbol, interval):
         except Exception:
             pass
     # Fallback — используем bot.py get_candles (Binance/CryptoCompare)
-    candles = get_candles(symbol, interval, 150)
+    candles = get_confirmed_candles(get_candles(symbol, interval, 150))
     if len(candles) < 20:
         return None
     highs, lows = find_swings(candles)
@@ -3192,6 +3226,18 @@ def analyze_trade_type(symbol, trade_type="swing"):
       swing — 1h, 4h        (среднесрок)
       long  — 1d, 1w, 1M   (долгосрок)
     """
+    # Legacy formatter used percentage-based stops/targets.  It is retained
+    # only as a compatibility entry point and must delegate to the canonical
+    # MTF candidate builder, which owns all structural level calculations.
+    _handler = globals().get("_RAW_SCAN_HANDLER")
+    if callable(_handler):
+        _tf_by_type = {"scalp": "15m", "swing": "1h", "long": "4h"}
+        return _handler(symbol, _tf_by_type.get(trade_type, "1h"), False)
+    logging.warning("analyze_trade_type disabled until canonical scan handler is registered")
+    return None
+
+    # Unreachable legacy implementation remains below for source compatibility
+    # with old deployments; the guard above prevents its fabricated levels.
     try:
         tfs = TF_CATEGORIES.get(trade_type, ["1h", "4h"])
 
@@ -3336,6 +3382,15 @@ def register_raw_scan_handler(handler):
 
 def full_scan(symbol, timeframe="1h"):
     """Полный SMC анализ с мультитаймфреймом + все новые фильтры"""
+    # All callers use the canonical implementation registered by bot.py.
+    # The former body contains historical fallback levels and is never allowed
+    # to run when the canonical strategy is unavailable.
+    if callable(_RAW_SCAN_HANDLER):
+        return _RAW_SCAN_HANDLER(symbol, timeframe, False)
+    logging.warning("full_scan disabled until canonical scan handler is registered")
+    return None
+
+    # Unreachable legacy implementation retained for old source deployments.
     try:
         # ── 0. Рыночный режим — в боковике сигналов нет ──
         regime = get_market_regime(symbol)
@@ -5590,7 +5645,7 @@ async def deep_error_analysis(signal_id, symbol, direction, entry, sl, result, h
     Сохраняет в таблицу bot_errors
     """
     try:
-        candles = get_candles(symbol, timeframe, 100)
+        candles = get_confirmed_candles(get_candles(symbol, timeframe, 201))
         price_now = candles[-1]["close"] if candles else 0
 
         # Получаем рыночный контекст на момент сделки
@@ -5953,6 +6008,18 @@ def _tokens_available() -> bool:
 
 # Словарь блокировок ключей: {key_index: timestamp когда получил rate limit}
 _key_rate_limited: dict = {}
+
+
+def legacy_strategy_groq_enabled() -> bool:
+    """Keep only the central post-strategy quality gate enabled by default.
+
+    Older deployments can temporarily restore per-strategy AI calls with
+    LEGACY_STRATEGY_GROQ=true.  Deterministic strategy calculations and
+    mandatory filters are never conditional on this flag.
+    """
+    return os.environ.get("LEGACY_STRATEGY_GROQ", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 def ask_groq(prompt, max_tokens=800):
     """
@@ -7534,9 +7601,12 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             хай пробит и закрылся ниже (медвежий sweep) → шорт
     """
     try:
-        candles = get_candles(symbol, timeframe, 100)
+        raw_candles = get_candles(symbol, timeframe, 101)
+        candles = get_confirmed_candles(raw_candles)
         if not candles or len(candles) < 20:
             return None
+
+        live_price = raw_candles[-1]["close"]
 
         closes  = [c["close"] for c in candles]
         highs   = [c["high"]  for c in candles]
@@ -7563,8 +7633,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         last_swing_low  = recent_lows[-1][1]
 
         # Предыдущий свинг для цели
-        prev_swing_high = recent_highs[-2][1] if len(recent_highs) >= 2 else last_swing_high * 1.05
-        prev_swing_low  = recent_lows[-2][1]  if len(recent_lows)  >= 2 else last_swing_low  * 0.95
+        prev_swing_high = recent_highs[-2][1]
+        prev_swing_low  = recent_lows[-2][1]
 
         direction = None
         entry = sl = tp = None
@@ -7589,8 +7659,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             rec_l    = sorted(sl_list[-3:], key=lambda x: x[0])
             chk_high = rec_h[-1][1]
             chk_low  = rec_l[-1][1]
-            prv_high = rec_h[-2][1]  if len(rec_h) >= 2  else chk_high * 1.05
-            prv_low  = rec_l[-2][1]  if len(rec_l) >= 2  else chk_low  * 0.95
+            prv_high = rec_h[-2][1]
+            prv_low  = rec_l[-2][1]
 
             # Bullish sweep
             if (check["low"] < chk_low and
@@ -7724,7 +7794,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         if _in_zone_rc:
                             _reaction_candles += 1
 
-                    if _reaction_candles > 5:
+                    if _reaction_candles >= 4:
                         logging.debug(f"[SWING] {symbol}: цена тупит у зоны {_reaction_candles} свечей — слабый сетап")
                         direction = None
                         entry = None
@@ -7774,8 +7844,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_vol = sweep_candle.get("volume", 0)
             if avg_vol > 0 and sweep_vol < avg_vol * _vol_mult:
                 return None
-        except Exception:
-            pass
+        except Exception as _swing_volume_error:
+            logging.debug("[SWING] %s: volume validation failed: %s", symbol, _swing_volume_error)
+            return None
 
         # ── Displacement candle — свеча после sweep должна быть импульсной ──
         # Адаптивный порог: если ATR < median → 50%, иначе 60%
@@ -7799,8 +7870,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
                 if _disp_range <= 0 or _disp_body / _disp_range < 0.50:
                     return None
-        except Exception:
-            pass
+        except Exception as _swing_displacement_error:
+            logging.debug("[SWING] %s: displacement validation failed: %s", symbol, _swing_displacement_error)
+            return None
 
         # ── CHoCH (Change of Character) — смена структуры после sweep ──
         # После bullish sweep цена должна пробить предыдущий swing high
@@ -7876,15 +7948,13 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     _swing_fvg_ok = True
                 elif direction == "BEARISH" and tp <= _sw_dir_fvg["top"] <= entry:
                     _swing_fvg_ok = True
-                elif _sw_dir_fvg:
-                    _swing_fvg_ok = True  # FVG есть, но вне зоны — всё равно засчитаем
         except Exception:
             pass
 
         # ── 1h CHoCH/BOS после 4h sweep ──
         _swing_1h_choch = False
         try:
-            _c1h_sw = get_candles(symbol, "1h", 30)
+            _c1h_sw = get_confirmed_candles(get_candles(symbol, "1h", 31))
             _swing_1h_choch = detect_bos_choch(_c1h_sw, direction, lookback=8) if _c1h_sw else False
         except Exception:
             pass
@@ -7917,7 +7987,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             pass
 
         # Если sweep был давно — цена могла уйти далеко от входа
-        current_price = candles[-1]["close"]
+        current_price = live_price
         if abs(current_price - entry) > atr * 4:
             return None
 
@@ -7927,12 +7997,11 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             return None
         tp = _adj_tp
 
-        # SL cap — не дальше 4% от entry
+        # A structural stop is immutable.  If it is too wide, reject the
+        # candidate instead of pulling SL inside market noise.
         _sl_max_pct = 0.04
-        if direction == "BULLISH":
-            sl = max(sl, entry * (1 - _sl_max_pct))
-        else:
-            sl = min(sl, entry * (1 + _sl_max_pct))
+        if abs(entry - sl) / max(abs(entry), 1e-12) > _sl_max_pct:
+            return None
 
         # ── Фильтр RR ──
         risk   = abs(entry - sl)
@@ -7978,7 +8047,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # ── Дополнительно: 15m подтверждение (бонус, не блок) ──
         _swing_15m_confirms = False
         try:
-            candles_15m = get_candles(symbol, "15m", 20)
+            candles_15m = get_confirmed_candles(get_candles(symbol, "15m", 21))
             if candles_15m and len(candles_15m) >= 5:
                 last_15m = candles_15m[-1]
                 body_15m = abs(last_15m["close"] - last_15m["open"])
@@ -7996,13 +8065,14 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp - entry) / entry * 100, 2)
 
-        # ── FR/OI фильтр для SWING ──
+        # ── Funding is risk context, never an automatic rejection ──
+        _swing_funding_warning = ""
         try:
             _sw_funding = get_funding_rate(symbol)
             if _sw_funding is not None and abs(_sw_funding) > 0.2:
                 if (direction == "BULLISH" and _sw_funding > 0.2) or (direction == "BEARISH" and _sw_funding < -0.2):
-                    logging.info(f"[SWING FR Block] {symbol}: FR {_sw_funding:+.4f}% экстремальный")
-                    return None
+                    _swing_funding_warning = f"extreme crowded funding {_sw_funding:+.4f}%"
+                    logging.info("[SWING Funding Warning] %s: %s", symbol, _swing_funding_warning)
         except Exception:
             pass
 
@@ -8105,7 +8175,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"{_recent_errors}"
             )
 
-            groq_response = ask_groq(groq_prompt, max_tokens=100)
+            groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
             if groq_response and len(groq_response) > 5:
                 try:
                     import json as _json, re as _re
@@ -8138,18 +8208,18 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             est_hours = int(round((abs(tp - entry) / atr) * tf_hours.get(timeframe, 4), 0)) if atr > 0 else 12
             est_hours = max(12, min(est_hours, 96))
 
-        # ── SWING Quality Score: подсчёт подтверждений (нужно 2 из 5) ──
+        # ── SWING Quality Score: six independent factual confirmations ──
         # Sweep volume ≥1.2x
         _sw_vol_ok = False
         try:
             _sw_avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
-            _sw_vol_ok = candles[-1]["volume"] >= _sw_avg_vol * 1.2
+            _sw_vol_ok = (trigger_candle or candles[-1])["volume"] >= _sw_avg_vol * 1.2
         except Exception:
             pass
         # Displacement ≥0.45
         _sw_disp_ok = False
         try:
-            _sw_last = candles[-1]
+            _sw_last = _disp_candle if '_disp_candle' in locals() else (trigger_candle or candles[-1])
             _sw_body = abs(_sw_last["close"] - _sw_last["open"])
             _sw_range = _sw_last["high"] - _sw_last["low"]
             _sw_disp_ok = _sw_body / _sw_range >= 0.45 if _sw_range > 0 else False
@@ -8162,21 +8232,23 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             _swing_1h_choch,    # CHoCH подтверждает
             _swing_pd_ok,       # Ликвидность/Premium-Discount
             _swing_fvg_ok,      # FVG между entry-TP
-            _swing_groq_ok,     # Groq подтвердил
             _swing_15m_confirms,  # 15m импульс совпадает
         ])
-        _sw_quality = f" [Q:{_sw_confirms}/7]"
+        _sw_quality = f" [Q:{_sw_confirms}/6]"
         # Sweep, объём, displacement и CHoCH уже обязательны выше. Здесь
         # остаются ещё минимум три независимых подтверждения.
         if _sw_confirms < 3:
-            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/7 < 3 — пропуск")
+            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 3 — пропуск")
             return None
 
-        # TP2 — extended target
+        # TP2 is optional and must be another real structural swing.  No
+        # synthetic distance multiplier is used when the market has no target.
         if direction == "BULLISH":
-            _sw_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
+            _sw_tp2_candidates = [level for _, level in swing_highs if level > tp * 1.005]
+            _sw_tp2 = smart_round(min(_sw_tp2_candidates)) if _sw_tp2_candidates else None
         else:
-            _sw_tp2 = smart_round(entry - abs(entry - tp) * 1.5)
+            _sw_tp2_candidates = [level for _, level in swing_lows if level < tp * 0.995]
+            _sw_tp2 = smart_round(max(_sw_tp2_candidates)) if _sw_tp2_candidates else None
 
         return {
             "symbol":    symbol,
@@ -8197,6 +8269,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "ob":        _swing_ob,
             "fvg":       _sw_dir_fvg if _swing_fvg_ok else None,
             "confirms":  _sw_confirms,
+            "funding_warning": _swing_funding_warning,
             "scan_type": "swing",
         }
 
@@ -8215,11 +8288,12 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     Не требует sweep — опирается на зону интереса и отбой от неё.
     """
     try:
-        candles = get_candles(symbol, timeframe, 100)
+        raw_candles = get_candles(symbol, timeframe, 101)
+        candles = get_confirmed_candles(raw_candles)
         if not candles or len(candles) < 50:
             return None
 
-        price = candles[-1]["close"]
+        price = raw_candles[-1]["close"]
         atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
         _ap_zone = get_adaptive_params(symbol, candles)
         _vf_zone = _ap_zone["volatility_factor"]
@@ -8234,8 +8308,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if range_size < atr * 2:
             return None  # Диапазон слишком мал
 
-        in_discount = price <= range_mid  # Нижние 50% — для LONG
-        in_premium  = price >= range_mid  # Верхние 50% — для SHORT
+        # Require a real range extreme and leave the middle 40% neutral.
+        in_discount = price <= range_low + range_size * 0.30
+        in_premium = price >= range_high - range_size * 0.30
 
         if not in_discount and not in_premium:
             return None
@@ -8307,8 +8382,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     logging.debug(f"[ZONE] {symbol}: нет сильного импульса (displacement < 0.5)")
                     return None
 
-            except Exception:
-                pass
+            except Exception as _zone_freshness_error:
+                logging.debug("[ZONE] %s: zone freshness unavailable: %s", symbol, _zone_freshness_error)
+                return None
 
         # ── 3. Подтверждение отбоя — хотя бы 1 свеча в направлении ──
         last = candles[-1]
@@ -8336,11 +8412,11 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             if not btc_ok:
                 return None
 
-        # ── 6. FR фильтр ──
+        # ── 6. Funding is risk context, not an automatic direction block ──
         try:
             fr = get_funding_rate(symbol)
             if fr is not None and abs(fr) > 0.2:
-                return None
+                logging.info("[ZONE] %s: extreme funding %.4f%% — risk warning", symbol, fr)
         except Exception:
             pass
 
@@ -8363,12 +8439,16 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             pass
 
         # Q1: CHoCH/BOS на 1h (реальная проверка структуры)
+        _zone_ltf_structure = False
         try:
-            _c1h_zone = get_candles(symbol, "1h", 30)
+            _c1h_zone = get_confirmed_candles(get_candles(symbol, "1h", 31))
             if _c1h_zone and detect_bos_choch(_c1h_zone, direction, lookback=8):
                 q_score += 1
+                _zone_ltf_structure = True
         except Exception:
             pass
+        if not _zone_ltf_structure:
+            return None
 
         # Q2: Объём последних 3 свечей > avg
         try:
@@ -8381,11 +8461,11 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # Q3: RSI не перекуплен (30-70)
         try:
             rmd = detect_rsi_macd_divergence(candles, direction)
-            rsi_val = rmd.get("rsi", 50) if rmd else 50
-            if 30 <= rsi_val <= 70:
+            rsi_val = rmd.get("rsi") if rmd else None
+            if rsi_val is not None and 30 <= rsi_val <= 70:
                 q_score += 1
         except Exception:
-            q_score += 1  # Нет данных — не блокируем
+            pass
 
         # Q4: FVG между entry и TP в направлении
         try:
@@ -8404,7 +8484,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # Q6: Funding rate нейтральный или против толпы
+        # Q6: Funding rate нейтральный или против толпы. Extreme funding is
+        # risk context for Groq, not a deterministic veto.
+        _zone_funding_warning = ""
         try:
             fr = get_funding_rate(symbol)
             if fr is not None:
@@ -8414,6 +8496,8 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                     q_score += 1  # Лонги накопились — хорошо для SHORT
                 elif abs(fr) < 0.05:
                     q_score += 1  # Нейтральный
+                elif (direction == "BULLISH" and fr > 0.2) or (direction == "BEARISH" and fr < -0.2):
+                    _zone_funding_warning = f"extreme crowded funding {fr:+.4f}%"
         except Exception:
             pass
 
@@ -8462,13 +8546,17 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             # TP = ближайший swing high
             swing_highs, _ = find_swings(candles, lookback=5)
             tp_candidates = [sh[1] for sh in swing_highs if sh[1] > entry * 1.005]
-            tp = smart_round(min(tp_candidates)) if tp_candidates else smart_round(entry + atr * 4)
+            if not tp_candidates:
+                return None
+            tp = smart_round(min(tp_candidates))
         else:
             entry = smart_round(price)
             sl    = smart_round(zone_level + atr * 0.5)
             _, swing_lows = find_swings(candles, lookback=5)
             tp_candidates = [sw[1] for sw in swing_lows if sw[1] < entry * 0.995]
-            tp = smart_round(max(tp_candidates)) if tp_candidates else smart_round(entry - atr * 4)
+            if not tp_candidates:
+                return None
+            tp = smart_round(max(tp_candidates))
 
         # ── 9. RR фильтр ──
         risk   = abs(entry - sl)
@@ -8513,12 +8601,12 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"Диапазон: {smart_price_fmt(range_low)}–{smart_price_fmt(range_high)} | Mid: {smart_price_fmt(range_mid)}\n"
                 f"Цена: {smart_price_fmt(price)} | OB: {smart_price_fmt(ob['bottom']) + '–' + smart_price_fmt(ob['top']) if ob else 'нет'}\n"
                 f"FVG: {smart_price_fmt(fvg['bottom']) + '–' + smart_price_fmt(fvg['top']) if fvg else 'нет'}\n"
-                f"1d тренд: {htf_1d} | Quality score: {q_score}/7\n"
+                f"1d тренд: {htf_1d} | Quality score: {q_score}/8\n"
                 f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)} RR: {rr} Стоп: {_zone_sl_pct}%"
                 f"{_self_rules}"
                 f"{_recent_errors}"
             )
-            _zone_resp = ask_groq(_zone_prompt, max_tokens=80)
+            _zone_resp = ask_groq(_zone_prompt, max_tokens=80) if legacy_strategy_groq_enabled() else None
             if _zone_resp:
                 import json as _j, re as _re
                 _clean = _re.sub(r'```json|```', '', _zone_resp).strip()
@@ -8532,24 +8620,19 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # TP2 — extended target (swing-based, fallback ATR)
+        # TP2 is optional and only exists when a second structural swing does.
         try:
             _z_sh, _z_sl = find_swings(candles, lookback=12)
             if direction == "BULLISH":
                 _tp2_cands = [s[1] for s in _z_sh if s[1] > tp * 1.005]
-                _z_tp2 = smart_round(min(_tp2_cands)) if _tp2_cands else smart_round(entry + abs(tp - entry) * 1.5)
+                _z_tp2 = smart_round(min(_tp2_cands)) if _tp2_cands else None
             else:
                 _tp2_cands = [s[1] for s in _z_sl if s[1] < tp * 0.995]
-                _z_tp2 = smart_round(max(_tp2_cands)) if _tp2_cands else smart_round(entry - abs(entry - tp) * 1.5)
+                _z_tp2 = smart_round(max(_tp2_cands)) if _tp2_cands else None
         except Exception:
-            _z_tp2 = smart_round(tp + atr * 2) if direction == "BULLISH" else smart_round(tp - atr * 2)
+            _z_tp2 = None
 
-        # Защита — tp2 должен отличаться от tp1 минимум на 0.3%
-        if abs(_z_tp2 - tp) / max(tp, 0.0001) < 0.003:
-            if direction == "BULLISH":
-                _z_tp2 = smart_round(tp + atr * 1.5)
-            else:
-                _z_tp2 = smart_round(tp - atr * 1.5)
+        _zone_est_hours = max(12, min(96, int(round(abs(tp - entry) / max(atr, 1e-12) * 4))))
 
         return {
             "symbol":    symbol,
@@ -8563,8 +8646,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "zone":      "Discount" if direction == "BULLISH" else "Premium",
             "q_score":   q_score,
             "htf_dir":   htf_1d,
+            "funding_warning": _zone_funding_warning,
             "logic":     logic,
-            "est_hours": 12,
+            "est_hours": _zone_est_hours,
         }
 
     except Exception as e:
@@ -8771,15 +8855,17 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         if _skip_symbol:
             logging.info(f"[WYCKOFF] {symbol}: {_skip_reason}")
             return None
-        candles_1d = get_candles(symbol, "1d", 60)
-        candles_4h = get_candles(symbol, "4h", 120)
+        raw_candles_1d = get_candles(symbol, "1d", 61)
+        raw_candles_4h = get_candles(symbol, "4h", 121)
+        candles_1d = get_confirmed_candles(raw_candles_1d)
+        candles_4h = get_confirmed_candles(raw_candles_4h)
 
         if not candles_1d or len(candles_1d) < 40:
             return None
         if not candles_4h or len(candles_4h) < 40:
             return None
 
-        price_now = candles_1d[-1]["close"]
+        price_now = raw_candles_1d[-1]["close"]
         score = 0
         signals = []
 
@@ -8916,16 +9002,31 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 return None
             entry = price_now
 
-        sl     = round(acc_low * 0.96, 8)  # Стоп под лоу боковика -4%
-        ar_price = phases.get("AR", {}).get("price", price_peak * 0.8)
+        atr_1d = average_true_range(candles_1d)
+        if not atr_1d:
+            return None
+        spring_low = phases.get("Spring", {}).get("price")
+        sc_low = phases.get("SC", {}).get("price")
+        structural_low = min(level for level in (spring_low, sc_low, acc_low) if level)
+        sl = smart_round(structural_low - atr_1d * 0.25)
+        ar_price = phases.get("AR", {}).get("price")
 
         # OB/FVG для промпта и результата
         _wyk_ob = find_ob(candles_1d, "BULLISH")
         _wyk_fvg = find_fvg(candles_1d, "BULLISH")
 
-        # Сначала даём Groq структурную fallback-цель. Раньше tp=None
-        # ломал расчёт RR ещё до вызова Groq и полностью обходил valid.
-        tp = round(max(ar_price, entry * 1.25), 8)
+        # AR/Creek and Fibonacci range extensions are anchored to the confirmed
+        # accumulation range.  No entry-relative percentage target is allowed.
+        acc_range = acc_high - acc_low
+        fib_1272 = acc_low + acc_range * 1.272
+        fib_1618 = acc_low + acc_range * 1.618
+        tp, tp2 = select_structural_targets(
+            entry, sl,
+            [ar_price, fib_1272, fib_1618, price_peak],
+            "BULLISH", 2.0, 4.0,
+        )
+        if tp is None:
+            return None
         logic = ""
         try:
             phase_summary = []
@@ -9002,7 +9103,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"{_self_rules}"
                 f"{_recent_errors}"
             )
-            groq_resp = ask_groq(groq_prompt, max_tokens=120)
+            groq_resp = ask_groq(groq_prompt, max_tokens=120) if legacy_strategy_groq_enabled() else None
             if groq_resp:
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
@@ -9021,11 +9122,6 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         if not logic:
             logic = f"Spring после SC+AR+ST — разворот Wyckoff"
 
-        # Structural target only; Groq is not allowed to modify it.
-        tp = max(tp, entry * 1.05)
-        tp = min(tp, entry * 1.50)
-        tp = round(tp, 8)
-
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
         if risk == 0 or not 2.0 <= reward / risk <= 4.0:
@@ -9037,12 +9133,10 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["SC", "AR", "ST", "Spring", "SOS"] if p in phases and (p not in ["Spring","SOS"] or phases[p].get("found"))]
 
-        _wyk_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
-
         return {
             "symbol": symbol, "direction": "BULLISH",
             "timeframe": "1d", "entry": entry,
-            "sl": sl, "tp": tp, "tp2": _wyk_tp2,
+            "sl": sl, "tp": tp, "tp2": tp2,
             "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
             "logic": logic, "score": min(score, 100),
             "drawdown_pct": drawdown_pct, "acc_range": acc_range_pct,
@@ -9069,15 +9163,17 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         if _skip_symbol:
             logging.info(f"[WYCKOFF] {symbol}: {_skip_reason}")
             return None
-        candles_1d = get_candles(symbol, "1d", 60)
-        candles_4h = get_candles(symbol, "4h", 120)
+        raw_candles_1d = get_candles(symbol, "1d", 61)
+        raw_candles_4h = get_candles(symbol, "4h", 121)
+        candles_1d = get_confirmed_candles(raw_candles_1d)
+        candles_4h = get_confirmed_candles(raw_candles_4h)
 
         if not candles_1d or len(candles_1d) < 40:
             return None
         if not candles_4h or len(candles_4h) < 40:
             return None
 
-        price_now = candles_1d[-1]["close"]
+        price_now = raw_candles_1d[-1]["close"]
         score = 0
         signals = []
 
@@ -9198,15 +9294,31 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 return None
             entry = price_now
 
-        sl    = round(dist_high * 1.04, 8)  # Стоп над хаем боковика +4%
-        ar_price = phases.get("AR", {}).get("price", price_bottom * 1.2)
+        atr_1d = average_true_range(candles_1d)
+        if not atr_1d:
+            return None
+        utad_high = phases.get("UTAD", {}).get("price")
+        bc_high = phases.get("BC", {}).get("price")
+        structural_high = max(level for level in (utad_high, bc_high, dist_high) if level)
+        sl = smart_round(structural_high + atr_1d * 0.25)
+        ar_price = phases.get("AR", {}).get("price")
 
         # OB/FVG для промпта и результата
         _wyk_ob = find_ob(candles_1d, "BEARISH")
         _wyk_fvg = find_fvg(candles_1d, "BEARISH")
 
-        # Предварительная структурная цель нужна и для честной оценки Groq.
-        tp = round(min(ar_price, entry * 0.75), 8)
+        # AR/Ice and Fibonacci range extensions are anchored to the confirmed
+        # distribution range.  No entry-relative percentage target is allowed.
+        dist_range = dist_high - dist_low
+        fib_1272 = dist_high - dist_range * 1.272
+        fib_1618 = dist_high - dist_range * 1.618
+        tp, tp2 = select_structural_targets(
+            entry, sl,
+            [ar_price, fib_1272, fib_1618, price_bottom],
+            "BEARISH", 2.0, 4.0,
+        )
+        if tp is None:
+            return None
         logic = ""
         try:
             phase_summary = []
@@ -9278,7 +9390,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"{_self_rules}"
                 f"{_recent_errors}"
             )
-            groq_resp = ask_groq(groq_prompt, max_tokens=120)
+            groq_resp = ask_groq(groq_prompt, max_tokens=120) if legacy_strategy_groq_enabled() else None
             if groq_resp:
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
@@ -9297,11 +9409,6 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         if not logic:
             logic = f"UTAD после BC+AR+ST — дистрибуция Wyckoff"
 
-        # Structural target only; Groq is not allowed to modify it.
-        tp = min(tp, entry * 0.95)
-        tp = max(tp, entry * 0.50)
-        tp = round(tp, 8)
-
         risk   = abs(sl - entry)
         reward = abs(entry - tp)
         if risk == 0 or not 2.0 <= reward / risk <= 4.0:
@@ -9313,12 +9420,10 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         phase_names = [p for p in ["BC", "AR", "ST", "UTAD", "SOW"] if p in phases and (p not in ["UTAD","SOW"] or phases[p].get("found"))]
 
-        _wyk_d_tp2 = smart_round(entry - abs(entry - tp) * 1.5)
-
         return {
             "symbol": symbol, "direction": "BEARISH",
             "timeframe": "1d", "entry": entry,
-            "sl": sl, "tp": tp, "tp2": _wyk_d_tp2,
+            "sl": sl, "tp": tp, "tp2": tp2,
             "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
             "logic": logic, "score": min(score, 100),
             "pump_pct": pump_pct, "dist_range": dist_range_pct,
@@ -9344,12 +9449,14 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         if _skip_symbol:
             logging.info(f"[WYCKOFF] {symbol}: {_skip_reason}")
             return None
-        candles_1d = get_candles(symbol, "1d", 60)
-        candles_4h = get_candles(symbol, "4h", 100)
+        raw_candles_1d = get_candles(symbol, "1d", 61)
+        raw_candles_4h = get_candles(symbol, "4h", 101)
+        candles_1d = get_confirmed_candles(raw_candles_1d)
+        candles_4h = get_confirmed_candles(raw_candles_4h)
         if not candles_1d or len(candles_1d) < 30: return None
         if not candles_4h or len(candles_4h) < 50: return None
 
-        price_now = candles_1d[-1]["close"]
+        price_now = raw_candles_1d[-1]["close"]
 
         # ── 1. Коррекция от пика (5% для BTC/ETH/BNB, 8% для остальных) ──
         price_peak = max(c["high"] for c in candles_1d[-40:-10])
@@ -9391,7 +9498,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         # ── 6. Ликвидность выше — EQH или swing high ──
         highs_acc = [c["high"] for c in acc_candles]
         eqh_levels = [h for h in highs_acc if abs(h - acc_high) / acc_high < 0.005]
-        liquidity_target = acc_high if len(eqh_levels) >= 2 else price_peak * 0.95
+        liquidity_target = acc_high if len(eqh_levels) >= 2 else price_peak
 
         # ── 7. BTC фильтр ──
         if symbol != "BTCUSDT":
@@ -9400,14 +9507,24 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
 
         # ── 8. Расчёт уровней ──
         entry = smart_round(price_now)
-        sl = smart_round(acc_low * 0.98)
-        tp = smart_round(liquidity_target)
+        atr_1d = average_true_range(candles_1d)
+        if not atr_1d:
+            return None
+        sl = smart_round(acc_low - atr_1d * 0.25)
+        acc_range = acc_high - acc_low
+        fib_1272 = acc_low + acc_range * 1.272
+        fib_1618 = acc_low + acc_range * 1.618
+        tp, tp2 = select_structural_targets(
+            entry, sl,
+            [liquidity_target, fib_1272, fib_1618, price_peak],
+            "BULLISH", 2.5, 4.0,
+        )
+        if tp is None:
+            return None
 
         risk = abs(entry - sl)
         reward = abs(tp - entry)
-        if risk == 0: return None
         rr = round(reward / risk, 2)
-        if rr < 2.5: return None
 
         signals = ["Higher Lows", "Vol Compression", "Liquidity Above"]
         if vol_expanding:
@@ -9451,7 +9568,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 f"{_self_rules}"
                 f"{_recent_errors}"
             )
-            _resp = ask_groq(_wyk_prompt, max_tokens=100)
+            _resp = ask_groq(_wyk_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
             if _resp:
                 import json as _j, re as _re
                 _m = _re.search(r'\{[^}]+\}', _resp, _re.DOTALL)
@@ -9471,11 +9588,9 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
             return None
         tp_pct = round((tp - entry) / entry * 100, 1)
         sl_pct = round((entry - sl) / entry * 100, 1)
-        _reac_tp2 = smart_round(entry + abs(tp - entry) * 1.5)
-
         return {
             "symbol": symbol, "direction": "BULLISH",
-            "timeframe": "1d", "entry": entry, "sl": sl, "tp": tp, "tp2": _reac_tp2,
+            "timeframe": "1d", "entry": entry, "sl": sl, "tp": tp, "tp2": tp2,
             "sl_pct": sl_pct, "tp_pct": tp_pct, "rr": rr,
             "score": 75, "signals": signals,
             "logic": f"Re-accumulation: higher lows + liquidity {smart_price_fmt(liquidity_target)}",
@@ -9498,25 +9613,17 @@ FAST_PAIRS = [
 
 def detect_fast_deal(symbol: str) -> dict | None:
     """
-    SMC скальпинг на 5m:
+    SMC FAST: 4h context, confirmed 15m setup and optional 5m control:
     1. BTC направление — синхронизация с рынком
-    2. 1d тренд — торгуем только по тренду
+    2. 4h/1h trend — торгуем только по тренду
     3. 4h OB/FVG — цена в зоне интереса
-    4. 1h импульсная свеча — подтверждение
-    5. 5m sweep + возврат — точный вход
-    Горизонт: 15-30 мин | Стоп: -0.5% | TP: +1%
+    4. 15m displacement/engulfing с объёмом — подтверждение
+    5. SL и TP — только за структурой/ликвидностью, без фиксированных %.
     """
     try:
-        from datetime import datetime as _dt
-        _now_dt = _dt.utcnow()
-        _hour = _now_dt.hour
-        _minute = _now_dt.minute
-        _time_minutes = _hour * 60 + _minute
-        # Kill Zone блокируется в bot.py; здесь те же окна оставлены для
-        # согласованности при ручном запуске detector.
-        _in_london_kz = 510 <= _time_minutes <= 690
-        _in_ny_kz     = 990 <= _time_minutes <= 1170
-        if not (_in_london_kz or _in_ny_kz):
+        # One DST-aware session clock is shared with bot.py so scheduled and
+        # manual FAST scans make the same decision in summer and winter.
+        if not _fast_session():
             return None
 
         # ── 1. BTC направление ──
@@ -9556,21 +9663,24 @@ def detect_fast_deal(symbol: str) -> dict | None:
         except Exception:
             pass
 
-        # ── 2.5. FR hard block для FAST ──
+        # ── 2.5. Extreme funding is a warning for the final quality gate ──
+        _fast_funding_warning = ""
         try:
             _fast_funding = get_funding_rate(symbol)
             if _fast_funding is not None and abs(_fast_funding) > 0.2:
                 if (direction == "BULLISH" and _fast_funding > 0.2) or (direction == "BEARISH" and _fast_funding < -0.2):
-                    return None
+                    _fast_funding_warning = f"extreme crowded funding {_fast_funding:+.4f}%"
+                    logging.info("[FAST Funding Warning] %s: %s", symbol, _fast_funding_warning)
         except Exception:
             pass
 
         # ── 3. 4h OB/FVG зона ──
-        candles_4h = get_candles(symbol, "4h", 50)
+        raw_candles_4h = get_candles(symbol, "4h", 51)
+        candles_4h = get_confirmed_candles(raw_candles_4h)
         if not candles_4h or len(candles_4h) < 20:
             return None
 
-        price_now = candles_4h[-1]["close"]
+        price_now = raw_candles_4h[-1]["close"]
         ob_4h  = find_ob(candles_4h, direction)
         fvg_4h = find_fvg(candles_4h, direction)
 
@@ -9616,7 +9726,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None
 
         # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
-        candles_15m_imp = get_candles(symbol, "15m", 20)
+        candles_15m_imp = get_confirmed_candles(get_candles(symbol, "15m", 21))
         if not candles_15m_imp or len(candles_15m_imp) < 3:
             return None
 
@@ -9628,7 +9738,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return None  # Импульс без объёма — ненадёжный
 
         # ── 5. 15m Engulfing + Displacement + Volume Spike ──
-        candles_15m = get_candles(symbol, "15m", 30)
+        candles_15m = get_confirmed_candles(get_candles(symbol, "15m", 31))
         if not candles_15m or len(candles_15m) < 10:
             return None
 
@@ -9699,13 +9809,18 @@ def detect_fast_deal(symbol: str) -> dict | None:
             logging.debug(f"[FAST] {symbol}: нет acceptance — цена не закрылась за зоной")
             return None
 
-        # ── TP = следующий EQH/FVG на 15m ──
+        # ── TP = confirmed 15m swing liquidity ──
+        _fast_highs, _fast_lows = find_swings(candles_15m, lookback=3)
         if direction == "BULLISH":
-            tp1 = smart_round(entry + atr_15m * 2.5)
-            tp2 = smart_round(entry + atr_15m * 4.0)
+            _fast_targets = sorted({level for _, level in _fast_highs if level > entry * 1.001})
         else:
-            tp1 = smart_round(entry - atr_15m * 2.5)
-            tp2 = smart_round(entry - atr_15m * 4.0)
+            _fast_targets = sorted(
+                {level for _, level in _fast_lows if level < entry * 0.999}, reverse=True
+            )
+        if not _fast_targets:
+            return None
+        tp1 = smart_round(_fast_targets[0])
+        tp2 = smart_round(_fast_targets[1]) if len(_fast_targets) > 1 else tp1
         tp = tp2  # основной TP для RR расчёта
 
         # ── RR проверка ──
@@ -9720,6 +9835,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp1 - entry) / entry * 100, 2)
         tp2_pct = round(abs(tp2 - entry) / entry * 100, 2)
+        entry_drift_pct = round(max(0.15, min(0.60, atr_15m / entry * 50)), 2)
 
         # ── Groq анализирует ──
         logic = ""
@@ -9754,7 +9870,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _self_rules = get_relevant_rules(symbol, direction, "FAST")
             _recent_errors = get_recent_errors(symbol)
             groq_prompt = (
-                "Ты Kill Zone скальпер — торгуешь ТОЛЬКО в London (07-11 UTC) и NY (15-19 UTC) сессии.\n"
+                "Ты Kill Zone скальпер — торгуешь только в подтверждённой London/NY сессии.\n"
                 'Отвечай СТРОГО JSON: {"logic": "макс 10 слов", "valid": true/false}\n\n'
                 "КАК ДУМАТЬ:\n"
                 "1. 15m engulfing + displacement — тело > 65% range, поглощение предыдущей свечи\n"
@@ -9768,7 +9884,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 "- Нет OB и нет FVG на 4h — вход без подтверждения зоны\n"
                 "- 1d тренд ПРОТИВ направления\n"
                 "- BTC тренд ПРОТИВ направления\n"
-                "- Вне Kill Zone (London 07-11, NY 15-19 UTC)\n"
+                "- Вне переданной приложением London/NY Kill Zone\n"
                 "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ если:\n"
                 "- Engulfing чёткий с объёмом 2.0x+\n"
@@ -9794,7 +9910,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"{_self_rules}"
                 f"{_recent_errors}"
             )
-            groq_resp = ask_groq(groq_prompt, max_tokens=80)
+            groq_resp = ask_groq(groq_prompt, max_tokens=80) if legacy_strategy_groq_enabled() else None
             if groq_resp:
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
@@ -9817,7 +9933,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         return {
             "symbol":    symbol,
             "direction": direction,
-            "timeframe": "5m",
+            "timeframe": "15m",
             "entry":     entry,
             "sl":        sl,
             "tp":        tp,
@@ -9826,10 +9942,12 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "sl_pct":    sl_pct,
             "tp_pct":    tp_pct,
             "tp2_pct":   tp2_pct,
+            "entry_drift_pct": entry_drift_pct,
             "rr":        rr,
             "logic":     logic,
             "zone":      zone_desc,
             "direction_1d": direction_1d,
+            "funding_warning": _fast_funding_warning,
             "ob":        ob_4h,
             "fvg":       fvg_4h,
             "fast_score": 0,
@@ -9879,9 +9997,10 @@ def get_precomputed_indicators(symbol: str, timeframe: str = "4h") -> dict:
         result["atr_med"] = sum(highs[-i] - lows[-i] for i in range(1, _n50 + 1)) / _n50
 
         # EMA20, EMA50, EMA200
-        result["ema20"] = sum(closes[-min(20, len(closes)):]) / min(20, len(closes))
-        result["ema50"] = sum(closes[-min(50, len(closes)):]) / min(50, len(closes))
-        result["ema200"] = sum(closes[-min(200, len(closes)):]) / min(200, len(closes))
+        for _period in (20, 50, 200):
+            _ema = ema_value(closes, _period)
+            if _ema is not None:
+                result[f"ema{_period}"] = _ema
 
         # Volatility factor
         result["volatility_factor"] = round(
@@ -10117,6 +10236,13 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
     MUST: зона + тренд + RR
     CONFIRMATIONS: импульс + ликвидность + объём + тайминг
     """
+    # This historical helper is not routed by any active strategy and still
+    # contains fixed-percentage/ATR target fallbacks.  Fail closed if an old
+    # integration calls it instead of a canonical strategy builder.
+    logging.warning("smc_core_check is deprecated; canonical strategy scanner required")
+    return None
+
+    # Unreachable legacy implementation retained for source compatibility.
     try:
         if not candles or len(candles) < 20:
             return None

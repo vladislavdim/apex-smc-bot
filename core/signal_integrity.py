@@ -61,8 +61,12 @@ def validate_candidate(candidate: dict[str, Any], current_price: Any = None) -> 
             errors.append("stop distance must be greater than zero")
         else:
             calculated_rr = abs(tp1 - entry) / risk
-            if calculated_rr < 1.0:
-                errors.append(f"TP1 risk/reward is below 1.0 ({calculated_rr:.2f})")
+            # Every active APEX strategy requires at least 2R.  This shared
+            # guard does not repair or recalculate a candidate; it only keeps
+            # an obsolete/partial strategy result away from Groq, Telegram and
+            # optional exchange execution.
+            if calculated_rr < 2.0:
+                errors.append(f"TP1 risk/reward is below 2.0 ({calculated_rr:.2f})")
             supplied_rr = candidate.get("rr")
             if supplied_rr not in (None, ""):
                 try:

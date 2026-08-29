@@ -38,14 +38,14 @@ class SignalIntegrityTests(unittest.TestCase):
         }
         self.assertFalse(validate_candidate(candidate)["valid"])
 
-    def test_tp1_below_one_r_is_rejected(self):
+    def test_tp1_below_two_r_is_rejected(self):
         candidate = {
             "symbol": "BTCUSDT", "direction": "BULLISH", "entry": 100,
-            "sl": 90, "tp1": 105, "tp2": 110, "tp3": 120,
+            "sl": 90, "tp1": 115, "tp2": 120, "tp3": 125,
         }
         report = validate_candidate(candidate)
         self.assertFalse(report["valid"])
-        self.assertTrue(any("below 1.0" in error for error in report["errors"]))
+        self.assertTrue(any("below 2.0" in error for error in report["errors"]))
 
     def test_already_stopped_or_reached_target_is_rejected(self):
         candidate = {
