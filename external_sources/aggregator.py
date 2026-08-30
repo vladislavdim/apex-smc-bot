@@ -10,6 +10,7 @@ from . import (btc_mempool, coinmetrics, crypto_monitor, defillama,
                live_tape, oli, smart_money, whale_tracker)
 from .models import empty_context, number
 from .pair_registry import get_pair, refresh_pair_registry
+from core.data_policy import provider_enabled
 
 
 # Maximum age at which a value may influence Groq. Adapters may retain an
@@ -359,12 +360,21 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
     context["pair_coverage"] = {provider: {"supported": bool(pair.get(f"{provider}_supported")),
         "status": pair.get(f"{provider}_status", "unverified"), "symbol": pair.get(f"{provider}_symbol")}
         for provider in ("gate", "binance", "bybit", "hyperliquid")}
+    hyperliquid_result = (
+        _bounded_collect(hyperliquid.SOURCE, hyperliquid.collect(symbol))
+        if provider_enabled("hyperliquid")
+        else asyncio.sleep(0, result={
+            "source": hyperliquid.SOURCE,
+            "status": "disabled",
+            "symbol": symbol,
+        })
+    )
     raw_results = await asyncio.gather(
         _bounded_collect(exchange_fallback.SOURCE, exchange_fallback.collect(symbol)),
         _bounded_collect(crypto_monitor.SOURCE, crypto_monitor.collect(symbol)),
         _bounded_collect(whale_tracker.SOURCE, whale_tracker.collect(symbol)),
         _bounded_collect(smart_money.SOURCE, smart_money.collect(symbol)),
-        _bounded_collect(hyperliquid.SOURCE, hyperliquid.collect(symbol)),
+        hyperliquid_result,
         _bounded_collect(live_tape.SOURCE, live_tape.collect(symbol)),
         _bounded_collect(btc_mempool.SOURCE, btc_mempool.collect(symbol)),
         _bounded_collect(oli.SOURCE, oli.collect(symbol)),
