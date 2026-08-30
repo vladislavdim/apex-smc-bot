@@ -4,6 +4,21 @@ APEX SMC Engine v3 — Умный обход барьеров + самообуч
 import requests, sqlite3, time, logging, json
 from datetime import datetime
 
+try:
+    from .market_structure import (
+        analyze_market_structure as _analyze_market_structure,
+        classify_swings as _classify_structure_swings,
+        events_with_trend_fallback as _structure_events,
+        find_swings as _find_structure_swings,
+    )
+except ImportError:  # market.py also imports this module from the core path.
+    from market_structure import (
+        analyze_market_structure as _analyze_market_structure,
+        classify_swings as _classify_structure_swings,
+        events_with_trend_fallback as _structure_events,
+        find_swings as _find_structure_swings,
+    )
+
 # ── WAL патч ──
 
 # ── WAL патч ──
@@ -326,38 +341,15 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
 # ═══════════════════════════════════════════════════════════════
 
 def find_swings(candles: list, lookback: int = 5):
-    highs, lows = [], []
-    n = len(candles)
-    for i in range(lookback, n-lookback):
-        w = candles[i-lookback:i+lookback+1]
-        if candles[i]["high"] == max(c["high"] for c in w): highs.append((i,candles[i]["high"]))
-        if candles[i]["low"]  == min(c["low"]  for c in w): lows.append((i,candles[i]["low"]))
-    return highs, lows
+    return _find_structure_swings(candles, lookback=lookback)
 
 def classify_swings(highs, lows):
-    result = []
-    for i,(idx,price) in enumerate(highs):
-        result.append({"idx":idx,"price":price,"kind":"HH" if i==0 or price>highs[i-1][1] else "LH"})
-    for i,(idx,price) in enumerate(lows):
-        result.append({"idx":idx,"price":price,"kind":"HL" if i==0 or price>lows[i-1][1] else "LL"})
-    return sorted(result, key=lambda x: x["idx"])
+    return _classify_structure_swings(highs, lows)
 
 def detect_events(candles: list, classified: list) -> list:
-    if not classified or not candles: return []
-    highs = [s for s in classified if s["kind"] in ("HH","LH")]
-    lows  = [s for s in classified if s["kind"] in ("HL","LL")]
-    last  = candles[-1]["close"]
-    events = []
-    if highs and last > highs[-1]["price"]:
-        events.append({"type":"CHoCH" if highs[-1]["kind"]=="LH" else "BOS","direction":"BULLISH","level":highs[-1]["price"]})
-    if lows and last < lows[-1]["price"]:
-        events.append({"type":"CHoCH" if lows[-1]["kind"]=="HL" else "BOS","direction":"BEARISH","level":lows[-1]["price"]})
-    if not events:
-        hh = sum(1 for s in classified if s["kind"]=="HH")
-        ll = sum(1 for s in classified if s["kind"]=="LL")
-        if hh > ll:   events.append({"type":"TREND","direction":"BULLISH","level":0})
-        elif ll > hh: events.append({"type":"TREND","direction":"BEARISH","level":0})
-    return events
+    if not classified or not candles:
+        return []
+    return _structure_events(candles, classified, max_break_age=1)
 
 def find_ob(candles: list, direction: str):
     for i in range(len(candles)-2, max(0,len(candles)-30), -1):
@@ -388,12 +380,11 @@ def smc_tf(symbol: str, interval: str) -> dict:
     if len(candles) < 20:
         return {"direction":None,"source":res["source"],"quality":res["quality"],
                 "error":res.get("error",""),"candles":[]}
-    highs, lows = find_swings(candles)
-    classified = classify_swings(highs, lows)
-    events = detect_events(candles, classified)
-    direction = events[0]["direction"] if events else None
+    structure = _analyze_market_structure(candles, swing_lookback=5, max_break_age=1)
+    direction = structure["direction"]
     return {"direction":direction,"source":res["source"],"quality":res["quality"],
-            "is_synthetic":res["is_synthetic"],"candles":candles,"candles_count":len(candles)}
+            "is_synthetic":res["is_synthetic"],"candles":candles,"candles_count":len(candles),
+            "structure_event":structure["event"]}
 
 def multi_tf_analysis(symbol: str, timeframes: list = None) -> dict | None:
     if timeframes is None: timeframes = ["15m","1h","4h"]
@@ -852,14 +843,15 @@ def full_smc_analysis(symbol: str, interval: str = "1h") -> dict:
     Используется в full_scan для обогащения сигнала.
     """
     result = get_candles_smart(symbol, interval, 200)
-    candles = result["candles"]
+    raw_candles = result["candles"]
+    candles = raw_candles[:-1] if len(raw_candles) > 1 else []
     if len(candles) < 20:
         return {"error": "no data", "source": result["source"]}
 
-    highs, lows = find_swings(candles)
-    classified = classify_swings(highs, lows)
-    events = detect_events(candles, classified)
-    direction = events[0]["direction"] if events else None
+    structure = _analyze_market_structure(candles, swing_lookback=5, max_break_age=1)
+    highs, lows = structure["highs"], structure["lows"]
+    events = [structure["event"]] if structure["event"] else []
+    direction = structure["direction"]
 
     ob  = find_ob(candles, direction) if direction else None
     fvg = find_fvg(candles, direction) if direction else None
