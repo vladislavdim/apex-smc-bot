@@ -14,6 +14,7 @@ from core.trade_execution import (
     execution_status,
     reconcile_live_executions,
 )
+from core import trade_execution
 
 
 CANDIDATE = {
@@ -188,6 +189,16 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertEqual(config.mode, "paper")
         self.assertFalse(config.live_armed)
+
+    def test_reconciliation_single_flight_skips_overlapping_call(self):
+        self.assertTrue(trade_execution._reconcile_process_lock.acquire(blocking=False))
+        try:
+            result = reconcile_live_executions(
+                db_path=self.db_path, config=live_config(), client=FakeClient(),
+            )
+        finally:
+            trade_execution._reconcile_process_lock.release()
+        self.assertEqual(result, [])
 
     def test_environment_caps_leverage_and_risk(self):
         config = ExecutionConfig.from_env({

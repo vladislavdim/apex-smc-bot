@@ -40,6 +40,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _ACCOUNT_STATUS_TTL_SECONDS = 30.0
 _account_status_lock = threading.Lock()
 _account_status_cache: tuple[float, dict[str, Any]] | None = None
+_reconcile_process_lock = threading.Lock()
 
 
 def _env_bool(value: Any, default: bool = False) -> bool:
@@ -923,6 +924,27 @@ def _cleanup_protective_orders(
 
 
 def reconcile_live_executions(
+    *, db_path: str = DB_PATH, config: ExecutionConfig | None = None,
+    client: BinanceFuturesClient | None = None,
+) -> list[dict[str, Any]]:
+    """Run at most one exchange reconciliation per process.
+
+    Entry submission performs an immediate reconciliation while the scheduler
+    also polls. A non-blocking process lock prevents both paths from creating
+    duplicate protective orders. A skipped call is retried on the next tick.
+    """
+    if not _reconcile_process_lock.acquire(blocking=False):
+        logging.debug("[AutoTrading] reconciliation already in progress; tick skipped")
+        return []
+    try:
+        return _reconcile_live_executions_unlocked(
+            db_path=db_path, config=config, client=client,
+        )
+    finally:
+        _reconcile_process_lock.release()
+
+
+def _reconcile_live_executions_unlocked(
     *, db_path: str = DB_PATH, config: ExecutionConfig | None = None,
     client: BinanceFuturesClient | None = None,
 ) -> list[dict[str, Any]]:
