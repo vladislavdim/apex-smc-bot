@@ -38,6 +38,17 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
     for name in ("gate_status", "binance_status", "bybit_status", "hyperliquid_status"):
         if name not in columns:
             conn.execute(f"ALTER TABLE external_pair_registry ADD COLUMN {name} TEXT DEFAULT 'unverified'")
+    probe_columns = {
+        "gate_candles_status": "TEXT DEFAULT 'unverified'",
+        "gate_candles_count": "INTEGER DEFAULT 0",
+        "gate_last_candle_at": "INTEGER",
+        "gate_probe_error": "TEXT",
+        "gate_probed_at": "INTEGER",
+    }
+    for name, declaration in probe_columns.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE external_pair_registry ADD COLUMN {name} {declaration}")
+    conn.commit()
     return conn
 
 
@@ -68,8 +79,9 @@ def get_pair(symbol: str) -> dict[str, Any]:
     except Exception:
         pass
     base = _base(symbol)
+    gate_base = f"1000{base}" if symbol in _SCALED else base
     return {
-        "apex_symbol": symbol, "gate_symbol": f"{base}_USDT",
+        "apex_symbol": symbol, "gate_symbol": f"{gate_base}_USDT",
         "binance_symbol": _SCALED.get(symbol, symbol), "bybit_symbol": _SCALED.get(symbol, symbol),
         "hyperliquid_symbol": base, "gate_supported": 0, "binance_supported": 0,
         "bybit_supported": 0, "hyperliquid_supported": 0,
@@ -77,6 +89,55 @@ def get_pair(symbol: str) -> dict[str, Any]:
         "bybit_status": "unverified", "hyperliquid_status": "unverified",
         "chain": "unknown", "contract_address": None,
     }
+
+
+def record_gate_candle_probe(
+    symbol: str,
+    *,
+    success: bool,
+    count: int = 0,
+    last_candle_at: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Persist actual candle availability separately from instrument-list support."""
+    normalized = symbol.upper().replace("/", "")
+    pair = get_pair(normalized)
+    now = int(time.time())
+    probe = {
+        "gate_candles_status": "available" if success else "failed",
+        "gate_candles_count": max(0, int(count)),
+        "gate_last_candle_at": last_candle_at,
+        "gate_probe_error": None if success else str(error or "unknown")[:500],
+        "gate_probed_at": now,
+    }
+    try:
+        conn = _connect()
+        conn.execute(
+            """INSERT INTO external_pair_registry
+               (apex_symbol,gate_symbol,binance_symbol,bybit_symbol,hyperliquid_symbol,
+                checked_at,gate_candles_status,gate_candles_count,gate_last_candle_at,
+                gate_probe_error,gate_probed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(apex_symbol) DO UPDATE SET
+                gate_candles_status=excluded.gate_candles_status,
+                gate_candles_count=excluded.gate_candles_count,
+                gate_last_candle_at=excluded.gate_last_candle_at,
+                gate_probe_error=excluded.gate_probe_error,
+                gate_probed_at=excluded.gate_probed_at""",
+            (
+                normalized, pair.get("gate_symbol"), pair.get("binance_symbol"),
+                pair.get("bybit_symbol"), pair.get("hyperliquid_symbol"),
+                int(pair.get("checked_at") or now), probe["gate_candles_status"],
+                probe["gate_candles_count"], last_candle_at, probe["gate_probe_error"], now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        if normalized in _snapshot:
+            _snapshot[normalized].update(probe)
+    except Exception:
+        # Coverage telemetry must never take down the scanner.
+        return
 
 
 async def refresh_pair_registry(symbols: list[str], force: bool = False) -> dict[str, dict[str, Any]]:
@@ -193,4 +254,9 @@ def coverage_summary(symbols: list[str]) -> dict[str, Any]:
     result: dict[str, Any] = {"total": len(rows)}
     result.update({provider: sum(bool(row.get(f"{provider}_supported")) for row in rows) for provider in ("gate", "binance", "bybit", "hyperliquid")})
     result["unavailable"] = {provider: sum(row.get(f"{provider}_status") == "unavailable" for row in rows) for provider in ("gate", "binance", "bybit", "hyperliquid")}
+    result["gate_candles"] = {
+        "available": sum(row.get("gate_candles_status") == "available" for row in rows),
+        "failed": sum(row.get("gate_candles_status") == "failed" for row in rows),
+        "unverified": sum(row.get("gate_candles_status") in (None, "unverified") for row in rows),
+    }
     return result

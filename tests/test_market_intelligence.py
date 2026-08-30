@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from core import smc_engine
 from core.historical_zones import build_zone_context, refresh_zones
 from core.outcome_learning import (
     build_learning_context,
@@ -66,6 +67,33 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(fallback["BTCUSDT"]["gate_supported"])
         self.assertTrue(fallback["BTCUSDT"]["binance_supported"])
         self.assertEqual(fallback["BTCUSDT"]["gate_status"], "unavailable")
+
+    async def test_gate_candles_use_registry_symbol_and_record_real_coverage(self):
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return [{"t": 123, "o": "1", "h": "2", "l": "0.5", "c": "1.5", "v": "10"}]
+
+        pair_registry._snapshot["PEPEUSDT"] = {
+            **pair_registry.get_pair("PEPEUSDT"),
+            "gate_symbol": "1000PEPE_USDT",
+        }
+        with patch.object(pair_registry, "_DB_PATH", self.db_path), \
+             patch("core.smc_engine.requests.get", return_value=Response()) as request:
+            candles = smc_engine._fetch_gate("PEPEUSDT", "1h", 10)
+            row = pair_registry.get_pair("PEPEUSDT")
+        self.assertEqual(request.call_args.kwargs["params"]["contract"], "1000PEPE_USDT")
+        self.assertEqual(candles[0]["timestamp"], 123)
+        self.assertEqual(row["gate_candles_status"], "available")
+        self.assertEqual(row["gate_candles_count"], 1)
+
+    async def test_unmapped_asset_is_never_silently_replaced_with_bitcoin(self):
+        with patch("core.smc_engine.requests.get") as request:
+            with self.assertRaisesRegex(ValueError, "No CG ID"):
+                smc_engine._fetch_synthetic("NOTAREALPAIRUSDT", "1h", 10)
+        request.assert_not_called()
 
     async def test_live_tape_combines_three_exchanges_and_liquidation_sides(self):
         pair = {
