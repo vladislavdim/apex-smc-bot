@@ -13,6 +13,7 @@ Groq учится какие источники работают, строит w
 import os, sqlite3, time, logging, requests, json, threading
 from datetime import datetime, timedelta
 from typing import Optional
+from core.data_policy import configured_market_data_providers
 from core.groq_models import configured_groq_models, is_model_unavailable_error
 
 # ── WAL патч ──
@@ -265,15 +266,16 @@ def _record_source(symbol: str, interval: str, source: str,
         logging.debug(f"[Router] _record_source: {e}")
 
 def _get_best_sources(symbol: str, interval: str) -> list:
-    """Возвращает список источников отсортированных по надёжности для этой пары/TF.
-    Ротация как у Groq ключей: упал первый -> второй -> третий.
-    Gate.io, KuCoin, Bybit идут первыми — не блокируются с Render."""
-    defaults = [
-        "gateio", "kucoin", "bybit",
-        "mexc", "kraken", "cryptocompare",
-        "binance_futures", "binance_spot",
-        "twelvedata", "coingecko", "synthetic"
-    ]
+    """Rank only providers explicitly allowed by the market-data policy."""
+    provider_sources = {
+        "gate": ["gateio"],
+        "binance": ["binance_futures"],
+        "bybit": ["bybit"],
+        "hyperliquid": [],
+    }
+    defaults = []
+    for provider in configured_market_data_providers():
+        defaults.extend(provider_sources.get(provider, []))
     try:
         with sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False) as conn:
             rows = conn.execute(
@@ -285,6 +287,8 @@ def _get_best_sources(symbol: str, interval: str) -> list:
             return defaults
         scored = {}
         for src, sc, fc, lat in rows:
+            if src not in defaults:
+                continue
             total = sc + fc
             wr = sc / total if total > 0 else 0.5
             speed = 1.0 - min(lat / 10.0, 1.0) if lat > 0 else 0.5
@@ -407,35 +411,45 @@ def _fetch_mexc(symbol: str, interval: str, limit: int) -> list:
              "volume": float(c[5])} for c in data]
 
 def _fetch_gateio(symbol: str, interval: str, limit: int) -> list:
-    """Gate.io — работает без геоблока с Render"""
+    """Gate USD-M perpetual candles used by the trading strategies."""
     gate_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m",
                 "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"7d"}
     gate_int = gate_map.get(interval, "1h")
-    # Gate.io использует формат BTC_USDT
-    base = symbol.replace("USDT","").replace("BUSD","").replace("PERP","")
-    gate_symbol = f"{base}_USDT"
-    r = requests.get("https://api.gateio.ws/api/v4/spot/candlesticks",
-        params={"currency_pair": gate_symbol, "interval": gate_int, "limit": limit},
+    apex_symbol = symbol.upper().replace("/", "")
+    try:
+        from external_sources.pair_registry import get_pair, record_gate_candle_probe
+        gate_symbol = str(get_pair(apex_symbol).get("gate_symbol") or apex_symbol.replace("USDT", "_USDT"))
+    except Exception:
+        gate_symbol = apex_symbol.replace("USDT", "_USDT")
+        record_gate_candle_probe = None
+    r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+        params={"contract": gate_symbol, "interval": gate_int, "limit": limit},
         headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
         timeout=12)
+    r.raise_for_status()
     data = r.json()
     if not isinstance(data, list) or len(data) < 5:
         raise ValueError(f"Gate empty {symbol}")
-    # Gate.io формат: [timestamp, volume, close, high, low, open, ...]
     candles = []
     for c in data:
         try:
             candles.append({
-                "open": float(c[5]),
-                "high": float(c[3]),
-                "low": float(c[4]),
-                "close": float(c[2]),
-                "volume": float(c[1])
+                "timestamp": int(float(c.get("t", 0) or 0)),
+                "open": float(c.get("o", 0)),
+                "high": float(c.get("h", 0)),
+                "low": float(c.get("l", 0)),
+                "close": float(c.get("c", 0)),
+                "volume": float(c.get("v", 0)),
             })
-        except (IndexError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             continue
     if len(candles) < 5:
         raise ValueError(f"Gate parse error {symbol}")
+    if record_gate_candle_probe:
+        record_gate_candle_probe(
+            apex_symbol, success=True, count=len(candles),
+            last_candle_at=max((c["timestamp"] for c in candles), default=0),
+        )
     return candles[-limit:]
 
 def _fetch_kucoin(symbol: str, interval: str, limit: int) -> list:
@@ -622,17 +636,6 @@ def _smart_fetch(symbol: str, interval: str, limit: int) -> list:
             errors.append(f"{src}: {err_msg[:60]}")
             logging.debug(f"[Router] {src} failed {symbol} {interval}: {err_msg[:80]}")
 
-    # Последний резерв — синтетические свечи
-    try:
-        candles = _build_synthetic_tf(symbol, interval, limit)
-        if candles and len(candles) >= 10:
-            _record_source(symbol, interval, "synthetic", True)
-            _candle_cache[ck] = (candles, time.time())
-            logging.info(f"[Router] {symbol} {interval} ← synthetic ({len(candles)}св)")
-            return candles
-    except Exception as e:
-        errors.append(f"synthetic: {e}")
-
     # Все источники упали — Groq анализирует и записывает workaround
     if errors:
         _groq_analyze_candle_failure(symbol, interval, errors)
@@ -684,51 +687,44 @@ _funding_cache: dict = {}
 _lunarcrush_cache: dict = {}
 
 def get_open_interest(symbol: str) -> dict:
-    """OI с Coinalyze или Binance"""
+    """OI from Gate USD-M contract statistics."""
     if symbol in _oi_cache:
         if time.time() - _oi_cache[symbol][1] < 300:
             return _oi_cache[symbol][0]
     result = {"oi": 0, "oi_change_4h": 0, "signal": "NEUTRAL"}
-    # Coinalyze
-    if COINALYZE_KEY:
-        try:
-            r = requests.get("https://api.coinalyze.net/v1/open-interest",
-                params={"symbols": symbol, "api_key": COINALYZE_KEY},
-                timeout=8)
-            data = r.json()
-            if isinstance(data, list) and data:
-                oi = data[0].get("openInterestUsd", 0)
-                oi_prev = data[0].get("openInterestUsdPrev4h", oi)
-                change = ((oi - oi_prev) / oi_prev * 100) if oi_prev else 0
-                sig = "RISING" if change > 5 else "FALLING" if change < -5 else "NEUTRAL"
-                result = {"oi": oi, "oi_change_4h": change, "signal": sig}
-                _oi_cache[symbol] = (result, time.time())
-                return result
-        except Exception as e:
-            logging.debug(f"[Router] OI Coinalyze {symbol}: {e}")
-    # Binance Futures fallback
     try:
-        r = requests.get(f"{BINANCE_F}/fapi/v1/openInterest",
-            params={"symbol": symbol}, timeout=8)
-        oi = float(r.json().get("openInterest", 0))
-        result = {"oi": oi, "oi_change_4h": 0, "signal": "NEUTRAL"}
+        from external_sources.pair_registry import get_pair
+        contract = str(get_pair(symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
+        r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/contract_stats",
+            params={"contract": contract, "interval": "4h", "limit": 2}, timeout=8)
+        r.raise_for_status()
+        rows = r.json()
+        current = float(rows[-1].get("open_interest") or 0) if rows else 0
+        previous = float(rows[0].get("open_interest") or 0) if rows else 0
+        change = ((current - previous) / previous * 100) if previous else 0
+        signal = "RISING" if change > 5 else "FALLING" if change < -5 else "NEUTRAL"
+        result = {"oi": current, "oi_change_4h": change, "signal": signal}
         _oi_cache[symbol] = (result, time.time())
     except Exception as e:
-        logging.debug(f"[Router] OI Binance {symbol}: {e}")
+        logging.debug(f"[Router] OI Gate {symbol}: {e}")
     return result
 
 def get_funding_rate(symbol: str) -> dict:
-    """Funding rate с Binance Futures"""
+    """Funding rate from Gate USD-M."""
     if symbol in _funding_cache:
         if time.time() - _funding_cache[symbol][1] < 600:
             return _funding_cache[symbol][0]
     result = {"rate": 0, "signal": "NEUTRAL", "warning": ""}
     try:
-        r = requests.get(f"{BINANCE_F}/fapi/v1/fundingRate",
-            params={"symbol": symbol, "limit": 1}, timeout=8)
+        from external_sources.pair_registry import get_pair
+        contract = str(get_pair(symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
+        r = requests.get(
+            f"https://fx-api.gateio.ws/api/v4/futures/usdt/contracts/{contract}", timeout=8,
+        )
+        r.raise_for_status()
         data = r.json()
-        if isinstance(data, list) and data:
-            rate = float(data[0].get("fundingRate", 0)) * 100
+        if isinstance(data, dict):
+            rate = float(data.get("funding_rate", 0)) * 100
             if rate > 0.1:
                 sig, warn = "HIGH_LONG", "⚠️ Высокий фандинг — лонги перегреты"
             elif rate < -0.1:
@@ -738,7 +734,7 @@ def get_funding_rate(symbol: str) -> dict:
             result = {"rate": rate, "signal": sig, "warning": warn}
             _funding_cache[symbol] = (result, time.time())
     except Exception as e:
-        logging.debug(f"[Router] Funding {symbol}: {e}")
+        logging.debug(f"[Router] Funding Gate {symbol}: {e}")
     return result
 
 def get_lunarcrush_score(symbol: str) -> dict:

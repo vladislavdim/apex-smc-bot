@@ -166,74 +166,6 @@ except NameError: _groq_tokens_used = 0
 
 # ===== DATABASE HELPERS =====
 
-def get_binance_klines(symbol, interval, limit=200):
-    """Надежное получение свечей с Binance с retry логикой"""
-    import requests
-    import time
-    
-    binance_intervals = {
-        "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
-        "1h": "1h", "4h": "4h", "1d": "1d"
-    }
-    binance_interval = binance_intervals.get(interval, "1h")
-    
-    for retry in range(3):
-        try:
-            r = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={
-                    "symbol": symbol,
-                    "interval": binance_interval,
-                    "limit": limit
-                },
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10
-            )
-            data = r.json()
-            if not isinstance(data, list):
-                logging.warning(f"Binance invalid response type for {symbol}: {type(data)}")
-                if retry < 2:
-                    time.sleep(2)
-                    continue
-                return []
-            if len(data) == 0:
-                logging.warning(f"Binance empty candles for {symbol} (retry {retry+1})")
-                if retry < 2:
-                    time.sleep(2)
-                    continue
-                return []
-            
-            # Проверка на валидность данных свечей
-            candles = []
-            for c in data:
-                try:
-                    if len(c) >= 5:
-                        candles.append({
-                            "open": float(c[0]),
-                            "high": float(c[1]),
-                            "low": float(c[2]),
-                            "close": float(c[3]),
-                            "volume": float(c[4])
-                        })
-                except (ValueError, TypeError, IndexError) as candle_error:
-                    logging.warning(f"Invalid candle data: {candle_error}")
-                    continue
-            
-            if candles:
-                return candles
-            else:
-                logging.warning(f"Binance no valid candles for {symbol}")
-                return []
-        except Exception as e:
-            logging.warning(f"Binance klines error (retry {retry+1}): {e}")
-            if retry < 2:
-                time.sleep(2)
-                continue
-            return []
-    
-    logging.error(f"Binance klines failed after 3 retries for {symbol}")
-    return []
-
 # ===== KEYBOARDS =====
 
 def main_menu():
@@ -259,7 +191,7 @@ def tf_keyboard():
     ])
 
 def pairs_keyboard(action="scan", page=0):
-    """Клавиатура общего Gate/Binance universe с пагинацией."""
+    """Клавиатура Gate USD-M universe с пагинацией."""
     all_pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     page_size = 20  # монет на странице
     total_pages = (len(all_pairs) + page_size - 1) // page_size
@@ -2781,8 +2713,12 @@ async def auto_research():
     topics = ["bitcoin analysis today", "crypto market today", "altcoins 2025"]
     for topic in topics:
         try:
-            result = tavily_search(topic, max_results=3)
-            summary = ask_groq(f"Вывод для трейдера (2 предложения):\n{result[:600]}", max_tokens=150)
+            result = await asyncio.to_thread(tavily_search, topic, max_results=3)
+            summary = await asyncio.to_thread(
+                ask_groq,
+                f"Вывод для трейдера (2 предложения):\n{result[:600]}",
+                max_tokens=150,
+            )
             if summary:
                 save_knowledge(topic, summary, "auto")
                 save_news(topic, summary)
@@ -2793,7 +2729,7 @@ async def auto_research():
 async def deep_market_scan(limit=200):
     """
     Глубокий скан всего рынка по запросу пользователя.
-    Проверяет 200 монет со всех бирж, ищет сигналы + накопления.
+    Проверяет Gate USD-M universe, ищет сигналы + накопления.
     Возвращает отсортированный список сигналов.
     """
     all_pairs = get_all_market_pairs()
@@ -2855,7 +2791,7 @@ def format_deep_scan_result(signals, accumulations, total_scanned):
             f"Попробуй позже или смени таймфрейм"
         )
 
-    parts = [f"🔍 <b>Глубокий скан</b> | {total_scanned} монет со всех бирж\n{'━'*24}\n"]
+    parts = [f"🔍 <b>Глубокий скан</b> | {total_scanned} Gate USD-M монет\n{'━'*24}\n"]
 
     # Сигналы SMC
     if signals:
@@ -3219,7 +3155,7 @@ def _is_entry_still_valid(sig_data: dict, max_drift_pct: float = 2.0) -> bool:
 async def auto_scan_job():
     """Каждые 10 мин: проверка закрытых сделок"""
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
-    closed = check_pending_signals()
+    closed = await asyncio.to_thread(check_pending_signals)
     for c in closed:
         if c["result"] == "tp1_hit":
             # TP1 достигнут — уведомляем о переходе в trailing mode
@@ -3254,6 +3190,16 @@ async def auto_scan_job():
 
 
 _auto_trade_reconcile_task = None
+_market_scan_lock = asyncio.Lock()
+
+
+async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
+    """Prevent different full-market scanners from saturating one event loop."""
+    if _market_scan_lock.locked():
+        logging.warning("[%s] previous market scan still running; cycle skipped", name)
+        return
+    async with _market_scan_lock:
+        await asyncio.wait_for(coroutine_factory(), timeout=timeout)
 
 
 async def _run_auto_trade_reconcile_once():
@@ -3315,7 +3261,7 @@ def pick_best_signal(signals: list) -> dict | None:
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
     try:
-        await asyncio.wait_for(_auto_scan_1h_impl(), timeout=210)
+        await _run_market_scan_exclusive("auto_scan_1h", _auto_scan_1h_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_scan_1h] таймаут 210с — пропускаем цикл")
     except Exception as e:
@@ -3323,23 +3269,23 @@ async def auto_scan_1h():
 
 async def _auto_scan_1h_impl():
     logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
-    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
+    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
     all_signals = []
 
     for symbol in pairs:
         try:
             # Определяем режим рынка
-            regime = detect_market_regime_v2(symbol)
+            regime = await asyncio.to_thread(detect_market_regime_v2, symbol)
             enabled = regime.get("enabled", ["MTF"])
 
             # Session liquidity check
-            _liq = check_session_liquidity(symbol, "1h")
+            _liq = await asyncio.to_thread(check_session_liquidity, symbol, "1h")
             if not _liq["ok"]:
                 continue
 
             # MTF — если включён для этого режима
             if "MTF" in enabled:
-                sig = full_scan_raw(symbol, "1h", auto=True)
+                sig = await asyncio.to_thread(full_scan_raw, symbol, "1h", True)
                 if sig and sig.get("confluence_score", 0) >= 35:
                     sig["grade"] = "MTF"
                     all_signals.append(sig)
@@ -3354,7 +3300,10 @@ async def _auto_scan_1h_impl():
     logging.info(f"[auto_scan_1h] Скан: {len(all_signals)} сигналов из {len(pairs)} пар")
 
     # Фильтрация и сортировка
-    valid = [s for s in all_signals if _is_entry_still_valid(s, max_drift_pct=2.0)]
+    valid = []
+    for signal in all_signals:
+        if await asyncio.to_thread(_is_entry_still_valid, signal, max_drift_pct=2.0):
+            valid.append(signal)
 
     # Rank for delivery, but do not impose a per-scan or weekly trade quota.
     sent = 0
@@ -3373,7 +3322,7 @@ async def _auto_scan_1h_impl():
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
     try:
-        await asyncio.wait_for(_auto_scan_swing_impl(), timeout=210)
+        await _run_market_scan_exclusive("auto_scan_swing", _auto_scan_swing_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_scan_swing] таймаут 210с — пропускаем цикл")
     except Exception as e:
@@ -3381,16 +3330,16 @@ async def auto_scan_swing():
 
 async def _auto_scan_swing_impl():
     logging.info("[auto_scan_swing] ЗАПУЩЕН")
-    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
+    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
     found = []
     blocked = 0
     for symbol in pairs:
         try:
-            _liq_sw = check_session_liquidity(symbol, "4h")
+            _liq_sw = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
             if not _liq_sw["ok"]:
                 blocked += 1
                 continue
-            r = detect_swing_setup(symbol, "4h")
+            r = await asyncio.to_thread(detect_swing_setup, symbol, "4h")
             if r:
                 found.append(r)
                 logging.info(f"[auto_scan_swing] {symbol} НАЙДЕН: {r.get('direction')} RR={r.get('rr')}")
@@ -3458,7 +3407,7 @@ async def _auto_scan_swing_impl():
             }
 
             # Проверка актуальности цены входа
-            if not _is_entry_still_valid(sd, max_drift_pct=3.0):
+            if not await asyncio.to_thread(_is_entry_still_valid, sd, max_drift_pct=3.0):
                 continue
 
             # Блокируем если сделка уже открыта в БД
@@ -3486,7 +3435,7 @@ async def _auto_scan_swing_impl():
 async def auto_zone_scan():
     """Каждые 20 мин: сканирует зоны Discount/Premium с OB/FVG"""
     try:
-        await asyncio.wait_for(_auto_zone_scan_impl(), timeout=210)
+        await _run_market_scan_exclusive("auto_zone_scan", _auto_zone_scan_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_zone_scan] таймаут 210с — пропускаем цикл")
     except Exception as e:
@@ -3494,14 +3443,14 @@ async def auto_zone_scan():
 
 async def _auto_zone_scan_impl():
     logging.info("[auto_zone_scan] ЗАПУЩЕН")
-    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
+    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
     found = []
     for symbol in pairs:
         try:
-            _liq_z = check_session_liquidity(symbol, "4h")
+            _liq_z = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
             if not _liq_z["ok"]:
                 continue
-            r = detect_zone_setup(symbol, "4h")
+            r = await asyncio.to_thread(detect_zone_setup, symbol, "4h")
             if r:
                 found.append(r)
                 logging.info(f"[auto_zone_scan] {symbol} НАЙДЕН: {r['direction']} RR={r['rr']} zone={r['zone']}")
@@ -3556,7 +3505,7 @@ async def _auto_zone_scan_impl():
                 ) if r.get(key) is not None},
             }
 
-            if not _is_entry_still_valid(sd, max_drift_pct=2.0):
+            if not await asyncio.to_thread(_is_entry_still_valid, sd, max_drift_pct=2.0):
                 continue
 
             try:
@@ -3687,7 +3636,7 @@ async def auto_scan_mega():
 async def auto_wyckoff_scan():
     """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
     try:
-        await asyncio.wait_for(_auto_wyckoff_scan_impl(), timeout=300)
+        await _run_market_scan_exclusive("auto_wyckoff_scan", _auto_wyckoff_scan_impl, 300)
     except asyncio.TimeoutError:
         logging.warning("[auto_wyckoff_scan] таймаут 300с — пропускаем цикл")
     except Exception as e:
@@ -3695,25 +3644,25 @@ async def auto_wyckoff_scan():
 
 async def _auto_wyckoff_scan_impl():
     logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
-    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
+    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
     found = []
     for symbol in pairs:
         try:
             # Session liquidity check
-            _liq_w = check_session_liquidity(symbol, "1d")
+            _liq_w = await asyncio.to_thread(check_session_liquidity, symbol, "1d")
             if not _liq_w["ok"]:
                 logging.debug(f"[WYCKOFF] {symbol}: низкая ликвидность ({_liq_w['ratio']}x) — пропускаем")
                 continue
             # LONG — Accumulation Spring
-            r = detect_wyckoff_spring(symbol)
+            r = await asyncio.to_thread(detect_wyckoff_spring, symbol)
             if r:
                 found.append(r)
             # SHORT — Distribution UTAD
-            r2 = detect_wyckoff_distribution(symbol)
+            r2 = await asyncio.to_thread(detect_wyckoff_distribution, symbol)
             if r2:
                 found.append(r2)
             # Re-accumulation (чаще чем классический Wyckoff)
-            r_reac = detect_wyckoff_reaccumulation(symbol)
+            r_reac = await asyncio.to_thread(detect_wyckoff_reaccumulation, symbol)
             if r_reac:
                 found.append({**r_reac, "scan_type": "wyckoff"})
             await asyncio.sleep(0.5)
@@ -3771,7 +3720,7 @@ async def _auto_wyckoff_scan_impl():
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа
-            if not _is_entry_still_valid(r, max_drift_pct=5.0):
+            if not await asyncio.to_thread(_is_entry_still_valid, r, max_drift_pct=5.0):
                 continue
 
             # Блокируем если сделка уже открыта
@@ -3825,7 +3774,11 @@ async def auto_fast_deal_scan():
         logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
         return
     try:
-        await asyncio.wait_for(_auto_fast_deal_scan_impl(_hour, _minute, _session), timeout=90)
+        await _run_market_scan_exclusive(
+            "auto_fast_deal_scan",
+            lambda: _auto_fast_deal_scan_impl(_hour, _minute, _session),
+            90,
+        )
     except asyncio.TimeoutError:
         logging.warning("[auto_fast_deal_scan] таймаут 90с — пропускаем цикл")
     except Exception as e:
@@ -3835,9 +3788,9 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН ({_session}, {_hour:02d}:{_minute:02d} UTC)")
 
     # Загружаем BTC свечи один раз для всех пар
-    _shared_btc_4h = get_candles("BTCUSDT", "4h", 30)
-    _shared_btc_1h = get_candles("BTCUSDT", "1h", 10)
-    _shared_btc_5m = get_candles("BTCUSDT", "5m", 10)
+    _shared_btc_4h = await asyncio.to_thread(get_candles, "BTCUSDT", "4h", 30)
+    _shared_btc_1h = await asyncio.to_thread(get_candles, "BTCUSDT", "1h", 10)
+    _shared_btc_5m = await asyncio.to_thread(get_candles, "BTCUSDT", "5m", 10)
 
     # Сохраняем в global storage для переиспользования другими функциями
     if _shared_btc_4h:
@@ -3848,11 +3801,11 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     found = []
     for symbol in FAST_PAIRS:
         try:
-            _liq_fast = check_session_liquidity(symbol)
+            _liq_fast = await asyncio.to_thread(check_session_liquidity, symbol)
             if not _liq_fast["ok"]:
                 logging.debug(f"[FAST] {symbol}: низкая ликвидность ({_liq_fast['ratio']}x) — пропускаем")
                 continue
-            r = detect_fast_deal(symbol)
+            r = await asyncio.to_thread(detect_fast_deal, symbol)
             if r:
                 found.append(r)
             await asyncio.sleep(0)  # отдаём управление event loop
@@ -3894,7 +3847,11 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
             text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
 
             # Проверка актуальности цены входа (1.5% для скальпинга)
-            if not _is_entry_still_valid(r, max_drift_pct=r.get("entry_drift_pct", 0.5)):
+            if not await asyncio.to_thread(
+                _is_entry_still_valid,
+                r,
+                max_drift_pct=r.get("entry_drift_pct", 0.5),
+            ):
                 continue
 
             # Блокируем если сделка уже открыта
@@ -3949,7 +3906,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
             logging.error(f"[FastDeal] {r.get('symbol')}: {e}")
 
 async def auto_accumulation_scan():
-    """Каждый час: сканируем общий Gate/Binance universe на накопление."""
+    """Каждый час: сканируем Gate USD-M universe на накопление."""
     try:
         await asyncio.wait_for(_auto_accumulation_scan_impl(), timeout=210)
     except asyncio.TimeoutError:
@@ -5112,8 +5069,20 @@ async def keepalive_heartbeat():
 
 async def market_intelligence_job():
     if not _MARKET_INTELLIGENCE_OK:return
-    try:await _refresh_market_intelligence(get_top_pairs(DEFAULT_UNIVERSE_SIZE),get_candles)
+    try:
+        pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+        await _refresh_market_intelligence(pairs, get_candles)
     except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
+
+
+async def _start_market_intelligence_background():
+    """Load the Gate universe once without blocking the scheduler event loop."""
+    try:
+        pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+        if _MARKET_INTELLIGENCE_OK:
+            await _start_market_intelligence(pairs, get_candles)
+    except Exception as exc:
+        logging.warning("[MarketIntelligence] startup failed safely: %s", exc)
 
 async def on_startup(app):
     # Логирование конфигурации при старте
@@ -5146,8 +5115,7 @@ async def on_startup(app):
     await _apply_trade_learning_baseline_reset()
     if _WEB_LEARNER_OK:
         _web_init_db()
-    threading.Thread(target=get_top_pairs, daemon=True).start()
-    if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(DEFAULT_UNIVERSE_SIZE),get_candles))
+    asyncio.create_task(_start_market_intelligence_background())
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
     if WEBHOOK_URL:
@@ -5159,7 +5127,7 @@ async def on_startup(app):
     # ── Webhook режим: настройка планировщика (сигналы + мозг) ──
     # BUG FIX: этот блок был случайно перемещён внутрь recheck_timing_queue.
     # Теперь он правильно инициализируется при старте webhook-сервера.
-    webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
+    webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1})
 
     # Основные сигналы
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
@@ -5284,7 +5252,7 @@ async def on_startup(app):
     async def _warmup_cache_wh():
         try:
             logging.info("[Cache] Прогрев кеша (webhook)...")
-            top = get_top_pairs(20)
+            top = await asyncio.to_thread(get_top_pairs, 20)
             candles_map = await fetch_candles_batch(top, "4h", 100)
             for s, c in candles_map.items():
                 if c:
@@ -5469,11 +5437,10 @@ def main():
             await _apply_trade_learning_baseline_reset()
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
-            threading.Thread(target=get_top_pairs, daemon=True).start()
-            if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(DEFAULT_UNIVERSE_SIZE),get_candles))
+            asyncio.create_task(_start_market_intelligence_background())
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
-            scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
+            scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
             scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
             scheduler.add_job(market_intelligence_job,"interval",minutes=20,jitter=60,max_instances=1,coalesce=True)
@@ -5509,7 +5476,7 @@ def main():
             async def _warmup_cache():
                 try:
                     logging.info("[Cache] Прогрев кеша...")
-                    top = get_top_pairs(20)
+                    top = await asyncio.to_thread(get_top_pairs, 20)
                     candles_map = await fetch_candles_batch(top, "4h", 100)
                     for s, c in candles_map.items():
                         if c:

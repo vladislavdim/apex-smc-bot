@@ -9,6 +9,7 @@ import sqlite3
 import time
 from typing import Any
 
+from core.data_policy import configured_market_data_providers
 from .http_client import http_client
 from .models import number
 
@@ -158,11 +159,18 @@ async def refresh_pair_registry(symbols: list[str], force: bool = False) -> dict
             except Exception:
                 return False, fallback
 
+        enabled = set(configured_market_data_providers())
+        gate_enabled, binance_enabled = "gate" in enabled, "binance" in enabled
+        bybit_enabled, hyper_enabled = "bybit" in enabled, "hyperliquid" in enabled
         gate_result, binance_result, bybit_result, hyper_result = await asyncio.gather(
-            safe(http_client.get_json("https://api.gateio.ws/api/v4/futures/usdt/contracts"), []),
-            safe(http_client.get_json("https://fapi.binance.com/fapi/v1/exchangeInfo"), {}),
-            safe(http_client.get_json("https://api.bybit.com/v5/market/instruments-info", {"category": "linear", "limit": 1000}), {}),
-            safe(http_client.post_json("https://api.hyperliquid.xyz/info", {"type": "metaAndAssetCtxs"}), []),
+            safe(http_client.get_json("https://api.gateio.ws/api/v4/futures/usdt/contracts"), [])
+            if gate_enabled else asyncio.sleep(0, result=(False, [])),
+            safe(http_client.get_json("https://fapi.binance.com/fapi/v1/exchangeInfo"), {})
+            if binance_enabled else asyncio.sleep(0, result=(False, {})),
+            safe(http_client.get_json("https://api.bybit.com/v5/market/instruments-info", {"category": "linear", "limit": 1000}), {})
+            if bybit_enabled else asyncio.sleep(0, result=(False, {})),
+            safe(http_client.post_json("https://api.hyperliquid.xyz/info", {"type": "metaAndAssetCtxs"}), [])
+            if hyper_enabled else asyncio.sleep(0, result=(False, [])),
         )
         gate_ok, gate = gate_result
         binance_ok, binance = binance_result
@@ -213,10 +221,10 @@ async def refresh_pair_registry(symbols: list[str], force: bool = False) -> dict
                 "binance_supported": int(binance_symbol in binance_set) if binance_ok else int(bool(previous.get("binance_supported"))),
                 "bybit_supported": int(bybit_symbol in bybit_set) if bybit_ok else int(bool(previous.get("bybit_supported"))),
                 "hyperliquid_supported": int(base in hyper_set) if hyper_ok else int(bool(previous.get("hyperliquid_supported"))),
-                "gate_status": "supported" if gate_symbol in gate_map else "unsupported" if gate_ok else "unavailable",
-                "binance_status": "supported" if binance_symbol in binance_set else "unsupported" if binance_ok else "unavailable",
-                "bybit_status": "supported" if bybit_symbol in bybit_set else "unsupported" if bybit_ok else "unavailable",
-                "hyperliquid_status": "supported" if base in hyper_set else "unsupported" if hyper_ok else "unavailable",
+                "gate_status": "disabled" if not gate_enabled else "supported" if gate_symbol in gate_map else "unsupported" if gate_ok else "unavailable",
+                "binance_status": "disabled" if not binance_enabled else "supported" if binance_symbol in binance_set else "unsupported" if binance_ok else "unavailable",
+                "bybit_status": "disabled" if not bybit_enabled else "supported" if bybit_symbol in bybit_set else "unsupported" if bybit_ok else "unavailable",
+                "hyperliquid_status": "disabled" if not hyper_enabled else "supported" if base in hyper_set else "unsupported" if hyper_ok else "unavailable",
                 "gate_multiplier": number(gate_row.get("quanto_multiplier")) if gate_ok else number(previous.get("gate_multiplier")),
                 "chain": str(verified.get("chain") or previous.get("chain") or "unknown"),
                 "contract_address": verified.get("address") or previous.get("contract_address"), "checked_at": now,
@@ -245,7 +253,13 @@ async def refresh_pair_registry(symbols: list[str], force: bool = False) -> dict
         except Exception:
             pass
         _snapshot, _checked_at = snapshot, time.time()
-        _refresh_ttl = 3600 if all((gate_ok, binance_ok, bybit_ok, hyper_ok)) else 300
+        enabled_results = [
+            ok for provider, ok in (
+                ("gate", gate_ok), ("binance", binance_ok),
+                ("bybit", bybit_ok), ("hyperliquid", hyper_ok),
+            ) if provider in enabled
+        ]
+        _refresh_ttl = 3600 if enabled_results and all(enabled_results) else 300
         return {symbol: dict(snapshot[symbol]) for symbol in normalized}
 
 

@@ -1,4 +1,4 @@
-"""Select a liquid APEX universe tradable on both Gate and Binance USD-M."""
+"""Select the liquid Gate USD-M universe used for APEX analysis."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ MIN_GATE_QUOTE_VOLUME = 250_000.0
 MAX_GATE_SPREAD_PCT = 0.25
 
 
-# Used only while either public instrument endpoint is unavailable.  The live
-# refresh replaces this list hourly and never admits a symbol unless the exact
-# same USDT perpetual name is trading on both exchanges.
+# Reviewed execution-compatible whitelist used both for Gate ranking and as a
+# fallback while Gate's public ticker endpoint is unavailable. Binance symbol
+# rules are checked again only after Groq approves an order for execution.
 FALLBACK_COMMON_PAIRS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "ZECUSDT", "XRPUSDT", "PROMUSDT",
     "TRUMPUSDT", "BTRUSDT", "HYPEUSDT", "UNIUSDT", "DOGEUSDT", "ZKCUSDT",
@@ -36,6 +36,14 @@ FALLBACK_COMMON_PAIRS = [
     "SLXUSDT", "MUBARAKUSDT", "BMTUSDT", "USUSDT", "CAPUSDT", "PEOPLEUSDT",
     "MONUSDT", "GALAUSDT",
 ]
+
+_GATE_SCALED_TO_APEX = {
+    "1000PEPEUSDT": "PEPEUSDT",
+    "1000SHIBUSDT": "SHIBUSDT",
+    "1000BONKUSDT": "BONKUSDT",
+    "1000FLOKIUSDT": "FLOKIUSDT",
+    "1000SATSUSDT": "SATSUSDT",
+}
 
 
 def _number(value: Any) -> float:
@@ -78,6 +86,44 @@ def select_common_pairs(
         symbol = contract.replace("_", "")
         base = symbol[:-4]
         if symbol not in binance_symbols or len(base) < 2 or not base.isascii() or not base.isalnum():
+            continue
+        volume = _number(row.get("volume_24h_quote") or row.get("volume_24h_settle"))
+        bid, ask = _number(row.get("highest_bid")), _number(row.get("lowest_ask"))
+        midpoint = (bid + ask) / 2
+        spread_pct = ((ask - bid) / midpoint * 100) if midpoint > 0 and ask >= bid else 999.0
+        if volume < MIN_GATE_QUOTE_VOLUME or spread_pct > MAX_GATE_SPREAD_PCT:
+            continue
+        ranked.append((volume, symbol))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [symbol for _, symbol in ranked[: max(1, int(limit))]]
+
+
+def select_gate_pairs(
+    gate_tickers: Any,
+    *,
+    allowed_symbols: list[str] | tuple[str, ...] = FALLBACK_COMMON_PAIRS,
+    limit: int = DEFAULT_UNIVERSE_SIZE,
+) -> list[str]:
+    """Rank Gate perpetuals without calling another exchange.
+
+    ``allowed_symbols`` is the last reviewed Binance-executable universe.  A
+    live Binance rules check still runs immediately before an approved order,
+    so an obsolete/delisted contract can never be submitted blindly.
+    """
+    if not isinstance(gate_tickers, list):
+        return []
+    allowed = {str(symbol).upper() for symbol in allowed_symbols}
+    ranked: list[tuple[float, str]] = []
+    for row in gate_tickers:
+        if not isinstance(row, dict):
+            continue
+        contract = str(row.get("contract", "")).upper()
+        if not contract.endswith("_USDT"):
+            continue
+        provider_symbol = contract.replace("_", "")
+        symbol = _GATE_SCALED_TO_APEX.get(provider_symbol, provider_symbol)
+        base = symbol[:-4]
+        if symbol not in allowed or len(base) < 2 or not base.isascii() or not base.isalnum():
             continue
         volume = _number(row.get("volume_24h_quote") or row.get("volume_24h_settle"))
         bid, ask = _number(row.get("highest_bid")), _number(row.get("lowest_ask"))

@@ -34,7 +34,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from core.pair_universe import (
     DEFAULT_UNIVERSE_SIZE,
     FALLBACK_COMMON_PAIRS,
-    select_common_pairs,
+    select_gate_pairs,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -1210,30 +1210,35 @@ def get_funding_rate(symbol: str) -> dict:
 
 
 def get_liquidation_ratio(symbol: str) -> dict:
-    """Long/Short ratio — соотношение лонгов и шортов"""
+    """Gate liquidation dominance; no Binance market-data request."""
     try:
+        from external_sources.pair_registry import get_pair
+        contract = str(get_pair(symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
         r = requests.get(
-            "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
-            params={"symbol": symbol, "period": "1h", "limit": 3},
-            headers={"User-Agent": "Mozilla/5.0"},
+            "https://api.gateio.ws/api/v4/futures/usdt/contract_stats",
+            params={"contract": contract, "interval": "1h", "limit": 3},
+            headers={"User-Agent": "APEX-SMC/1.0"},
             timeout=8
         )
         if r.status_code == 200:
             data = r.json()
-            if data and len(data) > 0:
-                latest = data[0]
-                long_pct  = float(latest.get("longAccount", 0.5))
-                short_pct = float(latest.get("shortAccount", 0.5))
-                ratio = long_pct / short_pct if short_pct > 0 else 1.0
+            if isinstance(data, list) and data:
+                latest = data[-1]
+                long_liq = abs(float(latest.get("long_liq_size") or 0))
+                short_liq = abs(float(latest.get("short_liq_size") or 0))
+                total = long_liq + short_liq
+                long_pct = long_liq / total if total else 0.5
+                short_pct = short_liq / total if total else 0.5
+                ratio = long_liq / short_liq if short_liq > 0 else (999.0 if long_liq else 1.0)
                 if ratio > 1.5:
-                    signal = "BEARISH"  # Слишком много лонгов — будут выбивать
-                    desc = f"L/S={ratio:.2f} — толпа в лонгах (контрариан BEARISH)"
+                    signal = "BEARISH"
+                    desc = f"Gate long liquidations dominate ({ratio:.2f}x)"
                 elif ratio < 0.67:
-                    signal = "BULLISH"  # Слишком много шортов — будут выбивать
-                    desc = f"L/S={ratio:.2f} — толпа в шортах (контрариан BULLISH)"
+                    signal = "BULLISH"
+                    desc = f"Gate short liquidations dominate ({(1 / ratio) if ratio else 999:.2f}x)"
                 else:
                     signal = "NEUTRAL"
-                    desc = f"L/S={ratio:.2f} — сбалансировано"
+                    desc = f"Gate liquidations balanced ({ratio:.2f}x)"
                 return {
                     "long_pct": long_pct,
                     "short_pct": short_pct,
@@ -1247,7 +1252,7 @@ def get_liquidation_ratio(symbol: str) -> dict:
     return {"ratio": 1.0, "signal": "NEUTRAL", "desc": "", "ok": False}
 
 def get_top_pairs(limit=DEFAULT_UNIVERSE_SIZE):
-    """Liquid Gate/Binance USD-M intersection, refreshed once per hour."""
+    """Liquid Gate USD-M analysis universe, refreshed once per hour."""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache[:limit]
@@ -1257,17 +1262,13 @@ def get_top_pairs(limit=DEFAULT_UNIVERSE_SIZE):
             "https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=7,
             headers={"User-Agent": "APEX-SMC/1.0"},
         )
-        binance = requests.get(
-            "https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=7,
-            headers={"User-Agent": "APEX-SMC/1.0"},
-        )
-        gate.raise_for_status(); binance.raise_for_status()
-        discovered = select_common_pairs(gate.json(), binance.json(), limit=DEFAULT_UNIVERSE_SIZE)
-        if len(discovered) >= DEFAULT_UNIVERSE_SIZE:
+        gate.raise_for_status()
+        discovered = select_gate_pairs(gate.json(), limit=DEFAULT_UNIVERSE_SIZE)
+        if discovered:
             pairs_cache = discovered
-            logging.info("[PairUniverse] %s common liquid Gate/Binance perpetuals", len(pairs_cache))
+            logging.info("[PairUniverse] %s liquid Gate perpetuals", len(pairs_cache))
         else:
-            raise RuntimeError(f"only {len(discovered)} eligible common pairs")
+            raise RuntimeError("no eligible Gate perpetuals")
     except Exception as exc:
         pairs_cache = list(dict.fromkeys(FALLBACK_COMMON_PAIRS))[:DEFAULT_UNIVERSE_SIZE]
         logging.warning("[PairUniverse] live refresh unavailable, using %s-pair fallback: %s", len(pairs_cache), exc)
@@ -1276,171 +1277,40 @@ def get_top_pairs(limit=DEFAULT_UNIVERSE_SIZE):
 
 
 def get_live_prices():
+    """Gate USD-M prices used by scanners and signal-integrity checks."""
     global price_cache, last_price_update
     if time.time() - last_price_update < 20 and price_cache:
         return price_cache
-
-    # 0. KuCoin allTickers — работает на Render, все пары одним запросом
     try:
         r = requests.get(
-            "https://api.kucoin.com/api/v1/market/allTickers",
-            headers={"User-Agent": "Mozilla/5.0"},
+            "https://api.gateio.ws/api/v4/futures/usdt/tickers",
+            headers={"User-Agent": "APEX-SMC/1.0"},
             timeout=10
         )
-        tickers = r.json().get("data", {}).get("ticker", [])
-        if tickers:
-            market = {}
-            for t in tickers:
-                sym = t.get("symbol", "").replace("-", "")
-                if sym.endswith("USDT"):
-                    try:
-                        price = float(t.get("last") or 0)
-                        change = float(t.get("changeRate") or 0) * 100
-                        vol = float(t.get("volValue") or 0)
-                        if price > 0:
-                            market[sym] = {"price": price, "change": round(change, 2), "volume": vol}
-                    except Exception:
-                        pass
-            if len(market) >= 10:
-                price_cache = market
-                last_price_update = time.time()
-                logging.info(f"Цены: KuCoin ({len(market)} пар)")
-                return price_cache
-    except Exception as e:
-        logging.warning(f"KuCoin prices: {e}")
-
-    # 0b. Gate.io tickers — второй быстрый источник
-    try:
-        r = requests.get(
-            "https://api.gateio.ws/api/v4/spot/tickers",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
+        r.raise_for_status()
         tickers = r.json()
-        if isinstance(tickers, list) and len(tickers) > 0:
+        if isinstance(tickers, list) and tickers:
             market = {}
             for t in tickers:
-                sym = t.get("currency_pair", "").replace("_", "")
+                sym = str(t.get("contract", "")).replace("_", "").upper()
                 if sym.endswith("USDT"):
                     try:
-                        price = float(t.get("last") or 0)
+                        price = float(t.get("last") or t.get("mark_price") or 0)
                         change = float(t.get("change_percentage") or 0)
-                        vol = float(t.get("quote_volume") or 0)
+                        vol = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0)
                         if price > 0:
                             market[sym] = {"price": price, "change": round(change, 2), "volume": vol}
                     except Exception:
                         pass
-            if len(market) >= 10:
-                price_cache = market
-                last_price_update = time.time()
-                logging.info(f"Цены: Gate.io ({len(market)} пар)")
-                return price_cache
-    except Exception as e:
-        logging.warning(f"Gate.io prices: {e}")
-
-    # 1. Binance Futures
-    try:
-        r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=10)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            market = {}
-            for t in data:
-                if isinstance(t, dict) and str(t.get("symbol","")).endswith("USDT"):
-                    market[t["symbol"]] = {
-                        "price": float(t["lastPrice"]),
-                        "change": float(t["priceChangePercent"]),
-                        "volume": float(t.get("quoteVolume", 0))
-                    }
             if market:
                 price_cache = market
                 last_price_update = time.time()
-                logging.info(f"Цены: Binance Futures ({len(market)} пар)")
+                logging.info("Цены: Gate Futures (%s пар)", len(market))
                 return price_cache
     except Exception as e:
-        logging.warning(f"Binance Futures prices: {e}")
+        logging.warning("Gate Futures prices unavailable: %s", e)
 
-    # 2. Binance Spot
-    try:
-        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            market = {}
-            for t in data:
-                if isinstance(t, dict) and str(t.get("symbol","")).endswith("USDT"):
-                    market[t["symbol"]] = {
-                        "price": float(t["lastPrice"]),
-                        "change": float(t["priceChangePercent"]),
-                        "volume": float(t.get("quoteVolume", 0))
-                    }
-            if market:
-                price_cache = market
-                last_price_update = time.time()
-                logging.info(f"Цены: Binance Spot ({len(market)} пар)")
-                return price_cache
-    except Exception as e:
-        logging.warning(f"Binance Spot prices: {e}")
-
-    # 3. CoinGecko (бесплатный, без ключа)
-    try:
-        ids = "bitcoin,ethereum,solana,binancecoin,ripple,dogecoin,avalanche-2,chainlink,toncoin"
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": ids, "vs_currencies": "usd", "include_24hr_change": "true", "include_24hr_vol": "true"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        data = r.json()
-        symbol_map = {
-            "bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT",
-            "binancecoin": "BNBUSDT", "ripple": "XRPUSDT", "dogecoin": "DOGEUSDT",
-            "avalanche-2": "AVAXUSDT", "chainlink": "LINKUSDT", "toncoin": "TONUSDT"
-        }
-        market = {}
-        for cg_id, symbol in symbol_map.items():
-            if cg_id in data:
-                d = data[cg_id]
-                market[symbol] = {
-                    "price": float(d.get("usd", 0)),
-                    "change": float(d.get("usd_24h_change", 0)),
-                    "volume": float(d.get("usd_24h_vol", 0))
-                }
-        if market:
-            price_cache = market
-            last_price_update = time.time()
-            logging.info(f"Цены: CoinGecko ({len(market)} монет)")
-            return price_cache
-    except Exception as e:
-        logging.warning(f"CoinGecko prices: {e}")
-
-    # 4. Kraken как последний fallback
-    try:
-        pairs_kraken = {"XBTUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT",
-                        "XRPUSD": "XRPUSDT", "DOGEUSD": "DOGEUSDT", "AVAXUSD": "AVAXUSDT",
-                        "LINKUSD": "LINKUSDT", "BNBUSD": "BNBUSDT"}
-        market = {}
-        r = requests.get(
-            "https://api.kraken.com/0/public/Ticker",
-            params={"pair": ",".join(pairs_kraken.keys())},
-            timeout=10
-        )
-        data = r.json().get("result", {})
-        for kraken_pair, our_symbol in pairs_kraken.items():
-            if kraken_pair in data:
-                d = data[kraken_pair]
-                market[our_symbol] = {
-                    "price": float(d["c"][0]),
-                    "change": 0,
-                    "volume": float(d["v"][1])
-                }
-        if market:
-            price_cache = market
-            last_price_update = time.time()
-            logging.info(f"Цены: Kraken ({len(market)} монет)")
-            return price_cache
-    except Exception as e:
-        logging.warning(f"Kraken prices: {e}")
-
-    logging.error("Все источники цен недоступны")
+    logging.error("Gate Futures prices unavailable; using last cache")
     return price_cache if price_cache else {}
 
 # ===== МОНИТОРИНГ НАКОПЛЕНИЙ ПЕРЕД ПАМПОМ =====
@@ -2180,8 +2050,10 @@ SYMBOL_ALIASES = {
 
 def get_candles(symbol, interval="1h", limit=200):
     """
-    Свечи с ротацией источников как у Groq ключей:
-    Router (Gate.io → KuCoin → Bybit → MEXC → Kraken → CryptoCompare) → старые fallback
+    Gate USD-M candles through the configured router.
+
+    Analysis never falls through to Binance.  Binance is reserved for the
+    deterministic execution module after Groq has approved a candidate.
     """
     global candle_cache
     cache_key = f"{symbol}_{interval}"
@@ -2198,7 +2070,7 @@ def get_candles(symbol, interval="1h", limit=200):
         candle_cache[cache_key] = (_gc, time.time())
         return _gc
 
-    # 1. Brain Router — Gate.io, KuCoin, Bybit, MEXC, Kraken, CryptoCompare (ротация)
+    # 1. Brain Router — Gate USD-M in the default production policy.
     if _ROUTER_OK:
         try:
             rc = _brain_router.candles(symbol, interval, limit)
@@ -2209,51 +2081,19 @@ def get_candles(symbol, interval="1h", limit=200):
         except Exception as e:
             logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
 
-    bi = BINANCE_INTERVALS.get(interval, interval)
+    # 2. Core SMC Gate adapter — independent fallback, same venue.
+    if _SMC_ENGINE_OK:
+        try:
+            result = get_candles_smart(symbol, interval, limit)
+            candles = result.get("candles", []) if isinstance(result, dict) else []
+            if candles and len(candles) >= 3:
+                candle_cache[cache_key] = (candles, time.time())
+                update_global_candles(symbol, interval, candles)
+                return candles
+        except Exception as e:
+            logging.debug("SMC Gate candles %s %s: %s", symbol, interval, e)
 
-    # 2. Binance Futures REST — fallback (заблокирован на Render но оставляем)
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/klines",
-            params={"symbol": symbol, "interval": bi, "limit": limit},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
-                candles = [{"open": float(c[1]), "high": float(c[2]),
-                            "low": float(c[3]), "close": float(c[4]),
-                            "volume": float(c[5])} for c in data]
-                if len(candles) >= 20:
-                    candle_cache[cache_key] = (candles, time.time())
-                    update_global_candles(symbol, interval, candles)
-                    return candles
-    except Exception as e:
-        logging.debug(f"Binance Futures {symbol} {interval}: {e}")
-
-    # 3. Binance Spot REST
-    try:
-        r = requests.get(
-            f"{BINANCE}/api/v3/klines",
-            params={"symbol": symbol, "interval": bi, "limit": limit},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 5 and isinstance(data[0], list):
-                candles = [{"open": float(c[1]), "high": float(c[2]),
-                            "low": float(c[3]), "close": float(c[4]),
-                            "volume": float(c[5])} for c in data]
-                if len(candles) >= 20:
-                    candle_cache[cache_key] = (candles, time.time())
-                    update_global_candles(symbol, interval, candles)
-                    return candles
-    except Exception as e:
-        logging.debug(f"Binance Spot {symbol} {interval}: {e}")
-
-    logging.debug(f"Нет свечей для {symbol} {interval}")
+    logging.debug("Нет Gate Futures свечей для %s %s", symbol, interval)
     return []
 
 
@@ -2284,12 +2124,20 @@ async def fetch_candles_batch(symbols: list, timeframe: str = "4h", limit: int =
 
 def get_orderbook(symbol):
     try:
-        r = requests.get(f"{BINANCE}/api/v3/depth", params={"symbol": symbol, "limit": 20}, timeout=8)
+        from external_sources.pair_registry import get_pair
+        pair = get_pair(symbol)
+        contract = str(pair.get("gate_symbol") or symbol.replace("USDT", "_USDT"))
+        multiplier = float(pair.get("gate_multiplier") or 1)
+        r = requests.get(
+            "https://api.gateio.ws/api/v4/futures/usdt/order_book",
+            params={"contract": contract, "limit": 20}, timeout=8,
+        )
+        r.raise_for_status()
         d = r.json()
-        bids = sum(float(b[1]) for b in d["bids"])
-        asks = sum(float(a[1]) for a in d["asks"])
+        bids = sum(float(row.get("p", 0)) * abs(float(row.get("s", 0))) * multiplier for row in d.get("bids", []))
+        asks = sum(float(row.get("p", 0)) * abs(float(row.get("s", 0))) * multiplier for row in d.get("asks", []))
         return {"bids": bids, "asks": asks, "bias": "BUY" if bids > asks else "SELL"}
-    except:
+    except Exception:
         return None
 
 
@@ -2708,8 +2556,8 @@ def get_fear_greed():
 
 def get_funding_rate(symbol):
     try:
-        # Gate.io futures — работает на Render
-        gate_sym = symbol.replace("USDT", "_USDT")
+        from external_sources.pair_registry import get_pair
+        gate_sym = str(get_pair(symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
         r = requests.get(
             f"https://fx-api.gateio.ws/api/v4/futures/usdt/contracts/{gate_sym}",
             timeout=8
@@ -2725,26 +2573,20 @@ def get_funding_rate(symbol):
 # ===== OPEN INTEREST =====
 
 def get_open_interest(symbol):
+    """Gate USD-M open-interest trend."""
     try:
-        # Текущий OI
-        r1 = requests.get(
-            f"{BINANCE_F}/fapi/v1/openInterest",
-            params={"symbol": symbol},
-            timeout=8
+        from external_sources.pair_registry import get_pair
+        contract = str(get_pair(symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
+        response = requests.get(
+            "https://api.gateio.ws/api/v4/futures/usdt/contract_stats",
+            params={"contract": contract, "interval": "1h", "limit": 5}, timeout=8,
         )
-        current_oi = float(r1.json()["openInterest"])
-
-        # История OI (последние 4 часа)
-        r2 = requests.get(
-            f"{BINANCE_F}/futures/data/openInterestHist",
-            params={"symbol": symbol, "period": "1h", "limit": 5},
-            timeout=8
-        )
-        hist = r2.json()
-        if not hist:
+        response.raise_for_status()
+        history = response.json()
+        if not isinstance(history, list) or not history:
             return None
-
-        old_oi = float(hist[0]["sumOpenInterest"])
+        current_oi = float(history[-1].get("open_interest") or 0)
+        old_oi = float(history[0].get("open_interest") or 0)
         change_pct = (current_oi - old_oi) / old_oi * 100 if old_oi > 0 else 0
 
         return {
@@ -3164,7 +3006,7 @@ pump_alerted = set()  # Чтобы не спамить одинаковыми
 async def realtime_pump_detector():
     """Каждые 5 минут ищет резкий рост объёма x3+ за 3 свечи"""
     try:
-        prices = get_live_prices()
+        prices = await asyncio.to_thread(get_live_prices)
         pairs = get_top_pairs(50)
 
         for symbol in pairs:
@@ -6768,15 +6610,19 @@ async def night_brain_tasks():
         logging.info(f"Ночная задача: {topic}")
 
         # 1. Самообучение — анализ истории сигналов
-        rules_before = len(get_self_rules() or [])
-        await self_research_loop()
-        rules_after_rows = get_self_rules() or []
+        rules_before = len(await asyncio.to_thread(get_self_rules) or [])
+        # self_research_loop is legacy async code whose body is synchronous.
+        # Run it on a worker loop so SQLite work cannot stall APScheduler.
+        await asyncio.to_thread(lambda: asyncio.run(self_research_loop()))
+        rules_after_rows = await asyncio.to_thread(get_self_rules) or []
         rules_after = len(rules_after_rows)
         new_rules = rules_after - rules_before
 
         # 2. Исследование темы
-        old_knowledge = get_knowledge(topic)
-        new_analysis = deep_research(topic)
+        old_knowledge, new_analysis = await asyncio.gather(
+            asyncio.to_thread(get_knowledge, topic),
+            asyncio.to_thread(deep_research, topic),
+        )
 
         comparison = ""
         if new_analysis and old_knowledge:
@@ -6788,20 +6634,22 @@ async def night_brain_tasks():
 Что изменилось? Прошлый прогноз сбылся? Какое правило нужно добавить в стратегию?
 Ответ: 2-3 предложения + одно конкретное правило."""
 
-            comparison = ask_groq(comparison_prompt, max_tokens=200)
+            comparison = await asyncio.to_thread(ask_groq, comparison_prompt, max_tokens=200)
             if comparison:
-                save_knowledge(f"comparison_{topic}", comparison, "self-compare")
+                await asyncio.to_thread(save_knowledge, f"comparison_{topic}", comparison, "self-compare")
                 # Если нашли правило — сохраняем
                 if "правило" in comparison.lower() or "избегать" in comparison.lower():
-                    save_self_rule("market", comparison[:150], 0.6, "night_comparison")
+                    await asyncio.to_thread(
+                        save_self_rule, "market", comparison[:150], 0.6, "night_comparison",
+                    )
 
         # 3. Обновляем модели топ-монет
         top_coins = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
         for sym in top_coins:
             try:
-                candles = get_candles(sym, "4h", 50)
+                candles = await asyncio.to_thread(get_candles, sym, "4h", 50)
                 if candles:
-                    update_market_model(sym, candles, "NEUTRAL")
+                    await asyncio.to_thread(update_market_model, sym, candles, "NEUTRAL")
             except:
                 pass
 
@@ -7060,224 +6908,11 @@ def get_messari_data(symbol):
         return None
 
 
-def get_all_prices_merged():
-    """
-    Объединяет данные со ВСЕХ источников.
-    Binance Futures — основной (Bybit убран — 403 на Render).
-    """
-    import concurrent.futures
-    result = {}
-
-    def fetch_binance_futures():
-        try:
-            r = requests.get(
-                f"{BINANCE_F}/fapi/v1/ticker/24hr",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                out = {}
-                for t in r.json():
-                    sym = t.get("symbol", "")
-                    if sym.endswith("USDT") and t.get("lastPrice"):
-                        out[sym] = {
-                            "price": float(t["lastPrice"]),
-                            "change": round(float(t.get("priceChangePercent", 0)), 2),
-                            "source": "Binance"
-                        }
-                return out
-        except:
-            return {}
-
-    def fetch_binance_spot():
-        try:
-            r = requests.get(
-                f"{BINANCE}/api/v3/ticker/24hr",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                out = {}
-                for t in r.json():
-                    sym = t.get("symbol", "")
-                    if sym.endswith("USDT") and t.get("lastPrice"):
-                        out[sym] = {
-                            "price": float(t["lastPrice"]),
-                            "change": round(float(t.get("priceChangePercent", 0)), 2),
-                            "source": "Binance Spot"
-                        }
-                return out
-        except:
-            return {}
-
-    def fetch_cryptocompare():
-        return get_cryptocompare_prices()
-
-    def fetch_yahoo():
-        return get_yahoo_finance_prices()
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-        f_bf = ex.submit(fetch_binance_futures)
-        f_bs = ex.submit(fetch_binance_spot)
-        f_cc = ex.submit(fetch_cryptocompare)
-        f_yf = ex.submit(fetch_yahoo)
-
-        bf_data = f_bf.result()
-        bs_data = f_bs.result()
-        cc_data = f_cc.result()
-        yf_data = f_yf.result()
-
-    # Binance Futures — приоритет (самый точный для фьючерсов)
-    result.update(cc_data)
-    result.update(yf_data)
-    result.update(bs_data)
-    result.update(bf_data)  # Binance Futures побеждает
-
-    logging.info(f"Merged prices: {len(result)} монет (BF:{len(bf_data)} BS:{len(bs_data)} CC:{len(cc_data)} YF:{len(yf_data)})")
-    return result
-
-
-def get_multiple_prices_realtime():
-    """
-    Агрегатор цен со всех бирж.
-    Источники: CoinGecko(600+ бирж) + CoinPaprika + CryptoCompare + Binance + Bybit
-    Возвращает до 250 монет.
-    """
-    result = {}
-
-    # ── 1. CoinGecko Markets — агрегирует 600+ бирж, топ-250 по объёму ──
-    try:
-        for page in [1, 2]:
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/coins/markets",
-                params={
-                    "vs_currency": "usd",
-                    "order": "volume_desc",
-                    "per_page": 125,
-                    "page": page,
-                    "price_change_percentage": "24h",
-                    "sparkline": "false"
-                },
-                headers={"User-Agent": "Mozilla/5.0 (compatible; APEX/1.0)"},
-                timeout=12
-            )
-            if r.status_code == 200:
-                for coin in r.json():
-                    sym = coin.get("symbol", "").upper() + "USDT"
-                    price = coin.get("current_price")
-                    change = coin.get("price_change_percentage_24h") or 0
-                    if price and price > 0:
-                        result[sym] = {
-                            "price": float(price),
-                            "change": round(float(change), 2),
-                            "volume": coin.get("total_volume") or 0,
-                            "source": "CoinGecko"
-                        }
-            elif r.status_code == 429:
-                break  # Rate limit — останавливаемся
-        if len(result) >= 20:
-            logging.info(f"Живые цены: CoinGecko ({len(result)} монет, 600+ бирж)")
-    except Exception as e:
-        logging.warning(f"get_prices CoinGecko: {e}")
-
-    # ── 2. CoinPaprika — независимый агрегатор, топ-500 ──
-    if len(result) < 50:
-        try:
-            r = requests.get(
-                "https://api.coinpaprika.com/v1/tickers",
-                params={"quotes": "USD", "limit": 200},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=12
-            )
-            if r.status_code == 200:
-                for coin in r.json():
-                    sym = coin.get("symbol", "").upper() + "USDT"
-                    quotes = coin.get("quotes", {}).get("USD", {})
-                    price = quotes.get("price")
-                    change = quotes.get("percent_change_24h") or 0
-                    if price and price > 0 and sym not in result:
-                        result[sym] = {
-                            "price": float(price),
-                            "change": round(float(change), 2),
-                            "volume": quotes.get("volume_24h") or 0,
-                            "source": "CoinPaprika"
-                        }
-            logging.info(f"Живые цены: +CoinPaprika (итого {len(result)} монет)")
-        except Exception as e:
-            logging.warning(f"get_prices CoinPaprika: {e}")
-
-    # ── 3. Binance Futures — прямо с биржи, все USDT пары ──
-    try:
-        r = requests.get(f"{BINANCE_F}/fapi/v1/ticker/24hr", timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                data.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-                added = 0
-                for t in data:
-                    sym = t.get("symbol", "")
-                    if sym.endswith("USDT"):
-                        price = float(t["lastPrice"])
-                        if price > 0:
-                            if sym not in result:
-                                result[sym] = {
-                                    "price": price,
-                                    "change": round(float(t["priceChangePercent"]), 2),
-                                    "volume": float(t.get("quoteVolume", 0)),
-                                    "source": "Binance"
-                                }
-                            added += 1
-                    if added >= 200:
-                        break
-                logging.info(f"Живые цены: +Binance (итого {len(result)} монет)")
-    except Exception as e:
-        logging.warning(f"get_prices Binance: {e}")
-
-    # ── 4. CryptoCompare — агрегирует Kraken/OKX/Coinbase/Huobi ──
-    if len(result) < 30:
-        try:
-            r = requests.get(
-                "https://min-api.cryptocompare.com/data/top/totalvolfull",
-                params={"limit": 50, "tsym": "USD"},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                data = r.json()
-                for item in data.get("Data", []):
-                    coin = item.get("CoinInfo", {})
-                    raw = item.get("RAW", {}).get("USD", {})
-                    sym = coin.get("Name", "").upper() + "USDT"
-                    price = raw.get("PRICE")
-                    change = raw.get("CHANGEPCT24HOUR") or 0
-                    if price and price > 0 and sym not in result:
-                        result[sym] = {
-                            "price": float(price),
-                            "change": round(float(change), 2),
-                            "volume": raw.get("TOTALVOLUME24HTO") or 0,
-                            "source": "CryptoCompare"
-                        }
-            logging.info(f"Живые цены: +CryptoCompare (итого {len(result)} монет)")
-        except Exception as e:
-            logging.warning(f"get_prices CryptoCompare: {e}")
-
-    logging.info(f"Итого агрегировано: {len(result)} монет со всех бирж")
-    return result
-
-
 def get_all_market_pairs():
     """
-    Возвращает список всех торговых пар для глубокого сканирования.
-    Берёт из кэша get_multiple_prices_realtime.
+    Return the same Gate analysis universe used by scheduled scanners.
     """
-    prices = get_multiple_prices_realtime()
-    # Сортируем по объёму
-    sorted_pairs = sorted(
-        prices.items(),
-        key=lambda x: x[1].get("volume", 0),
-        reverse=True
-    )
-    return [sym for sym, _ in sorted_pairs]
+    return get_top_pairs(DEFAULT_UNIVERSE_SIZE)
 
 
 
@@ -7325,11 +6960,9 @@ def ask_ai(user_id, user_name, user_message):
         "что происходит", "тренд", "перспективы", "будет"
     ])
 
-    # Живые цены — ВСЕГДА берём полный агрегатор (199+ монет)
+    # Живые цены берём с того же Gate USD-M venue, что и стратегии.
     live_prices_text = ""
-    prices = get_multiple_prices_realtime()
-    if not prices:
-        prices = get_live_prices()
+    prices = get_live_prices()
 
     if prices:
         # Приоритетные монеты показываем первыми

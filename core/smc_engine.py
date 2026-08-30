@@ -5,6 +5,11 @@ import requests, sqlite3, time, logging, json
 from datetime import datetime
 
 try:
+    from .data_policy import configured_market_data_providers
+except ImportError:
+    from data_policy import configured_market_data_providers
+
+try:
     from .market_structure import (
         analyze_market_structure as _analyze_market_structure,
         classify_swings as _classify_structure_swings,
@@ -136,16 +141,21 @@ def _ordered_sources(symbol):
         "bybit":0.82, "cryptocompare":0.80, "binance_futures":0.75, "binance_spot":0.70,
         "mexc":0.60, "kraken":0.58, "gate_io":0.55, "coingecko":0.50, "synthetic":0.10
     }
-    scores = {src: _reliability.get(src, defaults.get(src,0.5)) for src in defaults}
+    provider_sources = {
+        "gate": ["gate_io"],
+        "binance": ["binance_futures"],
+        "bybit": ["bybit"],
+        "hyperliquid": [],
+    }
+    allowed = []
+    for provider in configured_market_data_providers():
+        allowed.extend(provider_sources.get(provider, []))
+    scores = {src: _reliability.get(src, defaults.get(src,0.5)) for src in allowed}
     return sorted(scores, key=lambda s: scores[s], reverse=True)
 
 def _ordered_sources_for_interval(symbol, interval):
-    """Для коротких TF (1m/5m) ставим Binance Spot первым — он надёжнее CryptoCompare для альткоинов"""
-    base_order = _ordered_sources(symbol)
-    if interval in ("1m", "5m", "3m"):
-        priority = ["bybit", "binance_spot", "binance_futures", "mexc", "gate_io", "cryptocompare", "kraken", "coingecko", "synthetic"]
-        return priority
-    return base_order
+    """Use the same configured venue on every timeframe."""
+    return _ordered_sources(symbol)
 
 # ─── Фетчеры ─────────────────────────────────────────────────────────────────
 
@@ -331,8 +341,8 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
             if candles and len(candles) >= 15:
                 _record(src, symbol, interval, True, len(candles))
                 is_synth = src == "synthetic" or any(c.get("_synthetic") for c in candles[:1])
-                quality = ("high"   if src in ("cryptocompare","binance_futures","binance_spot") else
-                           "medium" if src in ("mexc","kraken","gate_io") else "low")
+                quality = ("high" if src == "gate_io" else
+                           "medium" if src in ("cryptocompare","mexc","kraken") else "low")
                 res = {"candles":candles,"source":src,"attempts":attempts,
                        "quality":quality,"is_synthetic":is_synth,"error":"",
                        "symbol":symbol,"interval":interval}

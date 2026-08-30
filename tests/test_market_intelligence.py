@@ -45,7 +45,8 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         hyper = [{"universe": [{"name": "BTC"}, {"name": "PEPE"}]}, []]
         pair_registry._snapshot.clear()
         pair_registry._checked_at = 0
-        with patch.object(pair_registry, "_DB_PATH", self.db_path), \
+        with patch.dict(os.environ, {"APEX_MARKET_DATA_PROVIDERS": "gate,binance,bybit,hyperliquid"}), \
+             patch.object(pair_registry, "_DB_PATH", self.db_path), \
              patch.object(pair_registry.http_client, "get_json", new=get_json), \
              patch.object(pair_registry.http_client, "post_json", new=AsyncMock(return_value=hyper)):
             rows = await pair_registry.refresh_pair_registry(
@@ -60,13 +61,34 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rows["BTCUSDT"]["hyperliquid_supported"])
 
         failure = AsyncMock(side_effect=TimeoutError())
-        with patch.object(pair_registry, "_DB_PATH", self.db_path), \
+        with patch.dict(os.environ, {"APEX_MARKET_DATA_PROVIDERS": "gate,binance,bybit,hyperliquid"}), \
+             patch.object(pair_registry, "_DB_PATH", self.db_path), \
              patch.object(pair_registry.http_client, "get_json", new=failure), \
              patch.object(pair_registry.http_client, "post_json", new=failure):
             fallback = await pair_registry.refresh_pair_registry(["BTCUSDT"], force=True)
         self.assertTrue(fallback["BTCUSDT"]["gate_supported"])
         self.assertTrue(fallback["BTCUSDT"]["binance_supported"])
         self.assertEqual(fallback["BTCUSDT"]["gate_status"], "unavailable")
+
+    async def test_pair_registry_defaults_to_gate_without_other_exchange_requests(self):
+        requested = []
+
+        async def get_json(url, params=None, headers=None):
+            requested.append(url)
+            return [{"name": "BTC_USDT", "quanto_multiplier": "0.0001"}]
+
+        pair_registry._snapshot.clear()
+        pair_registry._checked_at = 0
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(pair_registry, "_DB_PATH", self.db_path), \
+             patch.object(pair_registry.http_client, "get_json", new=get_json), \
+             patch.object(pair_registry.http_client, "post_json", new=AsyncMock()) as post:
+            rows = await pair_registry.refresh_pair_registry(["BTCUSDT"], force=True)
+
+        self.assertEqual(requested, ["https://api.gateio.ws/api/v4/futures/usdt/contracts"])
+        post.assert_not_awaited()
+        self.assertTrue(rows["BTCUSDT"]["gate_supported"])
+        self.assertEqual(rows["BTCUSDT"]["binance_status"], "disabled")
 
     async def test_gate_candles_use_registry_symbol_and_record_real_coverage(self):
         class Response:
