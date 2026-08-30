@@ -13,6 +13,7 @@ import hmac
 import calendar
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -41,6 +42,41 @@ _ACCOUNT_STATUS_TTL_SECONDS = 30.0
 _account_status_lock = threading.Lock()
 _account_status_cache: tuple[float, dict[str, Any]] | None = None
 _reconcile_process_lock = threading.Lock()
+_binance_circuit_lock = threading.Lock()
+_binance_blocked_until = 0.0
+_symbol_rules_lock = threading.Lock()
+_shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
+
+
+def _binance_circuit_remaining(now: float | None = None) -> float:
+    current = time.time() if now is None else now
+    with _binance_circuit_lock:
+        return max(0.0, _binance_blocked_until - current)
+
+
+def _open_binance_circuit(status_code: int, message: str, headers: Mapping[str, Any]) -> float:
+    """Stop every execution client after a Binance 429/418 response."""
+    global _binance_blocked_until
+    now = time.time()
+    default_wait = 300.0 if int(status_code) == 418 else 60.0
+    try:
+        retry_after = max(0.0, float(headers.get("Retry-After", default_wait) or default_wait))
+    except (TypeError, ValueError):
+        retry_after = default_wait
+    deadline = now + retry_after
+    match = re.search(r"banned until\s+(\d{10,})", str(message), re.IGNORECASE)
+    if match:
+        raw = float(match.group(1))
+        deadline = max(deadline, raw / 1000 if raw > 10_000_000_000 else raw)
+    with _binance_circuit_lock:
+        _binance_blocked_until = max(_binance_blocked_until, deadline)
+        return _binance_blocked_until
+
+
+def _ensure_binance_circuit_closed() -> None:
+    remaining = _binance_circuit_remaining()
+    if remaining > 0:
+        raise RuntimeError(f"Binance circuit open; retry in {int(remaining) + 1}s")
 
 
 def _env_bool(value: Any, default: bool = False) -> bool:
@@ -266,19 +302,14 @@ class BinanceFuturesClient:
         self._time_offset_ms = 0
 
     def _sync_server_time(self) -> None:
-        response = self.session.request(
-            "GET", f"{self.config.base_url}/fapi/v1/time",
-            headers={"User-Agent": "APEX-SMC-Bot/1.0"},
-            timeout=self.config.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
+        data = self._request("GET", "/fapi/v1/time", attempts=1)
         self._time_offset_ms = int(data["serverTime"]) - int(time.time() * 1000)
 
     def _request(
         self, method: str, path: str, params: dict[str, Any] | None = None,
         *, signed: bool = False, attempts: int | None = None,
     ):
+        _ensure_binance_circuit_closed()
         base_payload = dict(params or {})
         headers = {"User-Agent": "APEX-SMC-Bot/1.0"}
         if signed:
@@ -288,6 +319,9 @@ class BinanceFuturesClient:
         last_error: Exception | None = None
         for attempt in range(max_attempts):
             try:
+                # Another client or worker may have opened the process-wide
+                # breaker since this request began.
+                _ensure_binance_circuit_closed()
                 payload = dict(base_payload)
                 if signed:
                     payload["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
@@ -316,6 +350,16 @@ class BinanceFuturesClient:
                         message or getattr(response, "text", "request rejected"),
                     )
                     last_error = error
+                    if response.status_code in {418, 429}:
+                        deadline = _open_binance_circuit(
+                            response.status_code, error.message, response.headers,
+                        )
+                        logging.error(
+                            "[AutoTrading] Binance circuit opened until %s after HTTP %s",
+                            time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(deadline)),
+                            response.status_code,
+                        )
+                        raise error
                     if error_code == -1021 and signed and attempt < max_attempts - 1:
                         self._sync_server_time()
                         continue
@@ -381,7 +425,8 @@ class BinanceFuturesClient:
         raise RuntimeError(f"ambiguous Binance algo submission: {last_error}")
 
     def symbol_rules(self, symbol: str) -> SymbolRules:
-        cached = self._rules_cache.get(symbol)
+        with _symbol_rules_lock:
+            cached = _shared_symbol_rules_cache.get(symbol)
         if cached and time.time() - cached[0] < 3600:
             return cached[1]
         data = self._request("GET", "/fapi/v1/exchangeInfo")
@@ -398,7 +443,8 @@ class BinanceFuturesClient:
             min_qty=_decimal(lot_filter.get("minQty", "0")),
             min_notional=_decimal(notional_filter.get("notional", notional_filter.get("minNotional", "0"))),
         )
-        self._rules_cache[symbol] = (time.time(), rules)
+        with _symbol_rules_lock:
+            _shared_symbol_rules_cache[symbol] = (time.time(), rules)
         return rules
 
     def usdt_balance_details(self) -> dict[str, float]:
