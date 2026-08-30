@@ -9,6 +9,7 @@ import os
 import sqlite3
 import time
 from typing import Any
+from core.data_policy import configured_market_data_providers
 from .models import number
 from .pair_registry import get_pair
 
@@ -164,7 +165,7 @@ async def collect(symbol: str) -> dict:
         _last_persist[symbol] = time.time(); await asyncio.to_thread(_persist_snapshot, data)
     return {"source": SOURCE, "status": "fresh", "age_seconds": data["age_seconds"], "normalized": data}
 
-async def _consume(url: str, subscriptions: list[dict[str, Any]], parser) -> None:
+async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]], parser) -> None:
     if aiohttp is None: return
     backoff = 1
     while _stop_event and not _stop_event.is_set():
@@ -181,7 +182,8 @@ async def _consume(url: str, subscriptions: list[dict[str, Any]], parser) -> Non
                             except Exception as exc: logging.debug("[LiveTape] parse: %s", exc)
                         elif message.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}: break
         except asyncio.CancelledError: raise
-        except Exception as exc: logging.warning("[LiveTape] websocket retry: %s", type(exc).__name__)
+        except Exception as exc:
+            logging.warning("[LiveTape] %s websocket retry url=%s error=%s", provider, url.split("?", 1)[0], type(exc).__name__)
         if _stop_event and not _stop_event.is_set(): await asyncio.sleep(min(backoff, 30)); backoff = min(backoff * 2, 30)
 
 async def start(symbols: list[str]) -> dict[str, Any]:
@@ -199,22 +201,26 @@ async def start(symbols: list[str]) -> dict[str, Any]:
             provider_symbol = pair.get(f"{provider}_symbol")
             if provider_symbol: _provider_to_apex[(provider, str(provider_symbol).upper())] = symbol
     _stop_event = asyncio.Event()
+    enabled = set(configured_market_data_providers())
     gate = [get_pair(s)["gate_symbol"] for s in _configured_symbols if get_pair(s).get("gate_supported")]
     binance = [get_pair(s)["binance_symbol"] for s in _configured_symbols if get_pair(s).get("binance_supported")]
     bybit = [get_pair(s)["bybit_symbol"] for s in _configured_symbols if get_pair(s).get("bybit_supported")]
-    if gate:
+    if gate and "gate" in enabled:
         subs = [{"time": int(time.time()), "channel": channel, "event": "subscribe", "payload": gate} for channel in ("futures.trades", "futures.book_ticker", "futures.tickers")]
-        _tasks.append(asyncio.create_task(_consume("wss://fx-ws.gateio.ws/v4/ws/usdt", subs, ingest_gate)))
-    if binance:
-        streams = [stream for symbol in binance for stream in (f"{symbol.lower()}@aggTrade", f"{symbol.lower()}@forceOrder", f"{symbol.lower()}@bookTicker")]
-        for offset in range(0, len(streams), 80):
-            chunk = streams[offset:offset + 80]
-            _tasks.append(asyncio.create_task(_consume("wss://fstream.binance.com/public/stream?streams=" + "/".join(chunk), [], ingest_binance)))
-    if bybit:
+        _tasks.append(asyncio.create_task(_consume("gate", "wss://fx-ws.gateio.ws/v4/ws/usdt", subs, ingest_gate)))
+    if binance and "binance" in enabled:
+        public_streams = [f"{symbol.lower()}@bookTicker" for symbol in binance]
+        market_streams = [stream for symbol in binance for stream in (f"{symbol.lower()}@aggTrade", f"{symbol.lower()}@forceOrder")]
+        for route, streams in (("public", public_streams), ("market", market_streams)):
+            for offset in range(0, len(streams), 80):
+                chunk = streams[offset:offset + 80]
+                url = f"wss://fstream.binance.com/{route}/stream?streams=" + "/".join(chunk)
+                _tasks.append(asyncio.create_task(_consume(f"binance-{route}", url, [], ingest_binance)))
+    if bybit and "bybit" in enabled:
         args = [topic for symbol in bybit for topic in (f"publicTrade.{symbol}", f"allLiquidation.{symbol}", f"tickers.{symbol}")]
         subs = [{"op": "subscribe", "args": args[i:i + 50]} for i in range(0, len(args), 50)]
-        _tasks.append(asyncio.create_task(_consume("wss://stream.bybit.com/v5/public/linear", subs, ingest_bybit)))
-    return {"status": "started" if _tasks else "unavailable", "symbols": len(_configured_symbols), "connections": len(_tasks)}
+        _tasks.append(asyncio.create_task(_consume("bybit", "wss://stream.bybit.com/v5/public/linear", subs, ingest_bybit)))
+    return {"status": "started" if _tasks else "unavailable", "symbols": len(_configured_symbols), "connections": len(_tasks), "providers": sorted(enabled)}
 
 async def stop() -> None:
     global _tasks, _stop_event
