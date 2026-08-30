@@ -41,6 +41,13 @@ for _p in [_os_path.path.join(_BASE_DIR, "core"), _BASE_DIR]:
     if _p not in _sys.path:
         _sys.path.insert(0, _p)
 
+from market_structure import (
+    analyze_market_structure as _analyze_market_structure,
+    classify_swings as _classify_structure_swings,
+    events_with_trend_fallback as _structure_events,
+    find_swings as _find_structure_swings,
+)
+
 try:
     from session_clock import fast_session as _fast_session
 except Exception as _session_clock_error:
@@ -2497,62 +2504,16 @@ def format_historical_context(symbol, hist):
 # ===== SMC ENGINE =====
 
 def find_swings(candles, lookback=8):
-    highs, lows = [], []
-    for i in range(lookback, len(candles) - lookback):
-        wh = [c["high"] for c in candles[i-lookback:i+lookback+1]]
-        wl = [c["low"] for c in candles[i-lookback:i+lookback+1]]
-        if candles[i]["high"] == max(wh):
-            highs.append((i, candles[i]["high"]))
-        if candles[i]["low"] == min(wl):
-            lows.append((i, candles[i]["low"]))
-    return highs, lows
+    return _find_structure_swings(candles, lookback=lookback)
 
 def classify_swings(highs, lows):
-    result = []
-    for i, (idx, price) in enumerate(highs):
-        kind = "HH" if i == 0 or price > highs[i-1][1] else "LH"
-        result.append({"idx": idx, "price": price, "kind": kind})
-    for i, (idx, price) in enumerate(lows):
-        kind = "HL" if i == 0 or price > lows[i-1][1] else "LL"
-        result.append({"idx": idx, "price": price, "kind": kind})
-    return sorted(result, key=lambda x: x["idx"])
+    return _classify_structure_swings(highs, lows)
 
 def detect_events(candles, classified):
-    """Определяем направление тренда по структуре свингов — не требуем точного пробоя прямо сейчас"""
-    events = []
-    if not classified:
-        return events
-
-    highs = [s for s in classified if s["kind"] in ("HH", "LH")]
-    lows = [s for s in classified if s["kind"] in ("HL", "LL")]
-    last_close = candles[-1]["close"]
-
-    # Бычья структура: больше HH чем LH — восходящий тренд
-    hh_count = sum(1 for s in classified if s["kind"] == "HH")
-    lh_count = sum(1 for s in classified if s["kind"] == "LH")
-    hl_count = sum(1 for s in classified if s["kind"] == "HL")
-    ll_count = sum(1 for s in classified if s["kind"] == "LL")
-
-    # CHoCH/BOS — точный пробой свинга
-    if highs and last_close > highs[-1]["price"]:
-        etype = "CHoCH" if highs[-1]["kind"] == "LH" else "BOS"
-        events.append({"type": etype, "direction": "BULLISH", "level": highs[-1]["price"]})
-    if lows and last_close < lows[-1]["price"]:
-        etype = "CHoCH" if lows[-1]["kind"] == "HL" else "BOS"
-        events.append({"type": etype, "direction": "BEARISH", "level": lows[-1]["price"]})
-
-    # Если нет точного пробоя — определяем по структуре свингов
-    if not events:
-        if hh_count >= 2 and hl_count >= 1:
-            events.append({"type": "TREND", "direction": "BULLISH", "level": 0})
-        elif ll_count >= 2 and lh_count >= 1:
-            events.append({"type": "TREND", "direction": "BEARISH", "level": 0})
-        elif hh_count > ll_count:
-            events.append({"type": "BIAS", "direction": "BULLISH", "level": 0})
-        elif ll_count > hh_count:
-            events.append({"type": "BIAS", "direction": "BEARISH", "level": 0})
-
-    return events
+    """Return a real BOS/CHoCH or a symmetric HH+HL/LH+LL trend state."""
+    if not classified or not candles:
+        return []
+    return _structure_events(candles, classified, max_break_age=1)
 
 def find_ob(candles, direction):
     for i in range(len(candles) - 2, max(0, len(candles) - 25), -1):
@@ -3515,7 +3476,7 @@ def full_scan(symbol, timeframe="1h"):
 
         # ── CHoCH/MSS подтверждение на 15m ──
         try:
-            _candles_15m = get_candles(symbol, "15m", 30)
+            _candles_15m = get_confirmed_candles(get_candles(symbol, "15m", 30))
             if _candles_15m and len(_candles_15m) >= 10:
                 _sw_15m, _sl_15m = find_swings(_candles_15m, lookback=3)
                 _cl_15m = classify_swings(_sw_15m, _sl_15m)
@@ -7570,38 +7531,44 @@ def find_equal_highs_lows(candles, lookback=20, tolerance=0.002):
 
     return eqh_level, eql_level
 
-def detect_bos_choch(candles: list, direction: str, lookback: int = 15) -> bool:
-    """
-    Реальная проверка BOS (Break of Structure) или CHoCH (Change of Character).
+def get_bos_choch_event(
+    candles: list,
+    direction: str,
+    lookback: int = 15,
+    max_break_age: int = 1,
+) -> dict | None:
+    """Return a close-confirmed structural event matching ``direction``.
 
-    BULLISH BOS: цена пробила предыдущий swing high → структура сломана вверх
-    BEARISH BOS: цена пробила предыдущий swing low → структура сломана вниз
-
-    Возвращает True если структура подтверждает направление.
+    ``lookback`` keeps its legacy meaning as the minimum amount of history,
+    while centred pivots use a small, symmetric radius appropriate for the
+    supplied LTF sample.  A BOS continues an established HH+HL/LH+LL trend;
+    a CHoCH breaks against it.  Mixed structure returns ``None``.
     """
     try:
-        if not candles or len(candles) < lookback + 3:
-            return False
+        if direction not in ("BULLISH", "BEARISH"):
+            return None
+        if not candles or len(candles) < max(lookback + 3, 12):
+            return None
 
-        price = candles[-1]["close"]
-
-        # Берём свечи исключая последние 3 (текущее движение)
-        _hist = candles[-(lookback + 3):-3]
-        if not _hist:
-            return False
-
-        if direction == "BULLISH":
-            _prev_high = max(c["high"] for c in _hist)
-            return price > _prev_high
-
-        elif direction == "BEARISH":
-            _prev_low = min(c["low"] for c in _hist)
-            return price < _prev_low
-
-        return False
-
+        swing_lookback = 3 if len(candles) >= 50 else 2
+        structure = _analyze_market_structure(
+            candles,
+            swing_lookback=swing_lookback,
+            max_break_age=max_break_age,
+        )
+        event = structure.get("event")
+        if not event or event.get("direction") != direction:
+            return None
+        if event.get("type") not in ("BOS", "CHoCH") or not event.get("closed"):
+            return None
+        return event
     except Exception:
-        return False
+        return None
+
+
+def detect_bos_choch(candles: list, direction: str, lookback: int = 15) -> bool:
+    """Compatibility boolean for callers that do not need event metadata."""
+    return get_bos_choch_event(candles, direction, lookback=lookback) is not None
 
 
 def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
@@ -7884,40 +7851,17 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             logging.debug("[SWING] %s: displacement validation failed: %s", symbol, _swing_displacement_error)
             return None
 
-        # ── CHoCH (Change of Character) — смена структуры после sweep ──
-        # После bullish sweep цена должна пробить предыдущий swing high
-        # После bearish sweep цена должна пробить предыдущий swing low
-        choch_found = False
-        try:
-            if direction == "BULLISH":
-                # Ищем пробой предыдущего swing high после sweep свечи
-                choch_found = False
-                for ci in range(-trigger_lookback + 1, 0):
-                    if ci == 0:
-                        break
-                    c = candles[ci]
-                    if c["close"] > last_swing_high:
-                        choch_found = True
-                        break
-                # Если CHoCH не найден — ждём (текущая свеча тоже считается)
-                local_high = max(c["high"] for c in candles[-(trigger_lookback+5):-trigger_lookback])
-                choch_bull = candles[-1]["close"] > local_high
-                if not choch_found and choch_bull:
-                    choch_found = True
-            elif direction == "BEARISH":
-                choch_found = False
-                for ci in range(-trigger_lookback + 1, 0):
-                    if ci == 0: break
-                    if candles[ci]["close"] < last_swing_low:
-                        choch_found = True; break
-                local_low = min(c["low"] for c in candles[-(trigger_lookback+5):-trigger_lookback])
-                if not choch_found and candles[-1]["close"] < local_low:
-                    choch_found = True
-        except Exception:
-            pass
-
-        if not choch_found:
-            logging.info(f"[SWING] {symbol}: нет подтверждённого CHoCH после триггера")
+        # ── BOS/CHoCH after the sweep, confirmed by candle close ──
+        # The canonical engine distinguishes continuation (BOS) from a real
+        # change of character (CHoCH) using the prior paired swing structure.
+        _swing_structure_event = get_bos_choch_event(
+            candles,
+            direction,
+            lookback=30,
+            max_break_age=max(1, trigger_lookback),
+        )
+        if not _swing_structure_event:
+            logging.info(f"[SWING] {symbol}: нет подтверждённого BOS/CHoCH после триггера")
             return None
 
         # ── Reaction speed: sweep recovery within 1-2 candles ──
@@ -7963,9 +7907,14 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # ── 1h CHoCH/BOS после 4h sweep ──
         _swing_1h_choch = False
+        _swing_1h_structure_event = None
         try:
             _c1h_sw = get_confirmed_candles(get_candles(symbol, "1h", 31))
-            _swing_1h_choch = detect_bos_choch(_c1h_sw, direction, lookback=8) if _c1h_sw else False
+            _swing_1h_structure_event = (
+                get_bos_choch_event(_c1h_sw, direction, lookback=8, max_break_age=2)
+                if _c1h_sw else None
+            )
+            _swing_1h_choch = bool(_swing_1h_structure_event)
         except Exception:
             pass
 
@@ -8280,6 +8229,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "fvg":       _sw_dir_fvg if _swing_fvg_ok else None,
             "confirms":  _sw_confirms,
             "funding_warning": _swing_funding_warning,
+            "structure_event": _swing_structure_event,
+            "structure_event_1h": _swing_1h_structure_event,
             "scan_type": "swing",
         }
 
@@ -8450,9 +8401,14 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # Q1: CHoCH/BOS на 1h (реальная проверка структуры)
         _zone_ltf_structure = False
+        _zone_structure_event = None
         try:
             _c1h_zone = get_confirmed_candles(get_candles(symbol, "1h", 31))
-            if _c1h_zone and detect_bos_choch(_c1h_zone, direction, lookback=8):
+            _zone_structure_event = (
+                get_bos_choch_event(_c1h_zone, direction, lookback=8, max_break_age=1)
+                if _c1h_zone else None
+            )
+            if _zone_structure_event:
                 q_score += 1
                 _zone_ltf_structure = True
         except Exception:
@@ -8659,6 +8615,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             "funding_warning": _zone_funding_warning,
             "logic":     logic,
             "est_hours": _zone_est_hours,
+            "structure_event": _zone_structure_event,
         }
 
     except Exception as e:
@@ -9819,6 +9776,18 @@ def detect_fast_deal(symbol: str) -> dict | None:
             logging.debug(f"[FAST] {symbol}: нет acceptance — цена не закрылась за зоной")
             return None
 
+        # FAST still needs a real, recent close-confirmed structural break.
+        # Engulfing/volume alone cannot substitute for BOS/CHoCH.
+        _fast_structure_event = get_bos_choch_event(
+            candles_15m,
+            direction,
+            lookback=15,
+            max_break_age=min(3, max(1, _sweep_candles_ago)),
+        )
+        if not _fast_structure_event:
+            logging.debug(f"[FAST] {symbol}: нет свежего 15m BOS/CHoCH")
+            return None
+
         # ── TP = confirmed 15m swing liquidity ──
         _fast_highs, _fast_lows = find_swings(candles_15m, lookback=3)
         if direction == "BULLISH":
@@ -9887,17 +9856,20 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 "2. 4h OB или FVG подтверждает зону — институционалы там входили\n"
                 "3. Volume spike 2.0x — реальный интерес на engulfing свече\n"
                 "4. Acceptance — цена закрылась за зоной OB/FVG\n"
-                "5. BTC и 1d тренд совпадают — не иди против рынка\n\n"
+                "5. Закрытая 15m свеча подтверждает настоящий BOS/CHoCH\n"
+                "6. BTC и 1d тренд совпадают — не иди против рынка\n\n"
                 "БЛОКИРУЙ если:\n"
                 f"- RR={rr} < 1.5\n"
                 f"- Стоп {_fast_sl_pct}% > 1.5% от входа (скальп = узкий стоп)\n"
                 "- Нет OB и нет FVG на 4h — вход без подтверждения зоны\n"
+                "- Нет свежего подтверждённого BOS/CHoCH на закрытой 15m свече\n"
                 "- 1d тренд ПРОТИВ направления\n"
                 "- BTC тренд ПРОТИВ направления\n"
                 "- Вне переданной приложением London/NY Kill Zone\n"
                 "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ если:\n"
                 "- Engulfing чёткий с объёмом 2.0x+\n"
+                "- Есть свежий BOS/CHoCH в направлении сделки\n"
                 "- 4h OB или FVG подтверждает зону входа\n"
                 f"- RR={rr} >= 2.0\n"
                 "- 1d тренд и BTC в том же направлении\n"
@@ -9910,6 +9882,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"ДАННЫЕ СЕТАПА:\n"
                 f"Пара: {symbol} Направление: {direction}\n"
                 f"15m engulfing ({_sweep_candles_ago} свечей назад) | Acceptance: {_acceptance}\n"
+                f"Структура: {_fast_structure_event['type']} @ {_fast_structure_event['level']} | closed=true\n"
                 f"4h зона: {zone_desc} | {_ob_4h_desc} | {_fvg_4h_desc}\n"
                 f"Тренд: {direction_1d} | BTC: {btc_trend}\n"
                 f"Funding: {_fast_fund_str} | Fear&Greed: {_fast_fg_str} | Режим: {_fast_regime_str}\n"
@@ -9962,6 +9935,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "fvg":       fvg_4h,
             "fast_score": 0,
             "scan_type": "fast",
+            "structure_event": _fast_structure_event,
         }
 
     except Exception as e:

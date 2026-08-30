@@ -4422,6 +4422,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         _mtf_score_btc = False
         _mtf_score_session = False
         _mtf_score_bos = False
+        _mtf_structure_event = None
 
         # Volume spike ≥1.2x
         try:
@@ -4453,7 +4454,11 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # BOS/CHoCH на 15m
         try:
             _c15m_m = get_confirmed_candles(get_candles(symbol, "15m", 31))
-            if _c15m_m and detect_bos_choch(_c15m_m, direction, lookback=15):
+            _mtf_structure_event = (
+                get_bos_choch_event(_c15m_m, direction, lookback=15, max_break_age=1)
+                if _c15m_m else None
+            )
+            if _mtf_structure_event:
                 _mtf_score += 1
                 _mtf_score_bos = True
         except Exception:
@@ -4515,6 +4520,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
                 "positive_confluence": _positive_confluence[:8],
                 "confirmation_score": _mtf_score,
                 "bos_choch": _mtf_score_bos,
+                "structure_event": _mtf_structure_event,
                 "btc_confirmed": _mtf_score_btc,
                 "volume_confirmed": _mtf_score_vol,
                 "ob": ob,
