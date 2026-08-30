@@ -81,7 +81,7 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
             "gate_symbol": "1000PEPE_USDT",
         }
         with patch.object(pair_registry, "_DB_PATH", self.db_path), \
-             patch("core.smc_engine.requests.get", return_value=Response()) as request:
+             patch("core.smc_engine.requests.get", return_value=Response(), create=True) as request:
             candles = smc_engine._fetch_gate("PEPEUSDT", "1h", 10)
             row = pair_registry.get_pair("PEPEUSDT")
         self.assertEqual(request.call_args.kwargs["params"]["contract"], "1000PEPE_USDT")
@@ -90,7 +90,7 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["gate_candles_count"], 1)
 
     async def test_unmapped_asset_is_never_silently_replaced_with_bitcoin(self):
-        with patch("core.smc_engine.requests.get") as request:
+        with patch("core.smc_engine.requests.get", create=True) as request:
             with self.assertRaisesRegex(ValueError, "No CG ID"):
                 smc_engine._fetch_synthetic("NOTAREALPAIRUSDT", "1h", 10)
         request.assert_not_called()
