@@ -75,6 +75,13 @@ from core.session_clock import fast_session
 from core.trade_views import fetch_trades as _fetch_trade_view_rows
 from core.trade_views import format_trade_view as _format_trade_view
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
+from core.telegram_dashboard import (
+    fetch_strategy_stats as _fetch_strategy_stats,
+    fetch_system_health as _fetch_system_health,
+    fetch_watchlist as _fetch_watchlist,
+    format_strategy_stats as _format_strategy_stats,
+    format_watchlist as _format_watchlist,
+)
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
@@ -232,13 +239,13 @@ def get_binance_klines(symbol, interval, limit=200):
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades"),
-         InlineKeyboardButton(text="✅ По тейку", callback_data="menu_take_closed"),
+         InlineKeyboardButton(text="👀 Наблюдаемые", callback_data="menu_watchlist")],
+        [InlineKeyboardButton(text="✅ По тейку", callback_data="menu_take_closed"),
          InlineKeyboardButton(text="🛑 По стопу", callback_data="menu_stop_closed")],
-        [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals"),
-         InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats"),
-         InlineKeyboardButton(text="📰 Новости", callback_data="menu_news")],
-        [InlineKeyboardButton(text="🧠 Система APEX", callback_data="menu_brain")]
+         InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
+        [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
+         InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")]
     ])
 
 def tf_keyboard():
@@ -919,6 +926,22 @@ async def handle_callback(callback: CallbackQuery):
             ]),
         )
 
+    elif data == "menu_watchlist":
+        try:
+            items = await asyncio.to_thread(_fetch_watchlist, DB_PATH, 20)
+            text = _format_watchlist(items)
+        except Exception as exc:
+            logging.error("Telegram watchlist: %s", exc)
+            text = "⚠️ Не удалось прочитать наблюдаемые сделки. Сканер продолжает работать."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist"),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
     elif data == "menu_scan":
         try:
             await callback.message.edit_text(
@@ -1290,7 +1313,8 @@ async def handle_callback(callback: CallbackQuery):
             top = []
             patterns = []
 
-        wr = round(wins / total * 100, 1) if total > 0 else 0
+        resolved = wins + losses
+        wr = round(wins / resolved * 100, 1) if resolved > 0 else 0
         top_text = "\n".join([f"  {r[0]}: {r[1]:.0f}% WR за {r[2]} сигн." for r in top]) or "  Нет данных"
 
         err_text = ""
@@ -1310,10 +1334,51 @@ async def handle_callback(callback: CallbackQuery):
             f"{err_text}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Стратегии", callback_data="menu_strategies"),
+                [InlineKeyboardButton(text="📊 По стратегиям", callback_data="menu_strategies"),
                  InlineKeyboardButton(text="🔍 Ошибки", callback_data="menu_errors")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
             ])
+        )
+
+    elif data == "menu_system":
+        try:
+            health = await asyncio.to_thread(_fetch_system_health, DB_PATH)
+            execution = await asyncio.to_thread(_execution_status, DB_PATH) if _TRADE_EXECUTION_OK else {}
+            mode = str(execution.get("mode", "OFF")).upper() if execution.get("enabled") else "OFF"
+            live = "готова" if execution.get("live_armed") else "не активна"
+            account = execution.get("account") or {}
+            balance = (
+                f"${float(account.get('wallet_balance', 0) or 0):.4f}"
+                if account.get("available") else "недоступен"
+            )
+            external_state = "модуль загружен" if _MARKET_INTELLIGENCE_OK else "недоступен"
+            quality_state = "модуль загружен" if _SIGNAL_QUALITY_GATE_OK else "недоступен"
+            integrity_state = "модуль загружен" if _SIGNAL_INTEGRITY_OK else "недоступен"
+            text = (
+                "🛡 <b>Состояние APEX</b>\n\n"
+                f"Процесс Telegram: <b>работает</b>\n"
+                f"Проверка уровней: <b>{integrity_state}</b>\n"
+                f"Groq Quality Gate: <b>{quality_state}</b>\n"
+                f"Внешний контекст: <b>{external_state}</b>\n\n"
+                f"Gate — пары: <b>{health.get('gate_total', 0)}</b> · проверены свечами: "
+                f"<b>{health.get('gate_candles', 0)}</b>\n"
+                f"Решений Groq за 24ч: <b>{health.get('groq_24h', 0)}</b>\n"
+                f"Открытых ошибок: <b>{health.get('open_errors', 0)}</b>\n\n"
+                f"Автоторговля: <b>{mode}</b> · LIVE {live}\n"
+                f"Futures-баланс: <b>{balance}</b>\n"
+                f"Риск: <b>{execution.get('risk_pct', 0)}%</b> · плечо "
+                f"<b>x{execution.get('leverage', 1)}</b>\n\n"
+                "<i>Новости работают автоматически внутри Groq-фильтра и не требуют отдельной кнопки.</i>"
+            )
+        except Exception as exc:
+            logging.error("Telegram system status: %s", exc)
+            text = "⚠️ Не удалось собрать состояние системы. Сам сканер продолжает работать."
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_system"),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
         )
 
     elif data == "menu_brain":
@@ -1441,7 +1506,7 @@ async def handle_callback(callback: CallbackQuery):
             execution_block = "\n⚙️ Автоторговля: <b>модуль недоступен</b>\n"
 
         await callback.message.edit_text(
-            f"🧠 <b>Мозг APEX — состояние</b>\n"
+            f"🧠 <b>Знания APEX</b>\n"
             f"{'━'*24}\n\n"
             f"📚 Записей знаний: <b>{knowledge_count}</b>\n"
             f"📈 SMC-паттернов: <b>{pattern_count}</b>\n"
@@ -1991,55 +2056,12 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "menu_strategies":
-        strategies_text = (
-            "📋 <b>Активные стратегии APEX</b>\n\n"
-
-            "⚡ <b>FAST</b> — 4h контекст + 15m вход\n"
-            "• London/NY Kill Zone с учётом DST\n"
-            "• 4h OB/FVG в Discount/Premium\n"
-            "• 15m engulfing + displacement ≥ 0.65\n"
-            "• Volume spike ≥ 2.0x\n"
-            "• Acceptance (close за зоной)\n"
-            "• No middle range фильтр\n"
-            "• Цели по 15m swing liquidity · RR 2.0–4.0\n\n"
-
-            "📐 <b>MTF</b> — Multi TimeFrame\n"
-            "• 1h + 4h в одну сторону; 1d подтверждает\n"
-            "• BOS/CHoCH на закрытой 15m свече\n"
-            "• Свежий OB/FVG пересекает OTE 0.62–0.79\n"
-            "• SL за impulse/zone; TP по liquidity/swing\n"
-            "• RR 2.0–4.0\n\n"
-
-            "🔄 <b>SWING</b> — sweep & reverse\n"
-            "• Sweep EQH/EQL ИЛИ реакция от OB\n"
-            "• HTF: 4h + 1d (оба против = блок)\n"
-            "• Volume + displacement + CHoCH/P-D/FVG/15m\n"
-            "• Quality ≥ 3/6\n"
-            "• SL за sweep/OB; шире 4% = отказ, не cap\n"
-            "• TP на swing liquidity · RR 2.0–4.0\n\n"
-
-            "📦 <b>ZONE</b> — зона интереса\n"
-            "• OB/FVG unmitigated (≤ 2 теста)\n"
-            "• Strong move away disp ≥ 0.5\n"
-            "• Нижние/верхние 30% диапазона; середина = отказ\n"
-            "• Отбой + закрытый 1h BOS/CHoCH\n"
-            "• Q-score ≥ 4/8 при high volatility, иначе ≥ 5/8\n"
-            "• TP на swing level · RR ≥ 2.0\n\n"
-
-            "🌊 <b>WYCKOFF</b> — accumulation/distribution\n"
-            "• Spring+SOS или UTAD+SOW обязательны\n"
-            "• Volume/range compression и подтверждённые фазы\n"
-            "• SL за Spring/SC или UTAD/BC\n"
-            "• TP по AR/range Fibonacci extension\n"
-            "• RR 2.0–4.0; re-accumulation 2.5–4.0\n\n"
-
-            "🧠 <b>Общий контроль</b>\n"
-            "• Структура только по закрытым свечам\n"
-            "• Центральная проверка RR ≥ 2.0 и порядка уровней\n"
-            "• Groq видит strategy + self_rules + errors + external/news/history\n"
-            "• Groq может только APPROVE/WAIT/REJECT; уровни не меняет\n"
-        )
-
+        try:
+            strategy_rows = await asyncio.to_thread(_fetch_strategy_stats, DB_PATH)
+            strategies_text = _format_strategy_stats(strategy_rows)
+        except Exception as exc:
+            logging.error("Telegram strategy stats: %s", exc)
+            strategies_text = "⚠️ Не удалось рассчитать статистику стратегий."
         await callback.message.edit_text(
             strategies_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -3053,7 +3075,10 @@ async def _send_signal(sd):
         if decision in ("WAIT", "REJECT"):
             _record_strategy_decision(
                 sd, decision, "groq_quality_gate", "; ".join(review.get("reasons", [])),
-                evidence={"sources": review.get("context", {}).get("data_quality", {})}, db_path=DB_PATH,
+                evidence={
+                    "sources": review.get("context", {}).get("data_quality", {}),
+                    "candidate": {key: sd.get(key) for key in ("entry", "sl", "tp1", "tp2")},
+                }, db_path=DB_PATH,
             )
             return False
     if not ADMIN_IDS:
