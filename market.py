@@ -31,6 +31,11 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from core.pair_universe import (
+    DEFAULT_UNIVERSE_SIZE,
+    FALLBACK_COMMON_PAIRS,
+    select_common_pairs,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ── Внешние модули APEX ──────────────────────────────────────
@@ -1241,30 +1246,33 @@ def get_liquidation_ratio(symbol: str) -> dict:
         logging.debug(f"LiqRatio {symbol}: {e}")
     return {"ratio": 1.0, "signal": "NEUTRAL", "desc": "", "ok": False}
 
-def get_top_pairs(limit=100):
-    """Фиксированный список топ-80 монет — только проверенные пары с ликвидностью"""
+def get_top_pairs(limit=DEFAULT_UNIVERSE_SIZE):
+    """Liquid Gate/Binance USD-M intersection, refreshed once per hour."""
     global pairs_cache, pairs_cache_time
     if time.time() - pairs_cache_time < 3600 and pairs_cache:
         return pairs_cache[:limit]
-
-    FIXED_60 = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-        "TONUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
-        "ADAUSDT", "DOTUSDT", "POLUSDT", "LTCUSDT", "ATOMUSDT",
-        "NEARUSDT", "INJUSDT", "SUIUSDT", "APTUSDT", "OPUSDT",
-        "UNIUSDT", "PEPEUSDT", "SHIBUSDT", "TRXUSDT", "XLMUSDT",
-        "WLDUSDT", "SEIUSDT", "JUPUSDT", "BONKUSDT", "BCHUSDT",
-        "ICPUSDT", "ETCUSDT", "FILUSDT", "HBARUSDT", "STXUSDT",
-        "LDOUSDT", "RENDERUSDT", "FETUSDT", "APEUSDT", "FLOKIUSDT",
-        "WIFUSDT", "AAVEUSDT", "CRVUSDT", "GRTUSDT", "SNXUSDT",
-        "RUNEUSDT", "ENAUSDT", "TAOUSDT", "NOTUSDT", "CATIUSDT",
-        "VIRTUALUSDT", "DYMUSDT", "VANAUSDT", "PENGUUSDT", "BOMEUSDT",
-        "POPCATUSDT", "BBUSDT", "SATSUSDT", "WUSDT", "ONDOUSDT",
-    ]
-
-    pairs_cache = FIXED_60[:limit]
+    target = max(1, min(int(limit), DEFAULT_UNIVERSE_SIZE))
+    try:
+        gate = requests.get(
+            "https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=7,
+            headers={"User-Agent": "APEX-SMC/1.0"},
+        )
+        binance = requests.get(
+            "https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=7,
+            headers={"User-Agent": "APEX-SMC/1.0"},
+        )
+        gate.raise_for_status(); binance.raise_for_status()
+        discovered = select_common_pairs(gate.json(), binance.json(), limit=DEFAULT_UNIVERSE_SIZE)
+        if len(discovered) >= DEFAULT_UNIVERSE_SIZE:
+            pairs_cache = discovered
+            logging.info("[PairUniverse] %s common liquid Gate/Binance perpetuals", len(pairs_cache))
+        else:
+            raise RuntimeError(f"only {len(discovered)} eligible common pairs")
+    except Exception as exc:
+        pairs_cache = list(dict.fromkeys(FALLBACK_COMMON_PAIRS))[:DEFAULT_UNIVERSE_SIZE]
+        logging.warning("[PairUniverse] live refresh unavailable, using %s-pair fallback: %s", len(pairs_cache), exc)
     pairs_cache_time = time.time()
-    return pairs_cache
+    return pairs_cache[:target]
 
 
 def get_live_prices():
