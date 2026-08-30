@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import calendar
 import logging
 import os
 import sqlite3
@@ -55,6 +56,14 @@ def _bounded_float(value: Any, default: float, low: float, high: float) -> float
     return max(low, min(high, parsed))
 
 
+def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(low, min(high, parsed))
+
+
 @dataclass(frozen=True)
 class ExecutionConfig:
     enabled: bool = False
@@ -70,6 +79,9 @@ class ExecutionConfig:
     live_confirmation: str = ""
     timeout_seconds: float = 8.0
     retries: int = 3
+    kill_switch: bool = False
+    max_open_positions: int = 3
+    max_daily_loss_pct: float = 2.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ExecutionConfig":
@@ -101,6 +113,11 @@ class ExecutionConfig:
             live_confirmation=str(source.get("AUTO_TRADING_LIVE_CONFIRM", "")).strip(),
             timeout_seconds=_bounded_float(source.get("AUTO_TRADING_TIMEOUT_SECONDS"), 8.0, 3.0, 10.0),
             retries=max(1, min(4, retries)),
+            kill_switch=_env_bool(source.get("AUTO_TRADING_KILL_SWITCH"), False),
+            max_open_positions=_bounded_int(source.get("AUTO_TRADING_MAX_OPEN_POSITIONS"), 3, 1, 10),
+            max_daily_loss_pct=_bounded_float(
+                source.get("AUTO_TRADING_MAX_DAILY_LOSS_PCT"), 2.0, 0.25, 10.0,
+            ),
         )
 
     @property
@@ -402,13 +419,27 @@ class BinanceFuturesClient:
     def available_usdt(self) -> float:
         return self.usdt_balance_details()["available_balance"]
 
-    def income_history(self, limit: int = 100) -> list[dict[str, Any]]:
+    def income_history(self, limit: int = 100, start_time: int | None = None) -> list[dict[str, Any]]:
         """Return recent USD-M income records (Binance defaults to seven days)."""
-        result = self._request(
-            "GET", "/fapi/v1/income", {"limit": max(1, min(int(limit), 1000))},
-            signed=True,
-        )
+        params = {"limit": max(1, min(int(limit), 1000))}
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        result = self._request("GET", "/fapi/v1/income", params, signed=True)
         return result if isinstance(result, list) else []
+
+    def open_positions(self) -> list[dict[str, Any]]:
+        rows = self._request("GET", "/fapi/v3/positionRisk", signed=True)
+        if isinstance(rows, dict):
+            rows = [rows]
+        return [row for row in rows if abs(float(row.get("positionAmt", 0) or 0)) > 0]
+
+    def realized_pnl_since(self, start_time_ms: int) -> float:
+        rows = self.income_history(limit=1000, start_time=start_time_ms)
+        return sum(
+            float(row.get("income", 0) or 0)
+            for row in rows
+            if row.get("incomeType") == "REALIZED_PNL" and row.get("asset", "USDT") == "USDT"
+        )
 
     def mark_price(self, symbol: str) -> float:
         result = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
@@ -597,6 +628,12 @@ def execute_approved_candidate(
                 ),
             )
 
+        if config.kill_switch:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_KILL_SWITCH",
+                error="AUTO_TRADING_KILL_SWITCH is enabled",
+            )
+
         # Telegram delivery stays fail-open, but real money is fail-closed.
         review = candidate.get("_external_quality_review")
         try:
@@ -619,6 +656,25 @@ def execute_approved_candidate(
             return _store_execution(
                 db_path, signal_id, config, candidate, "SKIPPED_HEDGE_MODE",
                 error="safe live execution currently requires Binance One-way Mode",
+            )
+        # Exchange state is authoritative. Any failure here is caught by the
+        # outer fail-closed guard and no order is submitted.
+        open_positions = client.open_positions()
+        if len(open_positions) >= config.max_open_positions:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_MAX_POSITIONS",
+                error=f"open positions {len(open_positions)} >= limit {config.max_open_positions}",
+            )
+        balance_details = client.usdt_balance_details()
+        wallet_balance = float(balance_details.get("wallet_balance", 0) or 0)
+        now = time.gmtime()
+        utc_midnight_ms = int(calendar.timegm((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, 0)) * 1000)
+        daily_realized_pnl = client.realized_pnl_since(utc_midnight_ms)
+        loss_limit = wallet_balance * config.max_daily_loss_pct / 100.0
+        if wallet_balance > 0 and daily_realized_pnl <= -loss_limit:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_DAILY_LOSS",
+                error=f"daily realized PnL {daily_realized_pnl:.2f} <= -{loss_limit:.2f} USDT",
             )
         symbol = str(candidate.get("symbol", "")).upper()
         # Groq/news review and Telegram delivery take time.  Revalidate the

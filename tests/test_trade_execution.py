@@ -60,6 +60,18 @@ class FakeClient:
         self.calls.append("position_mode")
         return True
 
+    def open_positions(self):
+        self.calls.append("all_positions")
+        return []
+
+    def usdt_balance_details(self):
+        self.calls.append("balance_details")
+        return {"wallet_balance": self.balance, "available_balance": self.balance}
+
+    def realized_pnl_since(self, start_time_ms):
+        self.calls.append("daily_pnl")
+        return 0.0
+
     def has_open_position(self, symbol):
         self.calls.append(("position", symbol))
         return False
@@ -185,6 +197,35 @@ class TradeExecutionTests(unittest.TestCase):
         })
         self.assertEqual(config.leverage, 5)
         self.assertEqual(config.risk_pct, 1.0)
+
+    def test_live_kill_switch_blocks_before_exchange(self):
+        client = FakeClient()
+        result = execute_approved_candidate(
+            CANDIDATE, 99, db_path=self.db_path,
+            config=live_config(kill_switch=True), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_KILL_SWITCH")
+        self.assertEqual(client.calls, [])
+
+    def test_live_daily_loss_limit_blocks_new_order(self):
+        client = FakeClient(balance=1000)
+        client.realized_pnl_since = lambda _: -25.0
+        result = execute_approved_candidate(
+            CANDIDATE, 100, db_path=self.db_path,
+            config=live_config(max_daily_loss_pct=2.0), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_DAILY_LOSS")
+        self.assertFalse(any(call[0] == "entry" for call in client.calls if isinstance(call, tuple)))
+
+    def test_live_open_position_limit_blocks_new_order(self):
+        client = FakeClient()
+        client.open_positions = lambda: [{"symbol": "ETHUSDT", "positionAmt": "1"}]
+        result = execute_approved_candidate(
+            CANDIDATE, 102, db_path=self.db_path,
+            config=live_config(max_open_positions=1), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_MAX_POSITIONS")
+        self.assertFalse(any(call[0] == "entry" for call in client.calls if isinstance(call, tuple)))
 
     def test_position_size_uses_stop_risk_and_balance(self):
         plan = build_order_plan(CANDIDATE, 1000, live_config(), RULES)

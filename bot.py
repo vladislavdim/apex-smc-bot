@@ -74,6 +74,7 @@ from market import get_relevant_rules as _market_relevant_rules
 from core.session_clock import fast_session
 from core.trade_views import fetch_trades as _fetch_trade_view_rows
 from core.trade_views import format_trade_view as _format_trade_view
+from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
@@ -3012,6 +3013,7 @@ async def _send_signal(sd):
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
     if not _SIGNAL_INTEGRITY_OK:
         logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
+        _record_strategy_decision(sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
         return False
     try:
         _integrity_prices = get_live_prices()
@@ -3024,6 +3026,7 @@ async def _send_signal(sd):
             "[SignalIntegrity] %s %s blocked: %s",
             sd.get("symbol"), sd.get("direction"), integrity.get("errors"),
         )
+        _record_strategy_decision(sd, "REJECT", "integrity", "; ".join(integrity.get("errors", [])), db_path=DB_PATH)
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
@@ -3032,6 +3035,7 @@ async def _send_signal(sd):
             "[SignalArbiter] %s blocked: an existing pending thesis already owns the pair",
             sd.get("symbol"),
         )
+        _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
         return False
     _attach_learning_evidence(sd)
     if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
@@ -3047,9 +3051,14 @@ async def _send_signal(sd):
             review.get("reasons", []),
         )
         if decision in ("WAIT", "REJECT"):
+            _record_strategy_decision(
+                sd, decision, "groq_quality_gate", "; ".join(review.get("reasons", [])),
+                evidence={"sources": review.get("context", {}).get("data_quality", {})}, db_path=DB_PATH,
+            )
             return False
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
+        _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
         return False
     now_ts = time.time()
     cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
@@ -3061,6 +3070,7 @@ async def _send_signal(sd):
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             _cd.close()
             logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
+            _record_strategy_decision(sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
             return False
         _cd.close()
     except Exception as _cde:
@@ -3103,6 +3113,7 @@ async def _send_signal(sd):
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
+        _record_strategy_decision(sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
         return False
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
     if signal_id:
@@ -3123,6 +3134,7 @@ async def _send_signal(sd):
     except Exception as _cde:
         logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
         _sent_signal_cache[cache_key] = now_ts
+    _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     return True
 
 
@@ -4823,19 +4835,23 @@ async def restore_db_from_github():
     try:
         gh_token = os.environ.get("GITHUB_TOKEN", "")
         gh_repo = os.environ.get("GITHUB_REPO", "")
+        backup_branch = os.environ.get("BRAIN_BACKUP_BRANCH", "brain-backups").strip() or "brain-backups"
         if not gh_token or not gh_repo:
             logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
             return
         import base64, sqlite3 as _sq
         loop = asyncio.get_event_loop()
-        r = await loop.run_in_executor(
-            None,
-            lambda: requests.get(
+        headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+        r = await loop.run_in_executor(None, lambda: requests.get(
+            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
+            params={"ref": backup_branch}, headers=headers, timeout=10,
+        ))
+        # One-time read-only compatibility with historical backups on main.
+        if r.status_code == 404:
+            r = await loop.run_in_executor(None, lambda: requests.get(
                 f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-                headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
-                timeout=10
-            )
-        )
+                params={"ref": "main"}, headers=headers, timeout=10,
+            ))
         if r.status_code != 200:
             logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
             return
@@ -4877,33 +4893,57 @@ async def restore_db_from_github():
 
 
 async def backup_db_to_github():
-    """Сохраняем brain.db в GitHub"""
+    """Save brain.db to a dedicated branch, never to application main."""
     try:
         gh_token = os.environ.get("GITHUB_TOKEN", "")
         gh_repo = os.environ.get("GITHUB_REPO", "")
+        backup_branch = os.environ.get("BRAIN_BACKUP_BRANCH", "brain-backups").strip() or "brain-backups"
         if not gh_token or not gh_repo:
             return
         import base64
+        headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+        branch_response = requests.get(
+            f"https://api.github.com/repos/{gh_repo}/git/ref/heads/{backup_branch}",
+            headers=headers, timeout=10,
+        )
+        if branch_response.status_code == 404:
+            base_ref = requests.get(
+                f"https://api.github.com/repos/{gh_repo}/git/ref/heads/main",
+                headers=headers, timeout=10,
+            )
+            if base_ref.status_code != 200:
+                raise RuntimeError(f"cannot read main ref: HTTP {base_ref.status_code}")
+            base_sha = base_ref.json().get("object", {}).get("sha")
+            created = requests.post(
+                f"https://api.github.com/repos/{gh_repo}/git/refs",
+                headers=headers,
+                json={"ref": f"refs/heads/{backup_branch}", "sha": base_sha},
+                timeout=10,
+            )
+            if created.status_code not in (200, 201, 422):
+                raise RuntimeError(f"cannot create backup branch: HTTP {created.status_code}")
+        elif branch_response.status_code != 200:
+            raise RuntimeError(f"cannot verify backup branch: HTTP {branch_response.status_code}")
         with open("brain.db", "rb") as f:
             content = f.read()
         encoded = base64.b64encode(content).decode()
         # Получаем SHA для обновления
         r = requests.get(
             f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+            params={"ref": backup_branch}, headers=headers,
             timeout=10
         )
         sha = r.json().get("sha", "") if r.status_code == 200 else ""
         payload = {
             "message": f"brain.db backup {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]",
             "content": encoded,
-            "branch": "main"
+            "branch": backup_branch
         }
         if sha:
             payload["sha"] = sha
         r2 = requests.put(
             f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            headers={"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"},
+            headers=headers,
             json=payload,
             timeout=20
         )

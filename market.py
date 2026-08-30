@@ -6822,24 +6822,8 @@ async def night_brain_tasks():
 
         logging.info(f"Ночная задача выполнена. Новых правил: {new_rules}, всего: {rules_after}")
 
-        # Бэкап brain.db в GitHub
-        try:
-            import base64, requests as _req
-            _token = os.environ.get('GITHUB_TOKEN', '')
-            _repo  = os.environ.get('GITHUB_REPO', '')
-            if _token and _repo:
-                _r = _req.get(f'https://api.github.com/repos/{_repo}/contents/brain.db',
-                              headers={'Authorization': f'token {_token}'}, timeout=10)
-                _sha = _r.json().get('sha', '')
-                with open('brain.db', 'rb') as _f:
-                    _content = base64.b64encode(_f.read()).decode()
-                _req.put(f'https://api.github.com/repos/{_repo}/contents/brain.db',
-                         headers={'Authorization': f'token {_token}'},
-                         json={'message': 'night brain backup', 'content': _content, 'sha': _sha},
-                         timeout=30)
-                logging.info('[NightBrain] brain.db backed up to GitHub')
-        except Exception as _be:
-            logging.warning(f'[NightBrain] backup skip: {_be}')
+        # brain.db backup is owned by bot.py's single bounded scheduler. Keeping
+        # one writer prevents duplicate commits and main-branch pollution.
 
         # Очистка старых timing_queue записей (старше 24 часов)
         try:
@@ -6867,8 +6851,10 @@ async def night_brain_tasks():
 
 def get_price_realtime(symbol="BTCUSDT"):
     """Получаем цену прямо сейчас из нескольких источников"""
-    cg_id = COINGECKO_IDS.get(symbol, "bitcoin")
+    cg_id = COINGECKO_IDS.get(symbol)
     try:
+        if not cg_id:
+            raise ValueError(f"No CoinGecko mapping for {symbol}")
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": cg_id, "vs_currencies": "usd", "include_24hr_change": "true"},

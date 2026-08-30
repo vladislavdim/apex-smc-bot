@@ -233,15 +233,32 @@ def _fetch_kraken(symbol, interval, limit):
 
 def _fetch_gate(symbol, interval, limit):
     gi_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d"}
-    gate_sym = symbol if "_" in symbol else symbol.replace("USDT","_USDT")
-    r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
-        params={"contract":gate_sym,"interval":gi_map.get(interval,"1h"),"limit":limit},
-        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-    if r.status_code != 200: raise ValueError(f"Gate HTTP {r.status_code}")
-    data = r.json()
-    if not isinstance(data,list) or not data: raise ValueError("Empty Gate")
-    return [{"open":float(c.get("o",0)),"high":float(c.get("h",0)),
-             "low":float(c.get("l",0)),"close":float(c.get("c",0)),"volume":float(c.get("v",0))} for c in data]
+    apex_symbol = symbol.replace("_", "")
+    try:
+        from external_sources.pair_registry import get_pair, record_gate_candle_probe
+        gate_sym = str(get_pair(apex_symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
+    except Exception:
+        gate_sym = symbol if "_" in symbol else symbol.replace("USDT", "_USDT")
+        record_gate_candle_probe = None
+    try:
+        r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+            params={"contract":gate_sym,"interval":gi_map.get(interval,"1h"),"limit":limit},
+            headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        if r.status_code != 200: raise ValueError(f"Gate HTTP {r.status_code}")
+        data = r.json()
+        if not isinstance(data,list) or not data: raise ValueError("Empty Gate")
+        candles = [{"timestamp":int(float(c.get("t", 0) or 0)),
+                    "open":float(c.get("o",0)),"high":float(c.get("h",0)),
+                    "low":float(c.get("l",0)),"close":float(c.get("c",0)),
+                    "volume":float(c.get("v",0))} for c in data]
+        if record_gate_candle_probe:
+            record_gate_candle_probe(apex_symbol, success=True, count=len(candles),
+                                     last_candle_at=max((c["timestamp"] for c in candles), default=0))
+        return candles
+    except Exception as exc:
+        if record_gate_candle_probe:
+            record_gate_candle_probe(apex_symbol, success=False, error=str(exc))
+        raise
 
 def _fetch_coingecko(symbol, interval, limit):
     cg_id = COINGECKO_IDS.get(symbol)
@@ -258,7 +275,9 @@ def _fetch_coingecko(symbol, interval, limit):
 
 def _fetch_synthetic(symbol, interval, limit):
     """Последний резерв: строим свечи из market_chart (тики → группировка)"""
-    cg_id = COINGECKO_IDS.get(symbol, "bitcoin")
+    cg_id = COINGECKO_IDS.get(symbol)
+    if not cg_id:
+        raise ValueError(f"No CG ID for synthetic {symbol}")
     days_map = {"1m":1,"5m":1,"15m":1,"30m":1,"1h":7,"4h":14,"1d":30}
     r = requests.get(f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart",
         params={"vs_currency":"usd","days":days_map.get(interval,7)},
