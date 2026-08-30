@@ -3253,8 +3253,11 @@ async def auto_scan_job():
     pass
 
 
-async def auto_trade_reconcile_job():
-    """Protect filled live entries; a disabled/paper configuration is a no-op."""
+_auto_trade_reconcile_task = None
+
+
+async def _run_auto_trade_reconcile_once():
+    """Protect filled live entries without blocking the scheduler tick."""
     if not _TRADE_EXECUTION_OK:
         return
     try:
@@ -3267,6 +3270,15 @@ async def auto_trade_reconcile_job():
     except Exception as exc:
         # Exchange failures must never stop scanners or Telegram handlers.
         logging.error("[AutoTrading] reconciliation failed safely: %s", exc)
+
+
+async def auto_trade_reconcile_job():
+    """Start one background reconciliation; later ticks remain non-overlapping."""
+    global _auto_trade_reconcile_task
+    if _auto_trade_reconcile_task and not _auto_trade_reconcile_task.done():
+        logging.debug("[AutoTrading] previous reconciliation still running; tick skipped")
+        return
+    _auto_trade_reconcile_task = asyncio.create_task(_run_auto_trade_reconcile_once())
 
 
 def pick_best_signal(signals: list) -> dict | None:
