@@ -259,8 +259,8 @@ def tf_keyboard():
     ])
 
 def pairs_keyboard(action="scan", page=0):
-    """Клавиатура монет с пагинацией — топ-80"""
-    all_pairs = get_top_pairs(60)
+    """Клавиатура общего Gate/Binance universe с пагинацией."""
+    all_pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     page_size = 20  # монет на странице
     total_pages = (len(all_pairs) + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
@@ -1085,9 +1085,9 @@ async def handle_callback(callback: CallbackQuery):
 
     elif data.startswith("tf_"):
         tf = data.replace("tf_", "")
-        pairs = get_top_pairs(60)
+        pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
         await callback.message.edit_text(
-            f"🔍 Сканирую топ-60 на {TF_LABELS.get(tf, tf)}...\n⏳ ~20 сек"
+            f"🔍 Сканирую {DEFAULT_UNIVERSE_SIZE} пар на {TF_LABELS.get(tf, tf)}...\n⏳ это может занять несколько минут"
         )
         signals = []
         for symbol in pairs:
@@ -3315,15 +3315,15 @@ def pick_best_signal(signals: list) -> dict | None:
 async def auto_scan_1h():
     """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
     try:
-        await asyncio.wait_for(_auto_scan_1h_impl(), timeout=90)
+        await asyncio.wait_for(_auto_scan_1h_impl(), timeout=210)
     except asyncio.TimeoutError:
-        logging.warning("[auto_scan_1h] таймаут 90с — пропускаем цикл")
+        logging.warning("[auto_scan_1h] таймаут 210с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
 
 async def _auto_scan_1h_impl():
     logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
-    pairs = get_top_pairs(60)
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     all_signals = []
 
     for symbol in pairs:
@@ -3373,15 +3373,15 @@ async def _auto_scan_1h_impl():
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
     try:
-        await asyncio.wait_for(_auto_scan_swing_impl(), timeout=90)
+        await asyncio.wait_for(_auto_scan_swing_impl(), timeout=210)
     except asyncio.TimeoutError:
-        logging.warning("[auto_scan_swing] таймаут 90с — пропускаем цикл")
+        logging.warning("[auto_scan_swing] таймаут 210с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_scan_swing] ОШИБКА: {e}")
 
 async def _auto_scan_swing_impl():
     logging.info("[auto_scan_swing] ЗАПУЩЕН")
-    pairs = get_top_pairs(60)
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     found = []
     blocked = 0
     for symbol in pairs:
@@ -3486,15 +3486,15 @@ async def _auto_scan_swing_impl():
 async def auto_zone_scan():
     """Каждые 20 мин: сканирует зоны Discount/Premium с OB/FVG"""
     try:
-        await asyncio.wait_for(_auto_zone_scan_impl(), timeout=90)
+        await asyncio.wait_for(_auto_zone_scan_impl(), timeout=210)
     except asyncio.TimeoutError:
-        logging.warning("[auto_zone_scan] таймаут 90с — пропускаем цикл")
+        logging.warning("[auto_zone_scan] таймаут 210с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
 
 async def _auto_zone_scan_impl():
     logging.info("[auto_zone_scan] ЗАПУЩЕН")
-    pairs = get_top_pairs(60)
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     found = []
     for symbol in pairs:
         try:
@@ -3608,7 +3608,7 @@ async def auto_scan_mega():
         logging.warning("detect_mega_trade не найден в smc_engine")
         return
 
-    pairs = get_top_pairs(60)
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     found = []
 
     for symbol in pairs:
@@ -3687,15 +3687,15 @@ async def auto_scan_mega():
 async def auto_wyckoff_scan():
     """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
     try:
-        await asyncio.wait_for(_auto_wyckoff_scan_impl(), timeout=120)
+        await asyncio.wait_for(_auto_wyckoff_scan_impl(), timeout=300)
     except asyncio.TimeoutError:
-        logging.warning("[auto_wyckoff_scan] таймаут 120с — пропускаем цикл")
+        logging.warning("[auto_wyckoff_scan] таймаут 300с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_wyckoff_scan] ОШИБКА: {e}")
 
 async def _auto_wyckoff_scan_impl():
     logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
-    pairs = get_top_pairs(60)
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     found = []
     for symbol in pairs:
         try:
@@ -3949,16 +3949,16 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
             logging.error(f"[FastDeal] {r.get('symbol')}: {e}")
 
 async def auto_accumulation_scan():
-    """Каждый час: сканируем все топ-60 на накопление перед пампом"""
+    """Каждый час: сканируем общий Gate/Binance universe на накопление."""
     try:
-        await asyncio.wait_for(_auto_accumulation_scan_impl(), timeout=90)
+        await asyncio.wait_for(_auto_accumulation_scan_impl(), timeout=210)
     except asyncio.TimeoutError:
-        logging.warning("[auto_accumulation_scan] таймаут 90с — пропускаем цикл")
+        logging.warning("[auto_accumulation_scan] таймаут 210с — пропускаем цикл")
     except Exception as e:
         logging.error(f"[auto_accumulation_scan] ОШИБКА: {e}")
 
 async def _auto_accumulation_scan_impl():
-    pairs = get_top_pairs(60)
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
     found = []
 
     for symbol in pairs:
@@ -5112,7 +5112,7 @@ async def keepalive_heartbeat():
 
 async def market_intelligence_job():
     if not _MARKET_INTELLIGENCE_OK:return
-    try:await _refresh_market_intelligence(get_top_pairs(60),get_candles)
+    try:await _refresh_market_intelligence(get_top_pairs(DEFAULT_UNIVERSE_SIZE),get_candles)
     except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
 
 async def on_startup(app):
@@ -5147,7 +5147,7 @@ async def on_startup(app):
     if _WEB_LEARNER_OK:
         _web_init_db()
     threading.Thread(target=get_top_pairs, daemon=True).start()
-    if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(60),get_candles))
+    if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(DEFAULT_UNIVERSE_SIZE),get_candles))
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
     if WEBHOOK_URL:
@@ -5470,7 +5470,7 @@ def main():
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
             threading.Thread(target=get_top_pairs, daemon=True).start()
-            if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(60),get_candles))
+            if _MARKET_INTELLIGENCE_OK:asyncio.create_task(_start_market_intelligence(get_top_pairs(DEFAULT_UNIVERSE_SIZE),get_candles))
             await safe_delete_webhook()
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 60, "coalesce": True, "max_instances": 1})
