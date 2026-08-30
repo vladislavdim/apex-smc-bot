@@ -40,28 +40,18 @@ async def _provider_get(supported: bool, url: str, params: dict) -> object | Non
 
 async def collect(symbol: str) -> dict:
     async def fetch():
-        binance = "https://fapi.binance.com"
         pair = get_pair(symbol)
-        binance_symbol = str(pair.get("binance_symbol") or _provider_symbol(symbol))
-        bybit_symbol = str(pair.get("bybit_symbol") or _provider_symbol(symbol))
         gate_contract = str(pair.get("gate_symbol") or f"{symbol[:-4]}_USDT")
-        binance_supported = bool(pair.get("binance_supported"))
-        bybit_supported = bool(pair.get("bybit_supported"))
         gate_supported = bool(pair.get("gate_supported"))
-        premium, oi_1h, oi_4h, depth, bybit, gate_1h, gate_4h, gate_contract_info, gate_depth = await asyncio.gather(
-            _provider_get(binance_supported, f"{binance}/fapi/v1/premiumIndex", {"symbol": binance_symbol}),
-            _provider_get(binance_supported, f"{binance}/futures/data/openInterestHist", {"symbol": binance_symbol, "period": "1h", "limit": 2}),
-            _provider_get(binance_supported, f"{binance}/futures/data/openInterestHist", {"symbol": binance_symbol, "period": "4h", "limit": 2}),
-            _provider_get(binance_supported, f"{binance}/fapi/v1/depth", {"symbol": binance_symbol, "limit": 20}),
-            _provider_get(bybit_supported, "https://api.bybit.com/v5/market/tickers", {"category": "linear", "symbol": bybit_symbol}),
+        gate_1h, gate_4h, gate_contract_info, gate_depth = await asyncio.gather(
             _provider_get(gate_supported, "https://api.gateio.ws/api/v4/futures/usdt/contract_stats", {"contract": gate_contract, "interval": "1h", "limit": 2}),
             _provider_get(gate_supported, "https://api.gateio.ws/api/v4/futures/usdt/contract_stats", {"contract": gate_contract, "interval": "4h", "limit": 2}),
             _provider_get(gate_supported, f"https://fx-api.gateio.ws/api/v4/futures/usdt/contracts/{gate_contract}", {}),
             _provider_get(gate_supported, "https://api.gateio.ws/api/v4/futures/usdt/order_book", {"contract": gate_contract, "limit": 20}),
         )
         return {
-            "premium": premium, "oi_1h": oi_1h, "oi_4h": oi_4h,
-            "depth": depth, "bybit": bybit, "gate_1h": gate_1h,
+            "premium": None, "oi_1h": None, "oi_4h": None,
+            "depth": None, "bybit": None, "gate_1h": gate_1h,
             "gate_4h": gate_4h, "gate_contract": gate_contract_info,
             "gate_depth": gate_depth,
         }
