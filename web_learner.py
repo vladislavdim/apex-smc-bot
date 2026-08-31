@@ -44,6 +44,18 @@ def init_web_learner_db():
             actual_win_rate REAL,
             source TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS knowledge_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT,
+            rule_type TEXT,
+            rule_text TEXT,
+            confidence REAL DEFAULT 0.5,
+            source_url TEXT,
+            status TEXT DEFAULT 'candidate',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT,
+            UNIQUE(topic, rule_text))""")
         conn.commit()
 
 
@@ -448,18 +460,20 @@ def groq_research_topic(topic: str, query: str) -> dict:
                     (topic, data.get("summary", ""), texts[0]["url"] if texts else "",
                      float(data.get("relevance", 0.5))))
 
-            # Торговые правила → в self_rules
+            # Web findings are candidate knowledge only. Internet text must not
+            # silently become an active trading rule without later validation.
             for rule_item in data.get("trading_rules", []):
-                rule_text = rule_item.get("rule", "")
+                rule_text = (rule_item.get("rule") or "").strip()
                 try:
                     confidence = float(str(rule_item.get("confidence", 0.6)).split()[0])
                 except (ValueError, TypeError):
                     confidence = 0.6
                 rule_type = (rule_item.get("type") or "PREFER").lower()
                 if rule_text and confidence >= 0.6:
-                    conn.execute("""INSERT OR IGNORE INTO self_rules (rule_type, rule_text, confidence, source, created_at, active)
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1)""",
-                        (rule_type, rule_text, confidence, f"web_research:{topic}"))
+                    conn.execute("""INSERT OR IGNORE INTO knowledge_candidates
+                        (topic, rule_type, rule_text, confidence, source_url, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, 'candidate', CURRENT_TIMESTAMP)""",
+                        (topic, rule_type, rule_text, confidence, texts[0]["url"] if texts else ""))
 
             # Стратегия → в библиотеку
             strat = data.get("strategy", {})

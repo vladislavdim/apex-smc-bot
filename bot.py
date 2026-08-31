@@ -1338,34 +1338,48 @@ async def handle_callback(callback: CallbackQuery):
         try:
             # Данные из основной БД
             conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
+            rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE active=1").fetchone() or [0])[0]
+            core_rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE active=1 AND source='core_seed_v2'").fetchone() or [0])[0]
+            trade_rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE active=1 AND source='groq_trade_analysis'").fetchone() or [0])[0]
+            other_rule_count = max(0, rule_count - core_rule_count - trade_rule_count)
             top_rules = conn.execute(
-                "SELECT category, rule, confidence FROM self_rules ORDER BY confidence DESC LIMIT 5"
+                "SELECT category, rule, confidence FROM self_rules WHERE active=1 ORDER BY confidence DESC LIMIT 5"
             ).fetchall()
             obs_count = (conn.execute("SELECT COUNT(*) FROM observations").fetchone() or [0])[0]
             model_count = (conn.execute("SELECT COUNT(*) FROM market_model").fetchone() or [0])[0]
-            # avoid_count — проверяем оба варианта (старый category и новый rule_type)
             avoid_count = (conn.execute(
-                "SELECT COUNT(*) FROM self_rules WHERE rule_type='avoid' OR category='avoid'"
+                "SELECT COUNT(*) FROM self_rules WHERE active=1 AND (rule_type='avoid' OR category='avoid')"
             ).fetchone() or [0])[0]
-            # knowledge_count — из таблицы knowledge напрямую
             knowledge_count = (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
-            # pattern_count — из signal_log
             try:
-                pattern_count = (conn.execute("SELECT COUNT(*) FROM signal_log").fetchone() or [0])[0]
-            except Exception as e:
-                import logging
-                logging.error(e)
+                web_knowledge_count = (conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone() or [0])[0]
+                web_24h = (conn.execute("SELECT COUNT(*) FROM web_knowledge WHERE created_at >= datetime('now','-24 hours')").fetchone() or [0])[0]
+                last_web = (conn.execute("SELECT MAX(created_at) FROM web_knowledge").fetchone() or [None])[0]
+            except Exception:
+                web_knowledge_count = web_24h = 0
+                last_web = None
+            try:
+                candidate_count = (conn.execute("SELECT COUNT(*) FROM knowledge_candidates WHERE status='candidate'").fetchone() or [0])[0]
+            except Exception:
+                candidate_count = 0
+            try:
+                pending_topics = (conn.execute("SELECT COUNT(*) FROM learning_agenda WHERE status='pending'").fetchone() or [0])[0]
+            except Exception:
+                pending_topics = 0
+            try:
+                pattern_count = (conn.execute("SELECT COUNT(*) FROM pattern_memory").fetchone() or [0])[0]
+            except Exception:
                 pattern_count = 0
-            # coin_count — правила по монетам
             try:
                 coin_count = (conn.execute(
-                    "SELECT COUNT(DISTINCT symbol) FROM signal_log WHERE symbol IS NOT NULL"
+                    "SELECT COUNT(DISTINCT symbol) FROM signal_log WHERE symbol IS NOT NULL AND result IN ('tp1','tp2','tp3','sl')"
                 ).fetchone() or [0])[0]
-            except Exception as e:
-                import logging
-                logging.error(e)
+            except Exception:
                 coin_count = 0
+            try:
+                last_trade_learning = (conn.execute("SELECT MAX(created_at) FROM brain_log WHERE event_type='trade_analysis'").fetchone() or [None])[0]
+            except Exception:
+                last_trade_learning = None
             conn.close()
 
             # Данные из brain_builder (если доступен)
@@ -1380,8 +1394,11 @@ async def handle_callback(callback: CallbackQuery):
         except Exception as e:
             import logging
             logging.error(e)
-            rule_count = obs_count = model_count = avoid_count = 0
-            knowledge_count = pattern_count = coin_count = 0
+            rule_count = core_rule_count = trade_rule_count = other_rule_count = 0
+            obs_count = model_count = avoid_count = 0
+            knowledge_count = web_knowledge_count = web_24h = candidate_count = pending_topics = 0
+            pattern_count = coin_count = 0
+            last_web = last_trade_learning = None
             top_rules = []
             macro_summary = bb_rules = macro_time = ""
 
@@ -1461,13 +1478,20 @@ async def handle_callback(callback: CallbackQuery):
         await callback.message.edit_text(
             f"🧠 <b>Знания APEX</b>\n"
             f"{'━'*24}\n\n"
-            f"📚 Записей знаний: <b>{knowledge_count}</b>\n"
-            f"📈 SMC-паттернов: <b>{pattern_count}</b>\n"
-            f"📌 Торговых правил: <b>{rule_count}</b>\n"
+            f"📚 База знаний: <b>{knowledge_count + web_knowledge_count}</b>\n"
+            f"🌐 Web Research: <b>{web_knowledge_count}</b> · за 24ч <b>{web_24h}</b>\n"
+            f"🧠 Базовые core-правила: <b>{core_rule_count}</b>\n"
+            f"📈 Правила из сделок: <b>{trade_rule_count}</b>\n"
+            f"📌 Другие активные правила: <b>{other_rule_count}</b> · всего <b>{rule_count}</b>\n"
+            f"🧪 Кандидатов из исследований: <b>{candidate_count}</b>\n"
+            f"⏳ Тем на исследование: <b>{pending_topics}</b>\n"
+            f"📊 Паттернов из истории: <b>{pattern_count}</b>\n"
             f"⛔️ Антипаттернов: <b>{avoid_count}</b>\n"
             f"👁 Наблюдений рынка: <b>{obs_count}</b>\n"
             f"🗂 Моделей монет: <b>{model_count}</b>\n"
-            f"🪙 Пар с историей: <b>{coin_count}</b>\n"
+            f"🪙 Пар с закрытой историей: <b>{coin_count}</b>\n"
+            f"🕐 Последний WebLearner: <b>{last_web or '—'}</b>\n"
+            f"🎓 Последнее обучение по сделке: <b>{last_trade_learning or '—'}</b>\n"
             f"{execution_block}{macro_block}\n"
             f"<i>Обновление автоматическое: результаты сделок, новости и "
             f"веб-контекст сохраняются в brain.db. Groq использует этот "
@@ -5526,6 +5550,19 @@ def main():
             # backup_db_to_github убран из heartbeat-цикла — вызывает disk I/O ошибки
             # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
+            if BRAIN_BUILDER_AVAILABLE:
+                scheduler.add_job(run_brain_builder_async, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
+                scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0, timezone="UTC", max_instances=1, coalesce=True)
+            if _WEB_LEARNER_OK:
+                async def _polling_web_learner():
+                    try:
+                        results = await asyncio.to_thread(_web_learn_cycle)
+                        logging.info("[WebLearner] polling cycle complete: %s topic(s)", len(results or []))
+                        await backup_db_to_github()
+                    except Exception as exc:
+                        logging.warning("[WebLearner] polling cycle failed safely: %s", exc)
+                scheduler.add_job(_polling_web_learner, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
+                asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(_polling_web_learner()))
             if _LEARNING_OK:
                 # В polling-режиме раньше не было ни decay, ни пересмотра
                 # правил — self_rules только росли.
