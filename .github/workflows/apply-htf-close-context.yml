@@ -1,0 +1,243 @@
+name: Apply HTF close context
+on:
+  push:
+    branches: [fix/weekly-monthly-close-context]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/weekly-monthly-close-context
+          fetch-depth: 0
+      - name: Add HTF close context
+        run: |
+          cat > core/htf_close_context.py <<'PY'
+          """Closed weekly/monthly candle context for higher-timeframe Groq review.
+
+          This module never decides whether a trade is valid and never changes levels.
+          It only describes already-closed HTF candles for selected slower strategies.
+          """
+          from __future__ import annotations
+
+          from typing import Any, Callable
+
+          _SUPPORTED = ("MTF", "SWING", "WYCKOFF")
+
+
+          def strategy_uses_htf_close_context(strategy: str) -> bool:
+              name = str(strategy or "").upper()
+              return any(token in name for token in _SUPPORTED)
+
+
+          def _number(value: Any) -> float | None:
+              try:
+                  return float(value)
+              except (TypeError, ValueError):
+                  return None
+
+
+          def _bar_summary(bar: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+              o, h, l, c = (_number(bar.get(k)) for k in ("open", "high", "low", "close"))
+              ph, pl, pc = (_number(previous.get(k)) for k in ("high", "low", "close"))
+              if None in (o, h, l, c):
+                  return {"available": False}
+              span = h - l
+              close_position = round((c - l) / span * 100.0, 1) if span > 0 else 50.0
+              if ph is not None and c > ph:
+                  relation = "ABOVE_PREVIOUS_HIGH"
+              elif pl is not None and c < pl:
+                  relation = "BELOW_PREVIOUS_LOW"
+              else:
+                  relation = "INSIDE_PREVIOUS_RANGE"
+              if c > o:
+                  direction = "BULLISH"
+              elif c < o:
+                  direction = "BEARISH"
+              else:
+                  direction = "DOJI"
+              return {
+                  "available": True,
+                  "open": o,
+                  "high": h,
+                  "low": l,
+                  "close": c,
+                  "previous_high": ph,
+                  "previous_low": pl,
+                  "previous_close": pc,
+                  "direction": direction,
+                  "close_position_pct": close_position,
+                  "close_vs_previous_range": relation,
+              }
+
+
+          def build_htf_close_context(
+              symbol: str,
+              strategy: str,
+              candle_loader: Callable[[str, str, int], list] | None,
+          ) -> dict[str, Any]:
+              result: dict[str, Any] = {
+                  "used": False,
+                  "strategy": str(strategy or ""),
+                  "weekly": {"available": False},
+                  "monthly": {"available": False},
+              }
+              if not candle_loader or not strategy_uses_htf_close_context(strategy):
+                  return result
+              result["used"] = True
+              for tf, key in (("1w", "weekly"), ("1M", "monthly")):
+                  try:
+                      rows = candle_loader(str(symbol), tf, 5) or []
+                      clean = [row for row in rows if isinstance(row, dict)]
+                      # Exchange candle endpoints normally include the currently-forming
+                      # candle as the final row. Only immutable closed candles belong here.
+                      closed = clean[:-1] if len(clean) >= 3 else []
+                      if len(closed) >= 2:
+                          result[key] = _bar_summary(closed[-1], closed[-2])
+                  except Exception as exc:
+                      result[key] = {"available": False, "error": type(exc).__name__}
+              return result
+
+
+          def format_htf_close_context(context: dict[str, Any]) -> str:
+              if not context.get("used"):
+                  return ""
+              lines = [
+                  "HIGHER-TIMEFRAME CLOSED CANDLE CONTEXT:",
+                  "Context only. Never reject/approve solely because of this block and never alter entry/SL/TP/RR.",
+              ]
+              for key, label in (("weekly", "WEEKLY"), ("monthly", "MONTHLY")):
+                  row = context.get(key) or {}
+                  if not row.get("available"):
+                      lines.append(f"- {label}: unavailable")
+                      continue
+                  lines.append(
+                      f"- {label}: direction={row.get('direction')}; close={row.get('close')}; "
+                      f"previous_high={row.get('previous_high')}; previous_low={row.get('previous_low')}; "
+                      f"close_position={row.get('close_position_pct')}% of closed candle range; "
+                      f"relation={row.get('close_vs_previous_range')}"
+                  )
+              return "\n".join(lines)
+          PY
+
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('core/signal_quality_gate.py')
+          text = p.read_text()
+          old_import = 'from news_context.storage import persist_news_context\n'
+          new_import = old_import + 'from core.htf_close_context import build_htf_close_context, format_htf_close_context\n'
+          if old_import not in text:
+              raise SystemExit('quality gate import anchor missing')
+          text = text.replace(old_import, new_import, 1)
+
+          old_sig = '''async def review_signal_candidate(\n    candidate: dict[str, Any],\n    ask_groq: Callable[..., str | None],\n) -> dict[str, Any]:'''
+          new_sig = '''async def review_signal_candidate(\n    candidate: dict[str, Any],\n    ask_groq: Callable[..., str | None],\n    candle_loader: Callable[[str, str, int], list] | None = None,\n) -> dict[str, Any]:'''
+          if old_sig not in text:
+              raise SystemExit('quality gate signature missing')
+          text = text.replace(old_sig, new_sig, 1)
+
+          anchor = '''    learning = await asyncio.to_thread(build_learning_context, evidence_candidate)\n    external_block = format_external_context(context, strategy)\n'''
+          repl = '''    learning = await asyncio.to_thread(build_learning_context, evidence_candidate)\n    htf_close = await asyncio.to_thread(\n        build_htf_close_context, str(view.get("symbol") or ""), strategy, candle_loader\n    )\n    external_block = format_external_context(context, strategy)\n'''
+          if anchor not in text:
+              raise SystemExit('learning anchor missing')
+          text = text.replace(anchor, repl, 1)
+
+          anchor = '''    learning_block = format_learning_context(learning)\n    prompt = f"""You are the final quality reviewer'''
+          repl = '''    learning_block = format_learning_context(learning)\n    htf_close_block = format_htf_close_context(htf_close)\n    prompt = f"""You are the final quality reviewer'''
+          if anchor not in text:
+              raise SystemExit('prompt anchor missing')
+          text = text.replace(anchor, repl, 1)
+
+          anchor = '''unless new_strategy_research_ready=true.\n\nCANDIDATE:'''
+          repl = '''unless new_strategy_research_ready=true.\nWeekly/monthly closed-candle context is background HTF evidence only. It may adjust\nconfidence or be listed as a risk, but a conflicting weekly/monthly candle alone is\nNOT sufficient to WAIT or REJECT an otherwise valid candidate.\n\nCANDIDATE:'''
+          if anchor not in text:
+              raise SystemExit('instruction anchor missing')
+          text = text.replace(anchor, repl, 1)
+
+          anchor = '''{learning_block}\n\nReturn JSON only:'''
+          repl = '''{learning_block}\n\n{htf_close_block}\n\nReturn JSON only:'''
+          if anchor not in text:
+              raise SystemExit('learning block anchor missing')
+          text = text.replace(anchor, repl, 1)
+          p.write_text(text)
+
+          p = Path('bot.py')
+          text = p.read_text()
+          old = 'review = await _review_signal_candidate(sd, ask_groq)'
+          new = 'review = await _review_signal_candidate(sd, ask_groq, get_candles)'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one review call, got {text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
+
+          cat > tests/test_htf_close_context.py <<'PY'
+          import unittest
+
+          from core.htf_close_context import (
+              build_htf_close_context,
+              format_htf_close_context,
+              strategy_uses_htf_close_context,
+          )
+
+
+          def _loader(symbol, timeframe, limit):
+              rows = [
+                  {"open": 100, "high": 120, "low": 90, "close": 110},
+                  {"open": 110, "high": 130, "low": 100, "close": 125},
+                  {"open": 125, "high": 140, "low": 120, "close": 135},
+                  {"open": 135, "high": 150, "low": 130, "close": 145},  # forming; must be ignored
+              ]
+              return rows
+
+
+          class HTFCloseContextTests(unittest.TestCase):
+              def test_only_slow_strategies_use_context(self):
+                  self.assertTrue(strategy_uses_htf_close_context("MTF"))
+                  self.assertTrue(strategy_uses_htf_close_context("SWING A"))
+                  self.assertTrue(strategy_uses_htf_close_context("WYCKOFF"))
+                  self.assertFalse(strategy_uses_htf_close_context("FAST"))
+                  self.assertFalse(strategy_uses_htf_close_context("ZONE"))
+
+              def test_uses_last_closed_not_forming_bar(self):
+                  ctx = build_htf_close_context("BTCUSDT", "SWING", _loader)
+                  self.assertEqual(ctx["weekly"]["close"], 135.0)
+                  self.assertEqual(ctx["weekly"]["previous_high"], 130.0)
+                  self.assertEqual(ctx["weekly"]["close_vs_previous_range"], "ABOVE_PREVIOUS_HIGH")
+                  self.assertEqual(ctx["monthly"]["close"], 135.0)
+
+              def test_fast_has_no_loader_calls(self):
+                  calls = []
+                  def loader(*args):
+                      calls.append(args)
+                      return []
+                  ctx = build_htf_close_context("BTCUSDT", "FAST", loader)
+                  self.assertFalse(ctx["used"])
+                  self.assertEqual(calls, [])
+
+              def test_prompt_marks_context_as_non_blocking(self):
+                  block = format_htf_close_context(build_htf_close_context("BTCUSDT", "MTF", _loader))
+                  self.assertIn("Context only", block)
+                  self.assertIn("WEEKLY", block)
+                  self.assertIn("MONTHLY", block)
+
+
+          if __name__ == '__main__':
+              unittest.main()
+          PY
+      - name: Verify full suite
+        run: |
+          python -m py_compile bot.py core/signal_quality_gate.py core/htf_close_context.py
+          python -m unittest discover -s tests -v
+          git diff --check
+          git checkout origin/main -- brain.db
+      - name: Commit and remove helper
+        run: |
+          rm -f .github/workflows/apply-htf-close-context.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add bot.py core/signal_quality_gate.py core/htf_close_context.py tests/test_htf_close_context.py .github/workflows/apply-htf-close-context.yml
+          git commit -m "Add weekly and monthly close context for slow strategies"
+          git push origin HEAD:fix/weekly-monthly-close-context
