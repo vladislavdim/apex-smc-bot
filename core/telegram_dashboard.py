@@ -123,6 +123,96 @@ def format_watchlist(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)[:4000]
 
 
+def fetch_groq_rejections(db_path: str, hours: int = 24, limit: int = 30) -> dict[str, Any]:
+    """Read recent final Groq REJECT decisions without affecting trading state."""
+    conn = sqlite3.connect(db_path, timeout=20)
+    conn.row_factory = sqlite3.Row
+    result: dict[str, Any] = {"hours": hours, "total": 0, "by_strategy": [], "recent": []}
+    try:
+        period = f"-{int(hours)} hours"
+        rows = conn.execute(
+            """SELECT symbol,strategy,timeframe,direction,reason,groq_confidence,created_at
+               FROM strategy_decisions
+               WHERE outcome='REJECT' AND stage='groq_quality_gate'
+                 AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT ?""",
+            (period, int(limit)),
+        ).fetchall()
+        result["recent"] = [dict(row) for row in rows]
+        total = conn.execute(
+            """SELECT COUNT(*) FROM strategy_decisions
+               WHERE outcome='REJECT' AND stage='groq_quality_gate'
+                 AND created_at >= datetime('now', ?)""",
+            (period,),
+        ).fetchone()[0]
+        result["total"] = int(total or 0)
+        grouped = conn.execute(
+            """SELECT UPPER(COALESCE(NULLIF(strategy,''),'UNKNOWN')) strategy,
+                      COALESCE(NULLIF(reason,''),'без причины') reason,
+                      COUNT(*) count
+               FROM strategy_decisions
+               WHERE outcome='REJECT' AND stage='groq_quality_gate'
+                 AND created_at >= datetime('now', ?)
+               GROUP BY UPPER(COALESCE(NULLIF(strategy,''),'UNKNOWN')),
+                        COALESCE(NULLIF(reason,''),'без причины')
+               ORDER BY strategy, count DESC""",
+            (period,),
+        ).fetchall()
+        result["by_strategy"] = [dict(row) for row in grouped]
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return result
+
+
+def format_groq_rejections(data: dict[str, Any]) -> str:
+    hours = int(data.get("hours", 24) or 24)
+    total = int(data.get("total", 0) or 0)
+    if total <= 0:
+        return (
+            f"🚫 <b>Отказы Groq · {hours}ч</b>\n\n"
+            "За этот период финальных REJECT нет.\n\n"
+            "<i>Здесь отображаются только кандидаты, которые дошли до финального Groq quality gate.</i>"
+        )
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in data.get("by_strategy", []):
+        grouped[str(row.get("strategy") or "UNKNOWN")].append(row)
+
+    lines = [f"🚫 <b>Отказы Groq · {hours}ч</b>", f"Всего: <b>{total}</b>", ""]
+    preferred = ["MTF", "SWING", "ZONE", "FAST", "WYCKOFF"]
+    for strategy in preferred + sorted(name for name in grouped if name not in preferred):
+        rows = grouped.get(strategy)
+        if not rows:
+            continue
+        strategy_total = sum(int(row.get("count", 0) or 0) for row in rows)
+        lines.append(f"<b>{html.escape(strategy)}</b> · {strategy_total} шт")
+        for row in rows[:5]:
+            reason = html.escape(str(row.get("reason") or "без причины"))
+            if len(reason) > 170:
+                reason = reason[:167] + "…"
+            lines.append(f"• {int(row.get('count', 0) or 0)}× {reason}")
+        lines.append("")
+
+    recent = data.get("recent", [])
+    if recent:
+        lines.append("<b>Последние:</b>")
+        for row in recent[:10]:
+            icon = "🟢" if str(row.get("direction", "")).upper() == "BULLISH" else "🔴"
+            reason = html.escape(str(row.get("reason") or "без причины"))
+            if len(reason) > 120:
+                reason = reason[:117] + "…"
+            confidence = row.get("groq_confidence")
+            conf = f" · {float(confidence):.0%}" if confidence not in (None, "") else ""
+            lines.append(
+                f"{icon} <b>{html.escape(str(row.get('symbol') or '—'))}</b> · "
+                f"{html.escape(str(row.get('strategy') or '—'))}{conf}\n{reason}"
+            )
+    lines.extend(["", "<i>Это журнал AI-отказов, а не открытые сделки.</i>"])
+    return "\n".join(lines)[:4000]
+
+
 def fetch_strategy_stats(db_path: str) -> list[dict[str, Any]]:
     """Count only objectively resolved, activated/legacy-active signals."""
     conn = sqlite3.connect(db_path, timeout=20)
