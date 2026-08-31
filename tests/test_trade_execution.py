@@ -180,6 +180,8 @@ class TradeExecutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "brain.db")
+        trade_execution._binance_blocked_until = 0.0
+        trade_execution._shared_symbol_rules_cache.clear()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -189,6 +191,36 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertEqual(config.mode, "paper")
         self.assertFalse(config.live_armed)
+
+    def test_binance_rate_limit_opens_process_wide_circuit(self):
+        class RateLimitedResponse:
+            status_code = 418
+            headers = {"Retry-After": "120"}
+            text = "banned"
+
+            @staticmethod
+            def json():
+                return {"code": -1003, "msg": "IP banned until 4102444800000"}
+
+        class RateLimitedSession:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, *args, **kwargs):
+                self.calls += 1
+                return RateLimitedResponse()
+
+        first_session = RateLimitedSession()
+        first = BinanceFuturesClient(live_config(), session=first_session)
+        with self.assertRaises(trade_execution.BinanceAPIError):
+            first._request("GET", "/fapi/v1/exchangeInfo")
+
+        second_session = RateLimitedSession()
+        second = BinanceFuturesClient(live_config(), session=second_session)
+        with self.assertRaisesRegex(RuntimeError, "Binance circuit open"):
+            second._request("GET", "/fapi/v1/exchangeInfo")
+        self.assertEqual(first_session.calls, 1)
+        self.assertEqual(second_session.calls, 0)
 
     def test_reconciliation_single_flight_skips_overlapping_call(self):
         self.assertTrue(trade_execution._reconcile_process_lock.acquire(blocking=False))
