@@ -17,7 +17,7 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any, Mapping
 from urllib.parse import urlencode
@@ -660,6 +660,19 @@ def execute_approved_candidate(
     config = config or ExecutionConfig.from_env()
     if not config.enabled:
         return {"status": "DISABLED", "signal_id": signal_id}
+
+    risk_state = candidate.get("_strategy_risk_state") or {}
+    if str(risk_state.get("mode", "NORMAL")).upper() == "PAUSED":
+        return _store_execution(
+            db_path, signal_id, config, candidate, "BLOCKED_STRATEGY_PAUSE",
+            error=str(risk_state.get("reason") or "strategy risk state is paused"),
+        )
+    try:
+        risk_multiplier = max(0.0, min(1.0, float(risk_state.get("live_risk_multiplier", 1.0))))
+    except (TypeError, ValueError):
+        risk_multiplier = 1.0
+    if risk_multiplier < 1.0:
+        config = replace(config, risk_pct=max(0.01, config.risk_pct * risk_multiplier))
 
     try:
         if config.mode == "paper":
