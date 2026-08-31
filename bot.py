@@ -3039,7 +3039,7 @@ async def _send_signal(sd):
         return False
     _attach_learning_evidence(sd)
     if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
-        review = await _review_signal_candidate(sd, ask_groq)
+        review = await _review_signal_candidate(sd, ask_groq, get_candles)
         sd["_external_quality_reviewed"] = True
         sd["_external_quality_review"] = review
         decision = review.get("decision", "APPROVE")
