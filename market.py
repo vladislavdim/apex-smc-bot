@@ -7732,7 +7732,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 "Оцени качество sweep сетапа. "
                 f"Ответь СТРОГО JSON: {{\"logic\": \"макс 15 слов\", \"hours\": число, \"valid\": true/false}}\n\n"
                 "БЛОКИРУЙ (valid: false) если:\n"
-                f"- RR < 2.0 или стоп > 4% (RR={rr}, стоп={_sw_sl_pct}%)\n"
+                f"- RR < 2.5 или стоп > 4% (RR={rr}, стоп={_sw_sl_pct}%)\n"
                 "- Sweep был слабым (нет объёма, нет импульсной свечи обратно)\n"
                 "- Нет CHoCH после sweep — структура не сменилась\n"
                 "- 1d тренд против направления сигнала\n"
@@ -7812,19 +7812,21 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
+        # Fresh 1h structure is part of the SWING thesis, not a bonus vote.
+        if not _swing_1h_choch:
+            logging.info(f"[SWING Structure] {symbol}: no fresh 1h BOS/CHoCH after sweep — пропуск")
+            return None
+
         _sw_confirms = sum([
-            _sw_vol_ok,         # Volume ≥1.2x
-            _sw_disp_ok,        # Displacement ≥0.45
-            _swing_1h_choch,    # CHoCH подтверждает
-            _swing_pd_ok,       # Ликвидность/Premium-Discount
-            _swing_fvg_ok,      # FVG между entry-TP
-            _swing_15m_confirms,  # 15m импульс совпадает
+            _sw_vol_ok,           # Volume ≥1.2x
+            _sw_disp_ok,          # Displacement ≥0.45
+            _swing_pd_ok,         # Premium/Discount context
+            _swing_fvg_ok,        # FVG between entry and target
+            _swing_15m_confirms,  # 15m impulse in trade direction
         ])
-        _sw_quality = f" [Q:{_sw_confirms}/6]"
-        # Sweep, объём, displacement и CHoCH уже обязательны выше. Здесь
-        # остаются ещё минимум три независимых подтверждения.
-        if _sw_confirms < 3:
-            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 3 — пропуск")
+        _sw_quality = f" [Q:{_sw_confirms}/5]"
+        if _sw_confirms < 2:
+            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/5 < 2 — пропуск")
             return None
 
         # TP2 is optional and must be another real structural swing.  No
@@ -8036,20 +8038,13 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 if _c1h_zone else None
             )
             if _zone_structure_event:
-                q_score += 1
                 _zone_ltf_structure = True
         except Exception:
             pass
         if not _zone_ltf_structure:
             return None
 
-        # Q2: Объём последних 3 свечей > avg
-        try:
-            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
-            if all(candles[-i]["volume"] > avg_vol for i in range(1, 4)):
-                q_score += 1
-        except Exception:
-            pass
+        # Volume is scored once below on the actual rejection candle.
 
         # Q3: RSI не перекуплен (30-70)
         try:
@@ -8125,12 +8120,13 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # Адаптивный порог — при высокой волатильности достаточно 3
+        # Structure is already mandatory above. Optional confirmations are
+        # wick/RSI/FVG/BTC/funding/rejection-volume, without double-counting.
         _zone_ap = get_adaptive_params(symbol, candles)
         _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0
-        _q_min = 4 if _zone_vf > 1.2 else 5
+        _q_min = 3
         if q_score < _q_min:
-            return None  # Недостаточно подтверждений
+            return None  # Недостаточно независимых подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
         if direction == "BULLISH":
@@ -8194,7 +8190,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 f"Диапазон: {smart_price_fmt(range_low)}–{smart_price_fmt(range_high)} | Mid: {smart_price_fmt(range_mid)}\n"
                 f"Цена: {smart_price_fmt(price)} | OB: {smart_price_fmt(ob['bottom']) + '–' + smart_price_fmt(ob['top']) if ob else 'нет'}\n"
                 f"FVG: {smart_price_fmt(fvg['bottom']) + '–' + smart_price_fmt(fvg['top']) if fvg else 'нет'}\n"
-                f"1d тренд: {htf_1d} | Quality score: {q_score}/8\n"
+                f"1d тренд: {htf_1d} | Quality score: {q_score}/6\n"
                 f"Entry: {smart_price_fmt(entry)} SL: {smart_price_fmt(sl)} TP: {smart_price_fmt(tp)} RR: {rr} Стоп: {_zone_sl_pct}%"
                 f"{_self_rules}"
                 f"{_recent_errors}"
@@ -8672,7 +8668,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 "- Spring или SOS отсутствуют или слабые\n"
                 "- Объём на Spring не выше среднего\n"
                 "- Нет compression (сжатие диапазона и объёма)\n"
-                "- RR < 2.0 от текущей цены до целевой\n"
+                "- RR < 2.5 от текущей цены до целевой\n"
                 "- Цена уже выше Creek линии (пропустили вход)\n"
                 "- BTC в нисходящем тренде на 4h\n"
                 "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
@@ -8959,7 +8955,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 "БЛОКИРУЙ (valid: false) если:\n"
                 "- UTAD или SOW отсутствуют или слабые\n"
                 "- Объём на UTAD не выше среднего\n"
-                "- RR < 2.0 от текущей цены до целевой\n"
+                "- RR < 2.5 от текущей цены до целевой\n"
                 "- Цена уже ниже AR лоу (пропустили вход)\n"
                 "- BTC в восходящем тренде на 4h\n"
                 "- SL выставлен математически (entry ± X%), а не за структуру\n\n"

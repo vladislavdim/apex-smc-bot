@@ -80,8 +80,10 @@ from core.telegram_dashboard import (
     fetch_strategy_stats as _fetch_strategy_stats,
     fetch_system_health as _fetch_system_health,
     fetch_watchlist as _fetch_watchlist,
+    fetch_groq_rejections as _fetch_groq_rejections,
     format_strategy_stats as _format_strategy_stats,
     format_watchlist as _format_watchlist,
+    format_groq_rejections as _format_groq_rejections,
 )
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
@@ -870,8 +872,26 @@ async def handle_callback(callback: CallbackQuery):
             text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚫 Отказы Groq", callback_data="menu_groq_rejections")],
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist"),
                  InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
+    elif data == "menu_groq_rejections":
+        try:
+            rejection_data = await asyncio.to_thread(_fetch_groq_rejections, DB_PATH, 24, 30)
+            text = _format_groq_rejections(rejection_data)
+        except Exception as exc:
+            logging.error("Telegram Groq rejection view: %s", exc)
+            text = "⚠️ Не удалось прочитать журнал отказов Groq. Сканер продолжает работать."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_groq_rejections"),
+                 InlineKeyboardButton(text="👀 Наблюдаемые", callback_data="menu_watchlist")],
+                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
             ]),
         )
 

@@ -1,9 +1,9 @@
 """Deterministic safety checks for an already calculated trade candidate.
 
-The validator never calculates or repairs trade levels.  A strategy remains the
+The validator never calculates or repairs trade levels. A strategy remains the
 only authority for direction, entry, stop and targets; this module merely
 rejects malformed or internally contradictory candidates before Groq,
-Telegram, persistence or (in the future) exchange execution can see them.
+Telegram, persistence or exchange execution can see them.
 """
 
 from __future__ import annotations
@@ -18,6 +18,14 @@ def _price(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) and result > 0 else None
+
+
+def _strategy_name(candidate: dict[str, Any]) -> str:
+    raw = candidate.get("scan_type") or candidate.get("grade") or candidate.get("signal_type") or "MTF"
+    strategy = str(raw).upper()
+    if strategy == "FAST_DEAL":
+        return "FAST"
+    return strategy
 
 
 def validate_candidate(candidate: dict[str, Any], current_price: Any = None) -> dict[str, Any]:
@@ -61,12 +69,12 @@ def validate_candidate(candidate: dict[str, Any], current_price: Any = None) -> 
             errors.append("stop distance must be greater than zero")
         else:
             calculated_rr = abs(tp1 - entry) / risk
-            # Every active APEX strategy requires at least 2R.  This shared
-            # guard does not repair or recalculate a candidate; it only keeps
-            # an obsolete/partial strategy result away from Groq, Telegram and
-            # optional exchange execution.
-            if calculated_rr < 2.0:
-                errors.append(f"TP1 risk/reward is below 2.0 ({calculated_rr:.2f})")
+            strategy = _strategy_name(candidate)
+            min_rr = 2.5 if strategy in {"SWING", "WYCKOFF"} else 2.0
+            if calculated_rr < min_rr:
+                errors.append(
+                    f"TP1 risk/reward is below {min_rr:.1f} for {strategy} ({calculated_rr:.2f})"
+                )
             supplied_rr = candidate.get("rr")
             if supplied_rr not in (None, ""):
                 try:
