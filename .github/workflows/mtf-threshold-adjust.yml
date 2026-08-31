@@ -1,0 +1,46 @@
+name: Apply MTF threshold adjustment
+
+on:
+  push:
+    branches:
+      - fix/mtf-thresholds-3-2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/mtf-thresholds-3-2
+      - name: Apply exact MTF-only changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text()
+          old1 = 'min_conf = {"1h": 4, "4h": 4, "1d": 4, "1w": 3}'
+          new1 = 'min_conf = {"1h": 3, "4h": 4, "1d": 4, "1w": 3}'
+          old2 = 'if _mtf_score < 3 or not _mtf_score_bos:'
+          new2 = 'if _mtf_score < 2 or not _mtf_score_bos:'
+          if s.count(old1) != 1:
+              raise SystemExit(f'Expected exactly one positive-confluence threshold, found {s.count(old1)}')
+          if s.count(old2) != 1:
+              raise SystemExit(f'Expected exactly one MTF score threshold, found {s.count(old2)}')
+          s = s.replace(old1, new1).replace(old2, new2)
+          s = s.replace('Для редких MTF-сетапов нужны минимум 3 из 4 подтверждений,', 'Для MTF-сетапов нужны минимум 2 из 4 подтверждений,')
+          p.write_text(s)
+          PY
+      - name: Syntax check
+        run: python -m py_compile bot.py
+      - name: Commit exact change and remove helper
+        run: |
+          rm .github/workflows/mtf-threshold-adjust.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py .github/workflows/mtf-threshold-adjust.yml
+          git commit -m "Relax MTF candidate thresholds"
+          git push origin HEAD:fix/mtf-thresholds-3-2
