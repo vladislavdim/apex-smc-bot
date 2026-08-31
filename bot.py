@@ -1492,10 +1492,7 @@ async def handle_callback(callback: CallbackQuery):
             f"🪙 Пар с закрытой историей: <b>{coin_count}</b>\n"
             f"🕐 Последний WebLearner: <b>{last_web or '—'}</b>\n"
             f"🎓 Последнее обучение по сделке: <b>{last_trade_learning or '—'}</b>\n"
-            f"{execution_block}{macro_block}\n"
-            f"<i>Обновление автоматическое: результаты сделок, новости и "
-            f"веб-контекст сохраняются в brain.db. Groq использует этот "
-            f"контекст, но не переобучает свои базовые веса.</i>",
+            f"{execution_block}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🏅 Качество сигналов", callback_data="brain_grade_accuracy"),
