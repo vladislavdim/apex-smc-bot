@@ -16,6 +16,7 @@ from external_sources.models import empty_context
 from external_sources.storage import persist_context
 from news_context.aggregator import collect_news_context, format_news_context
 from news_context.storage import persist_news_context
+from core.htf_close_context import build_htf_close_context, format_htf_close_context
 
 try:
     from .market_memory import build_memory_context, format_market_memory_context
@@ -179,6 +180,7 @@ def _persist_review(
 async def review_signal_candidate(
     candidate: dict[str, Any],
     ask_groq: Callable[..., str | None],
+    candle_loader: Callable[[str, str, int], list] | None = None,
 ) -> dict[str, Any]:
     """Enrich a completed candidate and let Groq approve, wait, or reject it.
 
@@ -212,11 +214,15 @@ async def review_signal_candidate(
     evidence_candidate = dict(candidate)
     evidence_candidate["_external_quality_review"] = {"context": context, "news_context": news, "historical_zones": zones}
     learning = await asyncio.to_thread(build_learning_context, evidence_candidate)
+    htf_close = await asyncio.to_thread(
+        build_htf_close_context, str(view.get("symbol") or ""), strategy, candle_loader
+    )
     external_block = format_external_context(context, strategy)
     news_block = format_news_context(news)
     memory_block = format_market_memory_context(memory)
     zone_block = format_zone_context(zones)
     learning_block = format_learning_context(learning)
+    htf_close_block = format_htf_close_context(htf_close)
     prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
 
 The APEX strategy has already calculated direction, entry, SL, TP and RR.
@@ -232,6 +238,9 @@ Historical zones describe prior reactions only and MUST NOT replace the already
 calculated entry, SL or TP. Closed-loop evidence is statistical context, not
 permission to invent a new strategy. Do not propose or activate a new strategy
 unless new_strategy_research_ready=true.
+Weekly/monthly closed-candle context is background HTF evidence only. It may adjust
+confidence or be listed as a risk, but a conflicting weekly/monthly candle alone is
+NOT sufficient to WAIT or REJECT an otherwise valid candidate.
 
 CANDIDATE:
 {json.dumps(view, ensure_ascii=False, default=str)}
@@ -245,6 +254,8 @@ CANDIDATE:
 {zone_block}
 
 {learning_block}
+
+{htf_close_block}
 
 Return JSON only:
 {{
