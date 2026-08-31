@@ -111,6 +111,19 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["gate_candles_status"], "available")
         self.assertEqual(row["gate_candles_count"], 1)
 
+    async def test_gate_monthly_candles_use_30_day_api_interval(self):
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return [{"t": 123, "o": "1", "h": "2", "l": "0.5", "c": "1.5", "v": "10"}]
+
+        with patch("core.smc_engine.requests.get", return_value=Response(), create=True) as request:
+            smc_engine._fetch_gate("BTCUSDT", "1M", 10)
+
+        self.assertEqual(request.call_args.kwargs["params"]["interval"], "30d")
+
     async def test_unmapped_asset_is_never_silently_replaced_with_bitcoin(self):
         with patch("core.smc_engine.requests.get", create=True) as request:
             with self.assertRaisesRegex(ValueError, "No CG ID"):
