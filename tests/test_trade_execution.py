@@ -1,1 +1,482 @@
-aW1wb3J0IG9zCmltcG9ydCBzcWxpdGUzCmltcG9ydCB0ZW1wZmlsZQppbXBvcnQgdW5pdHRlc3QKZnJvbSBkZWNpbWFsIGltcG9ydCBEZWNpbWFsCgpmcm9tIGNvcmUudHJhZGVfZXhlY3V0aW9uIGltcG9ydCAoCiAgICBMSVZFX0NPTkZJUk1BVElPTiwKICAgIEJpbmFuY2VGdXR1cmVzQ2xpZW50LAogICAgRXhlY3V0aW9uQ29uZmlnLAogICAgU3ltYm9sUnVsZXMsCiAgICBidWlsZF9vcmRlcl9wbGFuLAogICAgZXhlY3V0ZV9hcHByb3ZlZF9jYW5kaWRhdGUsCiAgICBleGVjdXRpb25fc3RhdHVzLAogICAgcmVjb25jaWxlX2xpdmVfZXhlY3V0aW9ucywKKQpmcm9tIGNvcmUgaW1wb3J0IHRyYWRlX2V4ZWN1dGlvbgoKCkNBTkRJREFURSA9IHsKICAgICJzeW1ib2wiOiAiQlRDVVNEVCIsCiAgICAiZGlyZWN0aW9uIjogIkJVTExJU0giLAogICAgImVudHJ5IjogMTAwLAogICAgInNsIjogOTUsCiAgICAidHAxIjogMTEwLAogICAgInRwMiI6IDExNSwKICAgICJyciI6IDIsCiAgICAiX2V4dGVybmFsX3F1YWxpdHlfcmV2aWV3ZWQiOiBUcnVlLAogICAgIl9leHRlcm5hbF9xdWFsaXR5X3JldmlldyI6IHsKICAgICAgICAiZGVjaXNpb24iOiAiQVBQUk9WRSIsICJjb25maWRlbmNlIjogMC45LCAiZGVncmFkZWQiOiBGYWxzZSwKICAgIH0sCn0KClJVTEVTID0gU3ltYm9sUnVsZXMoCiAgICB0aWNrX3NpemU9RGVjaW1hbCgiMC4xIiksCiAgICBzdGVwX3NpemU9RGVjaW1hbCgiMC4wMDEiKSwKICAgIG1pbl9xdHk9RGVjaW1hbCgiMC4wMDEiKSwKICAgIG1pbl9ub3Rpb25hbD1EZWNpbWFsKCI1IiksCikKCgpkZWYgbGl2ZV9jb25maWcoKipvdmVycmlkZXMpOgogICAgdmFsdWVzID0gZGljdCgKICAgICAgICBlbmFibGVkPVRydWUsIG1vZGU9ImxpdmUiLCBsZXZlcmFnZT01LCByaXNrX3BjdD0wLjUsCiAgICAgICAgcGFwZXJfYmFsYW5jZV91c2R0PTEwMDAsIGZlZV9icHM9MTAsIHRwMV9mcmFjdGlvbj0wLjUsCiAgICAgICAgYXBpX2tleT0ia2V5IiwgYXBpX3NlY3JldD0ic2VjcmV0IiwgYmFzZV91cmw9Imh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkIiwKICAgICAgICBsaXZlX2NvbmZpcm1hdGlvbj1MSVZFX0NPTkZJUk1BVElPTiwgdGltZW91dF9zZWNvbmRzPTMsIHJldHJpZXM9MSwKICAgICkKICAgIHZhbHVlcy51cGRhdGUob3ZlcnJpZGVzKQogICAgcmV0dXJuIEV4ZWN1dGlvbkNvbmZpZygqKnZhbHVlcykKCgpjbGFzcyBGYWtlQ2xpZW50OgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGJhbGFuY2U9MTAwMCwgZW50cnlfc3RhdHVzPSJORVciLCBtYXJrX3ByaWNlPTEwMCk6CiAgICAgICAgc2VsZi5iYWxhbmNlID0gYmFsYW5jZQogICAgICAgIHNlbGYuZW50cnlfc3RhdHVzID0gZW50cnlfc3RhdHVzCiAgICAgICAgc2VsZi5jdXJyZW50X21hcmtfcHJpY2UgPSBtYXJrX3ByaWNlCiAgICAgICAgc2VsZi5jYWxscyA9IFtdCgogICAgZGVmIGlzX29uZV93YXlfbW9kZShzZWxmKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgicG9zaXRpb25fbW9kZSIpCiAgICAgICAgcmV0dXJuIFRydWUKCiAgICBkZWYgb3Blbl9wb3NpdGlvbnMoc2VsZik6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoImFsbF9wb3NpdGlvbnMiKQogICAgICAgIHJldHVybiBbXQoKICAgIGRlZiB1c2R0X2JhbGFuY2VfZGV0YWlscyhzZWxmKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgiYmFsYW5jZV9kZXRhaWxzIikKICAgICAgICByZXR1cm4geyJ3YWxsZXRfYmFsYW5jZSI6IHNlbGYuYmFsYW5jZSwgImF2YWlsYWJsZV9iYWxhbmNlIjogc2VsZi5iYWxhbmNlfQoKICAgIGRlZiByZWFsaXplZF9wbmxfc2luY2Uoc2VsZiwgc3RhcnRfdGltZV9tcyk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoImRhaWx5X3BubCIpCiAgICAgICAgcmV0dXJuIDAuMAoKICAgIGRlZiBoYXNfb3Blbl9wb3NpdGlvbihzZWxmLCBzeW1ib2wpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgicG9zaXRpb24iLCBzeW1ib2wpKQogICAgICAgIHJldHVybiBGYWxzZQoKICAgIGRlZiBoYXNfb3Blbl9vcmRlcnMoc2VsZiwgc3ltYm9sKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoIm9wZW5fb3JkZXJzIiwgc3ltYm9sKSkKICAgICAgICByZXR1cm4gRmFsc2UKCiAgICBkZWYgbWFya19wcmljZShzZWxmLCBzeW1ib2wpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgibWFya19wcmljZSIsIHN5bWJvbCkpCiAgICAgICAgcmV0dXJuIHNlbGYuY3VycmVudF9tYXJrX3ByaWNlCgogICAgZGVmIGF2YWlsYWJsZV91c2R0KHNlbGYpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCJiYWxhbmNlIikKICAgICAgICByZXR1cm4gc2VsZi5iYWxhbmNlCgogICAgZGVmIHN5bWJvbF9ydWxlcyhzZWxmLCBzeW1ib2wpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgicnVsZXMiLCBzeW1ib2wpKQogICAgICAgIHJldHVybiBSVUxFUwoKICAgIGRlZiBzZXRfbGV2ZXJhZ2Uoc2VsZiwgc3ltYm9sLCBsZXZlcmFnZSk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJsZXZlcmFnZSIsIHN5bWJvbCwgbGV2ZXJhZ2UpKQogICAgICAgIHJldHVybiB7ImxldmVyYWdlIjogbGV2ZXJhZ2V9CgogICAgZGVmIHNldF9pc29sYXRlZF9tYXJnaW4oc2VsZiwgc3ltYm9sKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoImlzb2xhdGVkIiwgc3ltYm9sKSkKICAgICAgICByZXR1cm4geyJjb2RlIjogMjAwfQoKICAgIGRlZiBwbGFjZV9saW1pdF9lbnRyeShzZWxmLCBwbGFuLCBjbGllbnRfaWQpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgiZW50cnkiLCBwbGFuLmNvcHkoKSwgY2xpZW50X2lkKSkKICAgICAgICByZXR1cm4geyJvcmRlcklkIjogImVudHJ5LTEifQoKICAgIGRlZiBxdWVyeV9vcmRlcihzZWxmLCBzeW1ib2wsIG9yZGVyX2lkKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoInF1ZXJ5Iiwgc3ltYm9sLCBvcmRlcl9pZCkpCiAgICAgICAgcmV0dXJuIHsKICAgICAgICAgICAgInN0YXR1cyI6IHNlbGYuZW50cnlfc3RhdHVzLAogICAgICAgICAgICAiZXhlY3V0ZWRRdHkiOiAiMC45ODAiIGlmIHNlbGYuZW50cnlfc3RhdHVzID09ICJGSUxMRUQiIGVsc2UgIjAiLAogICAgICAgIH0KCiAgICBkZWYgY2FuY2VsX29yZGVyKHNlbGYsIHN5bWJvbCwgb3JkZXJfaWQpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgiY2FuY2VsIiwgc3ltYm9sLCBvcmRlcl9pZCkpCiAgICAgICAgcmV0dXJuIHsic3RhdHVzIjogIkNBTkNFTEVEIn0KCiAgICBkZWYgcGxhY2VfY2xvc2VfYWxsX3RyaWdnZXIoc2VsZiwgc3ltYm9sLCBzaWRlLCBvcmRlcl90eXBlLCBzdG9wX3ByaWNlLCBjbGllbnRfaWQpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgiY2xvc2VfdHJpZ2dlciIsIHNpZGUsIG9yZGVyX3R5cGUsIHN0b3BfcHJpY2UsIGNsaWVudF9pZCkpCiAgICAgICAgcHJlZml4ID0gInN0b3AiIGlmIG9yZGVyX3R5cGUgPT0gIlNUT1BfTUFSS0VUIiBlbHNlICJ0cDIiCiAgICAgICAgcmV0dXJuIHsiYWxnb0lkIjogZiJ7cHJlZml4fS0xIn0KCiAgICBkZWYgcGxhY2VfcmVkdWNlX3RyaWdnZXIoc2VsZiwgc3ltYm9sLCBzaWRlLCBxdWFudGl0eSwgb3JkZXJfdHlwZSwgc3RvcF9wcmljZSwgY2xpZW50X2lkKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoInJlZHVjZV90cmlnZ2VyIiwgc2lkZSwgcXVhbnRpdHksIG9yZGVyX3R5cGUsIHN0b3BfcHJpY2UsIGNsaWVudF9pZCkpCiAgICAgICAgcmV0dXJuIHsiYWxnb0lkIjogInRwMS0xIn0KCiAgICBkZWYgcXVlcnlfYWxnb19vcmRlcihzZWxmLCBhbGdvX2lkPSIiLCBjbGllbnRfYWxnb19pZD0iIik6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJxdWVyeV9hbGdvIiwgYWxnb19pZCBvciBjbGllbnRfYWxnb19pZCkpCiAgICAgICAgcmV0dXJuIHsiYWxnb0lkIjogYWxnb19pZCBvciAiYWxnby0xIiwgImFsZ29TdGF0dXMiOiAiTkVXIn0KCiAgICBkZWYgY2FuY2VsX2FsZ29fb3JkZXIoc2VsZiwgYWxnb19pZCk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJjYW5jZWxfYWxnbyIsIGFsZ29faWQpKQogICAgICAgIHJldHVybiB7ImFsZ29JZCI6IGFsZ29faWQsICJhbGdvU3RhdHVzIjogIkNBTkNFTEVEIn0KCiAgICBkZWYgZW1lcmdlbmN5X2Nsb3NlKHNlbGYsIHN5bWJvbCwgZGlyZWN0aW9uLCBxdWFudGl0eSwgY2xpZW50X2lkKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoImVtZXJnZW5jeSIsIHN5bWJvbCwgZGlyZWN0aW9uLCBxdWFudGl0eSwgY2xpZW50X2lkKSkKICAgICAgICByZXR1cm4geyJvcmRlcklkIjogImV4aXQtMSJ9CgoKY2xhc3MgUmVjb3JkaW5nUmVzcG9uc2U6CiAgICBzdGF0dXNfY29kZSA9IDIwMAogICAgaGVhZGVycyA9IHt9CiAgICB0ZXh0ID0gIiIKCiAgICBkZWYgX19pbml0X18oc2VsZiwgcGF5bG9hZCk6CiAgICAgICAgc2VsZi5wYXlsb2FkID0gcGF5bG9hZAoKICAgIGRlZiBqc29uKHNlbGYpOgogICAgICAgIHJldHVybiBzZWxmLnBheWxvYWQKCiAgICBkZWYgcmFpc2VfZm9yX3N0YXR1cyhzZWxmKToKICAgICAgICByZXR1cm4gTm9uZQoKCmNsYXNzIFJlY29yZGluZ1Nlc3Npb246CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi5jYWxscyA9IFtdCgogICAgZGVmIHJlcXVlc3Qoc2VsZiwgbWV0aG9kLCB1cmwsICoqa3dhcmdzKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgobWV0aG9kLCB1cmwsIGt3YXJncykpCiAgICAgICAgaWYgdXJsLmVuZHN3aXRoKCIvZmFwaS92My9iYWxhbmNlIik6CiAgICAgICAgICAgIHJldHVybiBSZWNvcmRpbmdSZXNwb25zZShbewogICAgICAgICAgICAgICAgImFzc2V0IjogIlVTRFQiLCAiYmFsYW5jZSI6ICIxMS4yNSIsCiAgICAgICAgICAgICAgICAiYXZhaWxhYmxlQmFsYW5jZSI6ICIxMC43NSIsICJjcm9zc1VuUG5sIjogIjAuNTAiLAogICAgICAgICAgICB9XSkKICAgICAgICBpZiB1cmwuZW5kc3dpdGgoIi9mYXBpL3YxL2luY29tZSIpOgogICAgICAgICAgICByZXR1cm4gUmVjb3JkaW5nUmVzcG9uc2UoWwogICAgICAgICAgICAgICAgeyJzeW1ib2wiOiAiQlRDVVNEVCIsICJpbmNvbWVUeXBlIjogIlJFQUxJWkVEX1BOTCIsICJpbmNvbWUiOiAiMS4yMCIsICJhc3NldCI6ICJVU0RUIiwgInRpbWUiOiAyMDAwLCAidHJhbklkIjogMn0sCiAgICAgICAgICAgICAgICB7InN5bWJvbCI6ICJFVEhVU0RUIiwgImluY29tZVR5cGUiOiAiUkVBTElaRURfUE5MIiwgImluY29tZSI6ICItMC4zMCIsICJhc3NldCI6ICJVU0RUIiwgInRpbWUiOiAxMDAwLCAidHJhbklkIjogMX0sCiAgICAgICAgICAgICAgICB7InN5bWJvbCI6ICJCVENVU0RUIiwgImluY29tZVR5cGUiOiAiQ09NTUlTU0lPTiIsICJpbmNvbWUiOiAiLTAuMDUiLCAiYXNzZXQiOiAiVVNEVCIsICJ0aW1lIjogMjAwMCwgInRyYW5JZCI6IDN9LAogICAgICAgICAgICAgICAgeyJzeW1ib2wiOiAiIiwgImluY29tZVR5cGUiOiAiVFJBTlNGRVIiLCAiaW5jb21lIjogIjEwIiwgImFzc2V0IjogIlVTRFQiLCAidGltZSI6IDUwMCwgInRyYW5JZCI6IDR9LAogICAgICAgICAgICBdKQogICAgICAgIGlmIHVybC5lbmRzd2l0aCgiL2ZhcGkvdjEvYWxnb09yZGVyIikgYW5kIG1ldGhvZCA9PSAiUE9TVCI6CiAgICAgICAgICAgIHJldHVybiBSZWNvcmRpbmdSZXNwb25zZSh7ImFsZ29JZCI6IDQyLCAiYWxnb1N0YXR1cyI6ICJORVcifSkKICAgICAgICByZXR1cm4gUmVjb3JkaW5nUmVzcG9uc2Uoe30pCgoKY2xhc3MgVHJhZGVFeGVjdXRpb25UZXN0cyh1bml0dGVzdC5UZXN0Q2FzZSk6CiAgICBkZWYgc2V0VXAoc2VsZik6CiAgICAgICAgc2VsZi50bXAgPSB0ZW1wZmlsZS5UZW1wb3JhcnlEaXJlY3RvcnkoKQogICAgICAgIHNlbGYuZGJfcGF0aCA9IG9zLnBhdGguam9pbihzZWxmLnRtcC5uYW1lLCAiYnJhaW4uZGIiKQogICAgICAgIHRyYWRlX2V4ZWN1dGlvbi5fYmluYW5jZV9ibG9ja2VkX3VudGlsID0gMC4wCiAgICAgICAgdHJhZGVfZXhlY3V0aW9uLl9zaGFyZWRfc3ltYm9sX3J1bGVzX2NhY2hlLmNsZWFyKCkKCiAgICBkZWYgdGVhckRvd24oc2VsZik6CiAgICAgICAgc2VsZi50bXAuY2xlYW51cCgpCgogICAgZGVmIHRlc3Rfc3RyYXRlZ3lfcGF1c2VfYmxvY2tzX2JlZm9yZV9leGNoYW5nZV9jYWxscyhzZWxmKToKICAgICAgICBjYW5kaWRhdGUgPSB7KipDQU5ESURBVEUsICJfc3RyYXRlZ3lfcmlza19zdGF0ZSI6IHsKICAgICAgICAgICAgIm1vZGUiOiAiUEFVU0VEIiwgInJlYXNvbiI6ICI1IGNvbnNlY3V0aXZlIGFjdGl2YXRlZCBTTCIsCiAgICAgICAgICAgICJsaXZlX3Jpc2tfbXVsdGlwbGllciI6IDAuMCwKICAgICAgICB9fQogICAgICAgIGNsaWVudCA9IEZha2VDbGllbnQoKQogICAgICAgIHJlc3VsdCA9IGV4ZWN1dGVfYXBwcm92ZWRfY2FuZGlkYXRlKAogICAgICAgICAgICBjYW5kaWRhdGUsIDEwMSwgZGJfcGF0aD1zZWxmLmRiX3BhdGgsIGNvbmZpZz1saXZlX2NvbmZpZygpLCBjbGllbnQ9Y2xpZW50LAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJlc3VsdFsic3RhdHVzIl0sICJCTE9DS0VEX1NUUkFURUdZX1BBVVNFIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNsaWVudC5jYWxscywgW10pCgogICAgZGVmIHRlc3Rfc3RyYXRlZ3lfY2F1dGlvbl9oYWx2ZXNfcGFwZXJfcmlza19idWRnZXQoc2VsZik6CiAgICAgICAgY2FuZGlkYXRlID0geyoqQ0FORElEQVRFLCAiX3N0cmF0ZWd5X3Jpc2tfc3RhdGUiOiB7CiAgICAgICAgICAgICJtb2RlIjogIkNBVVRJT04iLCAibGl2ZV9yaXNrX211bHRpcGxpZXIiOiAwLjUsCiAgICAgICAgfX0KICAgICAgICBjb25maWcgPSBFeGVjdXRpb25Db25maWcoZW5hYmxlZD1UcnVlLCBtb2RlPSJwYXBlciIsIHJpc2tfcGN0PTAuNSwgcGFwZXJfYmFsYW5jZV91c2R0PTEwMDApCiAgICAgICAgcmVzdWx0ID0gZXhlY3V0ZV9hcHByb3ZlZF9jYW5kaWRhdGUoY2FuZGlkYXRlLCAxMDIsIGRiX3BhdGg9c2VsZi5kYl9wYXRoLCBjb25maWc9Y29uZmlnKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WyJzdGF0dXMiXSwgIlBBUEVSX1BFTkRJTkdfRU5UUlkiKQogICAgICAgIHNlbGYuYXNzZXJ0QWxtb3N0RXF1YWwocmVzdWx0WyJwbGFuIl1bInJpc2tfYnVkZ2V0Il0sIDIuNSkKCiAgICBkZWYgdGVzdF9kZWZhdWx0X2NvbmZpZ3VyYXRpb25faXNfZGlzYWJsZWRfcGFwZXIoc2VsZik6CiAgICAgICAgY29uZmlnID0gRXhlY3V0aW9uQ29uZmlnLmZyb21fZW52KHt9KQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UoY29uZmlnLmVuYWJsZWQpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChjb25maWcubW9kZSwgInBhcGVyIikKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKGNvbmZpZy5saXZlX2FybWVkKQoKICAgIGRlZiB0ZXN0X2JpbmFuY2VfcmF0ZV9saW1pdF9vcGVuc19wcm9jZXNzX3dpZGVfY2lyY3VpdChzZWxmKToKICAgICAgICBjbGFzcyBSYXRlTGltaXRlZFJlc3BvbnNlOgogICAgICAgICAgICBzdGF0dXNfY29kZSA9IDQxOAogICAgICAgICAgICBoZWFkZXJzID0geyJSZXRyeS1BZnRlciI6ICIxMjAifQogICAgICAgICAgICB0ZXh0ID0gImJhbm5lZCIKCiAgICAgICAgICAgIEBzdGF0aWNtZXRob2QKICAgICAgICAgICAgZGVmIGpzb24oKToKICAgICAgICAgICAgICAgIHJldHVybiB7ImNvZGUiOiAtMTAwMywgIm1zZyI6ICJJUCBiYW5uZWQgdW50aWwgNDEwMjQ0NDgwMDAwMCJ9CgogICAgICAgIGNsYXNzIFJhdGVMaW1pdGVkU2Vzc2lvbjoKICAgICAgICAgICAgZGVmIF9faW5pdF9fKHNlbGYpOgogICAgICAgICAgICAgICAgc2VsZi5jYWxscyA9IDAKCiAgICAgICAgICAgIGRlZiByZXF1ZXN0KHNlbGYsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgICAgICAgICBzZWxmLmNhbGxzICs9IDEKICAgICAgICAgICAgICAgIHJldHVybiBSYXRlTGltaXRlZFJlc3BvbnNlKCkKCiAgICAgICAgZmlyc3Rfc2Vzc2lvbiA9IFJhdGVMaW1pdGVkU2Vzc2lvbigpCiAgICAgICAgZmlyc3QgPSBCaW5hbmNlRnV0dXJlc0NsaWVudChsaXZlX2NvbmZpZygpLCBzZXNzaW9uPWZpcnN0X3Nlc3Npb24pCiAgICAgICAgd2l0aCBzZWxmLmFzc2VydFJhaXNlcyh0cmFkZV9leGVjdXRpb24uQmluYW5jZUFQSUVycm9yKToKICAgICAgICAgICAgZmlyc3QuX3JlcXVlc3QoIkdFVCIsICIvZmFwaS92MS9leGNoYW5nZUluZm8iKQoKICAgICAgICBzZWNvbmRfc2Vzc2lvbiA9IFJhdGVMaW1pdGVkU2Vzc2lvbigpCiAgICAgICAgc2Vjb25kID0gQmluYW5jZUZ1dHVyZXNDbGllbnQobGl2ZV9jb25maWcoKSwgc2Vzc2lvbj1zZWNvbmRfc2Vzc2lvbikKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzUmVnZXgoUnVudGltZUVycm9yLCAiQmluYW5jZSBjaXJjdWl0IG9wZW4iKToKICAgICAgICAgICAgc2Vjb25kLl9yZXF1ZXN0KCJHRVQiLCAiL2ZhcGkvdjEvZXhjaGFuZ2VJbmZvIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGZpcnN0X3Nlc3Npb24uY2FsbHMsIDEpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChzZWNvbmRfc2Vzc2lvbi5jYWxscywgMCkKCiAgICBkZWYgdGVzdF9yZWNvbmNpbGlhdGlvbl9zaW5nbGVfZmxpZ2h0X3NraXBzX292ZXJsYXBwaW5nX2NhbGwoc2VsZik6CiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKHRyYWRlX2V4ZWN1dGlvbi5fcmVjb25jaWxlX3Byb2Nlc3NfbG9jay5hY3F1aXJlKGJsb2NraW5nPUZhbHNlKSkKICAgICAgICB0cnk6CiAgICAgICAgICAgIHJlc3VsdCA9IHJlY29uY2lsZV9saXZlX2V4ZWN1dGlvbnMoCiAgICAgICAgICAgICAgICBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWxpdmVfY29uZmlnKCksIGNsaWVudD1GYWtlQ2xpZW50KCksCiAgICAgICAgICAgICkKICAgICAgICBmaW5hbGx5OgogICAgICAgICAgICB0cmFkZV9leGVjdXRpb24uX3JlY29uY2lsZV9wcm9jZXNzX2xvY2sucmVsZWFzZSgpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZXN1bHQsIFtdKQoKICAgIGRlZiB0ZXN0X2Vudmlyb25tZW50X2NhcHNfbGV2ZXJhZ2VfYW5kX3Jpc2soc2VsZik6CiAgICAgICAgY29uZmlnID0gRXhlY3V0aW9uQ29uZmlnLmZyb21fZW52KHsKICAgICAgICAgICAgIkFVVE9fVFJBRElOR19FTkFCTEVEIjogInRydWUiLAogICAgICAgICAgICAiQVVUT19UUkFESU5HX0xFVkVSQUdFIjogIjUwIiwKICAgICAgICAgICAgIkFVVE9fVFJBRElOR19SSVNLX1BDVCI6ICI5IiwKICAgICAgICB9KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoY29uZmlnLmxldmVyYWdlLCA1KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoY29uZmlnLnJpc2tfcGN0LCAxLjApCgogICAgZGVmIHRlc3RfbGl2ZV9raWxsX3N3aXRjaF9ibG9ja3NfYmVmb3JlX2V4Y2hhbmdlKHNlbGYpOgogICAgICAgIGNsaWVudCA9IEZha2VDbGllbnQoKQogICAgICAgIHJlc3VsdCA9IGV4ZWN1dGVfYXBwcm92ZWRfY2FuZGlkYXRlKAogICAgICAgICAgICBDQU5ESURBVEUsIDk5LCBkYl9wYXRoPXNlbGYuZGJfcGF0aCwKICAgICAgICAgICAgY29uZmlnPWxpdmVfY29uZmlnKGtpbGxfc3dpdGNoPVRydWUpLCBjbGllbnQ9Y2xpZW50LAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJlc3VsdFsic3RhdHVzIl0sICJCTE9DS0VEX0tJTExfU1dJVENIIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNsaWVudC5jYWxscywgW10pCgogICAgZGVmIHRlc3RfbGl2ZV9kYWlseV9sb3NzX2xpbWl0X2Jsb2Nrc19uZXdfb3JkZXIoc2VsZik6CiAgICAgICAgY2xpZW50ID0gRmFrZUNsaWVudChiYWxhbmNlPTEwMDApCiAgICAgICAgY2xpZW50LnJlYWxpemVkX3BubF9zaW5jZSA9IGxhbWJkYSBfOiAtMjUuMAogICAgICAgIHJlc3VsdCA9IGV4ZWN1dGVfYXBwcm92ZWRfY2FuZGlkYXRlKAogICAgICAgICAgICBDQU5ESURBVEUsIDEwMCwgZGJfcGF0aD1zZWxmLmRiX3BhdGgsCiAgICAgICAgICAgIGNvbmZpZz1saXZlX2NvbmZpZyhtYXhfZGFpbHlfbG9zc19wY3Q9Mi4wKSwgY2xpZW50PWNsaWVudCwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZXN1bHRbInN0YXR1cyJdLCAiQkxPQ0tFRF9EQUlMWV9MT1NTIikKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKGFueShjYWxsWzBdID09ICJlbnRyeSIgZm9yIGNhbGwgaW4gY2xpZW50LmNhbGxzIGlmIGlzaW5zdGFuY2UoY2FsbCwgdHVwbGUpKSkKCiAgICBkZWYgdGVzdF9saXZlX29wZW5fcG9zaXRpb25fbGltaXRfYmxvY2tzX25ld19vcmRlcihzZWxmKToKICAgICAgICBjbGllbnQgPSBGYWtlQ2xpZW50KCkKICAgICAgICBjbGllbnQub3Blbl9wb3NpdGlvbnMgPSBsYW1iZGE6IFt7InN5bWJvbCI6ICJFVEhVU0RUIiwgInBvc2l0aW9uQW10IjogIjEifV0KICAgICAgICByZXN1bHQgPSBleGVjdXRlX2FwcHJvdmVkX2NhbmRpZGF0ZSgKICAgICAgICAgICAgQ0FORElEQVRFLCAxMDIsIGRiX3BhdGg9c2VsZi5kYl9wYXRoLAogICAgICAgICAgICBjb25maWc9bGl2ZV9jb25maWcobWF4X29wZW5fcG9zaXRpb25zPTEpLCBjbGllbnQ9Y2xpZW50LAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJlc3VsdFsic3RhdHVzIl0sICJCTE9DS0VEX01BWF9QT1NJVElPTlMiKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UoYW55KGNhbGxbMF0gPT0gImVudHJ5IiBmb3IgY2FsbCBpbiBjbGllbnQuY2FsbHMgaWYgaXNpbnN0YW5jZShjYWxsLCB0dXBsZSkpKQoKICAgIGRlZiB0ZXN0X3Bvc2l0aW9uX3NpemVfdXNlc19zdG9wX3Jpc2tfYW5kX2JhbGFuY2Uoc2VsZik6CiAgICAgICAgcGxhbiA9IGJ1aWxkX29yZGVyX3BsYW4oQ0FORElEQVRFLCAxMDAwLCBsaXZlX2NvbmZpZygpLCBSVUxFUykKICAgICAgICBzZWxmLmFzc2VydFRydWUocGxhblsib2siXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHBsYW5bImxldmVyYWdlIl0sIDUpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChwbGFuWyJxdWFudGl0eSJdLCAiMC45OCIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChwbGFuWyJyaXNrX2J1ZGdldCJdLCA1LjApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgocGxhblsiZW50cnkiXSwgcGxhblsic2wiXSwgcGxhblsidHAxIl0sIHBsYW5bInRwMiJdKSwgKCIxMDAiLCAiOTUiLCAiMTEwIiwgIjExNSIpKQoKICAgIGRlZiB0ZXN0X2V4Y2hhbmdlX3JvdW5kaW5nX25ldmVyX21vdmVzX3N0b3BfaW5zaWRlX3N0cnVjdHVyZShzZWxmKToKICAgICAgICBjYW5kaWRhdGUgPSB7CiAgICAgICAgICAgICoqQ0FORElEQVRFLAogICAgICAgICAgICAiZW50cnkiOiAxMDAuMDQsICJzbCI6IDk1LjA2LCAidHAxIjogMTEwLjA5LCAidHAyIjogMTE1LjA5LAogICAgICAgIH0KICAgICAgICBwbGFuID0gYnVpbGRfb3JkZXJfcGxhbihjYW5kaWRhdGUsIDEwMDAsIGxpdmVfY29uZmlnKCksIFJVTEVTKQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShwbGFuWyJvayJdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocGxhblsiZW50cnkiXSwgIjEwMCIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChwbGFuWyJzbCJdLCAiOTUiKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocGxhblsidHAxIl0sICIxMTAiKQoKICAgICAgICBzaG9ydCA9IHsKICAgICAgICAgICAgKipjYW5kaWRhdGUsCiAgICAgICAgICAgICJkaXJlY3Rpb24iOiAiQkVBUklTSCIsICJzbCI6IDEwNS4wNCwgInRwMSI6IDkwLjAxLCAidHAyIjogODUuMDEsCiAgICAgICAgfQogICAgICAgIHNob3J0X3BsYW4gPSBidWlsZF9vcmRlcl9wbGFuKHNob3J0LCAxMDAwLCBsaXZlX2NvbmZpZygpLCBSVUxFUykKICAgICAgICBzZWxmLmFzc2VydFRydWUoc2hvcnRfcGxhblsib2siXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHNob3J0X3BsYW5bInNsIl0sICIxMDUuMSIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChzaG9ydF9wbGFuWyJ0cDEiXSwgIjkwLjEiKQoKICAgIGRlZiB0ZXN0X3plcm9fYmFsYW5jZV9pc19hX3NhZmVfc2tpcChzZWxmKToKICAgICAgICBwbGFuID0gYnVpbGRfb3JkZXJfcGxhbihDQU5ESURBVEUsIDAsIGxpdmVfY29uZmlnKCksIFJVTEVTKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UocGxhblsib2siXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHBsYW5bInN0YXR1cyJdLCAiU0tJUFBFRF9OT19CQUxBTkNFIikKCiAgICBkZWYgdGVzdF9saXZlX21vZGVfbmVlZHNfZXhhY3Rfc2Vjb25kX2NvbmZpcm1hdGlvbihzZWxmKToKICAgICAgICBjb25maWcgPSBsaXZlX2NvbmZpZyhsaXZlX2NvbmZpcm1hdGlvbj0ieWVzIikKICAgICAgICByZXN1bHQgPSBleGVjdXRlX2FwcHJvdmVkX2NhbmRpZGF0ZShDQU5ESURBVEUsIDEsIGRiX3BhdGg9c2VsZi5kYl9wYXRoLCBjb25maWc9Y29uZmlnKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WyJzdGF0dXMiXSwgIkxJVkVfTk9UX0FSTUVEIikKCiAgICBkZWYgdGVzdF9saXZlX21vZGVfcmVqZWN0c19jYW5kaWRhdGVfd2l0aG91dF9ncm9xX3Jldmlld19iZWZvcmVfZXhjaGFuZ2Uoc2VsZik6CiAgICAgICAgY2FuZGlkYXRlID0gewogICAgICAgICAgICBrZXk6IHZhbHVlIGZvciBrZXksIHZhbHVlIGluIENBTkRJREFURS5pdGVtcygpCiAgICAgICAgICAgIGlmIG5vdCBrZXkuc3RhcnRzd2l0aCgiX2V4dGVybmFsX3F1YWxpdHlfcmV2aWV3IikKICAgICAgICB9CiAgICAgICAgY2xpZW50ID0gRmFrZUNsaWVudCgpCiAgICAgICAgcmVzdWx0ID0gZXhlY3V0ZV9hcHByb3ZlZF9jYW5kaWRhdGUoCiAgICAgICAgICAgIGNhbmRpZGF0ZSwgMTAxLCBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWxpdmVfY29uZmlnKCksIGNsaWVudD1jbGllbnQsCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WyJzdGF0dXMiXSwgIkJMT0NLRURfR1JPUV9HVUFSRCIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChjbGllbnQuY2FsbHMsIFtdKQoKICAgIGRlZiB0ZXN0X2xpdmVfbW9kZV9yZWplY3RzX2RlZ3JhZGVkX2dyb3FfYXBwcm92YWxfYmVmb3JlX2V4Y2hhbmdlKHNlbGYpOgogICAgICAgIGNhbmRpZGF0ZSA9IHsKICAgICAgICAgICAgKipDQU5ESURBVEUsCiAgICAgICAgICAgICJfZXh0ZXJuYWxfcXVhbGl0eV9yZXZpZXciOiB7CiAgICAgICAgICAgICAgICAiZGVjaXNpb24iOiAiQVBQUk9WRSIsICJjb25maWRlbmNlIjogMC45OSwgImRlZ3JhZGVkIjogVHJ1ZSwKICAgICAgICAgICAgfSwKICAgICAgICB9CiAgICAgICAgY2xpZW50ID0gRmFrZUNsaWVudCgpCiAgICAgICAgcmVzdWx0ID0gZXhlY3V0ZV9hcHByb3ZlZF9jYW5kaWRhdGUoCiAgICAgICAgICAgIGNhbmRpZGF0ZSwgMTAyLCBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWxpdmVfY29uZmlnKCksIGNsaWVudD1jbGllbnQsCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WyJzdGF0dXMiXSwgIkJMT0NLRURfR1JPUV9HVUFSRCIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChjbGllbnQuY2FsbHMsIFtdKQoKICAgIGRlZiB0ZXN0X3BhcGVyX21vZGVfcmVjb3Jkc193aXRob3V0X2V4Y2hhbmdlKHNlbGYpOgogICAgICAgIGNvbmZpZyA9IEV4ZWN1dGlvbkNvbmZpZyhlbmFibGVkPVRydWUsIG1vZGU9InBhcGVyIiwgcGFwZXJfYmFsYW5jZV91c2R0PTEwMDApCiAgICAgICAgcmVzdWx0ID0gZXhlY3V0ZV9hcHByb3ZlZF9jYW5kaWRhdGUoQ0FORElEQVRFLCAyLCBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWNvbmZpZykKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJlc3VsdFsic3RhdHVzIl0sICJQQVBFUl9QRU5ESU5HX0VOVFJZIikKICAgICAgICB3aXRoIHNxbGl0ZTMuY29ubmVjdChzZWxmLmRiX3BhdGgpIGFzIGNvbm46CiAgICAgICAgICAgIHJvdyA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgICAgICJTRUxFQ1QgbW9kZSxzdGF0dXMsbGV2ZXJhZ2UgRlJPTSB0cmFkZV9leGVjdXRpb25zIFdIRVJFIHNpZ25hbF9pZD0yIgogICAgICAgICAgICApLmZldGNob25lKCkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJvdywgKCJwYXBlciIsICJQQVBFUl9QRU5ESU5HX0VOVFJZIiwgNSkpCgogICAgZGVmIHRlc3RfbGl2ZV96ZXJvX2JhbGFuY2VfZG9lc19ub3Rfc3VibWl0X2FuX29yZGVyKHNlbGYpOgogICAgICAgIGNsaWVudCA9IEZha2VDbGllbnQoYmFsYW5jZT0wKQogICAgICAgIHJlc3VsdCA9IGV4ZWN1dGVfYXBwcm92ZWRfY2FuZGlkYXRlKAogICAgICAgICAgICBDQU5ESURBVEUsIDMsIGRiX3BhdGg9c2VsZi5kYl9wYXRoLCBjb25maWc9bGl2ZV9jb25maWcoKSwgY2xpZW50PWNsaWVudCwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZXN1bHRbInN0YXR1cyJdLCAiU0tJUFBFRF9OT19CQUxBTkNFIikKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKGFueShjYWxsID09ICJlbnRyeSIgb3IgKGlzaW5zdGFuY2UoY2FsbCwgdHVwbGUpIGFuZCBjYWxsWzBdID09ICJlbnRyeSIpIGZvciBjYWxsIGluIGNsaWVudC5jYWxscykpCgogICAgZGVmIHRlc3RfbGl2ZV9zZXR1cF9hbHJlYWR5X2F0X3RhcmdldF9kb2VzX25vdF9zdWJtaXRfYW5fb3JkZXIoc2VsZik6CiAgICAgICAgY2xpZW50ID0gRmFrZUNsaWVudChiYWxhbmNlPTEwMDAsIG1hcmtfcHJpY2U9MTExKQogICAgICAgIHJlc3VsdCA9IGV4ZWN1dGVfYXBwcm92ZWRfY2FuZGlkYXRlKAogICAgICAgICAgICBDQU5ESURBVEUsIDQsIGRiX3BhdGg9c2VsZi5kYl9wYXRoLCBjb25maWc9bGl2ZV9jb25maWcoKSwgY2xpZW50PWNsaWVudCwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZXN1bHRbInN0YXR1cyJdLCAiU0tJUFBFRF9TVEFMRV9NQVJLRVQiKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UoYW55KGlzaW5zdGFuY2UoY2FsbCwgdHVwbGUpIGFuZCBjYWxsWzBdID09ICJlbnRyeSIgZm9yIGNhbGwgaW4gY2xpZW50LmNhbGxzKSkKCiAgICBkZWYgdGVzdF9maWxsZWRfbGl2ZV9lbnRyeV9nZXRzX3N0b3BfYW5kX3R3b190YWtlX29yZGVycyhzZWxmKToKICAgICAgICB3aXRoIHNxbGl0ZTMuY29ubmVjdChzZWxmLmRiX3BhdGgpIGFzIGNvbm46CiAgICAgICAgICAgIGNvbm4uZXhlY3V0ZSgiQ1JFQVRFIFRBQkxFIHNpZ25hbHMgKGlkIElOVEVHRVIgUFJJTUFSWSBLRVksIHJlc3VsdCBURVhUKSIpCiAgICAgICAgICAgIGNvbm4uZXhlY3V0ZSgiSU5TRVJUIElOVE8gc2lnbmFscyAoaWQscmVzdWx0KSBWQUxVRVMgKDcsJ3BlbmRpbmcnKSIpCiAgICAgICAgY2xpZW50ID0gRmFrZUNsaWVudChiYWxhbmNlPTEwMDAsIGVudHJ5X3N0YXR1cz0iRklMTEVEIikKICAgICAgICBzdWJtaXR0ZWQgPSBleGVjdXRlX2FwcHJvdmVkX2NhbmRpZGF0ZSgKICAgICAgICAgICAgQ0FORElEQVRFLCA3LCBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWxpdmVfY29uZmlnKCksIGNsaWVudD1jbGllbnQsCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoc3VibWl0dGVkWyJzdGF0dXMiXSwgIlBST1RFQ1RFRCIpCiAgICAgICAgY2FsbF90eXBlcyA9IFtjYWxsWzBdIGZvciBjYWxsIGluIGNsaWVudC5jYWxscyBpZiBpc2luc3RhbmNlKGNhbGwsIHR1cGxlKV0KICAgICAgICBzZWxmLmFzc2VydEluKCJjbG9zZV90cmlnZ2VyIiwgY2FsbF90eXBlcykKICAgICAgICBzZWxmLmFzc2VydEluKCJyZWR1Y2VfdHJpZ2dlciIsIGNhbGxfdHlwZXMpCiAgICAgICAgd2l0aCBzcWxpdGUzLmNvbm5lY3Qoc2VsZi5kYl9wYXRoKSBhcyBjb25uOgogICAgICAgICAgICByb3cgPSBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICAgICAiU0VMRUNUIHN0YXR1cyxzdG9wX29yZGVyX2lkLHRwMV9vcmRlcl9pZCx0cDJfb3JkZXJfaWQgRlJPTSB0cmFkZV9leGVjdXRpb25zIFdIRVJFIHNpZ25hbF9pZD03IgogICAgICAgICAgICApLmZldGNob25lKCkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJvdywgKCJQUk9URUNURUQiLCAic3RvcC0xIiwgInRwMS0xIiwgInRwMi0xIikpCgogICAgZGVmIHRlc3RfZXhwaXJlZF9zaWduYWxfZmlsbGVkX2F0X2V4Y2hhbmdlX2lzX2Nsb3NlZF9ub3RfcHJvdGVjdGVkKHNlbGYpOgogICAgICAgIHdpdGggc3FsaXRlMy5jb25uZWN0KHNlbGYuZGJfcGF0aCkgYXMgY29ubjoKICAgICAgICAgICAgY29ubi5leGVjdXRlKCJDUkVBVEUgVEFCTEUgc2lnbmFscyAoaWQgSU5URUdFUiBQUklNQVJZIEtFWSwgcmVzdWx0IFRFWFQpIikKICAgICAgICAgICAgY29ubi5leGVjdXRlKCJJTlNFUlQgSU5UTyBzaWduYWxzIChpZCxyZXN1bHQpIFZBTFVFUyAoOCwnc2wnKSIpCiAgICAgICAgY2xpZW50ID0gRmFrZUNsaWVudChiYWxhbmNlPTEwMDAsIGVudHJ5X3N0YXR1cz0iRklMTEVEIikKICAgICAgICBzdWJtaXR0ZWQgPSBleGVjdXRlX2FwcHJvdmVkX2NhbmRpZGF0ZSgKICAgICAgICAgICAgQ0FORElEQVRFLCA4LCBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWxpdmVfY29uZmlnKCksIGNsaWVudD1jbGllbnQsCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoc3VibWl0dGVkWyJzdGF0dXMiXSwgIkVNRVJHRU5DWV9DTE9TRUQiKQogICAgICAgIGNhbGxfdHlwZXMgPSBbY2FsbFswXSBmb3IgY2FsbCBpbiBjbGllbnQuY2FsbHMgaWYgaXNpbnN0YW5jZShjYWxsLCB0dXBsZSldCiAgICAgICAgc2VsZi5hc3NlcnRJbigiZW1lcmdlbmN5IiwgY2FsbF90eXBlcykKICAgICAgICBzZWxmLmFzc2VydE5vdEluKCJjbG9zZV90cmlnZ2VyIiwgY2FsbF90eXBlcykKICAgICAgICB3aXRoIHNxbGl0ZTMuY29ubmVjdChzZWxmLmRiX3BhdGgpIGFzIGNvbm46CiAgICAgICAgICAgIHN0YXR1cyA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgICAgICJTRUxFQ1Qgc3RhdHVzIEZST00gdHJhZGVfZXhlY3V0aW9ucyBXSEVSRSBzaWduYWxfaWQ9OCIKICAgICAgICAgICAgKS5mZXRjaG9uZSgpWzBdCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChzdGF0dXMsICJFTUVSR0VOQ1lfQ0xPU0VEIikKCiAgICBkZWYgdGVzdF9jbG9zZWRfc2lnbmFsX2NhbmNlbHNfb25seV9pdHNfcmVtYWluaW5nX2FsZ29fb3JkZXJzKHNlbGYpOgogICAgICAgIHdpdGggc3FsaXRlMy5jb25uZWN0KHNlbGYuZGJfcGF0aCkgYXMgY29ubjoKICAgICAgICAgICAgY29ubi5leGVjdXRlKCJDUkVBVEUgVEFCTEUgc2lnbmFscyAoaWQgSU5URUdFUiBQUklNQVJZIEtFWSwgcmVzdWx0IFRFWFQpIikKICAgICAgICAgICAgY29ubi5leGVjdXRlKCJJTlNFUlQgSU5UTyBzaWduYWxzIChpZCxyZXN1bHQpIFZBTFVFUyAoOSwncGVuZGluZycpIikKICAgICAgICBjbGllbnQgPSBGYWtlQ2xpZW50KGJhbGFuY2U9MTAwMCwgZW50cnlfc3RhdHVzPSJGSUxMRUQiKQogICAgICAgIHN1Ym1pdHRlZCA9IGV4ZWN1dGVfYXBwcm92ZWRfY2FuZGlkYXRlKAogICAgICAgICAgICBDQU5ESURBVEUsIDksIGRiX3BhdGg9c2VsZi5kYl9wYXRoLCBjb25maWc9bGl2ZV9jb25maWcoKSwgY2xpZW50PWNsaWVudCwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChzdWJtaXR0ZWRbInN0YXR1cyJdLCAiUFJPVEVDVEVEIikKICAgICAgICB3aXRoIHNxbGl0ZTMuY29ubmVjdChzZWxmLmRiX3BhdGgpIGFzIGNvbm46CiAgICAgICAgICAgIGNvbm4uZXhlY3V0ZSgiVVBEQVRFIHNpZ25hbHMgU0VUIHJlc3VsdD0ndHAyJyBXSEVSRSBpZD05IikKCiAgICAgICAgb3V0Y29tZXMgPSByZWNvbmNpbGVfbGl2ZV9leGVjdXRpb25zKAogICAgICAgICAgICBkYl9wYXRoPXNlbGYuZGJfcGF0aCwgY29uZmlnPWxpdmVfY29uZmlnKCksIGNsaWVudD1jbGllbnQsCiAgICAgICAgKQoKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG91dGNvbWVzWzBdWyJzdGF0dXMiXSwgIkNMT1NFRF9UUDIiKQogICAgICAgIGNhbmNlbGxlZCA9IFtjYWxsWzFdIGZvciBjYWxsIGluIGNsaWVudC5jYWxscyBpZiBpc2luc3RhbmNlKGNhbGwsIHR1cGxlKSBhbmQgY2FsbFswXSA9PSAiY2FuY2VsX2FsZ28iXQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoc2V0KGNhbmNlbGxlZCksIHsic3RvcC0xIiwgInRwMS0xIiwgInRwMi0xIn0pCgogICAgZGVmIHRlc3RfY29uZGl0aW9uYWxfb3JkZXJzX3VzZV9jdXJyZW50X2FsZ29fZW5kcG9pbnRfYW5kX2ZpZWxkcyhzZWxmKToKICAgICAgICBzZXNzaW9uID0gUmVjb3JkaW5nU2Vzc2lvbigpCiAgICAgICAgY2xpZW50ID0gQmluYW5jZUZ1dHVyZXNDbGllbnQobGl2ZV9jb25maWcoKSwgc2Vzc2lvbj1zZXNzaW9uKQoKICAgICAgICByZXN1bHQgPSBjbGllbnQucGxhY2VfY2xvc2VfYWxsX3RyaWdnZXIoCiAgICAgICAgICAgICJCVENVU0RUIiwgIlNFTEwiLCAiU1RPUF9NQVJLRVQiLCAiOTUiLCAiYXBleF9zXzEwIiwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WyJhbGdvSWQiXSwgNDIpCiAgICAgICAgbWV0aG9kLCB1cmwsIGt3YXJncyA9IHNlc3Npb24uY2FsbHNbMF0KICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG1ldGhvZCwgIlBPU1QiKQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZSh1cmwuZW5kc3dpdGgoIi9mYXBpL3YxL2FsZ29PcmRlciIpKQogICAgICAgIHBhcmFtcyA9IGt3YXJnc1sicGFyYW1zIl0KICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHBhcmFtc1siYWxnb1R5cGUiXSwgIkNPTkRJVElPTkFMIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHBhcmFtc1sidHJpZ2dlclByaWNlIl0sICI5NSIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChwYXJhbXNbImNsaWVudEFsZ29JZCJdLCAiYXBleF9zXzEwIikKICAgICAgICBzZWxmLmFzc2VydE5vdEluKCJzdG9wUHJpY2UiLCBwYXJhbXMpCgogICAgZGVmIHRlc3RfbGl2ZV9zdGF0dXNfc2hvd3NfYWN0dWFsX3dhbGxldF9hbmRfbmV0X3BubF93aXRob3V0X3RyYW5zZmVycyhzZWxmKToKICAgICAgICBzZXNzaW9uID0gUmVjb3JkaW5nU2Vzc2lvbigpCiAgICAgICAgY2xpZW50ID0gQmluYW5jZUZ1dHVyZXNDbGllbnQobGl2ZV9jb25maWcoKSwgc2Vzc2lvbj1zZXNzaW9uKQoKICAgICAgICBzdGF0dXMgPSBleGVjdXRpb25fc3RhdHVzKAogICAgICAgICAgICBzZWxmLmRiX3BhdGgsIGNvbmZpZz1saXZlX2NvbmZpZygpLCBjbGllbnQ9Y2xpZW50LAogICAgICAgICkKCiAgICAgICAgYWNjb3VudCA9IHN0YXR1c1siYWNjb3VudCJdCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGFjY291bnRbImF2YWlsYWJsZSJdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoYWNjb3VudFsid2FsbGV0X2JhbGFuY2UiXSwgMTEuMjUpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChhY2NvdW50WyJhdmFpbGFibGVfYmFsYW5jZSJdLCAxMC43NSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGFjY291bnRbInBubCJdWyJncm9zc19wcm9maXQiXSwgMS4yKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoYWNjb3VudFsicG5sIl1bImdyb3NzX2xvc3MiXSwgLTAuMykKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGFjY291bnRbInBubCJdWyJjb21taXNzaW9uIl0sIC0wLjA1KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoYWNjb3VudFsicG5sIl1bIm5ldF90cmFkaW5nX3BubCJdLCAwLjg1KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoYWNjb3VudFsicG5sIl1bInBvc2l0aXZlX2NvdW50Il0sIDEpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChhY2NvdW50WyJwbmwiXVsibmVnYXRpdmVfY291bnQiXSwgMSkKICAgICAgICByZXF1ZXN0ZWRfcGF0aHMgPSBbY2FsbFsxXSBmb3IgY2FsbCBpbiBzZXNzaW9uLmNhbGxzXQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShhbnkocGF0aC5lbmRzd2l0aCgiL2ZhcGkvdjMvYmFsYW5jZSIpIGZvciBwYXRoIGluIHJlcXVlc3RlZF9wYXRocykpCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGFueShwYXRoLmVuZHN3aXRoKCIvZmFwaS92MS9pbmNvbWUiKSBmb3IgcGF0aCBpbiByZXF1ZXN0ZWRfcGF0aHMpKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICB1bml0dGVzdC5tYWluKCkK
+import os
+import sqlite3
+import tempfile
+import unittest
+from decimal import Decimal
+
+from core.trade_execution import (
+    LIVE_CONFIRMATION,
+    BinanceFuturesClient,
+    ExecutionConfig,
+    SymbolRules,
+    build_order_plan,
+    execute_approved_candidate,
+    execution_status,
+    reconcile_live_executions,
+)
+from core import trade_execution
+
+
+CANDIDATE = {
+    "symbol": "BTCUSDT",
+    "direction": "BULLISH",
+    "entry": 100,
+    "sl": 95,
+    "tp1": 110,
+    "tp2": 115,
+    "rr": 2,
+    "_external_quality_reviewed": True,
+    "_external_quality_review": {
+        "decision": "APPROVE", "confidence": 0.9, "degraded": False,
+    },
+}
+
+RULES = SymbolRules(
+    tick_size=Decimal("0.1"),
+    step_size=Decimal("0.001"),
+    min_qty=Decimal("0.001"),
+    min_notional=Decimal("5"),
+)
+
+
+def live_config(**overrides):
+    values = dict(
+        enabled=True, mode="live", leverage=5, risk_pct=0.5,
+        paper_balance_usdt=1000, fee_bps=10, tp1_fraction=0.5,
+        api_key="key", api_secret="secret", base_url="https://example.invalid",
+        live_confirmation=LIVE_CONFIRMATION, timeout_seconds=3, retries=1,
+    )
+    values.update(overrides)
+    return ExecutionConfig(**values)
+
+
+class FakeClient:
+    def __init__(self, balance=1000, entry_status="NEW", mark_price=100):
+        self.balance = balance
+        self.entry_status = entry_status
+        self.current_mark_price = mark_price
+        self.calls = []
+
+    def is_one_way_mode(self):
+        self.calls.append("position_mode")
+        return True
+
+    def open_positions(self):
+        self.calls.append("all_positions")
+        return []
+
+    def usdt_balance_details(self):
+        self.calls.append("balance_details")
+        return {"wallet_balance": self.balance, "available_balance": self.balance}
+
+    def realized_pnl_since(self, start_time_ms):
+        self.calls.append("daily_pnl")
+        return 0.0
+
+    def has_open_position(self, symbol):
+        self.calls.append(("position", symbol))
+        return False
+
+    def has_open_orders(self, symbol):
+        self.calls.append(("open_orders", symbol))
+        return False
+
+    def mark_price(self, symbol):
+        self.calls.append(("mark_price", symbol))
+        return self.current_mark_price
+
+    def available_usdt(self):
+        self.calls.append("balance")
+        return self.balance
+
+    def symbol_rules(self, symbol):
+        self.calls.append(("rules", symbol))
+        return RULES
+
+    def set_leverage(self, symbol, leverage):
+        self.calls.append(("leverage", symbol, leverage))
+        return {"leverage": leverage}
+
+    def set_isolated_margin(self, symbol):
+        self.calls.append(("isolated", symbol))
+        return {"code": 200}
+
+    def place_limit_entry(self, plan, client_id):
+        self.calls.append(("entry", plan.copy(), client_id))
+        return {"orderId": "entry-1"}
+
+    def query_order(self, symbol, order_id):
+        self.calls.append(("query", symbol, order_id))
+        return {
+            "status": self.entry_status,
+            "executedQty": "0.980" if self.entry_status == "FILLED" else "0",
+        }
+
+    def cancel_order(self, symbol, order_id):
+        self.calls.append(("cancel", symbol, order_id))
+        return {"status": "CANCELED"}
+
+    def place_close_all_trigger(self, symbol, side, order_type, stop_price, client_id):
+        self.calls.append(("close_trigger", side, order_type, stop_price, client_id))
+        prefix = "stop" if order_type == "STOP_MARKET" else "tp2"
+        return {"algoId": f"{prefix}-1"}
+
+    def place_reduce_trigger(self, symbol, side, quantity, order_type, stop_price, client_id):
+        self.calls.append(("reduce_trigger", side, quantity, order_type, stop_price, client_id))
+        return {"algoId": "tp1-1"}
+
+    def query_algo_order(self, algo_id="", client_algo_id=""):
+        self.calls.append(("query_algo", algo_id or client_algo_id))
+        return {"algoId": algo_id or "algo-1", "algoStatus": "NEW"}
+
+    def cancel_algo_order(self, algo_id):
+        self.calls.append(("cancel_algo", algo_id))
+        return {"algoId": algo_id, "algoStatus": "CANCELED"}
+
+    def emergency_close(self, symbol, direction, quantity, client_id):
+        self.calls.append(("emergency", symbol, direction, quantity, client_id))
+        return {"orderId": "exit-1"}
+
+
+class RecordingResponse:
+    status_code = 200
+    headers = {}
+    text = ""
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        return None
+
+
+class RecordingSession:
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        if url.endswith("/fapi/v3/balance"):
+            return RecordingResponse([{
+                "asset": "USDT", "balance": "11.25",
+                "availableBalance": "10.75", "crossUnPnl": "0.50",
+            }])
+        if url.endswith("/fapi/v1/income"):
+            return RecordingResponse([
+                {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "1.20", "asset": "USDT", "time": 2000, "tranId": 2},
+                {"symbol": "ETHUSDT", "incomeType": "REALIZED_PNL", "income": "-0.30", "asset": "USDT", "time": 1000, "tranId": 1},
+                {"symbol": "BTCUSDT", "incomeType": "COMMISSION", "income": "-0.05", "asset": "USDT", "time": 2000, "tranId": 3},
+                {"symbol": "", "incomeType": "TRANSFER", "income": "10", "asset": "USDT", "time": 500, "tranId": 4},
+            ])
+        if url.endswith("/fapi/v1/algoOrder") and method == "POST":
+            return RecordingResponse({"algoId": 42, "algoStatus": "NEW"})
+        return RecordingResponse({})
+
+
+class TradeExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "brain.db")
+        trade_execution._binance_blocked_until = 0.0
+        trade_execution._shared_symbol_rules_cache.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_strategy_pause_blocks_before_exchange_calls(self):
+        candidate = {**CANDIDATE, "_strategy_risk_state": {
+            "mode": "PAUSED", "reason": "5 consecutive activated SL",
+            "live_risk_multiplier": 0.0,
+        }}
+        client = FakeClient()
+        result = execute_approved_candidate(
+            candidate, 101, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_STRATEGY_PAUSE")
+        self.assertEqual(client.calls, [])
+
+    def test_strategy_caution_halves_paper_risk_budget(self):
+        candidate = {**CANDIDATE, "_strategy_risk_state": {
+            "mode": "CAUTION", "live_risk_multiplier": 0.5,
+        }}
+        config = ExecutionConfig(enabled=True, mode="paper", risk_pct=0.5, paper_balance_usdt=1000)
+        result = execute_approved_candidate(candidate, 102, db_path=self.db_path, config=config)
+        self.assertEqual(result["status"], "PAPER_PENDING_ENTRY")
+        self.assertAlmostEqual(result["plan"]["risk_budget"], 2.5)
+
+    def test_default_configuration_is_disabled_paper(self):
+        config = ExecutionConfig.from_env({})
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.mode, "paper")
+        self.assertFalse(config.live_armed)
+
+    def test_binance_rate_limit_opens_process_wide_circuit(self):
+        class RateLimitedResponse:
+            status_code = 418
+            headers = {"Retry-After": "120"}
+            text = "banned"
+
+            @staticmethod
+            def json():
+                return {"code": -1003, "msg": "IP banned until 4102444800000"}
+
+        class RateLimitedSession:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, *args, **kwargs):
+                self.calls += 1
+                return RateLimitedResponse()
+
+        first_session = RateLimitedSession()
+        first = BinanceFuturesClient(live_config(), session=first_session)
+        with self.assertRaises(trade_execution.BinanceAPIError):
+            first._request("GET", "/fapi/v1/exchangeInfo")
+
+        second_session = RateLimitedSession()
+        second = BinanceFuturesClient(live_config(), session=second_session)
+        with self.assertRaisesRegex(RuntimeError, "Binance circuit open"):
+            second._request("GET", "/fapi/v1/exchangeInfo")
+        self.assertEqual(first_session.calls, 1)
+        self.assertEqual(second_session.calls, 0)
+
+    def test_reconciliation_single_flight_skips_overlapping_call(self):
+        self.assertTrue(trade_execution._reconcile_process_lock.acquire(blocking=False))
+        try:
+            result = reconcile_live_executions(
+                db_path=self.db_path, config=live_config(), client=FakeClient(),
+            )
+        finally:
+            trade_execution._reconcile_process_lock.release()
+        self.assertEqual(result, [])
+
+    def test_environment_caps_leverage_and_risk(self):
+        config = ExecutionConfig.from_env({
+            "AUTO_TRADING_ENABLED": "true",
+            "AUTO_TRADING_LEVERAGE": "50",
+            "AUTO_TRADING_RISK_PCT": "9",
+        })
+        self.assertEqual(config.leverage, 5)
+        self.assertEqual(config.risk_pct, 1.0)
+
+    def test_live_kill_switch_blocks_before_exchange(self):
+        client = FakeClient()
+        result = execute_approved_candidate(
+            CANDIDATE, 99, db_path=self.db_path,
+            config=live_config(kill_switch=True), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_KILL_SWITCH")
+        self.assertEqual(client.calls, [])
+
+    def test_live_daily_loss_limit_blocks_new_order(self):
+        client = FakeClient(balance=1000)
+        client.realized_pnl_since = lambda _: -25.0
+        result = execute_approved_candidate(
+            CANDIDATE, 100, db_path=self.db_path,
+            config=live_config(max_daily_loss_pct=2.0), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_DAILY_LOSS")
+        self.assertFalse(any(call[0] == "entry" for call in client.calls if isinstance(call, tuple)))
+
+    def test_live_open_position_limit_blocks_new_order(self):
+        client = FakeClient()
+        client.open_positions = lambda: [{"symbol": "ETHUSDT", "positionAmt": "1"}]
+        result = execute_approved_candidate(
+            CANDIDATE, 102, db_path=self.db_path,
+            config=live_config(max_open_positions=1), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_MAX_POSITIONS")
+        self.assertFalse(any(call[0] == "entry" for call in client.calls if isinstance(call, tuple)))
+
+    def test_position_size_uses_stop_risk_and_balance(self):
+        plan = build_order_plan(CANDIDATE, 1000, live_config(), RULES)
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["leverage"], 5)
+        self.assertEqual(plan["quantity"], "0.98")
+        self.assertEqual(plan["risk_budget"], 5.0)
+        self.assertEqual((plan["entry"], plan["sl"], plan["tp1"], plan["tp2"]), ("100", "95", "110", "115"))
+
+    def test_exchange_rounding_never_moves_stop_inside_structure(self):
+        candidate = {
+            **CANDIDATE,
+            "entry": 100.04, "sl": 95.06, "tp1": 110.09, "tp2": 115.09,
+        }
+        plan = build_order_plan(candidate, 1000, live_config(), RULES)
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["entry"], "100")
+        self.assertEqual(plan["sl"], "95")
+        self.assertEqual(plan["tp1"], "110")
+
+        short = {
+            **candidate,
+            "direction": "BEARISH", "sl": 105.04, "tp1": 90.01, "tp2": 85.01,
+        }
+        short_plan = build_order_plan(short, 1000, live_config(), RULES)
+        self.assertTrue(short_plan["ok"])
+        self.assertEqual(short_plan["sl"], "105.1")
+        self.assertEqual(short_plan["tp1"], "90.1")
+
+    def test_zero_balance_is_a_safe_skip(self):
+        plan = build_order_plan(CANDIDATE, 0, live_config(), RULES)
+        self.assertFalse(plan["ok"])
+        self.assertEqual(plan["status"], "SKIPPED_NO_BALANCE")
+
+    def test_live_mode_needs_exact_second_confirmation(self):
+        config = live_config(live_confirmation="yes")
+        result = execute_approved_candidate(CANDIDATE, 1, db_path=self.db_path, config=config)
+        self.assertEqual(result["status"], "LIVE_NOT_ARMED")
+
+    def test_live_mode_rejects_candidate_without_groq_review_before_exchange(self):
+        candidate = {
+            key: value for key, value in CANDIDATE.items()
+            if not key.startswith("_external_quality_review")
+        }
+        client = FakeClient()
+        result = execute_approved_candidate(
+            candidate, 101, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_GROQ_GUARD")
+        self.assertEqual(client.calls, [])
+
+    def test_live_mode_rejects_degraded_groq_approval_before_exchange(self):
+        candidate = {
+            **CANDIDATE,
+            "_external_quality_review": {
+                "decision": "APPROVE", "confidence": 0.99, "degraded": True,
+            },
+        }
+        client = FakeClient()
+        result = execute_approved_candidate(
+            candidate, 102, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_GROQ_GUARD")
+        self.assertEqual(client.calls, [])
+
+    def test_paper_mode_records_without_exchange(self):
+        config = ExecutionConfig(enabled=True, mode="paper", paper_balance_usdt=1000)
+        result = execute_approved_candidate(CANDIDATE, 2, db_path=self.db_path, config=config)
+        self.assertEqual(result["status"], "PAPER_PENDING_ENTRY")
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT mode,status,leverage FROM trade_executions WHERE signal_id=2"
+            ).fetchone()
+        self.assertEqual(row, ("paper", "PAPER_PENDING_ENTRY", 5))
+
+    def test_live_zero_balance_does_not_submit_an_order(self):
+        client = FakeClient(balance=0)
+        result = execute_approved_candidate(
+            CANDIDATE, 3, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "SKIPPED_NO_BALANCE")
+        self.assertFalse(any(call == "entry" or (isinstance(call, tuple) and call[0] == "entry") for call in client.calls))
+
+    def test_live_setup_already_at_target_does_not_submit_an_order(self):
+        client = FakeClient(balance=1000, mark_price=111)
+        result = execute_approved_candidate(
+            CANDIDATE, 4, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "SKIPPED_STALE_MARKET")
+        self.assertFalse(any(isinstance(call, tuple) and call[0] == "entry" for call in client.calls))
+
+    def test_filled_live_entry_gets_stop_and_two_take_orders(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (7,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        submitted = execute_approved_candidate(
+            CANDIDATE, 7, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(submitted["status"], "PROTECTED")
+        call_types = [call[0] for call in client.calls if isinstance(call, tuple)]
+        self.assertIn("close_trigger", call_types)
+        self.assertIn("reduce_trigger", call_types)
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT status,stop_order_id,tp1_order_id,tp2_order_id FROM trade_executions WHERE signal_id=7"
+            ).fetchone()
+        self.assertEqual(row, ("PROTECTED", "stop-1", "tp1-1", "tp2-1"))
+
+    def test_expired_signal_filled_at_exchange_is_closed_not_protected(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (8,'sl')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        submitted = execute_approved_candidate(
+            CANDIDATE, 8, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(submitted["status"], "EMERGENCY_CLOSED")
+        call_types = [call[0] for call in client.calls if isinstance(call, tuple)]
+        self.assertIn("emergency", call_types)
+        self.assertNotIn("close_trigger", call_types)
+        with sqlite3.connect(self.db_path) as conn:
+            status = conn.execute(
+                "SELECT status FROM trade_executions WHERE signal_id=8"
+            ).fetchone()[0]
+        self.assertEqual(status, "EMERGENCY_CLOSED")
+
+    def test_closed_signal_cancels_only_its_remaining_algo_orders(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (9,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        submitted = execute_approved_candidate(
+            CANDIDATE, 9, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(submitted["status"], "PROTECTED")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE signals SET result='tp2' WHERE id=9")
+
+        outcomes = reconcile_live_executions(
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+
+        self.assertEqual(outcomes[0]["status"], "CLOSED_TP2")
+        cancelled = [call[1] for call in client.calls if isinstance(call, tuple) and call[0] == "cancel_algo"]
+        self.assertEqual(set(cancelled), {"stop-1", "tp1-1", "tp2-1"})
+
+    def test_conditional_orders_use_current_algo_endpoint_and_fields(self):
+        session = RecordingSession()
+        client = BinanceFuturesClient(live_config(), session=session)
+
+        result = client.place_close_all_trigger(
+            "BTCUSDT", "SELL", "STOP_MARKET", "95", "apex_s_10",
+        )
+
+        self.assertEqual(result["algoId"], 42)
+        method, url, kwargs = session.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertTrue(url.endswith("/fapi/v1/algoOrder"))
+        params = kwargs["params"]
+        self.assertEqual(params["algoType"], "CONDITIONAL")
+        self.assertEqual(params["triggerPrice"], "95")
+        self.assertEqual(params["clientAlgoId"], "apex_s_10")
+        self.assertNotIn("stopPrice", params)
+
+    def test_live_status_shows_actual_wallet_and_net_pnl_without_transfers(self):
+        session = RecordingSession()
+        client = BinanceFuturesClient(live_config(), session=session)
+
+        status = execution_status(
+            self.db_path, config=live_config(), client=client,
+        )
+
+        account = status["account"]
+        self.assertTrue(account["available"])
+        self.assertEqual(account["wallet_balance"], 11.25)
+        self.assertEqual(account["available_balance"], 10.75)
+        self.assertEqual(account["pnl"]["gross_profit"], 1.2)
+        self.assertEqual(account["pnl"]["gross_loss"], -0.3)
+        self.assertEqual(account["pnl"]["commission"], -0.05)
+        self.assertEqual(account["pnl"]["net_trading_pnl"], 0.85)
+        self.assertEqual(account["pnl"]["positive_count"], 1)
+        self.assertEqual(account["pnl"]["negative_count"], 1)
+        requested_paths = [call[1] for call in session.calls]
+        self.assertTrue(any(path.endswith("/fapi/v3/balance") for path in requested_paths))
+        self.assertTrue(any(path.endswith("/fapi/v1/income") for path in requested_paths))
+
+
+if __name__ == "__main__":
+    unittest.main()
