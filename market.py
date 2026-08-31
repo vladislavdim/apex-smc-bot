@@ -9800,7 +9800,11 @@ def get_btc_correlation(symbol: str, btc_candles: list = None, period: int = 20)
 
 def check_session_liquidity(symbol: str, timeframe: str = "1h") -> dict:
     """
-    Сравнивает текущий объём сессии с нормой за 20 свечей.
+    Сравнивает последнюю закрытую свечу с нормой за 20 закрытых свечей.
+
+    Последняя строка ответа биржи — ещё формирующаяся свеча. Сравнивать её
+    частичный объём с полными свечами нельзя: сканы в начале часа/4h/дня
+    получали искусственно низкий ratio и блокировались до запуска стратегии.
     ratio < 0.7 → skip (низкая ликвидность). Кеш 5 минут.
     """
     import time as _time
@@ -9814,15 +9818,15 @@ def check_session_liquidity(symbol: str, timeframe: str = "1h") -> dict:
     result = {"ratio": 1.0, "ok": True, "desc": ""}
     try:
         candles = get_candles(symbol, timeframe, 25)
-        if not candles or len(candles) < 10:
+        if not candles or len(candles) < 22:
             return result
 
-        current_vol = candles[-1].get("volume", 0)
-        avg_vol = sum(c.get("volume", 0) for c in candles[-21:-1]) / 20
+        closed_vol = candles[-2].get("volume", 0)
+        avg_vol = sum(c.get("volume", 0) for c in candles[-22:-2]) / 20
         if avg_vol <= 0:
             return result
 
-        ratio = round(current_vol / avg_vol, 2)
+        ratio = round(closed_vol / avg_vol, 2)
         ok = ratio >= 0.7
         result = {
             "ratio": ratio,
