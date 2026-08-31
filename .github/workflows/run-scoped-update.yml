@@ -16,11 +16,12 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import subprocess, textwrap
+          import subprocess
           workflow = Path('.github/workflows/apply-strategy-rr-dashboard.yml').read_text()
           start = workflow.index("          python - <<'PY'\n") + len("          python - <<'PY'\n")
           end = workflow.index("\n          PY\n", start)
-          script = textwrap.dedent(workflow[start:end])
+          raw = workflow[start:end]
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in raw.splitlines()) + "\n"
           Path('/tmp/apply_scoped.py').write_text(script)
           subprocess.run(['python', '/tmp/apply_scoped.py'], check=True)
           Path('.github/workflows/run-scoped-update.yml').unlink()
