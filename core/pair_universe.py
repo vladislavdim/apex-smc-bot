@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from typing import Any
 
 
-DEFAULT_UNIVERSE_SIZE = 120
+MAX_REVIEWED_UNIVERSE_SIZE = 120
 MIN_GATE_QUOTE_VOLUME = 250_000.0
 MAX_GATE_SPREAD_PCT = 0.25
+
+
+def configured_universe_size(environ: Mapping[str, str] | None = None) -> int:
+    """Return the active liquid-pair limit while retaining the 120-pair reserve."""
+    source = os.environ if environ is None else environ
+    try:
+        requested = int(source.get("APEX_ACTIVE_PAIR_LIMIT", "80"))
+    except (TypeError, ValueError):
+        requested = 80
+    return max(20, min(requested, MAX_REVIEWED_UNIVERSE_SIZE))
+
+
+DEFAULT_UNIVERSE_SIZE = configured_universe_size()
 
 
 # Reviewed execution-compatible whitelist used both for Gate ranking and as a
