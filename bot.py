@@ -4217,7 +4217,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         # Предупреждения не являются подтверждениями. Для редких точных MTF
         # сетапов нужны реальные положительные confluence.
         _positive_confluence = [c for c in confluence if c.lstrip().startswith(("✅", "🎯", "🔥", "🚀"))]
-        min_conf = {"1h": 4, "4h": 4, "1d": 4, "1w": 3}
+        min_conf = {"1h": 3, "4h": 4, "1d": 4, "1w": 3}
         if len(_positive_confluence) < min_conf.get(timeframe, 4):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (positive confluence {len(_positive_confluence)} < {min_conf.get(timeframe,4)})")
             return None
@@ -4493,9 +4493,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
         except Exception:
             pass
 
-        # Для редких MTF-сетапов нужны минимум 3 из 4 подтверждений,
+        # Для MTF-сетапов нужны минимум 2 из 4 подтверждений,
         # включая реальную структуру (BOS/CHoCH), а не только сессию.
-        if _mtf_score < 3 or not _mtf_score_bos:
+        if _mtf_score < 2 or not _mtf_score_bos:
             logging.debug(f"[MTF] {symbol}: score {_mtf_score}/4 — пропускаем")
             return None
 
