@@ -1,1 +1,395 @@
-IiIiUGVyc2lzdGVudCBvcGVyYXRpb25hbCBjb250cm9sIGxvb3AgZm9yIEFQRVggc2Nhbm5lcnMgYW5kIHJpc2sgb3ZlcmxheXMuCgpUaGlzIG1vZHVsZSBvYnNlcnZlcyBzdHJhdGVneSBvdXRwdXQgYW5kIGNsb3NlZCBvdXRjb21lcy4gIEl0IG5ldmVyIGNhbGN1bGF0ZXMKb3IgZWRpdHMgZW50cnksIHN0b3AsIHRhcmdldHMsIGRpcmVjdGlvbiwgb3Igc3RyYXRlZ3kgY29uZmlybWF0aW9uIHJ1bGVzLgoiIiIKZnJvbSBfX2Z1dHVyZV9fIGltcG9ydCBhbm5vdGF0aW9ucwoKaW1wb3J0IGpzb24KaW1wb3J0IG9zCmltcG9ydCBzcWxpdGUzCmltcG9ydCB0aW1lCmZyb20gZGF0ZXRpbWUgaW1wb3J0IGRhdGV0aW1lLCB0aW1lem9uZQpmcm9tIHR5cGluZyBpbXBvcnQgQW55CgoKREJfUEFUSCA9IG9zLmVudmlyb24uZ2V0KAogICAgIkFQRVhfREJfUEFUSCIsCiAgICBvcy5lbnZpcm9uLmdldCgKICAgICAgICAiQVBFWF9CUkFJTl9EQl9QQVRIIiwKICAgICAgICBvcy5wYXRoLmpvaW4ob3MucGF0aC5kaXJuYW1lKG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmFic3BhdGgoX19maWxlX18pKSksICJicmFpbi5kYiIpLAogICAgKSwKKQoKX1NUUkFURUdJRVMgPSAoIk1URiIsICJTV0lORyIsICJaT05FIiwgIkZBU1QiLCAiV1lDS09GRiIpCgoKZGVmIF9jb25uZWN0KGRiX3BhdGg6IHN0ciA9IERCX1BBVEgpIC0+IHNxbGl0ZTMuQ29ubmVjdGlvbjoKICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoZGJfcGF0aCwgdGltZW91dD0yMCwgY2hlY2tfc2FtZV90aHJlYWQ9RmFsc2UpCiAgICBjb25uLnJvd19mYWN0b3J5ID0gc3FsaXRlMy5Sb3cKICAgIGNvbm4uZXhlY3V0ZSgiUFJBR01BIGpvdXJuYWxfbW9kZT1XQUwiKQogICAgY29ubi5leGVjdXRlKCJQUkFHTUEgYnVzeV90aW1lb3V0PTEwMDAwIikKICAgIHJldHVybiBjb25uCgoKZGVmIGVuc3VyZV9jb250cm9sX3NjaGVtYShkYl9wYXRoOiBzdHIgPSBEQl9QQVRIKSAtPiBOb25lOgogICAgIiIiSW5zdGFsbCBvbmUgaWRlbXBvdGVudCBzY2hlbWEgc2hhcmVkIGJ5IHBvbGxpbmcgYW5kIHdlYmhvb2sgbW9kZXMuIiIiCiAgICBjb25uID0gX2Nvbm5lY3QoZGJfcGF0aCkKICAgIGNvbm4uZXhlY3V0ZXNjcmlwdCgKICAgICAgICAiIiIKICAgICAgICBDUkVBVEUgVEFCTEUgSUYgTk9UIEVYSVNUUyBzY2FuX3J1bnMgKAogICAgICAgICAgICBpZCBJTlRFR0VSIFBSSU1BUlkgS0VZIEFVVE9JTkNSRU1FTlQsCiAgICAgICAgICAgIHN0cmF0ZWd5IFRFWFQgTk9UIE5VTEwsCiAgICAgICAgICAgIHNjYW5uZXIgVEVYVCBOT1QgTlVMTCwKICAgICAgICAgICAgc3RhdHVzIFRFWFQgTk9UIE5VTEwgREVGQVVMVCAnUlVOTklORycsCiAgICAgICAgICAgIHVuaXZlcnNlX3NpemUgSU5URUdFUiBERUZBVUxUIDAsCiAgICAgICAgICAgIGJhdGNoX3NpemUgSU5URUdFUiBERUZBVUxUIDAsCiAgICAgICAgICAgIHBhaXJzX2F0dGVtcHRlZCBJTlRFR0VSIERFRkFVTFQgMCwKICAgICAgICAgICAgZGF0YV9vayBJTlRFR0VSIERFRkFVTFQgMCwKICAgICAgICAgICAgZGF0YV9mYWlsZWQgSU5URUdFUiBERUZBVUxUIDAsCiAgICAgICAgICAgIGZpbHRlcmVkIElOVEVHRVIgREVGQVVMVCAwLAogICAgICAgICAgICBjYW5kaWRhdGVzIElOVEVHRVIgREVGQVVMVCAwLAogICAgICAgICAgICBncm9xX2FwcHJvdmUgSU5URUdFUiBERUZBVUxUIDAsCiAgICAgICAgICAgIGdyb3Ffd2FpdCBJTlRFR0VSIERFRkFVTFQgMCwKICAgICAgICAgICAgZ3JvcV9yZWplY3QgSU5URUdFUiBERUZBVUxUIDAsCiAgICAgICAgICAgIGRlbGl2ZXJlZCBJTlRFR0VSIERFRkFVTFQgMCwKICAgICAgICAgICAgYWN0aXZlX3N5bWJvbCBURVhULAogICAgICAgICAgICBlcnJvciBURVhULAogICAgICAgICAgICBzdGFydGVkX2F0IFRFWFQgREVGQVVMVCBDVVJSRU5UX1RJTUVTVEFNUCwKICAgICAgICAgICAgY29tcGxldGVkX2F0IFRFWFQsCiAgICAgICAgICAgIGhlYXJ0YmVhdF9hdCBURVhUIERFRkFVTFQgQ1VSUkVOVF9USU1FU1RBTVAKICAgICAgICApOwogICAgICAgIENSRUFURSBJTkRFWCBJRiBOT1QgRVhJU1RTIGlkeF9zY2FuX3J1bnNfc3RyYXRlZ3lfc3RhcnRlZAogICAgICAgICAgICBPTiBzY2FuX3J1bnMoc3RyYXRlZ3ksIHN0YXJ0ZWRfYXQgREVTQyk7CgogICAgICAgIENSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIHNjYW5fcGFpcl9ldmVudHMgKAogICAgICAgICAgICBpZCBJTlRFR0VSIFBSSU1BUlkgS0VZIEFVVE9JTkNSRU1FTlQsCiAgICAgICAgICAgIHJ1bl9pZCBJTlRFR0VSLAogICAgICAgICAgICBzdHJhdGVneSBURVhUIE5PVCBOVUxMLAogICAgICAgICAgICBzeW1ib2wgVEVYVCBOT1QgTlVMTCwKICAgICAgICAgICAgc3RhZ2UgVEVYVCBOT1QgTlVMTCwKICAgICAgICAgICAgb3V0Y29tZSBURVhUIE5PVCBOVUxMLAogICAgICAgICAgICByZWFzb25fY29kZSBURVhULAogICAgICAgICAgICBkZXRhaWxfanNvbiBURVhULAogICAgICAgICAgICBjcmVhdGVkX2F0IFRFWFQgREVGQVVMVCBDVVJSRU5UX1RJTUVTVEFNUAogICAgICAgICk7CiAgICAgICAgQ1JFQVRFIElOREVYIElGIE5PVCBFWElTVFMgaWR4X3NjYW5fcGFpcl9ldmVudHNfcnVuCiAgICAgICAgICAgIE9OIHNjYW5fcGFpcl9ldmVudHMocnVuX2lkLCBjcmVhdGVkX2F0KTsKICAgICAgICBDUkVBVEUgSU5ERVggSUYgTk9UIEVYSVNUUyBpZHhfc2Nhbl9wYWlyX2V2ZW50c19yZWNlbnQKICAgICAgICAgICAgT04gc2Nhbl9wYWlyX2V2ZW50cyhzdHJhdGVneSwgY3JlYXRlZF9hdCBERVNDKTsKCiAgICAgICAgQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgc2Nhbl9iYXRjaF9jdXJzb3JzICgKICAgICAgICAgICAgc2Nhbm5lciBURVhUIFBSSU1BUlkgS0VZLAogICAgICAgICAgICBjdXJzb3IgSU5URUdFUiBOT1QgTlVMTCBERUZBVUxUIDAsCiAgICAgICAgICAgIHVwZGF0ZWRfYXQgVEVYVCBERUZBVUxUIENVUlJFTlRfVElNRVNUQU1QCiAgICAgICAgKTsKCiAgICAgICAgQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgc3RyYXRlZ3lfcmlza19zdGF0ZSAoCiAgICAgICAgICAgIHN0cmF0ZWd5IFRFWFQgUFJJTUFSWSBLRVksCiAgICAgICAgICAgIGNvbnNlY3V0aXZlX2xvc3NlcyBJTlRFR0VSIE5PVCBOVUxMIERFRkFVTFQgMCwKICAgICAgICAgICAgY29uc2VjdXRpdmVfd2lucyBJTlRFR0VSIE5PVCBOVUxMIERFRkFVTFQgMCwKICAgICAgICAgICAgbW9kZSBURVhUIE5PVCBOVUxMIERFRkFVTFQgJ05PUk1BTCcsCiAgICAgICAgICAgIGdyb3FfbWluX2NvbmZpZGVuY2UgUkVBTCBOT1QgTlVMTCBERUZBVUxUIDAuNjUsCiAgICAgICAgICAgIGxpdmVfcmlza19tdWx0aXBsaWVyIFJFQUwgTk9UIE5VTEwgREVGQVVMVCAxLjAsCiAgICAgICAgICAgIGxpdmVfcGF1c2VkX3VudGlsIFRFWFQsCiAgICAgICAgICAgIGxhc3Rfc2lnbmFsX2lkIElOVEVHRVIsCiAgICAgICAgICAgIGxhc3RfcmVzdWx0IFRFWFQsCiAgICAgICAgICAgIHJlYXNvbiBURVhULAogICAgICAgICAgICB1cGRhdGVkX2F0IFRFWFQgREVGQVVMVCBDVVJSRU5UX1RJTUVTVEFNUAogICAgICAgICk7CgogICAgICAgIENSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIHJ1bGVfaHlwb3RoZXNlcyAoCiAgICAgICAgICAgIGlkIElOVEVHRVIgUFJJTUFSWSBLRVkgQVVUT0lOQ1JFTUVOVCwKICAgICAgICAgICAgaHlwb3RoZXNpc19rZXkgVEVYVCBVTklRVUUgTk9UIE5VTEwsCiAgICAgICAgICAgIHN0cmF0ZWd5IFRFWFQsCiAgICAgICAgICAgIHN5bWJvbCBURVhULAogICAgICAgICAgICBkaXJlY3Rpb24gVEVYVCwKICAgICAgICAgICAgcnVsZV90eXBlIFRFWFQsCiAgICAgICAgICAgIHJ1bGVfdGV4dCBURVhUIE5PVCBOVUxMLAogICAgICAgICAgICBzb3VyY2UgVEVYVCBOT1QgTlVMTCwKICAgICAgICAgICAgc3RhdGUgVEVYVCBOT1QgTlVMTCBERUZBVUxUICdIWVBPVEhFU0lTJywKICAgICAgICAgICAgc2FtcGxlcyBJTlRFR0VSIE5PVCBOVUxMIERFRkFVTFQgMCwKICAgICAgICAgICAgd2lucyBJTlRFR0VSIE5PVCBOVUxMIERFRkFVTFQgMCwKICAgICAgICAgICAgbG9zc2VzIElOVEVHRVIgTk9UIE5VTEwgREVGQVVMVCAwLAogICAgICAgICAgICBjb25maWRlbmNlIFJFQUwgTk9UIE5VTEwgREVGQVVMVCAwLjAsCiAgICAgICAgICAgIGV2aWRlbmNlX2pzb24gVEVYVCwKICAgICAgICAgICAgY3JlYXRlZF9hdCBURVhUIERFRkFVTFQgQ1VSUkVOVF9USU1FU1RBTVAsCiAgICAgICAgICAgIHVwZGF0ZWRfYXQgVEVYVCBERUZBVUxUIENVUlJFTlRfVElNRVNUQU1QLAogICAgICAgICAgICBleHBpcmVzX2F0IFRFWFQKICAgICAgICApOwogICAgICAgICIiIgogICAgKQogICAgZm9yIHN0cmF0ZWd5IGluIF9TVFJBVEVHSUVTOgogICAgICAgIGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgIklOU0VSVCBPUiBJR05PUkUgSU5UTyBzdHJhdGVneV9yaXNrX3N0YXRlKHN0cmF0ZWd5KSBWQUxVRVMgKD8pIiwKICAgICAgICAgICAgKHN0cmF0ZWd5LCksCiAgICAgICAgKQogICAgIyBBIGZyZXNoIGRhdGFiYXNlIGhpc3RvcmljYWxseSByZWNlaXZlZCB0d28gaW5jb21wYXRpYmxlIGVycm9yX3BhdHRlcm5zCiAgICAjIGRlZmluaXRpb25zLiAgS2VlcCBib3RoIG9wZXJhdGlvbmFsIGFuZCB0cmFkZS1wYXR0ZXJuIGNvbHVtbnMgdG9nZXRoZXIuCiAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgIiIiQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgZXJyb3JfcGF0dGVybnMgKAogICAgICAgICAgICBpZCBJTlRFR0VSIFBSSU1BUlkgS0VZIEFVVE9JTkNSRU1FTlQsCiAgICAgICAgICAgIGVycm9yX3R5cGUgVEVYVCwKICAgICAgICAgICAgcGF0dGVybiBURVhULAogICAgICAgICAgICBzeW1ib2wgVEVYVCwKICAgICAgICAgICAgdGltZWZyYW1lIFRFWFQsCiAgICAgICAgICAgIGNvbmRpdGlvbnMgVEVYVCwKICAgICAgICAgICAgc2xfY291bnQgSU5URUdFUiBERUZBVUxUIDEsCiAgICAgICAgICAgIGNvdW50IElOVEVHRVIgREVGQVVMVCAxLAogICAgICAgICAgICBydWxlX2FkZGVkIFRFWFQsCiAgICAgICAgICAgIGxhc3Rfc2VlbiBURVhUIERFRkFVTFQgQ1VSUkVOVF9USU1FU1RBTVAsCiAgICAgICAgICAgIGFjdGl2ZSBJTlRFR0VSIERFRkFVTFQgMQogICAgICAgICkiIiIKICAgICkKICAgIGNvbHVtbnMgPSB7cm93WzFdIGZvciByb3cgaW4gY29ubi5leGVjdXRlKCJQUkFHTUEgdGFibGVfaW5mbyhlcnJvcl9wYXR0ZXJucykiKX0KICAgIGFkZGl0aW9ucyA9IHsKICAgICAgICAiaWQiOiAiSU5URUdFUiIsICJlcnJvcl90eXBlIjogIlRFWFQiLCAicGF0dGVybiI6ICJURVhUIiwKICAgICAgICAic3ltYm9sIjogIlRFWFQiLCAidGltZWZyYW1lIjogIlRFWFQiLCAiY29uZGl0aW9ucyI6ICJURVhUIiwKICAgICAgICAic2xfY291bnQiOiAiSU5URUdFUiBERUZBVUxUIDEiLCAiY291bnQiOiAiSU5URUdFUiBERUZBVUxUIDEiLAogICAgICAgICJydWxlX2FkZGVkIjogIlRFWFQiLCAibGFzdF9zZWVuIjogIlRFWFQiLCAiYWN0aXZlIjogIklOVEVHRVIgREVGQVVMVCAxIiwKICAgIH0KICAgIGZvciBuYW1lLCBkZWZpbml0aW9uIGluIGFkZGl0aW9ucy5pdGVtcygpOgogICAgICAgIGlmIG5hbWUgbm90IGluIGNvbHVtbnMgYW5kIG5hbWUgIT0gImlkIjoKICAgICAgICAgICAgY29ubi5leGVjdXRlKGYiQUxURVIgVEFCTEUgZXJyb3JfcGF0dGVybnMgQUREIENPTFVNTiB7bmFtZX0ge2RlZmluaXRpb259IikKICAgIGNvbm4uZXhlY3V0ZSgiQ1JFQVRFIElOREVYIElGIE5PVCBFWElTVFMgaWR4X2Vycm9yX3BhdHRlcm5zX3RyYWRlIE9OIGVycm9yX3BhdHRlcm5zKHN5bWJvbCwgcGF0dGVybikiKQogICAgY29ubi5leGVjdXRlKCJDUkVBVEUgSU5ERVggSUYgTk9UIEVYSVNUUyBpZHhfZXJyb3JfcGF0dGVybnNfZXJyb3IgT04gZXJyb3JfcGF0dGVybnMoZXJyb3JfdHlwZSkiKQogICAgY29ubi5jb21taXQoKQogICAgY29ubi5jbG9zZSgpCgoKZGVmIGJlZ2luX3NjYW4oc3RyYXRlZ3k6IHN0ciwgc2Nhbm5lcjogc3RyLCB1bml2ZXJzZV9zaXplOiBpbnQsIGJhdGNoX3NpemU6IGludCwgZGJfcGF0aDogc3RyID0gREJfUEFUSCkgLT4gaW50OgogICAgZW5zdXJlX2NvbnRyb2xfc2NoZW1hKGRiX3BhdGgpCiAgICBjb25uID0gX2Nvbm5lY3QoZGJfcGF0aCkKICAgIGN1cnNvciA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAiIiJJTlNFUlQgSU5UTyBzY2FuX3J1bnMoc3RyYXRlZ3ksc2Nhbm5lcix1bml2ZXJzZV9zaXplLGJhdGNoX3NpemUpCiAgICAgICAgICAgVkFMVUVTICg/LD8sPyw/KSIiIiwKICAgICAgICAoc3RyKHN0cmF0ZWd5KS51cHBlcigpLCBzY2FubmVyLCBpbnQodW5pdmVyc2Vfc2l6ZSksIGludChiYXRjaF9zaXplKSksCiAgICApCiAgICBydW5faWQgPSBpbnQoY3Vyc29yLmxhc3Ryb3dpZCkKICAgIGNvbm4uY29tbWl0KCk7IGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIHJ1bl9pZAoKCmRlZiBzY2FuX2hlYXJ0YmVhdChydW5faWQ6IGludCwgc3ltYm9sOiBzdHIgPSAiIiwgZGJfcGF0aDogc3RyID0gREJfUEFUSCkgLT4gTm9uZToKICAgIHRyeToKICAgICAgICBjb25uID0gX2Nvbm5lY3QoZGJfcGF0aCkKICAgICAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICIiIlVQREFURSBzY2FuX3J1bnMgU0VUIGFjdGl2ZV9zeW1ib2w9PyxoZWFydGJlYXRfYXQ9Q1VSUkVOVF9USU1FU1RBTVAsCiAgICAgICAgICAgICAgICAgICAgICBwYWlyc19hdHRlbXB0ZWQ9cGFpcnNfYXR0ZW1wdGVkKzEgV0hFUkUgaWQ9PyIiIiwKICAgICAgICAgICAgKHN5bWJvbCwgaW50KHJ1bl9pZCkpLAogICAgICAgICkKICAgICAgICBjb25uLmNvbW1pdCgpOyBjb25uLmNsb3NlKCkKICAgIGV4Y2VwdCBzcWxpdGUzLkVycm9yOgogICAgICAgIHJldHVybgoKCmRlZiBzZXRfc2Nhbl9zY29wZShydW5faWQ6IGludCwgdW5pdmVyc2Vfc2l6ZTogaW50LCBiYXRjaF9zaXplOiBpbnQsIGRiX3BhdGg6IHN0ciA9IERCX1BBVEgpIC0+IE5vbmU6CiAgICB0cnk6CiAgICAgICAgY29ubiA9IF9jb25uZWN0KGRiX3BhdGgpCiAgICAgICAgY29ubi5leGVjdXRlKAogICAgICAgICAgICAiVVBEQVRFIHNjYW5fcnVucyBTRVQgdW5pdmVyc2Vfc2l6ZT0/LGJhdGNoX3NpemU9PyBXSEVSRSBpZD0/IiwKICAgICAgICAgICAgKGludCh1bml2ZXJzZV9zaXplKSwgaW50KGJhdGNoX3NpemUpLCBpbnQocnVuX2lkKSksCiAgICAgICAgKQogICAgICAgIGNvbm4uY29tbWl0KCk7IGNvbm4uY2xvc2UoKQogICAgZXhjZXB0IHNxbGl0ZTMuRXJyb3I6CiAgICAgICAgcmV0dXJuCgoKZGVmIHJlY29yZF9zY2FuX2V2ZW50KAogICAgcnVuX2lkOiBpbnQsIHN0cmF0ZWd5OiBzdHIsIHN5bWJvbDogc3RyLCBzdGFnZTogc3RyLCBvdXRjb21lOiBzdHIsCiAgICByZWFzb25fY29kZTogc3RyID0gIiIsIGRldGFpbDogZGljdFtzdHIsIEFueV0gfCBOb25lID0gTm9uZSwKICAgIGRiX3BhdGg6IHN0ciA9IERCX1BBVEgsCikgLT4gTm9uZToKICAgIHRyeToKICAgICAgICBjb25uID0gX2Nvbm5lY3QoZGJfcGF0aCkKICAgICAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICIiIklOU0VSVCBJTlRPIHNjYW5fcGFpcl9ldmVudHMKICAgICAgICAgICAgICAgKHJ1bl9pZCxzdHJhdGVneSxzeW1ib2wsc3RhZ2Usb3V0Y29tZSxyZWFzb25fY29kZSxkZXRhaWxfanNvbikKICAgICAgICAgICAgICAgVkFMVUVTICg/LD8sPyw/LD8sPyw/KSIiIiwKICAgICAgICAgICAgKGludChydW5faWQpLCBzdHIoc3RyYXRlZ3kpLnVwcGVyKCksIHN5bWJvbCwgc3RhZ2UsIG91dGNvbWUsIHJlYXNvbl9jb2RlLAogICAgICAgICAgICAganNvbi5kdW1wcyhkZXRhaWwgb3Ige30sIGVuc3VyZV9hc2NpaT1GYWxzZSwgZGVmYXVsdD1zdHIpWzo0MDAwXSksCiAgICAgICAgKQogICAgICAgIGZpZWxkID0gewogICAgICAgICAgICAiREFUQV9PSyI6ICJkYXRhX29rIiwgIkRBVEFfRkFJTEVEIjogImRhdGFfZmFpbGVkIiwKICAgICAgICAgICAgIkZJTFRFUkVEIjogImZpbHRlcmVkIiwgIkNBTkRJREFURSI6ICJjYW5kaWRhdGVzIiwKICAgICAgICAgICAgIkdST1FfQVBQUk9WRSI6ICJncm9xX2FwcHJvdmUiLCAiR1JPUV9XQUlUIjogImdyb3Ffd2FpdCIsCiAgICAgICAgICAgICJHUk9RX1JFSkVDVCI6ICJncm9xX3JlamVjdCIsICJERUxJVkVSRUQiOiAiZGVsaXZlcmVkIiwKICAgICAgICB9LmdldChzdHIob3V0Y29tZSkudXBwZXIoKSkKICAgICAgICBpZiBmaWVsZDoKICAgICAgICAgICAgY29ubi5leGVjdXRlKGYiVVBEQVRFIHNjYW5fcnVucyBTRVQge2ZpZWxkfT17ZmllbGR9KzEgV0hFUkUgaWQ9PyIsIChpbnQocnVuX2lkKSwpKQogICAgICAgIGNvbm4uY29tbWl0KCk7IGNvbm4uY2xvc2UoKQogICAgZXhjZXB0IHNxbGl0ZTMuRXJyb3I6CiAgICAgICAgcmV0dXJuCgoKZGVmIGZpbmlzaF9zY2FuKHJ1bl9pZDogaW50LCBzdGF0dXM6IHN0ciA9ICJDT01QTEVURUQiLCBlcnJvcjogc3RyID0gIiIsIGRiX3BhdGg6IHN0ciA9IERCX1BBVEgpIC0+IE5vbmU6CiAgICB0cnk6CiAgICAgICAgY29ubiA9IF9jb25uZWN0KGRiX3BhdGgpCiAgICAgICAgY29ubi5leGVjdXRlKAogICAgICAgICAgICAiIiJVUERBVEUgc2Nhbl9ydW5zIFNFVCBzdGF0dXM9PyxlcnJvcj0/LGFjdGl2ZV9zeW1ib2w9TlVMTCwKICAgICAgICAgICAgICAgICAgICAgIGhlYXJ0YmVhdF9hdD1DVVJSRU5UX1RJTUVTVEFNUCxjb21wbGV0ZWRfYXQ9Q1VSUkVOVF9USU1FU1RBTVAgV0hFUkUgaWQ9PyIiIiwKICAgICAgICAgICAgKHN0cihzdGF0dXMpLnVwcGVyKCksIHN0cihlcnJvcilbOjEwMDBdLCBpbnQocnVuX2lkKSksCiAgICAgICAgKQogICAgICAgIGNvbm4uZXhlY3V0ZSgiREVMRVRFIEZST00gc2Nhbl9wYWlyX2V2ZW50cyBXSEVSRSBjcmVhdGVkX2F0IDwgZGF0ZXRpbWUoJ25vdycsJy0xNCBkYXlzJykiKQogICAgICAgIGNvbm4uZXhlY3V0ZSgiREVMRVRFIEZST00gc2Nhbl9ydW5zIFdIRVJFIHN0YXJ0ZWRfYXQgPCBkYXRldGltZSgnbm93JywnLTkwIGRheXMnKSIpCiAgICAgICAgY29ubi5jb21taXQoKTsgY29ubi5jbG9zZSgpCiAgICBleGNlcHQgc3FsaXRlMy5FcnJvcjoKICAgICAgICByZXR1cm4KCgpkZWYgbWFya19zY2FuX3NraXBwZWQoc2Nhbm5lcjogc3RyLCBhY3RpdmVfc2Nhbm5lcjogc3RyLCBlbGFwc2VkOiBmbG9hdCwgZGJfcGF0aDogc3RyID0gREJfUEFUSCkgLT4gTm9uZToKICAgIHN0cmF0ZWd5ID0gc2Nhbm5lci5yZXBsYWNlKCJhdXRvX3NjYW5fIiwgIiIpLnJlcGxhY2UoImF1dG9fIiwgIiIpLnJlcGxhY2UoIl9zY2FuIiwgIiIpLnVwcGVyKCkKICAgIHJ1bl9pZCA9IGJlZ2luX3NjYW4oc3RyYXRlZ3ksIHNjYW5uZXIsIDAsIDAsIGRiX3BhdGgpCiAgICBmaW5pc2hfc2NhbihydW5faWQsICJTS0lQUEVEIiwgZiJ7YWN0aXZlX3NjYW5uZXJ9IHJ1bm5pbmcgZm9yIHtlbGFwc2VkOi4xZn1zIiwgZGJfcGF0aCkKCgpkZWYgdGFrZV9wZXJzaXN0ZW50X2JhdGNoKHNjYW5uZXI6IHN0ciwgaXRlbXM6IGxpc3RbQW55XSwgc2l6ZTogaW50LCBkYl9wYXRoOiBzdHIgPSBEQl9QQVRIKSAtPiBsaXN0W0FueV06CiAgICAiIiJSb3RhdGluZyBiYXRjaCB3aG9zZSBjdXJzb3Igc3Vydml2ZXMgZGVwbG95cyBhbmQgcHJvY2VzcyByZXN0YXJ0cy4iIiIKICAgIHZhbHVlcyA9IGxpc3QoaXRlbXMpCiAgICBpZiBub3QgdmFsdWVzOgogICAgICAgIHJldHVybiBbXQogICAgZW5zdXJlX2NvbnRyb2xfc2NoZW1hKGRiX3BhdGgpCiAgICBjb3VudCA9IG1pbihsZW4odmFsdWVzKSwgbWF4KDEsIGludChzaXplKSkpCiAgICBjb25uID0gX2Nvbm5lY3QoZGJfcGF0aCkKICAgIHJvdyA9IGNvbm4uZXhlY3V0ZSgiU0VMRUNUIGN1cnNvciBGUk9NIHNjYW5fYmF0Y2hfY3Vyc29ycyBXSEVSRSBzY2FubmVyPT8iLCAoc2Nhbm5lciwpKS5mZXRjaG9uZSgpCiAgICBzdGFydCA9IGludChyb3dbMF0gaWYgcm93IGVsc2UgMCkgJSBsZW4odmFsdWVzKQogICAgcmVzdWx0ID0gW3ZhbHVlc1soc3RhcnQgKyBvZmZzZXQpICUgbGVuKHZhbHVlcyldIGZvciBvZmZzZXQgaW4gcmFuZ2UoY291bnQpXQogICAgY29ubi5leGVjdXRlKAogICAgICAgICIiIklOU0VSVCBJTlRPIHNjYW5fYmF0Y2hfY3Vyc29ycyhzY2FubmVyLGN1cnNvcix1cGRhdGVkX2F0KSBWQUxVRVMgKD8sPyxDVVJSRU5UX1RJTUVTVEFNUCkKICAgICAgICAgICBPTiBDT05GTElDVChzY2FubmVyKSBETyBVUERBVEUgU0VUIGN1cnNvcj1leGNsdWRlZC5jdXJzb3IsdXBkYXRlZF9hdD1DVVJSRU5UX1RJTUVTVEFNUCIiIiwKICAgICAgICAoc2Nhbm5lciwgKHN0YXJ0ICsgY291bnQpICUgbGVuKHZhbHVlcykpLAogICAgKQogICAgY29ubi5jb21taXQoKTsgY29ubi5jbG9zZSgpCiAgICByZXR1cm4gcmVzdWx0CgoKZGVmIF9zdHJhdGVneV9uYW1lKHZhbHVlOiBBbnkpIC0+IHN0cjoKICAgIHJhdyA9IHN0cih2YWx1ZSBvciAiVU5LTk9XTiIpLnVwcGVyKCkKICAgIGlmIHJhdyA9PSAiRkFTVF9ERUFMIjoKICAgICAgICByZXR1cm4gIkZBU1QiCiAgICByZXR1cm4gbmV4dCgobmFtZSBmb3IgbmFtZSBpbiBfU1RSQVRFR0lFUyBpZiBuYW1lIGluIHJhdyksIHJhdykKCgpkZWYgcmVidWlsZF9zdHJhdGVneV9yaXNrX3N0YXRlcyhkYl9wYXRoOiBzdHIgPSBEQl9QQVRIKSAtPiBkaWN0W3N0ciwgZGljdFtzdHIsIEFueV1dOgogICAgIiIiUmVidWlsZCBzdHJlYWtzIGZyb20gYWN0aXZhdGVkLCBvYmplY3RpdmVseSByZXNvbHZlZCB0cmFkZXMuIiIiCiAgICBlbnN1cmVfY29udHJvbF9zY2hlbWEoZGJfcGF0aCkKICAgIGNvbm4gPSBfY29ubmVjdChkYl9wYXRoKQogICAgdHJ5OgogICAgICAgIHJvd3MgPSBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICIiIlNFTEVDVCBzLmlkLFVQUEVSKENPQUxFU0NFKE5VTExJRihzLmdyYWRlLCcnKSxOVUxMSUYocy5zaWduYWxfdHlwZSwnJyksJ1VOS05PV04nKSkgc3RyYXRlZ3ksCiAgICAgICAgICAgICAgICAgICAgICBsb3dlcihzLnJlc3VsdCkgcmVzdWx0LENPQUxFU0NFKHMuY2xvc2VkX2F0LHMuY3JlYXRlZF9hdCkgcmVzb2x2ZWRfYXQKICAgICAgICAgICAgICAgRlJPTSBzaWduYWxzIHMgTEVGVCBKT0lOIHNpZ25hbF9leGVjdXRpb25fc3RhdGUgeCBPTiB4LnNpZ25hbF9pZD1zLmlkCiAgICAgICAgICAgICAgIFdIRVJFIGxvd2VyKHMucmVzdWx0KSBJTiAoJ3RwMScsJ3RwMicsJ3RwMycsJ3NsJykKICAgICAgICAgICAgICAgICBBTkQgKHguc2lnbmFsX2lkIElTIE5VTEwgT1IgeC5zdGF0dXMgSU4gKCdhY3RpdmUnLCdjbG9zZWQnKSkKICAgICAgICAgICAgICAgT1JERVIgQlkgc3RyYXRlZ3kscmVzb2x2ZWRfYXQgREVTQyxzLmlkIERFU0MiIiIKICAgICAgICApLmZldGNoYWxsKCkKICAgIGV4Y2VwdCBzcWxpdGUzLkVycm9yOgogICAgICAgIHJvd3MgPSBbXQogICAgZ3JvdXBlZDogZGljdFtzdHIsIGxpc3Rbc3FsaXRlMy5Sb3ddXSA9IHt9CiAgICBmb3Igcm93IGluIHJvd3M6CiAgICAgICAgZ3JvdXBlZC5zZXRkZWZhdWx0KF9zdHJhdGVneV9uYW1lKHJvd1sic3RyYXRlZ3kiXSksIFtdKS5hcHBlbmQocm93KQogICAgcmVzdWx0OiBkaWN0W3N0ciwgZGljdFtzdHIsIEFueV1dID0ge30KICAgIG5vdyA9IHRpbWUudGltZSgpCiAgICBmb3Igc3RyYXRlZ3kgaW4gX1NUUkFURUdJRVM6CiAgICAgICAgaGlzdG9yeSA9IGdyb3VwZWQuZ2V0KHN0cmF0ZWd5LCBbXSkKICAgICAgICBsb3NzZXMgPSB3aW5zID0gMAogICAgICAgIGlmIGhpc3Rvcnk6CiAgICAgICAgICAgIGZpcnN0X3dpbiA9IHN0cihoaXN0b3J5WzBdWyJyZXN1bHQiXSkuc3RhcnRzd2l0aCgidHAiKQogICAgICAgICAgICBmb3Igcm93IGluIGhpc3Rvcnk6CiAgICAgICAgICAgICAgICBpc193aW4gPSBzdHIocm93WyJyZXN1bHQiXSkuc3RhcnRzd2l0aCgidHAiKQogICAgICAgICAgICAgICAgaWYgaXNfd2luICE9IGZpcnN0X3dpbjoKICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICAgICAgaWYgaXNfd2luOiB3aW5zICs9IDEKICAgICAgICAgICAgICAgIGVsc2U6IGxvc3NlcyArPSAxCiAgICAgICAgbGFzdF90cyA9IDAuMAogICAgICAgIGlmIGhpc3Rvcnk6CiAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgIGxhc3RfdHMgPSBkYXRldGltZS5mcm9taXNvZm9ybWF0KAogICAgICAgICAgICAgICAgICAgIHN0cihoaXN0b3J5WzBdWyJyZXNvbHZlZF9hdCJdKS5yZXBsYWNlKCJaIiwgIiswMDowMCIpCiAgICAgICAgICAgICAgICApLnJlcGxhY2UodHppbmZvPXRpbWV6b25lLnV0YykudGltZXN0YW1wKCkKICAgICAgICAgICAgZXhjZXB0IChUeXBlRXJyb3IsIFZhbHVlRXJyb3IpOgogICAgICAgICAgICAgICAgbGFzdF90cyA9IG5vdwogICAgICAgIHJlY2VudF9zZXF1ZW5jZSA9IGJvb2wobGFzdF90cyBhbmQgbm93IC0gbGFzdF90cyA8IDg2NDAwKQogICAgICAgIG1vZGUgPSAoCiAgICAgICAgICAgICJQQVVTRUQiIGlmIGxvc3NlcyA+PSA1IGFuZCByZWNlbnRfc2VxdWVuY2UKICAgICAgICAgICAgZWxzZSAiQ0FVVElPTiIgaWYgbG9zc2VzID49IDMgYW5kIHJlY2VudF9zZXF1ZW5jZQogICAgICAgICAgICBlbHNlICJOT1JNQUwiCiAgICAgICAgKQogICAgICAgIGNvbmZpZGVuY2UgPSAwLjc1IGlmIG1vZGUgaW4geyJDQVVUSU9OIiwgIlBBVVNFRCJ9IGVsc2UgMC42NQogICAgICAgIG11bHRpcGxpZXIgPSAwLjAgaWYgbW9kZSA9PSAiUEFVU0VEIiBlbHNlIDAuNSBpZiBtb2RlID09ICJDQVVUSU9OIiBlbHNlIDEuMAogICAgICAgIHBhdXNlZF91bnRpbCA9IHRpbWUuc3RyZnRpbWUoIiVZLSVtLSVkICVIOiVNOiVTIiwgdGltZS5nbXRpbWUobGFzdF90cyArIDg2NDAwKSkgaWYgbW9kZSA9PSAiUEFVU0VEIiBlbHNlIE5vbmUKICAgICAgICBsYXN0ID0gaGlzdG9yeVswXSBpZiBoaXN0b3J5IGVsc2UgTm9uZQogICAgICAgIHJlYXNvbiA9IGYie2xvc3Nlc30gY29uc2VjdXRpdmUgYWN0aXZhdGVkIFNMIiBpZiBsb3NzZXMgZWxzZSAibm9ybWFsIG9iamVjdGl2ZSBzZXF1ZW5jZSIKICAgICAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICIiIklOU0VSVCBJTlRPIHN0cmF0ZWd5X3Jpc2tfc3RhdGUKICAgICAgICAgICAgICAgKHN0cmF0ZWd5LGNvbnNlY3V0aXZlX2xvc3Nlcyxjb25zZWN1dGl2ZV93aW5zLG1vZGUsZ3JvcV9taW5fY29uZmlkZW5jZSwKICAgICAgICAgICAgICAgIGxpdmVfcmlza19tdWx0aXBsaWVyLGxpdmVfcGF1c2VkX3VudGlsLGxhc3Rfc2lnbmFsX2lkLGxhc3RfcmVzdWx0LHJlYXNvbix1cGRhdGVkX2F0KQogICAgICAgICAgICAgICBWQUxVRVMgKD8sPyw/LD8sPyw/LD8sPyw/LD8sQ1VSUkVOVF9USU1FU1RBTVApCiAgICAgICAgICAgICAgIE9OIENPTkZMSUNUKHN0cmF0ZWd5KSBETyBVUERBVEUgU0VUCiAgICAgICAgICAgICAgICBjb25zZWN1dGl2ZV9sb3NzZXM9ZXhjbHVkZWQuY29uc2VjdXRpdmVfbG9zc2VzLAogICAgICAgICAgICAgICAgY29uc2VjdXRpdmVfd2lucz1leGNsdWRlZC5jb25zZWN1dGl2ZV93aW5zLG1vZGU9ZXhjbHVkZWQubW9kZSwKICAgICAgICAgICAgICAgIGdyb3FfbWluX2NvbmZpZGVuY2U9ZXhjbHVkZWQuZ3JvcV9taW5fY29uZmlkZW5jZSwKICAgICAgICAgICAgICAgIGxpdmVfcmlza19tdWx0aXBsaWVyPWV4Y2x1ZGVkLmxpdmVfcmlza19tdWx0aXBsaWVyLAogICAgICAgICAgICAgICAgbGl2ZV9wYXVzZWRfdW50aWw9ZXhjbHVkZWQubGl2ZV9wYXVzZWRfdW50aWwsCiAgICAgICAgICAgICAgICBsYXN0X3NpZ25hbF9pZD1leGNsdWRlZC5sYXN0X3NpZ25hbF9pZCxsYXN0X3Jlc3VsdD1leGNsdWRlZC5sYXN0X3Jlc3VsdCwKICAgICAgICAgICAgICAgIHJlYXNvbj1leGNsdWRlZC5yZWFzb24sdXBkYXRlZF9hdD1DVVJSRU5UX1RJTUVTVEFNUCIiIiwKICAgICAgICAgICAgKHN0cmF0ZWd5LCBsb3NzZXMsIHdpbnMsIG1vZGUsIGNvbmZpZGVuY2UsIG11bHRpcGxpZXIsIHBhdXNlZF91bnRpbCwKICAgICAgICAgICAgIGludChsYXN0WyJpZCJdKSBpZiBsYXN0IGVsc2UgTm9uZSwgc3RyKGxhc3RbInJlc3VsdCJdKSBpZiBsYXN0IGVsc2UgTm9uZSwgcmVhc29uKSwKICAgICAgICApCiAgICAgICAgcmVzdWx0W3N0cmF0ZWd5XSA9IHsKICAgICAgICAgICAgInN0cmF0ZWd5Ijogc3RyYXRlZ3ksICJjb25zZWN1dGl2ZV9sb3NzZXMiOiBsb3NzZXMsICJjb25zZWN1dGl2ZV93aW5zIjogd2lucywKICAgICAgICAgICAgIm1vZGUiOiBtb2RlLCAiZ3JvcV9taW5fY29uZmlkZW5jZSI6IGNvbmZpZGVuY2UsCiAgICAgICAgICAgICJsaXZlX3Jpc2tfbXVsdGlwbGllciI6IG11bHRpcGxpZXIsICJsaXZlX3BhdXNlZF91bnRpbCI6IHBhdXNlZF91bnRpbCwKICAgICAgICAgICAgImxhc3Rfc2lnbmFsX2lkIjogaW50KGxhc3RbImlkIl0pIGlmIGxhc3QgZWxzZSBOb25lLAogICAgICAgICAgICAibGFzdF9yZXN1bHQiOiBzdHIobGFzdFsicmVzdWx0Il0pIGlmIGxhc3QgZWxzZSBOb25lLCAicmVhc29uIjogcmVhc29uLAogICAgICAgIH0KICAgIGNvbm4uY29tbWl0KCk7IGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIHJlc3VsdAoKCmRlZiBzdHJhdGVneV9yaXNrX3N0YXRlKHN0cmF0ZWd5OiBzdHIsIGRiX3BhdGg6IHN0ciA9IERCX1BBVEgsIHJlYnVpbGQ6IGJvb2wgPSBUcnVlKSAtPiBkaWN0W3N0ciwgQW55XToKICAgIG5vcm1hbGl6ZWQgPSBfc3RyYXRlZ3lfbmFtZShzdHJhdGVneSkKICAgIGlmIHJlYnVpbGQ6CiAgICAgICAgc3RhdGVzID0gcmVidWlsZF9zdHJhdGVneV9yaXNrX3N0YXRlcyhkYl9wYXRoKQogICAgICAgIHJldHVybiBzdGF0ZXMuZ2V0KG5vcm1hbGl6ZWQsIHsic3RyYXRlZ3kiOiBub3JtYWxpemVkLCAibW9kZSI6ICJOT1JNQUwiLCAiZ3JvcV9taW5fY29uZmlkZW5jZSI6IDAuNjUsICJsaXZlX3Jpc2tfbXVsdGlwbGllciI6IDEuMH0pCiAgICBlbnN1cmVfY29udHJvbF9zY2hlbWEoZGJfcGF0aCkKICAgIGNvbm4gPSBfY29ubmVjdChkYl9wYXRoKQogICAgcm93ID0gY29ubi5leGVjdXRlKCJTRUxFQ1QgKiBGUk9NIHN0cmF0ZWd5X3Jpc2tfc3RhdGUgV0hFUkUgc3RyYXRlZ3k9PyIsIChub3JtYWxpemVkLCkpLmZldGNob25lKCkKICAgIGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIGRpY3Qocm93KSBpZiByb3cgZWxzZSB7InN0cmF0ZWd5Ijogbm9ybWFsaXplZCwgIm1vZGUiOiAiTk9STUFMIiwgImdyb3FfbWluX2NvbmZpZGVuY2UiOiAwLjY1LCAibGl2ZV9yaXNrX211bHRpcGxpZXIiOiAxLjB9CgoKZGVmIHNjYW5uZXJfZGFzaGJvYXJkKGRiX3BhdGg6IHN0ciA9IERCX1BBVEgpIC0+IGRpY3Rbc3RyLCBBbnldOgogICAgZW5zdXJlX2NvbnRyb2xfc2NoZW1hKGRiX3BhdGgpCiAgICBjb25uID0gX2Nvbm5lY3QoZGJfcGF0aCkKICAgIHJ1bnMgPSBbXQogICAgZm9yIHN0cmF0ZWd5IGluIF9TVFJBVEVHSUVTOgogICAgICAgIHJvdyA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgIlNFTEVDVCAqIEZST00gc2Nhbl9ydW5zIFdIRVJFIHN0cmF0ZWd5PT8gT1JERVIgQlkgaWQgREVTQyBMSU1JVCAxIiwgKHN0cmF0ZWd5LCkKICAgICAgICApLmZldGNob25lKCkKICAgICAgICBydW5zLmFwcGVuZChkaWN0KHJvdykgaWYgcm93IGVsc2UgeyJzdHJhdGVneSI6IHN0cmF0ZWd5LCAic3RhdHVzIjogIk5FVkVSIn0pCiAgICByZWFzb25zID0gY29ubi5leGVjdXRlKAogICAgICAgICIiIlNFTEVDVCBzdHJhdGVneSxDT0FMRVNDRShOVUxMSUYocmVhc29uX2NvZGUsJycpLCdVTlNQRUNJRklFRCcpIHJlYXNvbl9jb2RlLENPVU5UKCopIGNvdW50CiAgICAgICAgICAgRlJPTSBzY2FuX3BhaXJfZXZlbnRzIFdIRVJFIGNyZWF0ZWRfYXQgPj0gZGF0ZXRpbWUoJ25vdycsJy0yNCBob3VycycpCiAgICAgICAgICAgICBBTkQgb3V0Y29tZSBJTiAoJ0ZJTFRFUkVEJywnREFUQV9GQUlMRUQnKQogICAgICAgICAgIEdST1VQIEJZIHN0cmF0ZWd5LENPQUxFU0NFKE5VTExJRihyZWFzb25fY29kZSwnJyksJ1VOU1BFQ0lGSUVEJykKICAgICAgICAgICBPUkRFUiBCWSBjb3VudCBERVNDIExJTUlUIDEyIiIiCiAgICApLmZldGNoYWxsKCkKICAgIHJpc2sgPSBjb25uLmV4ZWN1dGUoIlNFTEVDVCAqIEZST00gc3RyYXRlZ3lfcmlza19zdGF0ZSBPUkRFUiBCWSBzdHJhdGVneSIpLmZldGNoYWxsKCkKICAgIGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIHsicnVucyI6IHJ1bnMsICJyZWFzb25zIjogW2RpY3Qocm93KSBmb3Igcm93IGluIHJlYXNvbnNdLCAicmlzayI6IFtkaWN0KHJvdykgZm9yIHJvdyBpbiByaXNrXX0KCgpkZWYgZmluaXNoX2xhdGVzdF9ydW5uaW5nKHNjYW5uZXI6IHN0ciwgc3RhdHVzOiBzdHIsIGVycm9yOiBzdHIgPSAiIiwgZGJfcGF0aDogc3RyID0gREJfUEFUSCkgLT4gTm9uZToKICAgICIiIkNsb3NlIGFuIG9ycGhhbiBSVU5OSU5HIHJvdyBhZnRlciBhIHdyYXBwZXIgdGltZW91dCBvciBjYW5jZWxsYXRpb24uIiIiCiAgICB0cnk6CiAgICAgICAgY29ubiA9IF9jb25uZWN0KGRiX3BhdGgpCiAgICAgICAgcm93ID0gY29ubi5leGVjdXRlKAogICAgICAgICAgICAiU0VMRUNUIGlkIEZST00gc2Nhbl9ydW5zIFdIRVJFIHNjYW5uZXI9PyBBTkQgc3RhdHVzPSdSVU5OSU5HJyBPUkRFUiBCWSBpZCBERVNDIExJTUlUIDEiLAogICAgICAgICAgICAoc2Nhbm5lciwpLAogICAgICAgICkuZmV0Y2hvbmUoKQogICAgICAgIGNvbm4uY2xvc2UoKQogICAgICAgIGlmIHJvdzoKICAgICAgICAgICAgZmluaXNoX3NjYW4oaW50KHJvd1swXSksIHN0YXR1cywgZXJyb3IsIGRiX3BhdGgpCiAgICBleGNlcHQgc3FsaXRlMy5FcnJvcjoKICAgICAgICByZXR1cm4K
+"""Persistent operational control loop for APEX scanners and risk overlays.
+
+This module observes strategy output and closed outcomes.  It never calculates
+or edits entry, stop, targets, direction, or strategy confirmation rules.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+
+DB_PATH = os.environ.get(
+    "APEX_DB_PATH",
+    os.environ.get(
+        "APEX_BRAIN_DB_PATH",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"),
+    ),
+)
+
+_STRATEGIES = ("MTF", "SWING", "ZONE", "FAST", "WYCKOFF")
+
+
+def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
+
+
+def ensure_control_schema(db_path: str = DB_PATH) -> None:
+    """Install one idempotent schema shared by polling and webhook modes."""
+    conn = _connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scan_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy TEXT NOT NULL,
+            scanner TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'RUNNING',
+            universe_size INTEGER DEFAULT 0,
+            batch_size INTEGER DEFAULT 0,
+            pairs_attempted INTEGER DEFAULT 0,
+            data_ok INTEGER DEFAULT 0,
+            data_failed INTEGER DEFAULT 0,
+            filtered INTEGER DEFAULT 0,
+            candidates INTEGER DEFAULT 0,
+            groq_approve INTEGER DEFAULT 0,
+            groq_wait INTEGER DEFAULT 0,
+            groq_reject INTEGER DEFAULT 0,
+            delivered INTEGER DEFAULT 0,
+            active_symbol TEXT,
+            error TEXT,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            heartbeat_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_runs_strategy_started
+            ON scan_runs(strategy, started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS scan_pair_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER,
+            strategy TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            reason_code TEXT,
+            detail_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_pair_events_run
+            ON scan_pair_events(run_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_scan_pair_events_recent
+            ON scan_pair_events(strategy, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS scan_batch_cursors (
+            scanner TEXT PRIMARY KEY,
+            cursor INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS strategy_risk_state (
+            strategy TEXT PRIMARY KEY,
+            consecutive_losses INTEGER NOT NULL DEFAULT 0,
+            consecutive_wins INTEGER NOT NULL DEFAULT 0,
+            mode TEXT NOT NULL DEFAULT 'NORMAL',
+            groq_min_confidence REAL NOT NULL DEFAULT 0.65,
+            live_risk_multiplier REAL NOT NULL DEFAULT 1.0,
+            live_paused_until TEXT,
+            last_signal_id INTEGER,
+            last_result TEXT,
+            reason TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS rule_hypotheses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_key TEXT UNIQUE NOT NULL,
+            strategy TEXT,
+            symbol TEXT,
+            direction TEXT,
+            rule_type TEXT,
+            rule_text TEXT NOT NULL,
+            source TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'HYPOTHESIS',
+            samples INTEGER NOT NULL DEFAULT 0,
+            wins INTEGER NOT NULL DEFAULT 0,
+            losses INTEGER NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0.0,
+            evidence_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT
+        );
+        """
+    )
+    for strategy in _STRATEGIES:
+        conn.execute(
+            "INSERT OR IGNORE INTO strategy_risk_state(strategy) VALUES (?)",
+            (strategy,),
+        )
+    # A fresh database historically received two incompatible error_patterns
+    # definitions.  Keep both operational and trade-pattern columns together.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS error_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            error_type TEXT,
+            pattern TEXT,
+            symbol TEXT,
+            timeframe TEXT,
+            conditions TEXT,
+            sl_count INTEGER DEFAULT 1,
+            count INTEGER DEFAULT 1,
+            rule_added TEXT,
+            last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+            active INTEGER DEFAULT 1
+        )"""
+    )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(error_patterns)")}
+    additions = {
+        "id": "INTEGER", "error_type": "TEXT", "pattern": "TEXT",
+        "symbol": "TEXT", "timeframe": "TEXT", "conditions": "TEXT",
+        "sl_count": "INTEGER DEFAULT 1", "count": "INTEGER DEFAULT 1",
+        "rule_added": "TEXT", "last_seen": "TEXT", "active": "INTEGER DEFAULT 1",
+    }
+    for name, definition in additions.items():
+        if name not in columns and name != "id":
+            conn.execute(f"ALTER TABLE error_patterns ADD COLUMN {name} {definition}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_error_patterns_trade ON error_patterns(symbol, pattern)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_error_patterns_error ON error_patterns(error_type)")
+    conn.commit()
+    conn.close()
+
+
+def begin_scan(strategy: str, scanner: str, universe_size: int, batch_size: int, db_path: str = DB_PATH) -> int:
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    cursor = conn.execute(
+        """INSERT INTO scan_runs(strategy,scanner,universe_size,batch_size)
+           VALUES (?,?,?,?)""",
+        (str(strategy).upper(), scanner, int(universe_size), int(batch_size)),
+    )
+    run_id = int(cursor.lastrowid)
+    conn.commit(); conn.close()
+    return run_id
+
+
+def scan_heartbeat(run_id: int, symbol: str = "", db_path: str = DB_PATH) -> None:
+    try:
+        conn = _connect(db_path)
+        conn.execute(
+            """UPDATE scan_runs SET active_symbol=?,heartbeat_at=CURRENT_TIMESTAMP,
+                      pairs_attempted=pairs_attempted+1 WHERE id=?""",
+            (symbol, int(run_id)),
+        )
+        conn.commit(); conn.close()
+    except sqlite3.Error:
+        return
+
+
+def set_scan_scope(run_id: int, universe_size: int, batch_size: int, db_path: str = DB_PATH) -> None:
+    try:
+        conn = _connect(db_path)
+        conn.execute(
+            "UPDATE scan_runs SET universe_size=?,batch_size=? WHERE id=?",
+            (int(universe_size), int(batch_size), int(run_id)),
+        )
+        conn.commit(); conn.close()
+    except sqlite3.Error:
+        return
+
+
+def record_scan_event(
+    run_id: int, strategy: str, symbol: str, stage: str, outcome: str,
+    reason_code: str = "", detail: dict[str, Any] | None = None,
+    db_path: str = DB_PATH,
+) -> None:
+    try:
+        conn = _connect(db_path)
+        conn.execute(
+            """INSERT INTO scan_pair_events
+               (run_id,strategy,symbol,stage,outcome,reason_code,detail_json)
+               VALUES (?,?,?,?,?,?,?)""",
+            (int(run_id), str(strategy).upper(), symbol, stage, outcome, reason_code,
+             json.dumps(detail or {}, ensure_ascii=False, default=str)[:4000]),
+        )
+        field = {
+            "DATA_OK": "data_ok", "DATA_FAILED": "data_failed",
+            "FILTERED": "filtered", "CANDIDATE": "candidates",
+            "GROQ_APPROVE": "groq_approve", "GROQ_WAIT": "groq_wait",
+            "GROQ_REJECT": "groq_reject", "DELIVERED": "delivered",
+        }.get(str(outcome).upper())
+        if field:
+            conn.execute(f"UPDATE scan_runs SET {field}={field}+1 WHERE id=?", (int(run_id),))
+        conn.commit(); conn.close()
+    except sqlite3.Error:
+        return
+
+
+def finish_scan(run_id: int, status: str = "COMPLETED", error: str = "", db_path: str = DB_PATH) -> None:
+    try:
+        conn = _connect(db_path)
+        conn.execute(
+            """UPDATE scan_runs SET status=?,error=?,active_symbol=NULL,
+                      heartbeat_at=CURRENT_TIMESTAMP,completed_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (str(status).upper(), str(error)[:1000], int(run_id)),
+        )
+        conn.execute("DELETE FROM scan_pair_events WHERE created_at < datetime('now','-14 days')")
+        conn.execute("DELETE FROM scan_runs WHERE started_at < datetime('now','-90 days')")
+        conn.commit(); conn.close()
+    except sqlite3.Error:
+        return
+
+
+def mark_scan_skipped(scanner: str, active_scanner: str, elapsed: float, db_path: str = DB_PATH) -> None:
+    strategy = scanner.replace("auto_scan_", "").replace("auto_", "").replace("_scan", "").upper()
+    run_id = begin_scan(strategy, scanner, 0, 0, db_path)
+    finish_scan(run_id, "SKIPPED", f"{active_scanner} running for {elapsed:.1f}s", db_path)
+
+
+def take_persistent_batch(scanner: str, items: list[Any], size: int, db_path: str = DB_PATH) -> list[Any]:
+    """Rotating batch whose cursor survives deploys and process restarts."""
+    values = list(items)
+    if not values:
+        return []
+    ensure_control_schema(db_path)
+    count = min(len(values), max(1, int(size)))
+    conn = _connect(db_path)
+    row = conn.execute("SELECT cursor FROM scan_batch_cursors WHERE scanner=?", (scanner,)).fetchone()
+    start = int(row[0] if row else 0) % len(values)
+    result = [values[(start + offset) % len(values)] for offset in range(count)]
+    conn.execute(
+        """INSERT INTO scan_batch_cursors(scanner,cursor,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(scanner) DO UPDATE SET cursor=excluded.cursor,updated_at=CURRENT_TIMESTAMP""",
+        (scanner, (start + count) % len(values)),
+    )
+    conn.commit(); conn.close()
+    return result
+
+
+def _strategy_name(value: Any) -> str:
+    raw = str(value or "UNKNOWN").upper()
+    if raw == "FAST_DEAL":
+        return "FAST"
+    return next((name for name in _STRATEGIES if name in raw), raw)
+
+
+def rebuild_strategy_risk_states(db_path: str = DB_PATH) -> dict[str, dict[str, Any]]:
+    """Rebuild streaks from activated, objectively resolved trades."""
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.id,UPPER(COALESCE(NULLIF(s.grade,''),NULLIF(s.signal_type,''),'UNKNOWN')) strategy,
+                      lower(s.result) result,COALESCE(s.closed_at,s.created_at) resolved_at
+               FROM signals s LEFT JOIN signal_execution_state x ON x.signal_id=s.id
+               WHERE lower(s.result) IN ('tp1','tp2','tp3','sl')
+                 AND (x.signal_id IS NULL OR x.status IN ('active','closed'))
+               ORDER BY strategy,resolved_at DESC,s.id DESC"""
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(_strategy_name(row["strategy"]), []).append(row)
+    result: dict[str, dict[str, Any]] = {}
+    now = time.time()
+    for strategy in _STRATEGIES:
+        history = grouped.get(strategy, [])
+        losses = wins = 0
+        if history:
+            first_win = str(history[0]["result"]).startswith("tp")
+            for row in history:
+                is_win = str(row["result"]).startswith("tp")
+                if is_win != first_win:
+                    break
+                if is_win: wins += 1
+                else: losses += 1
+        last_ts = 0.0
+        if history:
+            try:
+                last_ts = datetime.fromisoformat(
+                    str(history[0]["resolved_at"]).replace("Z", "+00:00")
+                ).replace(tzinfo=timezone.utc).timestamp()
+            except (TypeError, ValueError):
+                last_ts = now
+        recent_sequence = bool(last_ts and now - last_ts < 86400)
+        mode = (
+            "PAUSED" if losses >= 5 and recent_sequence
+            else "CAUTION" if losses >= 3 and recent_sequence
+            else "NORMAL"
+        )
+        confidence = 0.75 if mode in {"CAUTION", "PAUSED"} else 0.65
+        multiplier = 0.0 if mode == "PAUSED" else 0.5 if mode == "CAUTION" else 1.0
+        paused_until = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(last_ts + 86400)) if mode == "PAUSED" else None
+        last = history[0] if history else None
+        reason = f"{losses} consecutive activated SL" if losses else "normal objective sequence"
+        conn.execute(
+            """INSERT INTO strategy_risk_state
+               (strategy,consecutive_losses,consecutive_wins,mode,groq_min_confidence,
+                live_risk_multiplier,live_paused_until,last_signal_id,last_result,reason,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT(strategy) DO UPDATE SET
+                consecutive_losses=excluded.consecutive_losses,
+                consecutive_wins=excluded.consecutive_wins,mode=excluded.mode,
+                groq_min_confidence=excluded.groq_min_confidence,
+                live_risk_multiplier=excluded.live_risk_multiplier,
+                live_paused_until=excluded.live_paused_until,
+                last_signal_id=excluded.last_signal_id,last_result=excluded.last_result,
+                reason=excluded.reason,updated_at=CURRENT_TIMESTAMP""",
+            (strategy, losses, wins, mode, confidence, multiplier, paused_until,
+             int(last["id"]) if last else None, str(last["result"]) if last else None, reason),
+        )
+        result[strategy] = {
+            "strategy": strategy, "consecutive_losses": losses, "consecutive_wins": wins,
+            "mode": mode, "groq_min_confidence": confidence,
+            "live_risk_multiplier": multiplier, "live_paused_until": paused_until,
+            "last_signal_id": int(last["id"]) if last else None,
+            "last_result": str(last["result"]) if last else None, "reason": reason,
+        }
+    conn.commit(); conn.close()
+    return result
+
+
+def strategy_risk_state(strategy: str, db_path: str = DB_PATH, rebuild: bool = True) -> dict[str, Any]:
+    normalized = _strategy_name(strategy)
+    if rebuild:
+        states = rebuild_strategy_risk_states(db_path)
+        return states.get(normalized, {"strategy": normalized, "mode": "NORMAL", "groq_min_confidence": 0.65, "live_risk_multiplier": 1.0})
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    row = conn.execute("SELECT * FROM strategy_risk_state WHERE strategy=?", (normalized,)).fetchone()
+    conn.close()
+    return dict(row) if row else {"strategy": normalized, "mode": "NORMAL", "groq_min_confidence": 0.65, "live_risk_multiplier": 1.0}
+
+
+def scanner_dashboard(db_path: str = DB_PATH) -> dict[str, Any]:
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    runs = []
+    for strategy in _STRATEGIES:
+        row = conn.execute(
+            "SELECT * FROM scan_runs WHERE strategy=? ORDER BY id DESC LIMIT 1", (strategy,)
+        ).fetchone()
+        runs.append(dict(row) if row else {"strategy": strategy, "status": "NEVER"})
+    reasons = conn.execute(
+        """SELECT strategy,COALESCE(NULLIF(reason_code,''),'UNSPECIFIED') reason_code,COUNT(*) count
+           FROM scan_pair_events WHERE created_at >= datetime('now','-24 hours')
+             AND outcome IN ('FILTERED','DATA_FAILED')
+           GROUP BY strategy,COALESCE(NULLIF(reason_code,''),'UNSPECIFIED')
+           ORDER BY count DESC LIMIT 12"""
+    ).fetchall()
+    risk = conn.execute("SELECT * FROM strategy_risk_state ORDER BY strategy").fetchall()
+    conn.close()
+    return {"runs": runs, "reasons": [dict(row) for row in reasons], "risk": [dict(row) for row in risk]}
+
+
+def finish_latest_running(scanner: str, status: str, error: str = "", db_path: str = DB_PATH) -> None:
+    """Close an orphan RUNNING row after a wrapper timeout or cancellation."""
+    try:
+        conn = _connect(db_path)
+        row = conn.execute(
+            "SELECT id FROM scan_runs WHERE scanner=? AND status='RUNNING' ORDER BY id DESC LIMIT 1",
+            (scanner,),
+        ).fetchone()
+        conn.close()
+        if row:
+            finish_scan(int(row[0]), status, error, db_path)
+    except sqlite3.Error:
+        return
