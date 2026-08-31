@@ -22,6 +22,20 @@ class KnowledgePipelineTests(unittest.TestCase):
         research = text[text.index('def groq_research_topic'):text.index('def run_web_learning_cycle')]
         self.assertNotIn('INSERT OR IGNORE INTO self_rules', research)
 
+    def test_default_web_learning_sources_are_balanced(self):
+        text = Path('web_learner.py').read_text()
+        self.assertIn('DEFAULT_LEARNING_SOURCES = (', text)
+        for name in ('CoinDesk', 'TheBlock', 'Decrypt', 'Glassnode_blog', 'Messari', 'IntoTheBlock', 'CryptoQuant_blog', 'DeFiLlama_news'):
+            self.assertIn(f'"{name}"', text)
+        self.assertNotIn('dict(list(RSS_SOURCES.items())[:8])', text)
+
+    def test_brain_screen_hides_macro_summary_but_keeps_learning_status(self):
+        text = Path('bot.py').read_text()
+        block = text[text.index('elif data == "menu_brain"'):text.index('elif data == "brain_sources"')]
+        self.assertNotIn('{macro_block}', block)
+        self.assertIn('Последний WebLearner', block)
+        self.assertIn('{execution_block}', block)
+
     def test_polling_mode_schedules_web_learning(self):
         text = Path('bot.py').read_text()
         polling = text[text.index('async def polling_main():'):]

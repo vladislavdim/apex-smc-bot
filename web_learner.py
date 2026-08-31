@@ -186,6 +186,13 @@ RSS_SOURCES = {
     "Reuters_crypto":    "https://feeds.reuters.com/reuters/businessNews",
 }
 
+DEFAULT_LEARNING_SOURCES = (
+    # Fresh market/news context
+    "CoinDesk", "TheBlock", "Decrypt",
+    # Research / on-chain / fundamental context
+    "Glassnode_blog", "Messari", "IntoTheBlock", "CryptoQuant_blog", "DeFiLlama_news",
+)
+
 # Конкретные темы для изучения из источников топ трейдеров
 TRADER_KNOWLEDGE_URLS = {
     # Smart Money Concepts
@@ -241,8 +248,10 @@ def get_rss_batch(categories: list = None, limit_per_source: int = 3) -> list:
     """
     import concurrent.futures
 
-    # Выбираем источники по категории
-    sources_to_use = dict(list(RSS_SOURCES.items())[:8])  # топ-8 по умолчанию
+    # Балансируем новости и исследовательские/on-chain источники.
+    # Раньше использовались просто первые 8 элементов словаря — почти только новостные сайты.
+    selected_names = [name for name in DEFAULT_LEARNING_SOURCES if name in RSS_SOURCES]
+    sources_to_use = {name: RSS_SOURCES[name] for name in selected_names}
 
     all_items = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
