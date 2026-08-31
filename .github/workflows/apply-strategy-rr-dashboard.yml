@@ -1,0 +1,179 @@
+name: Apply scoped strategy RR and Groq dashboard changes
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/strategy-core-rr-groq-rejections
+          fetch-depth: 0
+      - name: Apply exact scoped changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly 1 match, got {count}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          # SWING: make 1h structure hard, keep five independent quality confirms optional.
+          replace_once('market.py',
+          '''        _sw_confirms = sum([\n            _sw_vol_ok,         # Volume ≥1.2x\n            _sw_disp_ok,        # Displacement ≥0.45\n            _swing_1h_choch,    # CHoCH подтверждает\n            _swing_pd_ok,       # Ликвидность/Premium-Discount\n            _swing_fvg_ok,      # FVG между entry-TP\n            _swing_15m_confirms,  # 15m импульс совпадает\n        ])\n        _sw_quality = f" [Q:{_sw_confirms}/6]"\n        # Sweep, объём, displacement и CHoCH уже обязательны выше. Здесь\n        # остаются ещё минимум три независимых подтверждения.\n        if _sw_confirms < 3:\n            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/6 < 3 — пропуск")\n            return None\n''',
+          '''        # 1h structural reversal is part of the SWING thesis, not a quality bonus.\n        if not _swing_1h_choch:\n            logging.info(f"[SWING Structure] {symbol}: no fresh 1h BOS/CHoCH after sweep — пропуск")\n            return None\n\n        _sw_confirms = sum([\n            _sw_vol_ok,           # Volume ≥1.2x\n            _sw_disp_ok,          # Displacement ≥0.45\n            _swing_pd_ok,         # Premium/Discount context\n            _swing_fvg_ok,        # FVG between entry and target\n            _swing_15m_confirms,  # 15m impulse in trade direction\n        ])\n        _sw_quality = f" [Q:{_sw_confirms}/5]"\n        if _sw_confirms < 2:\n            logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/5 < 2 — пропуск")\n            return None\n''')
+
+          # ZONE: structure stays hard; remove its duplicate score point and the duplicate 3-candle volume vote.
+          replace_once('market.py',
+          '''            if _zone_structure_event:\n                q_score += 1\n                _zone_ltf_structure = True\n''',
+          '''            if _zone_structure_event:\n                _zone_ltf_structure = True\n''')
+          replace_once('market.py',
+          '''        # Q2: Объём последних 3 свечей > avg\n        try:\n            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19\n            if all(candles[-i]["volume"] > avg_vol for i in range(1, 4)):\n                q_score += 1\n        except Exception:\n            pass\n\n''',
+          '''        # Volume is scored once below on the actual rejection candle.\n\n''')
+          replace_once('market.py',
+          '''        # Адаптивный порог — при высокой волатильности достаточно 3\n        _zone_ap = get_adaptive_params(symbol, candles)\n        _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0\n        _q_min = 4 if _zone_vf > 1.2 else 5\n        if q_score < _q_min:\n            return None  # Недостаточно подтверждений\n''',
+          '''        # Structure is already mandatory above. Optional quality now uses\n        # wick/RSI/FVG/BTC/funding/rejection-volume without double-counting.\n        _zone_ap = get_adaptive_params(symbol, candles)\n        _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0\n        _q_min = 3\n        if q_score < _q_min:\n            return None  # Недостаточно независимых подтверждений\n''')
+          # Keep displayed denominator aligned with the six optional factors.
+          text = Path('market.py').read_text()
+          text = text.replace('Quality score: {q_score}/8', 'Quality score: {q_score}/6')
+          Path('market.py').write_text(text)
+
+          # Shared integrity: structural TP first, then strategy-specific minimum RR.
+          replace_once('core/signal_integrity.py',
+          '''            # Every active APEX strategy requires at least 2R.  This shared\n            # guard does not repair or recalculate a candidate; it only keeps\n            # an obsolete/partial strategy result away from Groq, Telegram and\n            # optional exchange execution.\n            if calculated_rr < 2.0:\n                errors.append(f"TP1 risk/reward is below 2.0 ({calculated_rr:.2f})")\n''',
+          '''            # Targets remain strategy-calculated structural levels. This guard\n            # only checks whether that real TP1 justifies the risk; it never moves TP.\n            strategy = str(candidate.get("scan_type") or candidate.get("grade") or candidate.get("signal_type") or "MTF").upper()\n            if strategy == "FAST_DEAL":\n                strategy = "FAST"\n            min_rr = 2.5 if strategy in {"SWING", "WYCKOFF"} else 2.0\n            if calculated_rr < min_rr:\n                errors.append(f"TP1 risk/reward is below {min_rr:.1f} for {strategy} ({calculated_rr:.2f})")\n''')
+
+          # Telegram dashboard: add read-only Groq REJECT aggregation and recent list.
+          p = Path('core/telegram_dashboard.py')
+          text = p.read_text()
+          marker = '\n\ndef fetch_strategy_stats(db_path: str) -> list[dict[str, Any]]:\n'
+          if marker not in text:
+              raise SystemExit('telegram_dashboard marker missing')
+          addition = r'''
+
+
+def fetch_groq_rejections(db_path: str, hours: int = 24, limit: int = 30) -> dict[str, Any]:
+    """Read recent final Groq REJECT decisions without affecting trading state."""
+    conn = sqlite3.connect(db_path, timeout=20)
+    conn.row_factory = sqlite3.Row
+    result: dict[str, Any] = {"hours": hours, "total": 0, "by_strategy": [], "recent": []}
+    try:
+        rows = conn.execute(
+            """SELECT symbol,strategy,timeframe,direction,reason,groq_confidence,created_at
+               FROM strategy_decisions
+               WHERE outcome='REJECT' AND stage='groq_quality_gate'
+                 AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT ?""",
+            (f"-{int(hours)} hours", int(limit)),
+        ).fetchall()
+        result["recent"] = [dict(row) for row in rows]
+        total = conn.execute(
+            """SELECT COUNT(*) FROM strategy_decisions
+               WHERE outcome='REJECT' AND stage='groq_quality_gate'
+                 AND created_at >= datetime('now', ?)""",
+            (f"-{int(hours)} hours",),
+        ).fetchone()[0]
+        result["total"] = int(total or 0)
+        grouped = conn.execute(
+            """SELECT UPPER(COALESCE(NULLIF(strategy,''),'UNKNOWN')) strategy,
+                      COALESCE(NULLIF(reason,''),'без причины') reason,
+                      COUNT(*) count
+               FROM strategy_decisions
+               WHERE outcome='REJECT' AND stage='groq_quality_gate'
+                 AND created_at >= datetime('now', ?)
+               GROUP BY UPPER(COALESCE(NULLIF(strategy,''),'UNKNOWN')), COALESCE(NULLIF(reason,''),'без причины')
+               ORDER BY strategy, count DESC""",
+            (f"-{int(hours)} hours",),
+        ).fetchall()
+        result["by_strategy"] = [dict(row) for row in grouped]
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return result
+
+
+def format_groq_rejections(data: dict[str, Any]) -> str:
+    hours = int(data.get("hours", 24) or 24)
+    total = int(data.get("total", 0) or 0)
+    if total <= 0:
+        return (
+            f"🚫 <b>Отказы Groq · {hours}ч</b>\n\n"
+            "За этот период финальных REJECT нет.\n\n"
+            "<i>Здесь отображаются только кандидаты, которые дошли до финального Groq quality gate.</i>"
+        )
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in data.get("by_strategy", []):
+        grouped[str(row.get("strategy") or "UNKNOWN")].append(row)
+    lines = [f"🚫 <b>Отказы Groq · {hours}ч</b>", f"Всего: <b>{total}</b>", ""]
+    preferred = ["MTF", "SWING", "ZONE", "FAST", "WYCKOFF"]
+    for strategy in preferred + sorted(name for name in grouped if name not in preferred):
+        rows = grouped.get(strategy)
+        if not rows:
+            continue
+        strategy_total = sum(int(row.get("count", 0) or 0) for row in rows)
+        lines.append(f"<b>{html.escape(strategy)}</b> · {strategy_total} шт")
+        for row in rows[:5]:
+            reason = html.escape(str(row.get("reason") or "без причины"))
+            if len(reason) > 170:
+                reason = reason[:167] + "…"
+            lines.append(f"• {int(row.get('count', 0) or 0)}× {reason}")
+        lines.append("")
+    recent = data.get("recent", [])
+    if recent:
+        lines.append("<b>Последние:</b>")
+        for row in recent[:10]:
+            icon = "🟢" if str(row.get("direction", "")).upper() == "BULLISH" else "🔴"
+            reason = html.escape(str(row.get("reason") or "без причины"))
+            if len(reason) > 120:
+                reason = reason[:117] + "…"
+            confidence = row.get("groq_confidence")
+            conf = f" · {float(confidence):.0%}" if confidence not in (None, "") else ""
+            lines.append(
+                f"{icon} <b>{html.escape(str(row.get('symbol') or '—'))}</b> · "
+                f"{html.escape(str(row.get('strategy') or '—'))}{conf}\n{reason}"
+            )
+    lines.append("")
+    lines.append("<i>Это журнал AI-отказов, а не открытые сделки.</i>")
+    return "\n".join(lines)[:4000]
+'''
+          text = text.replace(marker, addition + marker, 1)
+          p.write_text(text)
+
+          # Bot imports and Observed submenu.
+          replace_once('bot.py',
+          '''    fetch_strategy_stats as _fetch_strategy_stats,\n    fetch_system_health as _fetch_system_health,\n    fetch_watchlist as _fetch_watchlist,\n    format_strategy_stats as _format_strategy_stats,\n    format_watchlist as _format_watchlist,\n''',
+          '''    fetch_strategy_stats as _fetch_strategy_stats,\n    fetch_system_health as _fetch_system_health,\n    fetch_watchlist as _fetch_watchlist,\n    fetch_groq_rejections as _fetch_groq_rejections,\n    format_strategy_stats as _format_strategy_stats,\n    format_watchlist as _format_watchlist,\n    format_groq_rejections as _format_groq_rejections,\n''')
+          replace_once('bot.py',
+          '''            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist"),\n                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )\n\n    elif data == "menu_scan":\n''',
+          '''            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🚫 Отказы Groq", callback_data="menu_groq_rejections")],\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist"),\n                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )\n\n    elif data == "menu_groq_rejections":\n        try:\n            rejection_data = await asyncio.to_thread(_fetch_groq_rejections, DB_PATH, 24, 30)\n            text = _format_groq_rejections(rejection_data)\n        except Exception as exc:\n            logging.error("Telegram Groq rejection view: %s", exc)\n            text = "⚠️ Не удалось прочитать журнал отказов Groq. Сканер продолжает работать."\n        await callback.message.edit_text(\n            text,\n            parse_mode="HTML",\n            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_groq_rejections"),\n                 InlineKeyboardButton(text="👀 Наблюдаемые", callback_data="menu_watchlist")],\n                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )\n\n    elif data == "menu_scan":\n''')
+
+          # Strategy prompts: make SWING/WYCKOFF minimum-RR wording consistent with shared validator.
+          text = Path('market.py').read_text()
+          text = text.replace('f"- RR < 2.0 или стоп > 4% (RR={rr}, стоп={_sw_sl_pct}%)',
+                              'f"- RR < 2.5 или стоп > 4% (RR={rr}, стоп={_sw_sl_pct}%)')
+          text = text.replace('"- RR < 2.0 от текущей цены до целевой\\n"',
+                              '"- RR < 2.5 от текущей цены до целевой\\n"')
+          Path('market.py').write_text(text)
+
+          # Remove this helper workflow from the final branch diff.
+          Path('.github/workflows/apply-strategy-rr-dashboard.yml').unlink()
+          PY
+      - name: Syntax and tests
+        run: |
+          python -m py_compile bot.py market.py core/signal_integrity.py core/telegram_dashboard.py
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: Commit scoped changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Refine strategy confirmations RR and Groq rejection view"
+          git push origin HEAD:fix/strategy-core-rr-groq-rejections
