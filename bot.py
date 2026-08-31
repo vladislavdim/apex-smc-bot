@@ -44,6 +44,7 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
+from core.scan_batching import market_scan_batches
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
 _orig_edit_text = _msg_module.Message.edit_text
@@ -3191,15 +3192,29 @@ async def auto_scan_job():
 
 _auto_trade_reconcile_task = None
 _market_scan_lock = asyncio.Lock()
+_active_market_scan = None
+_active_market_scan_started = 0.0
 
 
 async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
-    """Prevent different full-market scanners from saturating one event loop."""
+    """Run one heavy market-data job at a time and identify contention."""
+    global _active_market_scan, _active_market_scan_started
     if _market_scan_lock.locked():
-        logging.warning("[%s] previous market scan still running; cycle skipped", name)
-        return
+        elapsed = max(0.0, time.monotonic() - _active_market_scan_started)
+        logging.warning(
+            "[%s] market scan '%s' still running for %.1fs; cycle skipped",
+            name, _active_market_scan or "unknown", elapsed,
+        )
+        return False
     async with _market_scan_lock:
-        await asyncio.wait_for(coroutine_factory(), timeout=timeout)
+        _active_market_scan = name
+        _active_market_scan_started = time.monotonic()
+        try:
+            await asyncio.wait_for(coroutine_factory(), timeout=timeout)
+            return True
+        finally:
+            _active_market_scan = None
+            _active_market_scan_started = 0.0
 
 
 async def _run_auto_trade_reconcile_once():
@@ -3259,7 +3274,7 @@ def pick_best_signal(signals: list) -> dict | None:
 
 
 async def auto_scan_1h():
-    """Каждые 10 минут: скан 1h таймфрейма — главный рабочий ТФ"""
+    """Раз в час после закрытия свечи: главный MTF-скан на 1h."""
     try:
         await _run_market_scan_exclusive("auto_scan_1h", _auto_scan_1h_impl, 210)
     except asyncio.TimeoutError:
@@ -3329,8 +3344,12 @@ async def auto_scan_swing():
         logging.error(f"[auto_scan_swing] ОШИБКА: {e}")
 
 async def _auto_scan_swing_impl():
-    logging.info("[auto_scan_swing] ЗАПУЩЕН")
-    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    pairs = market_scan_batches.take("swing", universe, (len(universe) + 1) // 2)
+    logging.info(
+        "[auto_scan_swing] ЗАПУЩЕН batch=%s universe=%s",
+        len(pairs), len(universe),
+    )
     found = []
     blocked = 0
     for symbol in pairs:
@@ -3442,8 +3461,12 @@ async def auto_zone_scan():
         logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
 
 async def _auto_zone_scan_impl():
-    logging.info("[auto_zone_scan] ЗАПУЩЕН")
-    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    pairs = market_scan_batches.take("zone", universe, (len(universe) + 2) // 3)
+    logging.info(
+        "[auto_zone_scan] ЗАПУЩЕН batch=%s universe=%s",
+        len(pairs), len(universe),
+    )
     found = []
     for symbol in pairs:
         try:
@@ -3764,7 +3787,7 @@ async def _auto_wyckoff_scan_impl():
 
 
 async def auto_fast_deal_scan():
-    """Каждые 5 мин: только ликвидные окна London/NY для точного FAST."""
+    """Каждые 20 минут: только ликвидные окна London/NY для точного FAST."""
     from datetime import datetime as _dt, timezone as _timezone
     _now_dt = _dt.now(_timezone.utc)
     _hour = _now_dt.hour
@@ -5069,20 +5092,53 @@ async def keepalive_heartbeat():
 
 async def market_intelligence_job():
     if not _MARKET_INTELLIGENCE_OK:return
-    try:
+    async def refresh():
         pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
         await _refresh_market_intelligence(pairs, get_candles)
+    try:
+        await _run_market_scan_exclusive("market_intelligence", refresh, 180)
     except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
 
 
 async def _start_market_intelligence_background():
     """Load the Gate universe once without blocking the scheduler event loop."""
-    try:
+    async def start():
         pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
         if _MARKET_INTELLIGENCE_OK:
             await _start_market_intelligence(pairs, get_candles)
+    try:
+        await _run_market_scan_exclusive("market_intelligence_startup", start, 240)
     except Exception as exc:
         logging.warning("[MarketIntelligence] startup failed safely: %s", exc)
+
+
+def _schedule_market_scans(scheduler):
+    """Stagger heavy scans in UTC so normal cycles do not contend for the lock.
+
+    Slots include headroom for the job timeouts. Strategies read the latest
+    Gate price at delivery time, while candle-based scans run only as often as
+    their working timeframe can produce materially new information.
+    """
+    common = {"timezone": "UTC", "max_instances": 1, "coalesce": True}
+    scheduler.add_job(auto_scan_1h, "cron", minute=2, id="market_mtf_1h", **common)
+    scheduler.add_job(auto_fast_deal_scan, "cron", minute="8,28,48", id="market_fast", **common)
+    scheduler.add_job(auto_zone_scan, "cron", minute="14,34,54", id="market_zone", **common)
+    scheduler.add_job(auto_scan_swing, "cron", minute="20,50", id="market_swing", **common)
+    scheduler.add_job(
+        auto_wyckoff_scan, "cron", hour="*/4", minute=40,
+        id="market_wyckoff", **common,
+    )
+    scheduler.add_job(
+        market_intelligence_job, "cron", minute=24,
+        id="market_intelligence_primary", **common,
+    )
+    # The second refresh is omitted in Wyckoff hours because that scan owns
+    # the 40-45 minute slot. This prevents a known, deterministic collision.
+    scheduler.add_job(
+        market_intelligence_job, "cron",
+        hour="1,2,3,5,6,7,9,10,11,13,14,15,17,18,19,21,22,23",
+        minute=44, id="market_intelligence_secondary", **common,
+    )
 
 async def on_startup(app):
     # Логирование конфигурации при старте
@@ -5132,12 +5188,7 @@ async def on_startup(app):
     # Основные сигналы
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(market_intelligence_job,"interval",minutes=20,jitter=60,max_instances=1,coalesce=True)
-    webhook_scheduler.add_job(auto_scan_1h,         "interval", minutes=10, jitter=60,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_scan_swing,      "interval", minutes=15, jitter=60,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_zone_scan,       "interval", minutes=20, jitter=60,  max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
-    webhook_scheduler.add_job(auto_fast_deal_scan,  "interval", minutes=5,  jitter=30,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_wyckoff_scan,    "interval", hours=4,    jitter=600, max_instances=1, coalesce=True)
+    _schedule_market_scans(webhook_scheduler)
     # Pump/accumulation detector notifications are intentionally not scheduled.
     webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
     # timing_queue отключена — MTF отправляет сигналы напрямую по скору
@@ -5443,17 +5494,12 @@ def main():
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
             scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
-            scheduler.add_job(market_intelligence_job,"interval",minutes=20,jitter=60,max_instances=1,coalesce=True)
-            scheduler.add_job(auto_scan_1h, "interval", minutes=10, jitter=60, max_instances=1, coalesce=True)       # 1h — каждые 10 мин (единственный MTF скан)
-            scheduler.add_job(auto_scan_swing, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)    # swing 4h — каждые 15 мин
-            scheduler.add_job(auto_zone_scan, "interval", minutes=20, jitter=60, max_instances=1, coalesce=True)  # ZONE — каждые 20 мин
+            _schedule_market_scans(scheduler)
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
             # Pump/accumulation detector notifications are intentionally not scheduled.
-            scheduler.add_job(auto_fast_deal_scan, "interval", minutes=5, jitter=30, max_instances=1, coalesce=True)  # Fast Deal 5m
-            scheduler.add_job(auto_wyckoff_scan, "interval", hours=4, jitter=600)     # Wyckoff Spring — каждые 4ч
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
