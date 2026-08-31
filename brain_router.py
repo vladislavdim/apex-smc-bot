@@ -413,7 +413,8 @@ def _fetch_mexc(symbol: str, interval: str, limit: int) -> list:
 def _fetch_gateio(symbol: str, interval: str, limit: int) -> list:
     """Gate USD-M perpetual candles used by the trading strategies."""
     gate_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m",
-                "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"7d"}
+                "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"7d",
+                "1M":"30d"}
     gate_int = gate_map.get(interval, "1h")
     apex_symbol = symbol.upper().replace("/", "")
     try:

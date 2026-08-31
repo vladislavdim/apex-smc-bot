@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from core.telegram_dashboard import (
+    fetch_system_health,
     fetch_strategy_stats,
     fetch_watchlist,
     format_strategy_stats,
@@ -28,6 +29,8 @@ class TelegramDashboardTests(unittest.TestCase):
             conn.execute("""CREATE TABLE strategy_decisions (
                 symbol TEXT,direction TEXT,timeframe TEXT,strategy TEXT,evidence_json TEXT,
                 outcome TEXT,stage TEXT,created_at TEXT)""")
+            conn.execute("""CREATE TABLE ai_signal_reviews (
+                decision TEXT,created_at TEXT)""")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -62,6 +65,21 @@ class TelegramDashboardTests(unittest.TestCase):
         self.assertEqual((mtf["tp1"], mtf["sl"], mtf["long"], mtf["short"]), (1, 1, 1, 1))
         self.assertEqual(mtf["win_rate"], 50.0)
         self.assertIn("нужно ещё 28", format_strategy_stats([mtf]))
+
+    def test_system_health_counts_all_final_groq_reviews(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO ai_signal_reviews VALUES (?,CURRENT_TIMESTAMP)",
+                [("APPROVE",), ("WAIT",), ("REJECT",)],
+            )
+            conn.execute(
+                "INSERT INTO strategy_decisions VALUES (?,?,?,?,?,'REJECT','groq_quality_gate',CURRENT_TIMESTAMP)",
+                ("BTCUSDT", "BULLISH", "1h", "MTF", "{}"),
+            )
+
+        health = fetch_system_health(self.db_path)
+        self.assertEqual(health["groq_24h"], 3)
+        self.assertIsNotNone(health["groq_last"])
 
 
 if __name__ == "__main__":

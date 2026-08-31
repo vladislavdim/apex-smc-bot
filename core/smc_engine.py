@@ -242,7 +242,8 @@ def _fetch_kraken(symbol, interval, limit):
              "close":float(c[4]),"volume":float(c[6])} for c in rows[-limit:]]
 
 def _fetch_gate(symbol, interval, limit):
-    gi_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d"}
+    gi_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h",
+              "4h":"4h","1d":"1d","1w":"7d","1M":"30d"}
     apex_symbol = symbol.replace("_", "")
     try:
         from external_sources.pair_registry import get_pair, record_gate_candle_probe
