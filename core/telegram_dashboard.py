@@ -287,13 +287,24 @@ def fetch_system_health(db_path: str) -> dict[str, Any]:
     except sqlite3.Error:
         pass
     try:
+        # Every final quality-gate call is persisted here, including APPROVE.
+        # strategy_decisions only contains the WAIT/REJECT branches.
         row = conn.execute(
-            """SELECT COUNT(*),MAX(created_at) FROM strategy_decisions
-               WHERE stage='groq_quality_gate' AND created_at >= datetime('now','-24 hours')"""
+            """SELECT COUNT(*),MAX(created_at) FROM ai_signal_reviews
+               WHERE created_at >= datetime('now','-24 hours')"""
         ).fetchone()
         result["groq_24h"], result["groq_last"] = row[0], row[1]
     except sqlite3.Error:
-        pass
+        # Compatibility with databases created before ai_signal_reviews existed.
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*),MAX(created_at) FROM strategy_decisions
+                   WHERE stage='groq_quality_gate'
+                     AND created_at >= datetime('now','-24 hours')"""
+            ).fetchone()
+            result["groq_24h"], result["groq_last"] = row[0], row[1]
+        except sqlite3.Error:
+            pass
     finally:
         conn.close()
     return result
