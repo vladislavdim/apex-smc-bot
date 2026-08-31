@@ -1,1 +1,80 @@
-aW1wb3J0IHNxbGl0ZTMKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUsIHRpbWVkZWx0YSwgdGltZXpvbmUKCmZyb20gY29yZS5jb250cm9sX2xvb3AgaW1wb3J0ICgKICAgIGJlZ2luX3NjYW4sCiAgICBlbnN1cmVfY29udHJvbF9zY2hlbWEsCiAgICBmaW5pc2hfc2NhbiwKICAgIHJlYnVpbGRfc3RyYXRlZ3lfcmlza19zdGF0ZXMsCiAgICBzY2FubmVyX2Rhc2hib2FyZCwKICAgIHRha2VfcGVyc2lzdGVudF9iYXRjaCwKKQpmcm9tIGNvcmUudGVsZWdyYW1fZGFzaGJvYXJkIGltcG9ydCBmb3JtYXRfc2Nhbm5lcl9kYXNoYm9hcmQKCgpkZWYgX3NpZ25hbHNfc2NoZW1hKHBhdGgpOgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdChwYXRoKQogICAgY29ubi5leGVjdXRlc2NyaXB0KAogICAgICAgICIiIgogICAgICAgIENSRUFURSBUQUJMRSBzaWduYWxzICgKICAgICAgICAgIGlkIElOVEVHRVIgUFJJTUFSWSBLRVksIGdyYWRlIFRFWFQsIHNpZ25hbF90eXBlIFRFWFQsIHJlc3VsdCBURVhULAogICAgICAgICAgY3JlYXRlZF9hdCBURVhULCBjbG9zZWRfYXQgVEVYVAogICAgICAgICk7CiAgICAgICAgQ1JFQVRFIFRBQkxFIHNpZ25hbF9leGVjdXRpb25fc3RhdGUgKHNpZ25hbF9pZCBJTlRFR0VSLCBzdGF0dXMgVEVYVCk7CiAgICAgICAgIiIiCiAgICApCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCgpkZWYgdGVzdF9wZXJzaXN0ZW50X2JhdGNoX2N1cnNvcl9zdXJ2aXZlc19jYWxscyh0bXBfcGF0aCk6CiAgICBwYXRoID0gc3RyKHRtcF9wYXRoIC8gImJyYWluLmRiIikKICAgIGFzc2VydCB0YWtlX3BlcnNpc3RlbnRfYmF0Y2goInN3aW5nIiwgWzEsIDIsIDMsIDRdLCAyLCBwYXRoKSA9PSBbMSwgMl0KICAgIGFzc2VydCB0YWtlX3BlcnNpc3RlbnRfYmF0Y2goInN3aW5nIiwgWzEsIDIsIDMsIDRdLCAyLCBwYXRoKSA9PSBbMywgNF0KCgpkZWYgdGVzdF9zdHJhdGVneV9yaXNrX2lzX3NlcGFyYXRlX2FuZF91c2VzX29ubHlfYWN0aXZhdGVkX291dGNvbWVzKHRtcF9wYXRoKToKICAgIHBhdGggPSBzdHIodG1wX3BhdGggLyAiYnJhaW4uZGIiKQogICAgX3NpZ25hbHNfc2NoZW1hKHBhdGgpCiAgICByZWNlbnQgPSBkYXRldGltZS5ub3codGltZXpvbmUudXRjKS5zdHJmdGltZSgiJVktJW0tJWQgJUg6JU06JVMiKQogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdChwYXRoKQogICAgZm9yIHNpZ25hbF9pZCBpbiByYW5nZSgxLCA2KToKICAgICAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICJJTlNFUlQgSU5UTyBzaWduYWxzIFZBTFVFUyAoPyw/LD8sPyw/LD8pIiwKICAgICAgICAgICAgKHNpZ25hbF9pZCwgIkZBU1QiLCAiIiwgInNsIiwgcmVjZW50LCByZWNlbnQpLAogICAgICAgICkKICAgICAgICBjb25uLmV4ZWN1dGUoIklOU0VSVCBJTlRPIHNpZ25hbF9leGVjdXRpb25fc3RhdGUgVkFMVUVTICg/LD8pIiwgKHNpZ25hbF9pZCwgImNsb3NlZCIpKQogICAgY29ubi5leGVjdXRlKCJJTlNFUlQgSU5UTyBzaWduYWxzIFZBTFVFUyAoPyw/LD8sPyw/LD8pIiwgKDEwLCAiU1dJTkciLCAiIiwgInRwMSIsIHJlY2VudCwgcmVjZW50KSkKICAgIGNvbm4uZXhlY3V0ZSgiSU5TRVJUIElOVE8gc2lnbmFsX2V4ZWN1dGlvbl9zdGF0ZSBWQUxVRVMgKD8sPykiLCAoMTAsICJ3YWl0aW5nX2VudHJ5IikpCiAgICBjb25uLmNvbW1pdCgpOyBjb25uLmNsb3NlKCkKCiAgICBzdGF0ZXMgPSByZWJ1aWxkX3N0cmF0ZWd5X3Jpc2tfc3RhdGVzKHBhdGgpCiAgICBhc3NlcnQgc3RhdGVzWyJGQVNUIl1bIm1vZGUiXSA9PSAiUEFVU0VEIgogICAgYXNzZXJ0IHN0YXRlc1siRkFTVCJdWyJsaXZlX3Jpc2tfbXVsdGlwbGllciJdID09IDAuMAogICAgYXNzZXJ0IHN0YXRlc1siU1dJTkciXVsibW9kZSJdID09ICJOT1JNQUwiCiAgICBhc3NlcnQgc3RhdGVzWyJTV0lORyJdWyJjb25zZWN1dGl2ZV93aW5zIl0gPT0gMAoKCmRlZiB0ZXN0X3N0cmF0ZWd5X3BhdXNlX2V4cGlyZXNfd2l0aG91dF9iZWluZ19leHRlbmRlZCh0bXBfcGF0aCk6CiAgICBwYXRoID0gc3RyKHRtcF9wYXRoIC8gImJyYWluLmRiIikKICAgIF9zaWduYWxzX3NjaGVtYShwYXRoKQogICAgb2xkID0gKGRhdGV0aW1lLm5vdyh0aW1lem9uZS51dGMpIC0gdGltZWRlbHRhKGRheXM9MikpLnN0cmZ0aW1lKCIlWS0lbS0lZCAlSDolTTolUyIpCiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KHBhdGgpCiAgICBmb3Igc2lnbmFsX2lkIGluIHJhbmdlKDEsIDYpOgogICAgICAgIGNvbm4uZXhlY3V0ZSgiSU5TRVJUIElOVE8gc2lnbmFscyBWQUxVRVMgKD8sPyw/LD8sPyw/KSIsIChzaWduYWxfaWQsICJaT05FIiwgIiIsICJzbCIsIG9sZCwgb2xkKSkKICAgICAgICBjb25uLmV4ZWN1dGUoIklOU0VSVCBJTlRPIHNpZ25hbF9leGVjdXRpb25fc3RhdGUgVkFMVUVTICg/LD8pIiwgKHNpZ25hbF9pZCwgImNsb3NlZCIpKQogICAgY29ubi5jb21taXQoKTsgY29ubi5jbG9zZSgpCiAgICBzdGF0ZSA9IHJlYnVpbGRfc3RyYXRlZ3lfcmlza19zdGF0ZXMocGF0aClbIlpPTkUiXQogICAgYXNzZXJ0IHN0YXRlWyJtb2RlIl0gPT0gIk5PUk1BTCIKICAgIGFzc2VydCBzdGF0ZVsibGl2ZV9wYXVzZWRfdW50aWwiXSBpcyBOb25lCgoKZGVmIHRlc3RfZGFzaGJvYXJkX3JlcG9ydHNfcmVhbF9ydW4odG1wX3BhdGgpOgogICAgcGF0aCA9IHN0cih0bXBfcGF0aCAvICJicmFpbi5kYiIpCiAgICBlbnN1cmVfY29udHJvbF9zY2hlbWEocGF0aCkKICAgIHJ1bl9pZCA9IGJlZ2luX3NjYW4oIk1URiIsICJhdXRvX3NjYW5fMWgiLCAxMjAsIDQwLCBwYXRoKQogICAgZmluaXNoX3NjYW4ocnVuX2lkLCAiQ09NUExFVEVEIiwgZGJfcGF0aD1wYXRoKQogICAgZGF0YSA9IHNjYW5uZXJfZGFzaGJvYXJkKHBhdGgpCiAgICBtdGYgPSBuZXh0KHJvdyBmb3Igcm93IGluIGRhdGFbInJ1bnMiXSBpZiByb3dbInN0cmF0ZWd5Il0gPT0gIk1URiIpCiAgICBhc3NlcnQgbXRmWyJzdGF0dXMiXSA9PSAiQ09NUExFVEVEIgogICAgYXNzZXJ0ICLQodC60LDQvdC10YDRiyDQuCDQutC+0L3RgtGA0L7Qu9GMIiBpbiBmb3JtYXRfc2Nhbm5lcl9kYXNoYm9hcmQoZGF0YSkK
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+from core.control_loop import (
+    begin_scan,
+    ensure_control_schema,
+    finish_scan,
+    rebuild_strategy_risk_states,
+    scanner_dashboard,
+    take_persistent_batch,
+)
+from core.telegram_dashboard import format_scanner_dashboard
+
+
+def _signals_schema(path):
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE signals (
+          id INTEGER PRIMARY KEY, grade TEXT, signal_type TEXT, result TEXT,
+          created_at TEXT, closed_at TEXT
+        );
+        CREATE TABLE signal_execution_state (signal_id INTEGER, status TEXT);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_persistent_batch_cursor_survives_calls(tmp_path):
+    path = str(tmp_path / "brain.db")
+    assert take_persistent_batch("swing", [1, 2, 3, 4], 2, path) == [1, 2]
+    assert take_persistent_batch("swing", [1, 2, 3, 4], 2, path) == [3, 4]
+
+
+def test_strategy_risk_is_separate_and_uses_only_activated_outcomes(tmp_path):
+    path = str(tmp_path / "brain.db")
+    _signals_schema(path)
+    recent = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(path)
+    for signal_id in range(1, 6):
+        conn.execute(
+            "INSERT INTO signals VALUES (?,?,?,?,?,?)",
+            (signal_id, "FAST", "", "sl", recent, recent),
+        )
+        conn.execute("INSERT INTO signal_execution_state VALUES (?,?)", (signal_id, "closed"))
+    conn.execute("INSERT INTO signals VALUES (?,?,?,?,?,?)", (10, "SWING", "", "tp1", recent, recent))
+    conn.execute("INSERT INTO signal_execution_state VALUES (?,?)", (10, "waiting_entry"))
+    conn.commit(); conn.close()
+
+    states = rebuild_strategy_risk_states(path)
+    assert states["FAST"]["mode"] == "PAUSED"
+    assert states["FAST"]["live_risk_multiplier"] == 0.0
+    assert states["SWING"]["mode"] == "NORMAL"
+    assert states["SWING"]["consecutive_wins"] == 0
+
+
+def test_strategy_pause_expires_without_being_extended(tmp_path):
+    path = str(tmp_path / "brain.db")
+    _signals_schema(path)
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(path)
+    for signal_id in range(1, 6):
+        conn.execute("INSERT INTO signals VALUES (?,?,?,?,?,?)", (signal_id, "ZONE", "", "sl", old, old))
+        conn.execute("INSERT INTO signal_execution_state VALUES (?,?)", (signal_id, "closed"))
+    conn.commit(); conn.close()
+    state = rebuild_strategy_risk_states(path)["ZONE"]
+    assert state["mode"] == "NORMAL"
+    assert state["live_paused_until"] is None
+
+
+def test_dashboard_reports_real_run(tmp_path):
+    path = str(tmp_path / "brain.db")
+    ensure_control_schema(path)
+    run_id = begin_scan("MTF", "auto_scan_1h", 120, 40, path)
+    finish_scan(run_id, "COMPLETED", db_path=path)
+    data = scanner_dashboard(path)
+    mtf = next(row for row in data["runs"] if row["strategy"] == "MTF")
+    assert mtf["status"] == "COMPLETED"
+    assert "Сканеры и контроль" in format_scanner_dashboard(data)
