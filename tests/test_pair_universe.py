@@ -1,12 +1,22 @@
 import unittest
 
-from core.pair_universe import FALLBACK_COMMON_PAIRS, select_common_pairs, select_gate_pairs
+from core.pair_universe import (
+    FALLBACK_COMMON_PAIRS,
+    configured_universe_size,
+    select_common_pairs,
+    select_gate_pairs,
+)
 
 
 class PairUniverseTests(unittest.TestCase):
     def test_fallback_has_exactly_120_unique_pairs(self):
         self.assertEqual(len(FALLBACK_COMMON_PAIRS), 120)
         self.assertEqual(len(set(FALLBACK_COMMON_PAIRS)), 120)
+
+    def test_active_universe_defaults_to_80_and_is_bounded(self):
+        self.assertEqual(configured_universe_size({}), 80)
+        self.assertEqual(configured_universe_size({"APEX_ACTIVE_PAIR_LIMIT": "5"}), 20)
+        self.assertEqual(configured_universe_size({"APEX_ACTIVE_PAIR_LIMIT": "500"}), 120)
 
     def test_selects_only_liquid_exact_common_perpetuals(self):
         gate = [
