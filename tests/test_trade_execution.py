@@ -186,6 +186,27 @@ class TradeExecutionTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_strategy_pause_blocks_before_exchange_calls(self):
+        candidate = {**CANDIDATE, "_strategy_risk_state": {
+            "mode": "PAUSED", "reason": "5 consecutive activated SL",
+            "live_risk_multiplier": 0.0,
+        }}
+        client = FakeClient()
+        result = execute_approved_candidate(
+            candidate, 101, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_STRATEGY_PAUSE")
+        self.assertEqual(client.calls, [])
+
+    def test_strategy_caution_halves_paper_risk_budget(self):
+        candidate = {**CANDIDATE, "_strategy_risk_state": {
+            "mode": "CAUTION", "live_risk_multiplier": 0.5,
+        }}
+        config = ExecutionConfig(enabled=True, mode="paper", risk_pct=0.5, paper_balance_usdt=1000)
+        result = execute_approved_candidate(candidate, 102, db_path=self.db_path, config=config)
+        self.assertEqual(result["status"], "PAPER_PENDING_ENTRY")
+        self.assertAlmostEqual(result["plan"]["risk_budget"], 2.5)
+
     def test_default_configuration_is_disabled_paper(self):
         config = ExecutionConfig.from_env({})
         self.assertFalse(config.enabled)

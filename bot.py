@@ -44,7 +44,20 @@ from groq import Groq
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
-from core.scan_batching import market_scan_batches
+from core.control_loop import (
+    ensure_control_schema as _ensure_control_schema,
+    begin_scan as _begin_scan_control,
+    finish_scan as _finish_scan_control,
+    record_scan_event as _record_scan_event,
+    scan_heartbeat as _scan_heartbeat,
+    set_scan_scope as _set_scan_scope,
+    mark_scan_skipped as _mark_scan_skipped,
+    finish_latest_running as _finish_latest_running,
+    take_persistent_batch as _take_persistent_batch,
+    rebuild_strategy_risk_states as _rebuild_strategy_risk_states,
+    strategy_risk_state as _strategy_risk_state,
+    scanner_dashboard as _scanner_dashboard,
+)
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
 _orig_edit_text = _msg_module.Message.edit_text
@@ -84,6 +97,7 @@ from core.telegram_dashboard import (
     format_strategy_stats as _format_strategy_stats,
     format_watchlist as _format_watchlist,
     format_groq_rejections as _format_groq_rejections,
+    format_scanner_dashboard as _format_scanner_dashboard,
 )
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
@@ -180,7 +194,8 @@ def main_menu():
         [InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
-         InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")]
+         InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")],
+        [InlineKeyboardButton(text="📡 Сканеры и контроль", callback_data="menu_scanners")]
     ])
 
 def tf_keyboard():
@@ -874,6 +889,23 @@ async def handle_callback(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🚫 Отказы Groq", callback_data="menu_groq_rejections")],
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist"),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
+    elif data == "menu_scanners":
+        try:
+            await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
+            dashboard = await asyncio.to_thread(_scanner_dashboard, DB_PATH)
+            text = _format_scanner_dashboard(dashboard)
+        except Exception as exc:
+            logging.error("Telegram scanner dashboard: %s", exc)
+            text = "⚠️ Не удалось прочитать состояние сканеров."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),
                  InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
             ]),
         )
@@ -3011,6 +3043,24 @@ def _attach_learning_evidence(sd: dict) -> None:
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
+    _run_id = sd.get("_scan_run_id") or _active_scan_run_id
+    _strategy = _signal_type_from_candidate(sd)
+    if _run_id:
+        await asyncio.to_thread(
+            _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+            "STRATEGY", "CANDIDATE", "TECHNICAL_SETUP", {}, DB_PATH,
+        )
+    risk_state = await asyncio.to_thread(_strategy_risk_state, _strategy, DB_PATH, False)
+    sd["_strategy_risk_state"] = risk_state
+    if risk_state.get("mode") == "PAUSED":
+        reason = f"{_strategy} LIVE paused after {risk_state.get('consecutive_losses', 0)} consecutive SL"
+        _record_strategy_decision(sd, "WAIT", "strategy_risk", reason, db_path=DB_PATH)
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "RISK", "FILTERED", "STRATEGY_PAUSED", {"reason": reason}, DB_PATH,
+            )
+        return False
     if not _SIGNAL_INTEGRITY_OK:
         logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
         _record_strategy_decision(sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
@@ -3043,6 +3093,13 @@ async def _send_signal(sd):
         sd["_external_quality_reviewed"] = True
         sd["_external_quality_review"] = review
         decision = review.get("decision", "APPROVE")
+        min_confidence = float(risk_state.get("groq_min_confidence", 0.65) or 0.65)
+        if decision == "APPROVE" and float(review.get("confidence", 0.0) or 0.0) < min_confidence:
+            decision = "WAIT"
+            review["decision"] = decision
+            review.setdefault("reasons", []).append(
+                f"strategy risk gate requires Groq confidence >= {min_confidence:.0%}"
+            )
         logging.info(
             "[SignalQualityGate] %s %s → %s confidence=%.2f sources=%s reasons=%s",
             sd.get("symbol"), sd.get("direction"), decision,
@@ -3051,6 +3108,12 @@ async def _send_signal(sd):
             review.get("reasons", []),
         )
         if decision in ("WAIT", "REJECT"):
+            if _run_id:
+                await asyncio.to_thread(
+                    _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                    "GROQ", f"GROQ_{decision}", "QUALITY_GATE",
+                    {"confidence": review.get("confidence"), "reasons": review.get("reasons", [])}, DB_PATH,
+                )
             _record_strategy_decision(
                 sd, decision, "groq_quality_gate", "; ".join(review.get("reasons", [])),
                 evidence={
@@ -3059,6 +3122,12 @@ async def _send_signal(sd):
                 }, db_path=DB_PATH,
             )
             return False
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "GROQ", "GROQ_APPROVE", "QUALITY_GATE",
+                {"confidence": review.get("confidence")}, DB_PATH,
+            )
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
@@ -3138,6 +3207,11 @@ async def _send_signal(sd):
         logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
         _sent_signal_cache[cache_key] = now_ts
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
+    if _run_id:
+        await asyncio.to_thread(
+            _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+            "DELIVERY", "DELIVERED", "TELEGRAM", {"signal_id": signal_id}, DB_PATH,
+        )
     return True
 
 
@@ -3198,6 +3272,8 @@ async def auto_scan_job():
     """Каждые 10 мин: проверка закрытых сделок"""
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
     closed = await asyncio.to_thread(check_pending_signals)
+    if closed:
+        await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
     for c in closed:
         if c["result"] == "tp1_hit":
             # TP1 достигнут — уведомляем о переходе в trailing mode
@@ -3235,27 +3311,80 @@ _auto_trade_reconcile_task = None
 _market_scan_lock = asyncio.Lock()
 _active_market_scan = None
 _active_market_scan_started = 0.0
+_active_scan_run_id = None
+
+
+def _scanner_strategy(name):
+    return {
+        "auto_scan_1h": "MTF", "auto_scan_swing": "SWING",
+        "auto_zone_scan": "ZONE", "auto_fast_deal_scan": "FAST",
+        "auto_wyckoff_scan": "WYCKOFF",
+    }.get(name, str(name).upper())
+
+
+async def _control_scan_scope(pairs, universe_size=None):
+    if _active_scan_run_id:
+        await asyncio.to_thread(
+            _set_scan_scope, _active_scan_run_id,
+            len(pairs) if universe_size is None else universe_size, len(pairs), DB_PATH,
+        )
+
+
+async def _control_scan_pair(symbol):
+    if _active_scan_run_id:
+        await asyncio.to_thread(_scan_heartbeat, _active_scan_run_id, symbol, DB_PATH)
+
+
+async def _control_scan_outcome(symbol, outcome, reason, detail=None):
+    if _active_scan_run_id:
+        await asyncio.to_thread(
+            _record_scan_event, _active_scan_run_id, _scanner_strategy(_active_market_scan),
+            symbol, "DETECTOR", outcome, reason, detail or {}, DB_PATH,
+        )
 
 
 async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
     """Run one heavy market-data job at a time and identify contention."""
-    global _active_market_scan, _active_market_scan_started
+    global _active_market_scan, _active_market_scan_started, _active_scan_run_id
     if _market_scan_lock.locked():
         elapsed = max(0.0, time.monotonic() - _active_market_scan_started)
         logging.warning(
             "[%s] market scan '%s' still running for %.1fs; cycle skipped",
             name, _active_market_scan or "unknown", elapsed,
         )
+        await asyncio.to_thread(
+            _mark_scan_skipped, name, _active_market_scan or "unknown", elapsed, DB_PATH
+        )
         return False
     async with _market_scan_lock:
         _active_market_scan = name
         _active_market_scan_started = time.monotonic()
+        _active_scan_run_id = await asyncio.to_thread(
+            _begin_scan_control, _scanner_strategy(name), name, 0, 0, DB_PATH
+        )
         try:
             await asyncio.wait_for(coroutine_factory(), timeout=timeout)
+            await asyncio.to_thread(_finish_scan_control, _active_scan_run_id, "COMPLETED", "", DB_PATH)
             return True
+        except asyncio.TimeoutError:
+            await asyncio.to_thread(
+                _finish_latest_running, name, "TIMEOUT", f"timeout after {timeout}s", DB_PATH
+            )
+            raise
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                _finish_latest_running, name, "CANCELLED", "process shutdown", DB_PATH
+            )
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(
+                _finish_latest_running, name, "ERROR", str(exc), DB_PATH
+            )
+            raise
         finally:
             _active_market_scan = None
             _active_market_scan_started = 0.0
+            _active_scan_run_id = None
 
 
 async def _run_auto_trade_reconcile_once():
@@ -3326,9 +3455,11 @@ async def auto_scan_1h():
 async def _auto_scan_1h_impl():
     logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
     pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    await _control_scan_scope(pairs)
     all_signals = []
 
     for symbol in pairs:
+        await _control_scan_pair(symbol)
         try:
             # Определяем режим рынка
             regime = await asyncio.to_thread(detect_market_regime_v2, symbol)
@@ -3337,6 +3468,7 @@ async def _auto_scan_1h_impl():
             # Session liquidity check
             _liq = await asyncio.to_thread(check_session_liquidity, symbol, "1h")
             if not _liq["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
 
             # MTF — если включён для этого режима
@@ -3345,12 +3477,17 @@ async def _auto_scan_1h_impl():
                 if sig and sig.get("confluence_score", 0) >= 35:
                     sig["grade"] = "MTF"
                     all_signals.append(sig)
+                else:
+                    await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+            else:
+                await _control_scan_outcome(symbol, "FILTERED", "REGIME_DISABLED")
 
             await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
             break
         except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_scan_1h] {symbol}: {e}")
 
     logging.info(f"[auto_scan_1h] Скан: {len(all_signals)} сигналов из {len(pairs)} пар")
@@ -3386,18 +3523,23 @@ async def auto_scan_swing():
 
 async def _auto_scan_swing_impl():
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-    pairs = market_scan_batches.take("swing", universe, (len(universe) + 1) // 2)
+    pairs = await asyncio.to_thread(
+        _take_persistent_batch, "swing", universe, (len(universe) + 1) // 2, DB_PATH
+    )
     logging.info(
         "[auto_scan_swing] ЗАПУЩЕН batch=%s universe=%s",
         len(pairs), len(universe),
     )
+    await _control_scan_scope(pairs, len(universe))
     found = []
     blocked = 0
     for symbol in pairs:
+        await _control_scan_pair(symbol)
         try:
             _liq_sw = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
             if not _liq_sw["ok"]:
                 blocked += 1
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
             r = await asyncio.to_thread(detect_swing_setup, symbol, "4h")
             if r:
@@ -3405,11 +3547,13 @@ async def _auto_scan_swing_impl():
                 logging.info(f"[auto_scan_swing] {symbol} НАЙДЕН: {r.get('direction')} RR={r.get('rr')}")
             else:
                 blocked += 1
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0.15)
         except asyncio.CancelledError:
             logging.info("[auto_scan_swing] Прерван планировщиком — продолжаем")
             break
         except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_scan_swing] {symbol}: {e}")
 
     if not found:
@@ -3503,25 +3647,33 @@ async def auto_zone_scan():
 
 async def _auto_zone_scan_impl():
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-    pairs = market_scan_batches.take("zone", universe, (len(universe) + 2) // 3)
+    pairs = await asyncio.to_thread(
+        _take_persistent_batch, "zone", universe, (len(universe) + 2) // 3, DB_PATH
+    )
     logging.info(
         "[auto_zone_scan] ЗАПУЩЕН batch=%s universe=%s",
         len(pairs), len(universe),
     )
+    await _control_scan_scope(pairs, len(universe))
     found = []
     for symbol in pairs:
+        await _control_scan_pair(symbol)
         try:
             _liq_z = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
             if not _liq_z["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
             r = await asyncio.to_thread(detect_zone_setup, symbol, "4h")
             if r:
                 found.append(r)
                 logging.info(f"[auto_zone_scan] {symbol} НАЙДЕН: {r['direction']} RR={r['rr']} zone={r['zone']}")
+            else:
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0.2)
         except asyncio.CancelledError:
             break
         except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_zone_scan] {symbol}: {e}")
 
     if not found:
@@ -3709,12 +3861,15 @@ async def auto_wyckoff_scan():
 async def _auto_wyckoff_scan_impl():
     logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
     pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    await _control_scan_scope(pairs)
     found = []
     for symbol in pairs:
+        await _control_scan_pair(symbol)
         try:
             # Session liquidity check
             _liq_w = await asyncio.to_thread(check_session_liquidity, symbol, "1d")
             if not _liq_w["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 logging.debug(f"[WYCKOFF] {symbol}: низкая ликвидность ({_liq_w['ratio']}x) — пропускаем")
                 continue
             # LONG — Accumulation Spring
@@ -3729,8 +3884,11 @@ async def _auto_wyckoff_scan_impl():
             r_reac = await asyncio.to_thread(detect_wyckoff_reaccumulation, symbol)
             if r_reac:
                 found.append({**r_reac, "scan_type": "wyckoff"})
+            if not any((r, r2, r_reac)):
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0.5)
         except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_wyckoff_scan] {symbol}: {e}")
 
     if not found:
@@ -3863,17 +4021,23 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
         update_global_candles("BTCUSDT", "1h", _shared_btc_1h)
 
     found = []
+    await _control_scan_scope(FAST_PAIRS)
     for symbol in FAST_PAIRS:
+        await _control_scan_pair(symbol)
         try:
             _liq_fast = await asyncio.to_thread(check_session_liquidity, symbol)
             if not _liq_fast["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 logging.debug(f"[FAST] {symbol}: низкая ликвидность ({_liq_fast['ratio']}x) — пропускаем")
                 continue
             r = await asyncio.to_thread(detect_fast_deal, symbol)
             if r:
                 found.append(r)
+            else:
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0)  # отдаём управление event loop
         except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_fast_deal_scan] {symbol}: {e}")
 
     if not found:
@@ -4941,8 +5105,21 @@ async def restore_db_from_github():
             if len(content) < 100_000:
                 logging.warning(f"GitHub brain.db слишком маленькая ({len(content)//1024}KB) — пропускаем")
                 return
-            with open("brain.db", "wb") as f:
-                f.write(content)
+            import tempfile
+            restore_dir = os.path.dirname(os.path.abspath(DB_PATH))
+            with tempfile.NamedTemporaryFile(dir=restore_dir, suffix=".restore", delete=False) as temp_db:
+                temp_db.write(content)
+                temp_path = temp_db.name
+            try:
+                check = sqlite3.connect(temp_path, timeout=10)
+                integrity = check.execute("PRAGMA integrity_check").fetchone()
+                check.close()
+                if not integrity or str(integrity[0]).lower() != "ok":
+                    raise RuntimeError(f"backup integrity failed: {integrity}")
+                os.replace(temp_path, DB_PATH)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             logging.info(f"brain.db восстановлен из GitHub ({len(content)//1024}KB)")
         else:
             logging.info(f"brain.db локальная актуальна (local={local_size//1024}KB знаний={local_knowledge}) — пропускаем")
@@ -4982,8 +5159,22 @@ async def backup_db_to_github():
                 raise RuntimeError(f"cannot create backup branch: HTTP {created.status_code}")
         elif branch_response.status_code != 200:
             raise RuntimeError(f"cannot verify backup branch: HTTP {branch_response.status_code}")
-        with open("brain.db", "rb") as f:
-            content = f.read()
+        # Copy through SQLite's backup API so committed WAL pages are included
+        # and GitHub never receives a torn live database file.
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as snapshot:
+            source = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+            target = sqlite3.connect(snapshot.name)
+            try:
+                source.backup(target)
+                integrity = target.execute("PRAGMA integrity_check").fetchone()
+                if not integrity or str(integrity[0]).lower() != "ok":
+                    raise RuntimeError(f"SQLite snapshot integrity failed: {integrity}")
+            finally:
+                target.close()
+                source.close()
+            snapshot.seek(0)
+            content = snapshot.read()
         encoded = base64.b64encode(content).decode()
         # Получаем SHA для обновления
         r = requests.get(
@@ -5189,6 +5380,8 @@ async def on_startup(app):
 
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
+    _ensure_control_schema(DB_PATH)
+    _rebuild_strategy_risk_states(DB_PATH)
     if _TRADE_EXECUTION_OK:
         try:
             _ensure_execution_schema(DB_PATH)
@@ -5509,6 +5702,8 @@ def main():
             except Exception as _re:
                 logging.warning(f"restore_db_from_github: {_re}")
             init_db()
+            _ensure_control_schema(DB_PATH)
+            _rebuild_strategy_risk_states(DB_PATH)
             if _TRADE_EXECUTION_OK:
                 try:
                     _ensure_execution_schema(DB_PATH)
