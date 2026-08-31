@@ -1,0 +1,39 @@
+name: Run scoped strategy update
+on:
+  push:
+    branches: [fix/strategy-core-rr-groq-rejections]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/strategy-core-rr-groq-rejections
+          fetch-depth: 0
+      - name: Apply prepared scoped patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess, textwrap
+          workflow = Path('.github/workflows/apply-strategy-rr-dashboard.yml').read_text()
+          start = workflow.index("          python - <<'PY'\n") + len("          python - <<'PY'\n")
+          end = workflow.index("\n          PY\n", start)
+          script = textwrap.dedent(workflow[start:end])
+          Path('/tmp/apply_scoped.py').write_text(script)
+          subprocess.run(['python', '/tmp/apply_scoped.py'], check=True)
+          Path('.github/workflows/run-scoped-update.yml').unlink()
+          PY
+      - name: Verify syntax tests and diff
+        run: |
+          python -m py_compile bot.py market.py core/signal_integrity.py core/telegram_dashboard.py
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: Commit verified changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Refine strategy confirmations RR and Groq rejection view"
+          git push origin HEAD:fix/strategy-core-rr-groq-rejections
