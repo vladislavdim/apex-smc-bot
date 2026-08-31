@@ -1,6 +1,6 @@
 import unittest
 
-from core.pair_universe import FALLBACK_COMMON_PAIRS, select_common_pairs
+from core.pair_universe import FALLBACK_COMMON_PAIRS, select_common_pairs, select_gate_pairs
 
 
 class PairUniverseTests(unittest.TestCase):
@@ -33,6 +33,17 @@ class PairUniverseTests(unittest.TestCase):
                 "quoteAsset": quote, "marginAsset": quote,
             }]}
             self.assertEqual(select_common_pairs(gate, info), [])
+
+    def test_gate_selection_needs_no_binance_response(self):
+        gate = [
+            {"contract": "BTC_USDT", "volume_24h_quote": "900000", "highest_bid": "100", "lowest_ask": "100.1"},
+            {"contract": "ETH_USDT", "volume_24h_quote": "800000", "highest_bid": "50", "lowest_ask": "50.05"},
+            {"contract": "NOTREVIEWED_USDT", "volume_24h_quote": "999999", "highest_bid": "1", "lowest_ask": "1.001"},
+        ]
+        self.assertEqual(
+            select_gate_pairs(gate, allowed_symbols=["BTCUSDT", "ETHUSDT"]),
+            ["BTCUSDT", "ETHUSDT"],
+        )
 
 
 if __name__ == "__main__":
