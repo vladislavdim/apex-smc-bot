@@ -278,6 +278,74 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(status["live_reconcile_pending"], 0)
         client_class.assert_not_called()
 
+    def test_explicit_balance_refresh_is_persisted_and_throttled(self):
+        first_client = FakeClient(balance=321.25)
+        first = execution_status(
+            self.db_path,
+            config=live_config(),
+            client=first_client,
+            refresh_balance=True,
+        )
+        self.assertTrue(first["account"]["available"])
+        self.assertEqual(first["account"]["wallet_balance"], 321.25)
+        self.assertEqual(first_client.calls, ["balance_details"])
+
+        second_client = FakeClient(balance=999)
+        second = execution_status(
+            self.db_path,
+            config=live_config(),
+            client=second_client,
+            refresh_balance=True,
+        )
+        self.assertEqual(second["account"]["wallet_balance"], 321.25)
+        self.assertEqual(second_client.calls, [])
+
+        persisted = execution_status(self.db_path, config=live_config())
+        self.assertTrue(persisted["account"]["available"])
+        self.assertTrue(persisted["account"]["deferred"])
+        self.assertEqual(persisted["account"]["wallet_balance"], 321.25)
+
+    def test_failed_balance_refresh_preserves_stale_snapshot_and_throttles_retry(self):
+        trade_execution._store_balance_attempt(
+            self.db_path,
+            attempted_at=1,
+            balance={
+                "wallet_balance": 42.5,
+                "available_balance": 40,
+                "cross_unrealized_pnl": -0.5,
+            },
+        )
+
+        class FailingBalanceClient:
+            def __init__(self):
+                self.calls = 0
+
+            def usdt_balance_details(self):
+                self.calls += 1
+                raise RuntimeError("temporary balance failure")
+
+        failing = FailingBalanceClient()
+        failed = execution_status(
+            self.db_path,
+            config=live_config(),
+            client=failing,
+            refresh_balance=True,
+        )
+        self.assertEqual(failing.calls, 1)
+        self.assertTrue(failed["account"]["available"])
+        self.assertTrue(failed["account"]["stale"])
+        self.assertEqual(failed["account"]["wallet_balance"], 42.5)
+
+        retry_client = FakeClient(balance=1000)
+        throttled = execution_status(
+            self.db_path,
+            config=live_config(),
+            client=retry_client,
+            refresh_balance=True,
+        )
+        self.assertEqual(retry_client.calls, [])
+        self.assertEqual(throttled["account"]["wallet_balance"], 42.5)
+
     def test_protected_order_is_visible_but_not_polled_while_signal_is_open(self):
         trade_execution.ensure_execution_schema(self.db_path)
         with sqlite3.connect(self.db_path) as conn:
