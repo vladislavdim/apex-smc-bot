@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 75152)
-Total output lines: 6158
-
 """
 bot.py — Telegram хендлеры, команды, scheduler, запуск APEX.
 Вся рыночная логика — в market.py
@@ -1973,7 +1970,2153 @@ async def handle_callback(callback: CallbackQuery):
         )
 
     elif data == "brain_autopilot":
-        await callback.message.edit_text("🤖 Загружаю статус автопил…25152 tokens truncated…ound:
+        await callback.message.edit_text("🤖 Загружаю статус автопилота...")
+        try:
+            status = _autopilot_status() if _AUTOPILOT_OK else "❌ apex_autopilot.py не загружен"
+        except Exception as e:
+            status = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            status,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_extensions":
+        await callback.message.edit_text("🔌 Загружаю плагин...")
+        try:
+            if _EXT_OK:
+                s = _ext_summary()
+                session = _ext_session()
+                changelog_text = ""
+                for ch in reversed(s.get("changelog", [])):
+                    changelog_text += f"\n• <b>v{ch.get('version','?')}</b> [{ch.get('date','?')}] — {ch.get('changes','?')[:80]}"
+
+                text = (
+                    f"🔌 <b>Плагин Groq Extensions</b>\n"
+                    f"{'━'*24}\n\n"
+                    f"📦 Версия: <b>{s.get('version','?')}</b>\n"
+                    f"🔧 Фильтров активно: <b>{s.get('filters', 0)}</b>\n"
+                    f"⚡️ Бустеров confluence: <b>{s.get('boosters', 0)}</b>\n"
+                    f"✏️ Последнее изменение: <b>{s.get('last_change','—')}</b>\n"
+                    f"👤 Автор: <b>{s.get('last_author','—')}</b>\n\n"
+                    f"📋 <b>История изменений:</b>{changelog_text or ' нет'}\n\n"
+                    f"⏰ Сейчас: <b>{session.get('session','?')}</b> {session.get('note','')}\n\n"
+                    f"<i>Используй /improve &lt;запрос&gt; чтобы Groq внёс изменение</i>\n"
+                    f"<i>Пример: /improve не торговать SHIB в выходные</i>"
+                )
+            else:
+                text = (
+                    "🔌 <b>Плагин Groq Extensions</b>\n\n"
+                    "❌ groq_extensions.py не найден в репо.\n\n"
+                    "Загрузи файл groq_extensions.py в корень репозитория."
+                )
+        except Exception as e:
+            text = f"Ошибка: {e}"
+
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_web_learn_now":
+        await callback.message.edit_text("🔍 Groq составляет агенду и начинает поиск...")
+        try:
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, _web_learn_cycle)
+            text = f"✅ Изучено тем: {len(results)}\n"
+            for r in results[:3]:
+                text += f"\n• {r['topic']}: {str(r.get('result',{}).get('summary',''))[:100]}"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brain_web_knowledge")]
+            ]))
+
+    elif data == "brain_diagnosis_run":
+        await callback.message.edit_text("⏳ Groq проводит глубокий самоанализ ошибок...")
+        try:
+            if _LEARNING_OK:
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(None, _learn_self_diag)
+                if not text:
+                    text = "Недостаточно потерь для анализа (нужно минимум 3 sl)"
+            else:
+                text = "learning.py не загружен"
+        except Exception as e:
+            text = f"Ошибка: {e}"
+        await callback.message.edit_text(
+            text or "Не удалось запустить диагноз",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+            ])
+        )
+
+    elif data == "brain_macro":
+        await callback.message.edit_text("🌍 Запрашиваю макро анализ...")
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: __import__('brain_builder').learn_macro_trends())
+            brain = (get_brain_summary() or {}) if callable(get_brain_summary) else {}
+            macro = brain.get("macro_summary", "Нет данных")[:500]
+            macro_time = brain.get("macro_time", "")
+            await callback.message.edit_text(
+                f"🌍 <b>Макро анализ</b> ({macro_time})\n{'━'*24}\n\n{macro}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+                ])
+            )
+        except Exception as e:
+            await callback.message.edit_text(
+                f"❌ Ошибка макро анализа: {e}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
+                ])
+            )
+
+    elif data == "brain_learn_now":
+        await callback.message.edit_text(
+            "🧠 Запускаю полное обучение...\n"
+            "⏳ Groq анализирует: макро + новости + SMC + история сделок\n"
+            "Займёт ~30 секунд"
+        )
+        await run_brain_builder_async()
+        await autonomous_learning_cycle()
+        brain = (get_brain_summary() or {}) if BRAIN_BUILDER_AVAILABLE else {}
+        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+        rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
+        conn.close()
+        await callback.message.edit_text(
+            f"✅ <b>Обучение завершено</b>\n\n"
+            f"📌 Торговых правил: <b>{rule_count}</b>\n"
+            f"📚 Знаний Groq: <b>{brain.get('knowledge_count', 0)}</b>\n"
+            f"🪙 Правил по монетам: <b>{brain.get('coin_count', 0)}</b>\n"
+            f"📈 SMC паттернов: <b>{brain.get('pattern_count', 0)}</b>\n\n"
+            f"<i>База сохранена в GitHub — знания не пропадут при рестарте</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🧠 Открыть мозг", callback_data="menu_brain")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+
+    elif data == "menu_evolution":
+        try:
+            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+            history      = conn.execute("SELECT title, description, after_value, impact_score, created_at FROM learning_history ORDER BY id DESC LIMIT 20").fetchall()
+            total_events = (conn.execute("SELECT COUNT(*) FROM learning_history").fetchone() or [0])[0]
+            rules_total  = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
+            rules_strong = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE confidence >= 0.7").fetchone() or [0])[0]
+            errors_fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
+            knowledge_cnt= (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
+            conn.close()
+        except:
+            history = []; total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
+
+        if not history:
+            evo_text = ("📚 <b>Эволюция APEX</b>\n" + "━"*26 + "\n\n🆕 История пуста.\n\n<i>Нажми «Запустить обучение» чтобы бот начал читать интернет и накапливать знания</i>")
+        else:
+            lines_evo = [
+                "📚 <b>Эволюция APEX</b>", "━"*26,
+                f"📊 Событий: <b>{total_events}</b>  |  📌 Правил: <b>{rules_total}</b>  |  💪 Сильных: <b>{rules_strong}</b>",
+                f"🔧 Исправлено ошибок: <b>{errors_fixed}</b>  |  📖 Знаний: <b>{knowledge_cnt}</b>",
+                "━"*26, "<b>Хронология:</b>", "",
+            ]
+            for title, desc, after, score, created in history[:15]:
+                ts  = (created or "")[:16]
+                bar = "█" * int((score or 0.5) * 5)
+                lines_evo += [
+                    f"<b>{title}</b>  <code>{ts}</code>",
+                    f"  {(desc or '')[:90]}",
+                    *([ f"  → {after[:60]}" ] if after else []),
+                    f"  {bar} {int((score or 0.5)*100)}%",
+                    "",
+                ]
+            evo_text = "\n".join(lines_evo)
+
+        if len(evo_text) > 4000:
+            evo_text = evo_text[:4000] + "\n\n<i>...показаны последние события</i>"
+
+        await callback.message.edit_text(evo_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_evolution")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
+            ])
+        )
+
+    elif data == "menu_strategies":
+        try:
+            strategy_rows = await asyncio.to_thread(_fetch_strategy_stats, DB_PATH)
+            strategies_text = _format_strategy_stats(strategy_rows)
+        except Exception as exc:
+            logging.error("Telegram strategy stats: %s", exc)
+            strategies_text = "⚠️ Не удалось рассчитать статистику стратегий."
+        await callback.message.edit_text(
+            strategies_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_strategies")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_stats")]
+            ])
+        )
+
+    elif data == "menu_wins":
+        try:
+            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+            wins_list = conn.execute(
+                """SELECT symbol, direction, entry, tp1, result, grade, timeframe,
+                   created_at, closed_at,
+                   ROUND((julianday(closed_at) - julianday(created_at)) * 24, 1) as hours
+                   FROM signals WHERE result LIKE 'tp%'
+                   ORDER BY closed_at DESC LIMIT 15"""
+            ).fetchall()
+            total_wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
+            total_sigs = (conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending'").fetchone() or [0])[0]
+            avg_hours = (conn.execute(
+                "SELECT AVG((julianday(closed_at)-julianday(created_at))*24) FROM signals WHERE result LIKE 'tp%'"
+            ).fetchone() or [0])[0] or 0
+            best = conn.execute(
+                "SELECT symbol, win_rate FROM signal_learning ORDER BY win_rate DESC LIMIT 3"
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            wins_list = []
+            total_wins = total_sigs = 0
+            avg_hours = 0
+            best = []
+
+        wr = round(total_wins / total_sigs * 100, 1) if total_sigs > 0 else 0
+
+        if not wins_list:
+            text = (
+                "🏆 <b>Удачные сделки</b>\n\n"
+                "Пока нет закрытых прибыльных сделок.\n\n"
+                "<i>Сигналы отслеживаются автоматически — как только сработает TP, сделка появится здесь.</i>"
+            )
+        else:
+            lines = []
+            tp_emoji = {"tp1": "🥉", "tp2": "🥈", "tp3": "🥇"}
+            for w in wins_list:
+                symbol, direction, entry, tp1, result, grade, tf, created, closed, hours = w
+                emoji = "🟢" if direction == "BULLISH" else "🔴"
+                tp_icon = tp_emoji.get(result, "✅")
+                hours_str = f"{hours:.0f}ч" if hours and hours < 48 else f"{hours/24:.1f}дн" if hours else "?"
+                date_str = closed[:10] if closed else created[:10]
+                lines.append(
+                    f"{tp_icon} <b>{symbol}</b> {emoji} {result.upper()} | {grade or '-'}\n"
+                    f"   Вход: {entry:.4f} → TP: {tp1:.4f} | {hours_str} | {date_str}"
+                )
+
+            best_text = " | ".join([f"{b[0]} {b[1]:.0f}%" for b in best]) if best else "—"
+
+            text = (
+                f"🏆 <b>Удачные сделки APEX</b>\n"
+                f"{'━'*24}\n\n"
+                f"✅ Всего побед: <b>{total_wins}</b> из {total_sigs}\n"
+                f"🎯 Win Rate: <b>{wr}%</b>\n"
+                f"⏱ Среднее время: <b>{avg_hours:.1f}ч</b>\n"
+                f"🌟 Лучшие: {best_text}\n"
+                f"{'━'*24}\n\n"
+                + "\n\n".join(lines[:10])
+            )
+
+        await callback.message.edit_text(
+            text[:4000],
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_wins"),
+                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+    elif data == "menu_errors":
+        try:
+            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+            total_err = (conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone() or [0])[0]
+            unfixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
+            fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
+            errors = conn.execute(
+                """SELECT id, symbol, direction, error_type, result, fixed, created_at
+                   FROM bot_errors ORDER BY id DESC LIMIT 8"""
+            ).fetchall()
+            patterns = conn.execute(
+                "SELECT error_type, count, rule_added FROM error_patterns ORDER BY count DESC LIMIT 5"
+            ).fetchall()
+            conn.close()
+        except:
+            total_err = unfixed = fixed = 0
+            errors = []
+            patterns = []
+
+        errors_text = ""
+        for e in errors:
+            status = "✅" if e[5] else "❌"
+            errors_text += f"{status} #{e[0]} <b>{e[1]}</b> {e[2]} — {ERROR_TYPES.get(e[3], e[3])} [{e[6][:10]}]\n"
+
+        patterns_text = ""
+        for p in patterns:
+            rule_icon = "📌" if p[2] else "⚠️"
+            patterns_text += f"{rule_icon} {ERROR_TYPES.get(p[0], p[0])}: {p[1]}x\n"
+            if p[2]:
+                patterns_text += f"   → {p[2][:60]}\n"
+
+        await callback.message.edit_text(
+            f"🔍 <b>Ошибки бота APEX</b>\n"
+            f"{'━'*24}\n\n"
+            f"Всего: {total_err} | ❌ Открыто: {unfixed} | ✅ Исправлено: {fixed}\n\n"
+            f"<b>Последние ошибки:</b>\n{errors_text or 'Нет ошибок'}\n"
+            f"<b>Паттерны:</b>\n{patterns_text or 'Нет повторений'}\n"
+            f"{'━'*24}\n"
+            f"<i>/errors [id] — детальный разбор\n"
+            f"/errors fix [id] — отметить как исправленное</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_errors"),
+                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+    elif data == "menu_news":
+        await callback.message.edit_text("📰 Собираю свежие новости...")
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+        # Крипто новости
+        crypto_news = await asyncio.get_running_loop().run_in_executor(None, get_crypto_news)
+        # Макро новости
+        macro_news = await asyncio.get_running_loop().run_in_executor(None, get_market_impact_news)
+
+        crypto_text = format_news(crypto_news[:6])
+        macro_text = format_news(macro_news[:4])
+
+        # AI анализ влияния на рынок
+        all_titles = "\n".join([item["title"] for item in (crypto_news + macro_news)[:10]])
+        analysis = ask_groq(
+            f"Ты крипто трейдер. Оцени эти новости — что важно для рынка прямо сейчас? (3-4 пункта, дерзко и кратко):\n{all_titles}",
+            max_tokens=300
+        )
+        save_news("crypto news", all_titles[:500])
+
+        msg = (
+            f"📰 <b>Новости крипторынка</b>\n"
+            f"🕐 Обновлено: {now_str}\n"
+            f"{'━'*24}\n\n"
+            f"<b>🔥 Крипто:</b>\n{crypto_text}\n\n"
+            f"{'━'*24}\n"
+            f"<b>🌍 Макро (влияет на рынок):</b>\n{macro_text}\n\n"
+            f"{'━'*24}\n"
+            f"<b>⚡️ APEX анализ:</b>\n{analysis or 'Анализирую...'}"
+        )
+
+        # Telegram лимит 4096 символов
+        if len(msg) > 4000:
+            msg = msg[:3990] + "..."
+
+        await callback.message.edit_text(
+            msg,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_news"),
+                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+    elif data in ("menu_find_deals", "menu_find_deals_refresh"):
+        await callback.message.edit_text(
+            "🎯 <b>Ищу сделки...</b>\n\n"
+            "⏳ Сканирую топ-40 пар по SMC: OB, FVG, мультитаймфрейм\n"
+            "<i>~20-30 секунд</i>",
+            parse_mode="HTML"
+        )
+        signals = await asyncio.get_running_loop().run_in_executor(None, scan_all_for_deals, 40)
+
+        if not signals:
+            await callback.message.edit_text(
+                "🎯 <b>Сделок нет</b>\n\n"
+                "😴 Прошёлся по топ-40 монетам — чётких сетапов не нашёл.\n"
+                "Рынок в боковике или сигналы ещё не сформировались.\n\n"
+                "<i>Обычно сигналы появляются после пробоя уровней или выхода новостей</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="menu_find_deals_refresh")],
+                    [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+                ])
+            )
+            return
+
+        grade_icons = {"🔥🔥🔥 МЕГА ТОП": "🔥🔥🔥", "🔥🔥 ТОП СДЕЛКА": "🔥🔥", "✅ ХОРОШАЯ": "✅"}
+        lines = [f"🎯 <b>Найдено сделок: {len(signals)}</b>", "━"*24, ""]
+        for s in signals:
+            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+            icon  = grade_icons.get(s["grade"], "✅")
+            lines.append(f"{icon} {emoji} <b>{s['symbol'].replace('USDT','')}</b> — {s['direction']}")
+        lines += ["", "<i>Выбери монету для полного сигнала 👇</i>"]
+
+        buttons = []
+        row = []
+        for s in signals[:12]:
+            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
+            fire  = "🔥" if "ТОП" in s["grade"] else ""
+            row.append(InlineKeyboardButton(
+                text=f"{fire}{emoji} {s['symbol'].replace('USDT','')}",
+                callback_data=f"deal_open_{s['symbol']}"
+            ))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_find_deals_refresh"),
+            InlineKeyboardButton(text="🔙 Меню",     callback_data="menu_back"),
+        ])
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+
+    elif data.startswith("deal_open_"):
+        symbol = data.replace("deal_open_", "")
+        await callback.message.edit_text(f"📊 Загружаю сигнал по <b>{symbol}</b>...", parse_mode="HTML")
+        result = await asyncio.get_running_loop().run_in_executor(None, full_scan_raw, symbol, "1h")
+        if result:
+            mem = get_user_memory(user_id)
+            risk_block = ""
+            if mem["deposit"] > 0:
+                try:
+                    rc = calc_risk(mem["deposit"], mem["risk"], result.get("entry", 0), result.get("sl", 0))
+                    if rc:
+                        risk_block = (
+                            f"\n💰 <b>Риск-менеджмент:</b>\n"
+                            f"Размер позиции: <b>{rc['position_size']:.2f}</b> USDT\n"
+                            f"Риск в $: <b>${rc['risk_amount']:.2f}</b> ({mem['risk']}%)\n"
+                        )
+                except:
+                    pass
+            await callback.message.edit_text(
+                result["text"] + risk_block,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Обновить сигнал", callback_data=data)],
+                    [InlineKeyboardButton(text="🔙 К списку сделок", callback_data="menu_find_deals")],
+                ])
+            )
+        else:
+            await callback.message.edit_text(
+                f"😴 <b>{symbol}</b> — сигнал пропал.\n<i>Рынок изменился пока ты смотрел список</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 К списку сделок", callback_data="menu_find_deals")],
+                ])
+            )
+
+    elif data.startswith("menu_trade_") or data.startswith("trade_scalp_") or data.startswith("trade_swing_") or data.startswith("trade_long_"):
+        # Старые хендлеры — редиректим на новый
+        await callback.message.edit_text("🔄", parse_mode="HTML")
+        await asyncio.sleep(0.1)
+        # Имитируем нажатие menu_find_deals
+        signals = await asyncio.get_running_loop().run_in_executor(None, scan_all_for_deals, 40)
+        await callback.message.edit_text(
+            f"🎯 Найдено сделок: {len(signals)}" if signals else "😴 Сигналов нет",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals")],
+                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ])
+        )
+
+    elif data == "menu_pump":
+        await callback.message.edit_text("📦 Сканирую топ-60 на накопление перед пампом...\n⏳ ~30 секунд")
+        pairs = await asyncio.get_running_loop().run_in_executor(None, get_top_pairs, 50)
+        found = []
+        for symbol in pairs:
+            try:
+                acc = await asyncio.get_running_loop().run_in_executor(None, detect_accumulation, symbol)
+                if acc and acc["score"] >= 50:
+                    found.append(acc)
+            except:
+                pass
+
+        found.sort(key=lambda x: x["score"], reverse=True)
+
+        if not found:
+            await callback.message.edit_text(
+                "📦 Накоплений не найдено.\nРынок в движении — боковиков нет.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_pump"),
+                     InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+                ])
+            )
+            return
+
+        summary = f"📦 <b>Накопления перед пампом</b>\nНайдено: {len(found)} монет\n{'━'*24}\n\n"
+        for acc in found[:3]:
+            p = acc["price"]
+            ps = f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
+            bar = "█" * (acc["score"] // 10) + "░" * (10 - acc["score"] // 10)
+            summary += (
+                f"📦 <b>{acc['symbol']}</b> | {ps}\n"
+                f"Скор: [{bar}] {acc['score']}/100\n"
+                f"{acc['signals'][0] if acc['signals'] else ''}\n\n"
+            )
+
+        summary += f"<i>Полный разбор каждой — команда /pump BTCUSDT</i>"
+
+        await callback.message.edit_text(
+            summary,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_pump"),
+                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+            ])
+        )
+
+@dp.message(Command("patch"))
+async def cmd_patch(message: types.Message):
+    """Ручной запуск авто-патча — /patch [описание ошибки]"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    args = message.text.split(maxsplit=1)
+    error_text = args[1].strip() if len(args) > 1 else "manual patch request"
+    await message.answer("🔧 Запускаю анализ кода через Groq...")
+    await analyze_and_patch(error_text, "manual")
+
+
+@dp.message(Command("pump"))
+async def cmd_pump(message: types.Message):
+    args = message.text.split()
+    if len(args) == 2:
+        symbol = args[1].upper().replace("USDT","") + "USDT"
+        await message.answer(f"📦 Анализирую накопление {symbol}...")
+        acc = await asyncio.get_running_loop().run_in_executor(None, detect_accumulation, symbol)
+        if acc:
+            await message.answer(format_accumulation(acc), parse_mode="HTML")
+        else:
+            await message.answer(f"😴 {symbol} — накоплений не обнаружено.")
+    else:
+        await message.answer("📦 Сканирую топ-20 на накопление...")
+        pairs = get_top_pairs(20)
+        found = []
+        for symbol in pairs:
+            acc = detect_accumulation(symbol)
+            if acc and acc["score"] >= 50:
+                found.append(acc)
+            time.sleep(0.2)
+        found.sort(key=lambda x: x["score"], reverse=True)
+        if not found:
+            await message.answer("😴 Накоплений не найдено.")
+            return
+        await message.answer(f"📦 Найдено накоплений: {len(found)}")
+        for acc in found[:3]:
+            await message.answer(format_accumulation(acc), parse_mode="HTML")
+            await asyncio.sleep(0.5)
+
+
+@dp.message(Command("trade"))
+async def cmd_trade(message: types.Message):
+    """
+    /trade BTC          — все типы сделок (скальп + свинг + долгосрок)
+    /trade BTC scalp    — только скальп
+    /trade BTC swing    — только свинг
+    /trade BTC long     — только долгосрок
+    """
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "📊 <b>Анализ по типу сделки</b>\n\n"
+            "Использование:\n"
+            "/trade BTC — все типы\n"
+            "/trade BTC scalp — скальп (1m/5m/15m)\n"
+            "/trade BTC swing — свинг (1h/4h)\n"
+            "/trade BTC long — долгосрок (1d/1w/1M)\n\n"
+            "<i>Примеры: /trade TON, /trade ETH swing, /trade SOL long</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Распознаём символ через алиасы
+    raw = args[1].lower()
+    symbol = SYMBOL_ALIASES.get(raw, raw.upper())
+    if not symbol.endswith("USDT"):
+        symbol = symbol.upper() + "USDT"
+
+    trade_type = args[2].lower() if len(args) >= 3 else "all"
+    valid_types = {"scalp", "swing", "long", "all"}
+    if trade_type not in valid_types:
+        trade_type = "all"
+
+    types_to_run = ["scalp", "swing", "long"] if trade_type == "all" else [trade_type]
+
+    type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
+    await message.answer(
+        f"🔍 Анализирую <b>{symbol}</b>\n"
+        f"Типы: {' | '.join([type_labels[t] for t in types_to_run])}\n"
+        f"⏳ Подожди...",
+        parse_mode="HTML"
+    )
+
+    found_any = False
+    for tt in types_to_run:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, analyze_trade_type, symbol, tt
+        )
+        if result:
+            found_any = True
+            await message.answer(result["text"], parse_mode="HTML")
+            await asyncio.sleep(0.5)
+        else:
+            await message.answer(
+                f"{type_labels[tt]}: нет чёткого сигнала по {symbol} на таймфреймах {', '.join(TF_CATEGORIES[tt])}"
+            )
+
+    if not found_any:
+        await message.answer(
+            f"😴 <b>{symbol}</b> — нет сигналов ни по одному типу сделки.\n"
+            f"Рынок, возможно, в боковике или данных недостаточно.",
+            parse_mode="HTML"
+        )
+
+@dp.message(Command("think"))
+async def cmd_think(message: types.Message):
+    """Бот думает вслух — глубокий ресёрч по теме"""
+    args = message.text.split(maxsplit=1)
+    topic = args[1].strip() if len(args) > 1 else "bitcoin market analysis"
+    await message.answer(f"🧠 Думаю над темой: <b>{topic}</b>...\n⏳ Ищу в интернете, анализирую...", parse_mode="HTML")
+    result = await asyncio.get_running_loop().run_in_executor(None, deep_research, topic)
+    if result:
+        await message.answer(
+            f"🧠 <b>Глубокий анализ: {topic}</b>\n\n{result}",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("Не удалось найти достаточно данных.")
+
+@dp.message(Command("brain"))
+async def cmd_brain(message: types.Message):
+    """Показываем что бот знает — его база знаний"""
+    try:
+        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+        total_k = (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
+        sources = conn.execute(
+            "SELECT source, COUNT(*) as cnt FROM knowledge GROUP BY source ORDER BY cnt DESC LIMIT 8"
+        ).fetchall()
+        recent = conn.execute(
+            "SELECT topic, source, created_at FROM knowledge ORDER BY id DESC LIMIT 5"
+        ).fetchall()
+        reflections = (conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE source='self-reflection'"
+        ).fetchone() or [0])[0]
+        comparisons = (conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE source='self-compare'"
+        ).fetchone() or [0])[0]
+        conn.close()
+
+        sources_text = "\n".join([f"• {r[0]}: {r[1]} записей" for r in sources])
+        recent_text = "\n".join([f"• [{r[2][:10]}] {r[0][:40]} ({r[1]})" for r in recent])
+
+        await message.answer(
+            f"🧠 <b>Мозг APEX</b>\n\n"
+            f"📚 Всего знаний: <b>{total_k}</b>\n"
+            f"🔄 Само-рефлексий: <b>{reflections}</b>\n"
+            f"📊 Сравнений прогнозов: <b>{comparisons}</b>\n\n"
+            f"<b>Источники знаний:</b>\n{sources_text}\n\n"
+            f"<b>Последние 5 знаний:</b>\n{recent_text}\n\n"
+            f"<i>Используй /think [тема] — заставить думать над конкретным вопросом</i>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+@dp.message(Command("errors"))
+async def cmd_errors(message: types.Message):
+    """Раздел ошибок бота — просмотр, анализ, исправления"""
+    args = message.text.split()
+
+    # /errors fix <id> — отметить ошибку как исправленную
+    if len(args) == 3 and args[1] == "fix":
+        try:
+            error_id = int(args[2])
+            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+            row = conn.execute(
+                "SELECT symbol, error_type, ai_next_time FROM bot_errors WHERE id=?",
+                (error_id,)
+            ).fetchone()
+
+            if not row:
+                await message.answer(f"Ошибка #{error_id} не найдена.")
+                conn.close()
+                return
+
+            # AI формулирует что именно исправлено
+            fix_prompt = f"""Ошибка типа "{ERROR_TYPES.get(row[1], row[1])}" по монете {row[0]} отмечена как исправленная.
+Правило было: {row[2]}
+
+Напиши 1-2 предложения:
+1. Что именно было исправлено в стратегии
+2. Как бот будет поступать теперь"""
+
+            fix_desc = ask_groq(fix_prompt, max_tokens=150)
+
+            conn.execute(
+                "UPDATE bot_errors SET fixed=1, fix_description=?, fixed_at=CURRENT_TIMESTAMP WHERE id=?",
+                (fix_desc or "Исправлено вручную", error_id)
+            )
+            conn.commit()
+            conn.close()
+
+            await message.answer(
+                f"✅ <b>Ошибка #{error_id} отмечена как исправленная</b>\n\n"
+                f"<b>{row[0]}</b> | {ERROR_TYPES.get(row[1], row[1])}\n\n"
+                f"📌 <b>Что изменено:</b>\n{fix_desc or 'Исправлено'}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"Ошибка: {e}")
+        return
+
+    # /errors <id> — детальный просмотр конкретной ошибки
+    if len(args) == 2:
+        try:
+            error_id = int(args[1])
+            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+            row = conn.execute(
+                """SELECT id, symbol, direction, entry, sl, result, error_type,
+                   error_description, ai_analysis, ai_lesson, ai_next_time,
+                   fixed, fix_description, hours_in_trade, market_context, created_at
+                   FROM bot_errors WHERE id=?""",
+                (error_id,)
+            ).fetchone()
+            conn.close()
+
+            if not row:
+                await message.answer(f"Ошибка #{error_id} не найдена.")
+                return
+
+            fixed_block = ""
+            if row[11]:  # fixed == 1
+                fixed_block = f"\n\n✅ <b>ИСПРАВЛЕНО:</b>\n{row[12]}"
+            else:
+                fixed_block = f"\n\n❌ Ещё не исправлено\n/errors fix {error_id} — отметить как исправленное"
+
+            await message.answer(
+                f"🔍 <b>Разбор ошибки #{row[0]}</b>\n"
+                f"{'━'*24}\n\n"
+                f"📊 <b>Сделка:</b> {row[1]} {row[2]}\n"
+                f"💰 Вход: <code>{row[3]}</code> | Стоп: <code>{row[4]}</code>\n"
+                f"❌ Результат: {row[5]} за {row[13]}ч\n"
+                f"🏷 Тип ошибки: <b>{ERROR_TYPES.get(row[6], row[6])}</b>\n"
+                f"📅 {row[15][:16]}\n\n"
+                f"📋 <b>Рыночный контекст:</b>\n{row[14]}\n\n"
+                f"🧠 <b>Анализ:</b>\n{row[8]}\n\n"
+                f"📚 <b>Урок:</b>\n{row[9]}\n\n"
+                f"📌 <b>В следующий раз:</b>\n{row[10]}"
+                f"{fixed_block}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"Ошибка: {e}")
+        return
+
+    # /errors — список всех ошибок
+    try:
+        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
+        total = (conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone() or [0])[0]
+        unfixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
+        fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
+
+        # Последние 10 ошибок
+        errors = conn.execute(
+            """SELECT id, symbol, direction, error_type, result, fixed, created_at
+               FROM bot_errors ORDER BY id DESC LIMIT 10"""
+        ).fetchall()
+
+        # Паттерны — повторяющиеся ошибки
+        patterns = conn.execute(
+            "SELECT error_type, count, rule_added FROM error_patterns ORDER BY count DESC LIMIT 5"
+        ).fetchall()
+        conn.close()
+
+        errors_text = ""
+        for e in errors:
+            status = "✅" if e[5] else "❌"
+            errors_text += f"{status} #{e[0]} <b>{e[1]}</b> {e[2]} — {ERROR_TYPES.get(e[3], e[3])} ({e[4]}) [{e[6][:10]}]\n"
+
+        patterns_text = ""
+        for p in patterns:
+            rule_icon = "📌" if p[2] else "⚠️"
+            patterns_text += f"{rule_icon} {ERROR_TYPES.get(p[0], p[0])}: {p[1]}x"
+            if p[2]:
+                patterns_text += f" → правило: {p[2][:60]}"
+            patterns_text += "\n"
+
+        await message.answer(
+            f"🔍 <b>Ошибки бота APEX</b>\n"
+            f"{'━'*24}\n\n"
+            f"Всего: {total} | ❌ Открыто: {unfixed} | ✅ Исправлено: {fixed}\n\n"
+            f"<b>Последние ошибки:</b>\n{errors_text}\n"
+            f"<b>Паттерны (повторяющиеся):</b>\n{patterns_text}\n"
+            f"{'━'*24}\n"
+            f"<i>/errors [id] — детальный разбор\n"
+            f"/errors fix [id] — отметить как исправленное</i>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+@dp.chat_member()
+async def on_new_member(event: ChatMemberUpdated):
+    """Приветствие новых участников канала"""
+    try:
+        old_status = event.old_chat_member.status if event.old_chat_member else "left"
+        new_status = event.new_chat_member.status if event.new_chat_member else "left"
+        # Только новые участники (было left/kicked → стало member/administrator)
+        if old_status in ("left", "kicked", "restricted") and new_status in ("member", "administrator"):
+            user = event.new_chat_member.user
+            name = user.first_name or "трейдер"
+            # Groq генерирует уникальное приветствие
+            greeting = None
+            try:
+                groq_prompt = (
+                    f"Придумай короткое креативное приветствие для нового подписчика "
+                    f"трейдингового канала. Имя: {name}. Упомяни профитные сделки и удачу. "
+                    f"Максимум 2 предложения. Только на русском."
+                )
+                groq_resp = ask_groq(groq_prompt, max_tokens=80)
+                if groq_resp and len(groq_resp.strip()) > 10:
+                    greeting = groq_resp.strip()
+            except Exception:
+                pass
+            if not greeting:
+                greeting = f"Привет {name}! Рады видеть тебя — профитных сделок и зелёных свечей! 🚀"
+            await bot.send_message(event.chat.id, greeting)
+            logging.info(f"[Welcome] {name} (id={user.id}) joined chat {event.chat.id}")
+    except Exception as e:
+        logging.debug(f"on_new_member error: {e}")
+
+
+@dp.message()
+async def handle_text(message: types.Message):
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "трейдер"
+    text = message.text
+    if not text:
+        return
+
+    # Проверяем состояние (ожидаем ввод монеты)
+    if user_id in user_states:
+        state = user_states.pop(user_id)
+
+        if state.get("action") == "live_analysis":
+            symbol = text.upper().replace("USDT", "") + "USDT"
+            tf = state.get("tf", "1h")
+            thinking = await message.answer(f"📍 Анализирую {symbol} {TF_LABELS.get(tf, tf)}...")
+            result = await asyncio.get_running_loop().run_in_executor(None, live_position_analysis, symbol, tf)
+            try: await thinking.delete()
+            except: pass
+            if result:
+                await message.answer(result, parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"live_refresh_{symbol}_{tf}")],
+                        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+                    ]))
+            else:
+                await message.answer(f"Нет данных по {symbol}. Попробуй: BTC, ETH, SOL, BNB")
+            return
+
+        if state.get("action") == "backtest":
+            symbol = text.upper().replace("USDT", "") + "USDT"
+            tf = state.get("tf", "1h")
+            thinking = await message.answer(f"🔬 Запускаю бектест {symbol} {TF_LABELS.get(tf, tf)}...")
+            result = await asyncio.get_running_loop().run_in_executor(None, backtest, symbol, tf)
+            try: await thinking.delete()
+            except: pass
+            if result:
+                grade = "🔥 Отличная" if result["win_rate"] >= 60 else "✅ Рабочая" if result["win_rate"] >= 50 else "⚠️ Слабая"
+                await message.answer(
+                    f"🔬 <b>Бектест {symbol} [{TF_LABELS.get(tf, tf)}]</b>\n\n"
+                    f"Сигналов: {result['total']}\n"
+                    f"✅ Выигрыши: {result['wins']}\n"
+                    f"❌ Проигрыши: {result['losses']}\n"
+                    f"🎯 Win Rate: <b>{result['win_rate']}%</b>\n"
+                    f"Оценка: {grade}",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="📍 Где мы сейчас?", callback_data=f"live_now_{symbol}_{tf}")],
+                        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+                    ])
+                )
+            else:
+                await message.answer("Недостаточно данных для бектеста")
+            return
+
+    save_chat_log(user_id, "user", text)
+    thinking = await message.answer("⚡️")
+    # ✅ ФИКС: run_in_executor — ask_ai не блокирует event loop
+    reply = await asyncio.get_running_loop().run_in_executor(None, ask_ai, user_id, user_name, text)
+    try:
+        await thinking.delete()
+    except:
+        pass
+    if reply:
+        save_chat_log(user_id, "assistant", reply)
+        await message.answer(reply)
+        asyncio.create_task(
+            asyncio.to_thread(extract_and_save_profile, user_id, user_name, text, reply)
+        )
+    else:
+        await message.answer("⚡️ Перегружен, попробуй через минуту.")
+
+# ===== AUTO TASKS =====
+
+async def auto_research():
+    topics = ["bitcoin analysis today", "crypto market today", "altcoins 2025"]
+    for topic in topics:
+        try:
+            result = await asyncio.to_thread(tavily_search, topic, max_results=3)
+            summary = await asyncio.to_thread(
+                ask_groq,
+                f"Вывод для трейдера (2 предложения):\n{result[:600]}",
+                max_tokens=150,
+            )
+            if summary:
+                save_knowledge(topic, summary, "auto")
+                save_news(topic, summary)
+            await asyncio.sleep(15)
+        except:
+            pass
+
+async def deep_market_scan(limit=200):
+    """
+    Глубокий скан всего рынка по запросу пользователя.
+    Проверяет Gate USD-M universe, ищет сигналы + накопления.
+    Возвращает отсортированный список сигналов.
+    """
+    all_pairs = get_all_market_pairs()
+    scan_pairs = all_pairs[:limit]
+
+    signals = []
+    accumulations = []
+
+    # Сканируем батчами по 10 монет параллельно
+    async def scan_one(symbol):
+        try:
+            loop = asyncio.get_running_loop()
+            # Таймаут 8 сек на монету — не зависаем
+            sig = await asyncio.wait_for(
+                loop.run_in_executor(None, full_scan_raw, symbol, "1h"),
+                timeout=8.0
+            )
+            if sig and sig.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА", "ХОРОШАЯ",
+                                             "🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
+                signals.append(sig)
+            # Накопление — отдельный таймаут
+            acc = await asyncio.wait_for(
+                loop.run_in_executor(None, detect_accumulation, symbol),
+                timeout=6.0
+            )
+            if acc and acc.get("score", 0) >= 72:  # поднят порог качества
+                accumulations.append({
+                    "symbol": symbol,
+                    "score": acc["score"],
+                    "signal": acc.get("signal", ""),
+                    "price": acc.get("price", 0)
+                })
+        except asyncio.TimeoutError:
+            logging.debug(f"deep_scan timeout: {symbol}")
+        except Exception as e:
+            logging.debug(f"deep_scan error {symbol}: {e}")
+
+    # Батчи по 10
+    for i in range(0, min(len(scan_pairs), limit), 10):
+        batch = scan_pairs[i:i+10]
+        await asyncio.gather(*[scan_one(sym) for sym in batch])
+        await asyncio.sleep(0.5)  # Не перегружаем API
+
+    # Сортируем по приоритету
+    grade_order = {"🔥🔥🔥 МЕГА ТОП": 0, "🔥🔥 ТОП СДЕЛКА": 1, "✅ ХОРОШАЯ": 2}
+    signals.sort(key=lambda x: grade_order.get(x.get("grade", ""), 3))
+    accumulations.sort(key=lambda x: x["score"], reverse=True)
+
+    return signals, accumulations
+
+
+def format_deep_scan_result(signals, accumulations, total_scanned):
+    """Форматирует результат глубокого скана для Telegram"""
+    if not signals and not accumulations:
+        return (
+            f"🔍 <b>Глубокий скан завершён</b>\n"
+            f"Проверено монет: {total_scanned}\n\n"
+            f"😴 Рынок спокоен — нет чётких сетапов\n"
+            f"Попробуй позже или смени таймфрейм"
+        )
+
+    parts = [f"🔍 <b>Глубокий скан</b> | {total_scanned} Gate USD-M монет\n{'━'*24}\n"]
+
+    # Сигналы SMC
+    if signals:
+        parts.append(f"\n📡 <b>Найдено сигналов: {len(signals)}</b>\n")
+        for s in signals[:5]:  # Топ-5
+            sym = s.get("symbol", "")
+            direction = s.get("direction", "")
+            entry = s.get("entry", 0)
+            tp1 = s.get("tp1", 0)
+            tp2 = s.get("tp2", 0)
+            tp3 = s.get("tp3", 0)
+            sl = s.get("sl", 0)
+            grade = s.get("grade", "")
+            emoji = "🟢" if "BULL" in direction else "🔴"
+
+            parts.append(
+                f"\n{grade}\n"
+                f"{emoji} <b>{sym}</b> — {direction}\n"
+                f"💰 Вход: <code>{entry:.4f}</code>\n"
+                f"🛑 Стоп: <code>{sl:.4f}</code>\n"
+                f"🎯 TP: <code>{tp1:.4f}</code>\n"
+            )
+
+    # Накопления (потенциальные памп кандидаты)
+    if accumulations:
+        parts.append(f"\n📦 <b>Накопление (Wyckoff) — {len(accumulations)} монет:</b>\n")
+        for a in accumulations[:5]:
+            score = a["score"]
+            fire = "🔥🔥🔥" if score >= 80 else "🔥🔥" if score >= 70 else "🔥"
+            parts.append(
+                f"{fire} <b>{a['symbol']}</b> — скор {score}/100\n"
+                f"   {a['signal']}\n"
+            )
+
+    return "".join(parts)
+
+
+def _format_channel_signal(sd: dict) -> str:
+    """Сообщение для канала — такой же текст как в боте"""
+    text = sd.get("text", "")
+    if text:
+        return text
+
+    # Fallback
+    symbol    = sd.get("symbol", "???")
+    direction = sd.get("direction", "")
+    entry     = sd.get("entry", 0)
+    tp1       = sd.get("tp1", 0)
+    sl        = sd.get("sl", 0)
+    tf        = sd.get("timeframe", "1h")
+    score     = sd.get("confluence_score", 0)
+    scan_type = sd.get("scan_type", "")
+
+    def fmt(p):
+        if not p: return "—"
+        if p < 0.0001: return f"${p:.8f}"
+        if p < 0.01:   return f"${p:.6f}"
+        if p < 1:      return f"${p:.4f}"
+        return f"${p:,.2f}"
+
+    dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+    label     = "🔄 [SWING]" if scan_type == "swing" else "🌊 [WYCKOFF]" if scan_type == "wyckoff" else "⚡ [FAST]" if scan_type == "fast" else "📐 [MTF]"
+    tf_time   = {"1h": "5-12ч", "4h": "1-3дн"}.get(tf, "1-3дн")
+    risk      = "низкий" if score >= 60 else "средний"
+
+    lines = [
+        f"{label} | <b>{symbol}</b> — {dir_label}",
+        f"📊 Контекст: {tf}",
+        f"",
+        f"🎯 TP:   <code>{fmt(tp1)}</code>",
+        f"💰 Вход: <code>{fmt(entry)}</code>",
+        f"🛑 Стоп: <code>{fmt(sl)}</code>",
+        f"",
+        f"⚡ Риск: {risk}",
+        f"⏱ Горизонт: {tf_time}",
+        f"",
+        f"💡 Это аналитика, не совет. Торгуй осознанно",
+    ]
+    return "\n".join(lines)
+
+
+async def _send_with_retry(chat_id, text, parse_mode="HTML", retries=3, **kwargs):
+    """Отправка Telegram сообщения с retry и exponential backoff"""
+    for attempt in range(retries):
+        try:
+            await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
+            return True
+        except Exception as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                logging.warning(f"[Telegram] Retry {attempt+1}/{retries} chat={chat_id}: {e}")
+            else:
+                logging.error(f"[Telegram] Не удалось отправить после {retries} попыток chat={chat_id}: {e}")
+    return False
+
+
+def _signal_type_from_candidate(sd: dict) -> str:
+    scan_type = str(sd.get("scan_type") or "").upper()
+    grade = str(sd.get("grade") or sd.get("signal_type") or "MTF").upper()
+    aliases = {
+        "MTF": "MTF", "SWING": "SWING", "ZONE": "ZONE",
+        "FAST": "FAST", "FAST_DEAL": "FAST", "WYCKOFF": "WYCKOFF",
+        "MEGA": "MEGA",
+    }
+    return aliases.get(scan_type, aliases.get(grade, "MTF"))
+
+
+def _persist_delivered_signal(sd: dict):
+    """Persist only a candidate that passed review and reached Telegram."""
+    if sd.get("_signal_persisted"):
+        return sd.get("_signal_id")
+    signal_type = _signal_type_from_candidate(sd)
+    default_hours = {
+        "FAST": 1, "MTF": 72, "SWING": 12, "ZONE": 12,
+        "WYCKOFF": 168, "MEGA": 336,
+    }
+    result = save_signal_db(
+        sd.get("symbol"), sd.get("direction"), signal_type,
+        sd.get("entry"), sd.get("tp1", sd.get("tp")),
+        sd.get("tp2", sd.get("tp1", sd.get("tp"))),
+        sd.get("tp3", sd.get("tp2", sd.get("tp1", sd.get("tp")))),
+        sd.get("sl"), sd.get("timeframe", "1h"),
+        sd.get("estimated_hours", default_hours.get(signal_type, 72)),
+        sd.get("grade", signal_type),
+        confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
+        regime=sd.get("regime", signal_type) or signal_type,
+    )
+    signal_id = result[0] if isinstance(result, tuple) else result
+    if signal_id:
+        sd["_signal_persisted"] = True
+        sd["_signal_id"] = signal_id
+    else:
+        logging.error("[SignalLifecycle] Telegram delivered but persistence failed: %s", sd.get("symbol"))
+    return signal_id
+
+
+def _has_pending_signal_for_symbol(symbol: str) -> bool:
+    """One active thesis per pair, without imposing a weekly trade quota."""
+    if not symbol:
+        return False
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
+        row = conn.execute(
+            "SELECT id FROM signals WHERE symbol=? AND result='pending' LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        conn.close()
+        return bool(row)
+    except Exception as exc:
+        logging.warning("[SignalArbiter] pending-position check failed: %s", exc)
+        return False
+
+
+def _attach_learning_evidence(sd: dict) -> None:
+    """Give the single final Groq gate factual rules/errors without changing levels."""
+    strategy = _signal_type_from_candidate(sd)
+    evidence = dict(sd.get("technical_evidence") or {})
+    try:
+        evidence["self_rules"] = (
+            _market_relevant_rules(sd.get("symbol", ""), sd.get("direction", ""), strategy).strip()
+            or "no_relevant_self_rules"
+        )[:2000]
+    except Exception:
+        evidence["self_rules"] = "self_rules_unavailable"
+    try:
+        evidence["recent_bot_errors"] = (
+            _market_recent_errors(sd.get("symbol", ""), limit=5).strip()
+            or "no_recent_bot_errors"
+        )[:2000]
+    except Exception:
+        evidence["recent_bot_errors"] = "bot_errors_unavailable"
+    try:
+        evidence["validated_experience_rules"] = _active_experience_rules(
+            strategy, str(sd.get("regime") or ""), DB_PATH
+        )[:2000]
+    except Exception:
+        evidence["validated_experience_rules"] = "experience_rules_unavailable"
+    sd["technical_evidence"] = evidence
+
+
+async def _send_signal(sd):
+    """Отправляет сигнал всем админам и в каналы"""
+    logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
+    await asyncio.to_thread(_capture_experience_candidate, sd, DB_PATH)
+
+    async def _remember(decision, reason="", review=None):
+        await asyncio.to_thread(
+            _record_experience_decision, sd, decision, reason, review, DB_PATH
+        )
+
+    _run_id = sd.get("_scan_run_id") or _active_scan_run_id
+    _strategy = _signal_type_from_candidate(sd)
+    if _run_id:
+        await asyncio.to_thread(
+            _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+            "STRATEGY", "CANDIDATE", "TECHNICAL_SETUP", {}, DB_PATH,
+        )
+    risk_state = await asyncio.to_thread(_strategy_risk_state, _strategy, DB_PATH, False)
+    sd["_strategy_risk_state"] = risk_state
+    if risk_state.get("mode") == "PAUSED":
+        reason = f"{_strategy} LIVE paused after {risk_state.get('consecutive_losses', 0)} consecutive SL"
+        await _remember("WAIT", reason)
+        _record_strategy_decision(sd, "WAIT", "strategy_risk", reason, db_path=DB_PATH)
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "RISK", "FILTERED", "STRATEGY_PAUSED", {"reason": reason}, DB_PATH,
+            )
+        return False
+    if not _SIGNAL_INTEGRITY_OK:
+        logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
+        _record_strategy_decision(sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
+        await _remember("REJECT", "integrity validator unavailable")
+        return False
+    try:
+        _integrity_prices = get_live_prices()
+        _integrity_current = _integrity_prices.get(sd.get("symbol", ""), {}).get("price")
+    except Exception:
+        _integrity_current = None
+    integrity = _validate_signal_candidate(sd, _integrity_current)
+    if not integrity.get("valid"):
+        logging.error(
+            "[SignalIntegrity] %s %s blocked: %s",
+            sd.get("symbol"), sd.get("direction"), integrity.get("errors"),
+        )
+        _record_strategy_decision(sd, "REJECT", "integrity", "; ".join(integrity.get("errors", [])), db_path=DB_PATH)
+        await _remember("REJECT", "; ".join(integrity.get("errors", [])))
+        return False
+    if integrity.get("warnings"):
+        logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
+    if not sd.get("_signal_id") and _has_pending_signal_for_symbol(sd.get("symbol", "")):
+        logging.info(
+            "[SignalArbiter] %s blocked: an existing pending thesis already owns the pair",
+            sd.get("symbol"),
+        )
+        _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
+        await _remember("WAIT", "existing pending thesis owns pair")
+        return False
+    _attach_learning_evidence(sd)
+    setup_assessment = _assess_setup_candidate(sd)
+    sd["setup_assessment"] = setup_assessment
+    await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "TECHNICAL", DB_PATH)
+    if setup_assessment.get("blocking"):
+        setup_state = str(setup_assessment.get("state") or "DEVELOPING")
+        decision = "REJECT" if setup_state == "INVALID" else "WAIT"
+        reason = str(setup_assessment.get("thesis") or f"setup evidence {setup_state}")
+        _record_strategy_decision(sd, decision, "setup_evidence", reason, evidence=setup_assessment, db_path=DB_PATH)
+        await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "FINAL", DB_PATH)
+        await _remember(decision, reason)
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "SETUP_EVIDENCE", decision, setup_state, setup_assessment, DB_PATH,
+            )
+        logging.info("[SetupEvidence] %s %s → %s: %s", sd.get("symbol"), _strategy, setup_state, reason)
+        return False
+    if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
+        review = await _review_signal_candidate(sd, ask_groq, get_candles)
+        sd["_external_quality_reviewed"] = True
+        sd["_external_quality_review"] = review
+        if isinstance(review.get("setup_assessment"), dict):
+            sd["setup_assessment"] = review["setup_assessment"]
+        decision = review.get("decision", "APPROVE")
+        min_confidence = float(risk_state.get("groq_min_confidence", 0.65) or 0.65)
+        if decision == "APPROVE" and float(review.get("confidence", 0.0) or 0.0) < min_confidence:
+            decision = "WAIT"
+            review["decision"] = decision
+            review.setdefault("reasons", []).append(
+                f"strategy risk gate requires Groq confidence >= {min_confidence:.0%}"
+            )
+        logging.info(
+            "[SignalQualityGate] %s %s → %s confidence=%.2f sources=%s reasons=%s",
+            sd.get("symbol"), sd.get("direction"), decision,
+            review.get("confidence", 0.0),
+            review.get("context", {}).get("data_quality", {}).get("available_sources", []),
+            review.get("reasons", []),
+        )
+        if decision in ("WAIT", "REJECT"):
+            if _run_id:
+                await asyncio.to_thread(
+                    _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                    "GROQ", f"GROQ_{decision}", "QUALITY_GATE",
+                    {"confidence": review.get("confidence"), "reasons": review.get("reasons", [])}, DB_PATH,
+                )
+            _record_strategy_decision(
+                sd, decision, "groq_quality_gate", "; ".join(review.get("reasons", [])),
+                evidence={
+                    "sources": review.get("context", {}).get("data_quality", {}),
+                    "candidate": {key: sd.get(key) for key in ("entry", "sl", "tp1", "tp2")},
+                }, db_path=DB_PATH,
+            )
+            await _remember(decision, "; ".join(review.get("reasons", [])), review)
+            return False
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "GROQ", "GROQ_APPROVE", "QUALITY_GATE",
+                {"confidence": review.get("confidence")}, DB_PATH,
+            )
+        await _remember("APPROVE", "; ".join(review.get("reasons", [])), review)
+    else:
+        existing_review = sd.get("_external_quality_review")
+        if isinstance(existing_review, dict):
+            existing_decision = str(existing_review.get("decision") or "APPROVE").upper()
+            await _remember(
+                existing_decision,
+                "; ".join(existing_review.get("reasons", [])),
+                existing_review,
+            )
+        else:
+            await _remember("APPROVE", "quality gate unavailable; analytical candidate retained")
+    setup_state = str((sd.get("setup_assessment") or {}).get("state") or "")
+    if setup_state in {"VALID", "STRONG", "EXCEPTIONAL"} and sd.get("text"):
+        setup_line = f"\n🧭 Класс сетапа: <b>{setup_state}</b>"
+        disclaimer = "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
+        if setup_line not in sd["text"]:
+            sd["text"] = sd["text"].replace(disclaimer, setup_line + disclaimer) if disclaimer in sd["text"] else sd["text"] + setup_line
+    if not ADMIN_IDS:
+        logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
+        _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
+        await _remember("APPROVE", "approved but Telegram ADMIN_IDS empty")
+        return False
+    now_ts = time.time()
+    cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
+    try:
+        import sqlite3 as _sq3
+        _cd = _sq3.connect("brain.db", timeout=10)
+        row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
+        last_sent = row[0] if row else 0
+        if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+            _cd.close()
+            logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
+            _record_strategy_decision(sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
+            await _remember("WAIT", "duplicate signal cooldown")
+            return False
+        _cd.close()
+    except Exception as _cde:
+        logging.warning(f"[_send_signal] cooldown DB ошибка: {_cde}")
+        last_sent = _sent_signal_cache.get(cache_key, 0)
+        if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
+            logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
+            await _remember("WAIT", "duplicate signal cooldown cache")
+            return False
+        # Значение кладём в fallback-кэш только после подтверждённой отправки.
+        pass
+    delivered = False
+    for admin_id in ADMIN_IDS:
+        ok = await _send_with_retry(admin_id, sd["text"], parse_mode="HTML")
+        if ok:
+            delivered = True
+            logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
+    try:
+        scan_type = str(sd.get("scan_type", "")).lower()
+        if scan_type == "fast":
+            fast_ok = await _send_with_retry(
+                SIGNAL_CHANNEL_SWING, sd["text"], parse_mode="HTML",
+                message_thread_id=FAST_DEAL_THREAD_ID,
+            )
+            delivered = delivered or fast_ok
+            if fast_ok:
+                logging.info("[_send_signal] Отправлено в FAST thread: %s", sd.get("symbol"))
+        else:
+            channel_text = _format_channel_signal(sd)
+            main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+            delivered = delivered or main_ok
+            if main_ok:
+                logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
+        if scan_type == "swing":
+            channel_text = _format_channel_signal(sd)
+            swing_ok = await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+            delivered = delivered or swing_ok
+            if swing_ok:
+                logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
+    except Exception as ce:
+        logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
+    if not delivered:
+        logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
+        _record_strategy_decision(sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
+        await _remember("APPROVE", "approved; Telegram delivery failed")
+        return False
+    signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
+    if signal_id:
+        try: await asyncio.to_thread(_capture_signal_evidence, signal_id, sd, DB_PATH)
+        except Exception as exc: logging.warning("[ClosedLoop] capture signal %s: %s", signal_id, exc)
+    if signal_id and _TRADE_EXECUTION_OK:
+        execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
+        logging.info(
+            "[AutoTrading] signal=%s symbol=%s status=%s",
+            signal_id, sd.get("symbol"), execution.get("status"),
+        )
+    try:
+        import sqlite3 as _sq3
+        _cd = _sq3.connect("brain.db", timeout=10)
+        _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
+        _cd.commit()
+        _cd.close()
+    except Exception as _cde:
+        logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
+        _sent_signal_cache[cache_key] = now_ts
+    _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
+    await _remember("APPROVE", "signal delivered", sd.get("_external_quality_review"))
+    if _run_id:
+        await asyncio.to_thread(
+            _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+            "DELIVERY", "DELIVERED", "TELEGRAM", {"signal_id": signal_id}, DB_PATH,
+        )
+    return True
+
+
+async def _scan_tf(timeframe: str, pairs_limit: int = 50):
+    """Сканирует топ пары на одном таймфрейме, возвращает сигналы"""
+    pairs = get_top_pairs(pairs_limit)
+    signals = []
+    logging.info(f"[_scan_tf] Начинаем скан {timeframe}, пар: {len(pairs)}")
+    for symbol in pairs:
+        try:
+            sig_data = full_scan_raw(symbol, timeframe, auto=True)
+            if sig_data:
+                sig_data["timeframe"] = timeframe
+                signals.append(sig_data)
+                logging.info(f"[_scan_tf] {symbol} {timeframe} → сигнал: {sig_data.get('direction')} {sig_data.get('grade')}")
+            await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            logging.info(f"[_scan_tf] {timeframe} прерван планировщиком")
+            break
+        except Exception as e:
+            logging.error(f"[_scan_tf] {symbol} {timeframe} ошибка: {e}")
+    logging.info(f"[_scan_tf] {timeframe} завершён: {len(signals)} сигналов из {len(pairs)} пар")
+    return signals
+
+
+def _is_entry_still_valid(sig_data: dict, max_drift_pct: float = 2.0) -> bool:
+    """Reject malformed or materially stale entries without moving levels."""
+    try:
+        entry = sig_data.get("entry", 0)
+        if not entry:
+            return False
+        prices = get_live_prices()
+        symbol = sig_data.get("symbol", "")
+        current = prices.get(symbol, {}).get("price", 0)
+        if not current:
+            return False
+        integrity = _validate_signal_candidate(sig_data, current)
+        if not integrity.get("valid"):
+            logging.info(
+                "[Актуальность] %s отклонён: %s",
+                symbol, integrity.get("errors"),
+            )
+            return False
+        drift = abs(float(current) - float(entry)) / float(entry) * 100
+        if drift > max_drift_pct:
+            logging.info(
+                "[Актуальность] %s drift %.2f%% > %.2f%% — сигнал устарел",
+                symbol, drift, max_drift_pct,
+            )
+            return False
+        return True
+    except Exception as exc:
+        logging.warning("[Актуальность] validation error: %s", exc)
+        return False
+
+
+async def auto_scan_job():
+    """Каждые 10 мин: проверка закрытых сделок"""
+    logging.info("⚡ auto_scan_job ЗАПУЩЕН")
+    closed = await asyncio.to_thread(check_pending_signals)
+    if closed:
+        await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
+    for c in closed:
+        if c["result"] == "tp1_hit":
+            # TP1 достигнут — уведомляем о переходе в trailing mode
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"✅ <b>TP1 достигнут!</b> {c['symbol']} {c.get('direction','')}\n"
+                        f"🔄 Стоп перенесён в безубыток: <code>{smart_price_fmt(c.get('entry', 0))}</code>\n"
+                        f"🎯 Trailing SL: <code>{smart_price_fmt(c.get('trailing_sl', 0))}</code>\n"
+                        f"🎯 Ждём TP2: <code>{smart_price_fmt(c.get('tp2', 0))}</code>",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+        elif c["is_win"]:
+            tp_icons = {"tp1": "🎯", "tp2": "🎯🎯", "tp3": "🎯🎯🎯"}
+            icon = tp_icons.get(c["result"], "✅")
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"{icon} <b>{c['symbol']}</b> — {c['result'].upper()}!\n"
+                        f"⏱ Закрыто за {c['hours']}ч | {c.get('grade', '-')}",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+
+    # 5m и 15m убраны — используем только 1h, 4h, 1d, 1w
+    pass
+
+
+_auto_trade_reconcile_task = None
+_trade_manager_task = None
+_market_scan_lock = asyncio.Lock()
+_active_market_scan = None
+_active_market_scan_started = 0.0
+_active_scan_run_id = None
+
+
+def _scanner_strategy(name):
+    return {
+        "auto_scan_1h": "MTF", "auto_scan_swing": "SWING",
+        "auto_zone_scan": "ZONE", "auto_fast_deal_scan": "FAST",
+        "auto_wyckoff_scan": "WYCKOFF",
+    }.get(name, str(name).upper())
+
+
+async def _control_scan_scope(pairs, universe_size=None):
+    if _active_scan_run_id:
+        await asyncio.to_thread(
+            _set_scan_scope, _active_scan_run_id,
+            len(pairs) if universe_size is None else universe_size, len(pairs), DB_PATH,
+        )
+
+
+async def _control_scan_round(round_id):
+    if _active_scan_run_id:
+        await asyncio.to_thread(_set_scan_round, _active_scan_run_id, round_id, DB_PATH)
+
+
+async def _control_scan_pair(symbol):
+    if _active_scan_run_id:
+        await asyncio.to_thread(_scan_heartbeat, _active_scan_run_id, symbol, DB_PATH)
+
+
+async def _control_scan_outcome(symbol, outcome, reason, detail=None):
+    if _active_scan_run_id:
+        await asyncio.to_thread(
+            _record_scan_event, _active_scan_run_id, _scanner_strategy(_active_market_scan),
+            symbol, "DETECTOR", outcome, reason, detail or {}, DB_PATH,
+        )
+
+
+async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
+    """Run one heavy market-data job at a time and identify contention."""
+    global _active_market_scan, _active_market_scan_started, _active_scan_run_id
+    if _market_scan_lock.locked():
+        elapsed = max(0.0, time.monotonic() - _active_market_scan_started)
+        logging.warning(
+            "[%s] market scan '%s' still running for %.1fs; cycle skipped",
+            name, _active_market_scan or "unknown", elapsed,
+        )
+        await asyncio.to_thread(
+            _mark_scan_skipped, name, _active_market_scan or "unknown", elapsed, DB_PATH
+        )
+        return False
+    async with _market_scan_lock:
+        _active_market_scan = name
+        _active_market_scan_started = time.monotonic()
+        _active_scan_run_id = await asyncio.to_thread(
+            _begin_scan_control, _scanner_strategy(name), name, 0, 0, DB_PATH
+        )
+        try:
+            await asyncio.wait_for(coroutine_factory(), timeout=timeout)
+            await asyncio.to_thread(_finish_scan_control, _active_scan_run_id, "COMPLETED", "", DB_PATH)
+            return True
+        except asyncio.TimeoutError:
+            await asyncio.to_thread(
+                _finish_latest_running, name, "TIMEOUT", f"timeout after {timeout}s", DB_PATH
+            )
+            raise
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                _finish_latest_running, name, "CANCELLED", "process shutdown", DB_PATH
+            )
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(
+                _finish_latest_running, name, "ERROR", str(exc), DB_PATH
+            )
+            raise
+        finally:
+            _active_market_scan = None
+            _active_market_scan_started = 0.0
+            _active_scan_run_id = None
+
+
+async def _run_auto_trade_reconcile_once():
+    """Protect filled live entries without blocking the scheduler tick."""
+    if not _TRADE_EXECUTION_OK:
+        return
+    try:
+        outcomes = await asyncio.to_thread(_reconcile_live_executions, db_path=DB_PATH)
+        for outcome in outcomes:
+            logging.info(
+                "[AutoTrading] reconcile signal=%s status=%s",
+                outcome.get("signal_id"), outcome.get("status"),
+            )
+    except Exception as exc:
+        # Exchange failures must never stop scanners or Telegram handlers.
+        logging.error("[AutoTrading] reconciliation failed safely: %s", exc)
+
+
+async def auto_trade_reconcile_job():
+    """Start one background reconciliation; later ticks remain non-overlapping."""
+    global _auto_trade_reconcile_task
+    if _auto_trade_reconcile_task and not _auto_trade_reconcile_task.done():
+        logging.debug("[AutoTrading] previous reconciliation still running; tick skipped")
+        return
+    _auto_trade_reconcile_task = asyncio.create_task(_run_auto_trade_reconcile_once())
+
+
+async def _run_trade_manager_once():
+    """Manage activated analytics trades using Gate data, outside the scan lock."""
+    try:
+        updates = await asyncio.to_thread(
+            _trade_manager_cycle,
+            get_live_prices,
+            get_candles,
+            ask_groq,
+            db_path=DB_PATH,
+        )
+        for update in updates:
+            logging.info(
+                "[TradeManager] signal=%s symbol=%s events=%s action=%s notify=%s",
+                update.get("signal_id"), update.get("symbol"), update.get("events"),
+                update.get("review", {}).get("action"), update.get("notify"),
+            )
+            if not update.get("notify"):
+                continue
+            for admin_id in ADMIN_IDS:
+                await _send_with_retry(
+                    admin_id,
+                    update.get("telegram", ""),
+                    parse_mode="HTML",
+                )
+    except asyncio.CancelledError:
+        logging.info("[TradeManager] cycle stopped during process shutdown")
+    except Exception as exc:
+        # Management is advisory and must never stop scanners or Telegram.
+        logging.warning("[TradeManager] cycle failed safely: %s", exc)
+
+
+async def trade_manager_job():
+    """Start one manager pass; overlapping scheduler ticks are ignored."""
+    global _trade_manager_task
+    if _trade_manager_task and not _trade_manager_task.done():
+        logging.debug("[TradeManager] previous cycle still running; tick skipped")
+        return
+    _trade_manager_task = asyncio.create_task(_run_trade_manager_once())
+
+
+def pick_best_signal(signals: list) -> dict | None:
+    """
+    Выбирает лучший сигнал из найденных по приоритету и score.
+    WYCKOFF > SWING > MTF > ZONE > FAST
+    """
+    if not signals:
+        return None
+
+    priority_order = {
+        "WYCKOFF": 5,
+        "SWING":   4,
+        "MTF":     3,
+        "ZONE":    2,
+        "FAST":    1,
+    }
+
+    valid = [s for s in signals if s and s.get("rr", 0) >= 1.5]
+    if not valid:
+        return None
+
+    return sorted(
+        valid,
+        key=lambda x: (
+            priority_order.get(x.get("grade", x.get("signal_type", "MTF")), 0),
+            x.get("score", x.get("confluence_score", 0)),
+            x.get("rr", 0)
+        ),
+        reverse=True
+    )[0]
+
+
+async def auto_scan_1h():
+    """Раз в час после закрытия свечи: главный MTF-скан на 1h."""
+    try:
+        await _run_market_scan_exclusive("auto_scan_1h", _auto_scan_1h_impl, 210)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_scan_1h] таймаут 210с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
+
+async def _auto_scan_1h_impl():
+    logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "MTF", universe, (len(universe) + 1) // 2, DB_PATH
+    )
+    pairs = batch["pairs"]
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
+    all_signals = []
+
+    for symbol in pairs:
+        await _control_scan_pair(symbol)
+        try:
+            # Определяем режим рынка
+            regime = await asyncio.to_thread(detect_market_regime_v2, symbol)
+            enabled = regime.get("enabled", ["MTF"])
+
+            # Session liquidity check
+            _liq = await asyncio.to_thread(check_session_liquidity, symbol, "1h")
+            if not _liq["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
+                continue
+
+            # MTF — если включён для этого режима
+            if "MTF" in enabled:
+                sig = await asyncio.to_thread(full_scan_raw, symbol, "1h", True, True)
+                if sig and sig.get("_pending_ltf"):
+                    await asyncio.to_thread(
+                        _upsert_ltf_watch, "MTF", symbol, sig.get("direction", ""),
+                        sig.get("required_timeframe", "15m"), sig.get("reason", "WAIT_LTF_CONFIRMATION"),
+                        4, DB_PATH,
+                    )
+                    await _control_scan_outcome(symbol, "FILTERED", "WAIT_LTF_CONFIRMATION", sig)
+                elif sig and sig.get("confluence_score", 0) >= 35:
+                    sig["grade"] = "MTF"
+                    all_signals.append(sig)
+                else:
+                    await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+            else:
+                await _control_scan_outcome(symbol, "FILTERED", "REGIME_DISABLED")
+
+            await asyncio.sleep(0.1)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
+            logging.warning(f"[auto_scan_1h] {symbol}: {e}")
+
+    logging.info(f"[auto_scan_1h] Скан: {len(all_signals)} сигналов из {len(pairs)} пар")
+
+    # Фильтрация и сортировка
+    valid = []
+    for signal in all_signals:
+        if await asyncio.to_thread(_is_entry_still_valid, signal, max_drift_pct=2.0):
+            valid.append(signal)
+
+    # Rank for delivery, but do not impose a per-scan or weekly trade quota.
+    sent = 0
+    valid.sort(
+        key=lambda item: (item.get("confluence_score", 0), item.get("rr", 0)),
+        reverse=True,
+    )
+    for sd in valid:
+        logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
+        delivered = await _send_signal(sd)
+        await asyncio.sleep(1)
+        sent += int(bool(delivered))
+    logging.info(f"[auto_scan_1h] Завершён, отправлено {sent}")
+
+
+async def auto_scan_swing():
+    """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
+    try:
+        await _run_market_scan_exclusive("auto_scan_swing", _auto_scan_swing_impl, 210)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_scan_swing] таймаут 210с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_scan_swing] ОШИБКА: {e}")
+
+async def _auto_scan_swing_impl():
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "SWING", universe, (len(universe) + 1) // 2, DB_PATH
+    )
+    pairs = batch["pairs"]
+    logging.info(
+        "[auto_scan_swing] ЗАПУЩЕН batch=%s universe=%s",
+        len(pairs), len(universe),
+    )
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
+    found = []
+    blocked = 0
+    for symbol in pairs:
+        await _control_scan_pair(symbol)
+        try:
+            _liq_sw = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
+            if not _liq_sw["ok"]:
+                blocked += 1
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
+                continue
+            r = await asyncio.to_thread(detect_swing_setup, symbol, "4h")
+            if r:
+                found.append(r)
+                logging.info(f"[auto_scan_swing] {symbol} НАЙДЕН: {r.get('direction')} RR={r.get('rr')}")
+            else:
+                blocked += 1
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+            await asyncio.sleep(0.15)
+        except asyncio.CancelledError:
+            logging.info("[auto_scan_swing] Прерван планировщиком")
+            raise
+        except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
+            logging.warning(f"[auto_scan_swing] {symbol}: {e}")
+
+    if not found:
+        logging.info(f"[auto_scan_swing] Swing scan 4h: сетапов нет (проверено {len(pairs)}, заблокировано фильтрами {blocked})")
+        return
+
+    # Сортируем по RR
+    found.sort(key=lambda x: x["rr"], reverse=True)
+    logging.info(f"[auto_scan_swing] Swing scan 4h: найдено {len(found)} сетапов")
+
+    for r in found:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+            trend_icon = "📈" if direction == "BULLISH" else "📉"
+            htf = r.get("htf_dir", "")
+            htf_text = f" | 1d: {htf}" if htf else ""
+
+            risk_label = "низкий" if r["rr"] >= 3 else "средний"
+
+            # AI комментарий
+
+            _sw_tp2_str = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
+            text = (
+                f"🔄 <b>[SWING]</b> | <b>{symbol}</b> — {dir_label}\n"
+                f"📊 Контекст: 4h{htf_text}\n"
+                f"\n"
+                f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code>{_sw_tp2_str}\n"
+                f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
+                f"\n"
+                f"📈 Логика: {r['logic']}\n"
+                f"\n"
+                f"⚡ Риск: {risk_label}\n"
+                f"⏱ Горизонт: ~{r.get('est_hours', 8)}ч"
+            )
+            text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
+
+            _sw_tp2_val = r.get("tp2") or r["tp"]
+            sd = {
+                "symbol": symbol, "direction": direction,
+                "timeframe": "4h", "entry": r["entry"],
+                "sl": r["sl"], "tp1": r["tp"],
+                "tp2": _sw_tp2_val, "tp3": _sw_tp2_val,
+                "rr": r.get("rr"),
+                "grade": "SWING", "text": text,
+                "confluence_score": int(r["rr"] * 20),
+                "regime": "SWING",
+                "scan_type": "swing",
+                "technical_evidence": {key: r.get(key) for key in (
+                    "logic", "htf_dir", "htf_1w", "weekly_warning", "confirms",
+                    "funding_warning", "ob", "fvg", "structure_event", "structure_event_1h"
+                ) if r.get(key) is not None},
+            }
+            sd["technical_evidence"]["causal_matrix_ready"] = True
+
+            # Проверка актуальности цены входа
+            if not await asyncio.to_thread(_is_entry_still_valid, sd, max_drift_pct=3.0):
+                continue
+
+            # Блокируем если сделка уже открыта в БД
+            try:
+                import sqlite3 as _sq3
+                _chk = _sq3.connect("brain.db", timeout=10)
+                _open = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND direction=? AND result='pending' LIMIT 1",
+                    (symbol, direction)
+                ).fetchone()
+                _chk.close()
+                if _open:
+                    continue
+            except Exception:
+                pass
+            delivered = await _send_signal(sd)
+            if delivered:
+                logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
+                await backup_db_to_github()
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logging.error(f"[SwingScan] send {r.get('symbol')}: {e}")
+
+async def auto_zone_scan():
+    """Каждые 20 мин: сканирует зоны Discount/Premium с OB/FVG"""
+    try:
+        await _run_market_scan_exclusive("auto_zone_scan", _auto_zone_scan_impl, 210)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_zone_scan] таймаут 210с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
+
+
+def _zone_candidate_from_setup(r):
+    """Format an already validated ZONE setup without changing its levels."""
+    symbol = r["symbol"]
+    direction = r["direction"]
+    dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+    htf = r.get("htf_dir", "")
+    tp2_text = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
+    text = (
+        f"📦 <b>[ZONE]</b> | <b>{symbol}</b> — {dir_label}\n"
+        f"📊 Контекст: 4h | 1d: {htf} | {r['zone']} зона ({r['zone_type']})\n\n"
+        f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code>{tp2_text}\n"
+        f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+        f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n\n"
+        f"📈 Логика: {r['logic']}\n\n"
+        f"⭐ Quality: {r['q_score']}/8 | RR: {r['rr']}\n"
+        f"⏱ Горизонт: ~{r.get('est_hours', 12)}ч\n\n"
+        "💡 Это аналитика, не совет. Торгуй осознанно"
+    )
+    tp2 = r.get("tp2") or r["tp"]
+    candidate = {
+        "symbol": symbol, "direction": direction,
+        "timeframe": "4h", "entry": r["entry"],
+        "sl": r["sl"], "tp1": r["tp"], "tp2": tp2, "tp3": tp2,
+        "rr": r.get("rr"), "grade": "ZONE", "text": text,
+        "confluence_score": int(r["rr"] * 20), "regime": "ZONE", "scan_type": "zone",
+        "technical_evidence": {key: r.get(key) for key in (
+            "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning", "structure_event"
+        ) if r.get(key) is not None},
+    }
+    candidate["technical_evidence"]["causal_matrix_ready"] = True
+    return candidate
+
+async def _auto_zone_scan_impl():
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "ZONE", universe, (len(universe) + 2) // 3, DB_PATH
+    )
+    pairs = batch["pairs"]
+    logging.info(
+        "[auto_zone_scan] ЗАПУЩЕН batch=%s universe=%s",
+        len(pairs), len(universe),
+    )
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
+    found = []
+    for symbol in pairs:
+        await _control_scan_pair(symbol)
+        try:
+            _liq_z = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
+            if not _liq_z["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
+                continue
+            r = await asyncio.to_thread(detect_zone_setup, symbol, "4h", True)
+            if r and r.get("_pending_ltf"):
+                await asyncio.to_thread(
+                    _upsert_ltf_watch, "ZONE", symbol, r.get("direction", ""),
+                    r.get("required_timeframe", "1h"), r.get("reason", "WAIT_LTF_CONFIRMATION"),
+                    8, DB_PATH,
+                )
+                await _control_scan_outcome(symbol, "FILTERED", "WAIT_LTF_CONFIRMATION", r)
+            elif r:
+                found.append(r)
+                logging.info(f"[auto_zone_scan] {symbol} НАЙДЕН: {r['direction']} RR={r['rr']} zone={r['zone']}")
+            else:
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+            await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
+            logging.warning(f"[auto_zone_scan] {symbol}: {e}")
+
+    if not found:
+        logging.info("[auto_zone_scan] Зон нет")
+        return
+
+    found.sort(key=lambda x: x["rr"], reverse=True)
+
+    for r in found:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            sd = _zone_candidate_from_setup(r)
+
+            if not await asyncio.to_thread(_is_entry_still_valid, sd, max_drift_pct=2.0):
+                continue
+
+            try:
+                import sqlite3 as _sq3
+                _chk = _sq3.connect("brain.db", timeout=10)
+                _open = _chk.execute(
+                    "SELECT id FROM signals WHERE symbol=? AND direction=? AND result='pending' LIMIT 1",
+                    (symbol, direction)
+                ).fetchone()
+                _chk.close()
+                if _open:
+                    continue
+            except Exception:
+                pass
+
+            delivered = await _send_signal(sd)
+            if delivered:
+                logging.info(f"[ZoneScan] {symbol} {direction} RR={r['rr']} zone={r['zone']} → отправлен")
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logging.error(f"[ZoneScan] {r.get('symbol')}: {e}")
+
+async def auto_scan_1d():
+    """Каждый час: скан 1d таймфрейма"""
+    signals = await _scan_tf("1d", pairs_limit=20)
+    logging.info(f"Скан 1d: сигналов {len(signals)}")
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=5.0)]
+    for sd in valid:
+        await _send_signal(sd)
+        await asyncio.sleep(1)
+
+
+async def auto_scan_1w():
+    """Каждые 6 часов: скан недельного таймфрейма — долгосрочные сделки"""
+    signals = await _scan_tf("1w", pairs_limit=15)
+    logging.info(f"Скан 1w: сигналов {len(signals)}")
+    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=8.0)]
+    for sd in valid:
+        await _send_signal(sd)
+        await asyncio.sleep(1)
+
+
+async def auto_scan_mega():
+    """Каждые 6 часов: скан мега-сделок на 100-200% на 4h, 1d и 1w таймфреймах"""
+    try:
+        from smc_engine import detect_mega_trade
+    except ImportError:
+        logging.warning("detect_mega_trade не найден в smc_engine")
+        return
+
+    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
+    found = []
+
+    for symbol in pairs:
+        try:
+            candles_4h = get_candles(symbol, "4h", 100)
+            candles_1d = get_candles(symbol, "1d", 60)
+            candles_1w = get_candles(symbol, "1w", 50)
+            if len(candles_4h) < 50 or len(candles_1d) < 30:
+                continue
+            # Используем недельные если доступны, иначе дневные
+            base_candles = candles_1w if len(candles_1w) >= 20 else candles_1d
+            result = detect_mega_trade(candles_4h, base_candles, symbol)
+            if result and result["score"] >= 45:
+                found.append(result)
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logging.debug(f"auto_scan_mega {symbol}: {e}")
+
+    found.sort(key=lambda x: x["score"], reverse=True)
+    logging.info(f"Мега-скан: найдено {len(found)} сигналов")
+
+    for r in found:
+        try:
+            symbol    = r["symbol"]
+            direction = r["direction"]
+            emoji     = "🟢" if direction == "BULLISH" else "🔴"
+            arrow     = "▲" if direction == "BULLISH" else "▼"
+
+            signals_text = "\n".join(r["signals"])
+
+            push_dir = "↑" if direction == "BULLISH" else "↓"
+            text = (
+                f"<b>{symbol}</b> — strong push {push_dir}\n"
+                f"📊 Контекст: 4h/1d\n"
+                f"\n"
+                f"🎯 TP:  <code>{r['tp1']:.4f}</code>\n"
+                f"💰 Вход: <code>{r['entry']:.4f}</code>\n"
+                f"🛑 Стоп: <code>{r['sl']:.4f}</code>\n"
+                f"\n"
+                f"{'📈' if direction == 'BULLISH' else '📉'} Логика: боковик {r['days_in_range']}д →\n"
+                f"давление → резкий выход {push_dir}\n"
+                f"\n"
+                f"⚡ Риск: низкий\n"
+                f"⏱ Горизонт: 1-2 дня"
+            )
+
+            candidate = {
+                "symbol": symbol,
+                "direction": direction,
+                "scan_type": "MEGA",
+                "grade": "MEGA",
+                "timeframe": "4h",
+                "entry": r["entry"],
+                "sl": r["sl"],
+                "tp1": r["tp1"],
+                "tp2": r.get("tp2", r["tp1"]),
+                "tp3": r.get("tp3", r.get("tp2", r["tp1"])),
+                "rr": abs(r["tp1"] - r["entry"]) / max(abs(r["entry"] - r["sl"]), 1e-12),
+                "estimated_hours": 24 * 14,
+                "confluence_score": r["score"],
+                "regime": "MEGA",
+                "text": text,
+                "technical_evidence": {
+                    "score": r.get("score"),
+                    "days_in_range": r.get("days_in_range"),
+                    "signals": r.get("signals", []),
+                },
+            }
+            await _send_signal(candidate)
+            await asyncio.sleep(2)
+        except Exception as e:
+            logging.error(f"auto_scan_mega send {r.get('symbol')}: {e}")
+
+
+
+async def auto_wyckoff_scan():
+    """Hourly quarter-batch; one full Wyckoff universe is covered every 4h."""
+    try:
+        await _run_market_scan_exclusive("auto_wyckoff_scan", _auto_wyckoff_scan_impl, 300)
+    except asyncio.TimeoutError:
+        logging.warning("[auto_wyckoff_scan] таймаут 300с — пропускаем цикл")
+    except Exception as e:
+        logging.error(f"[auto_wyckoff_scan] ОШИБКА: {e}")
+
+async def _auto_wyckoff_scan_impl():
+    logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "WYCKOFF", universe, max(1, (len(universe) + 3) // 4), DB_PATH
+    )
+    pairs = batch["pairs"]
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
+    found = []
+    for symbol in pairs:
+        await _control_scan_pair(symbol)
+        try:
+            # Session liquidity check
+            _liq_w = await asyncio.to_thread(check_session_liquidity, symbol, "1d")
+            if not _liq_w["ok"]:
+                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
+                logging.debug(f"[WYCKOFF] {symbol}: низкая ликвидность ({_liq_w['ratio']}x) — пропускаем")
+                continue
+            # LONG — Accumulation Spring
+            r = await asyncio.to_thread(detect_wyckoff_spring, symbol)
+            if r:
+                found.append(r)
+            # SHORT — Distribution UTAD
+            r2 = await asyncio.to_thread(detect_wyckoff_distribution, symbol)
+            if r2:
+                found.append(r2)
+            # Re-accumulation (чаще чем классический Wyckoff)
+            r_reac = await asyncio.to_thread(detect_wyckoff_reaccumulation, symbol)
+            if r_reac:
+                found.append({**r_reac, "scan_type": "wyckoff"})
+            if not any((r, r2, r_reac)):
+                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
+            logging.warning(f"[auto_wyckoff_scan] {symbol}: {e}")
+
+    if not found:
         logging.info("[auto_wyckoff_scan] Wyckoff scan: паттернов нет")
         return
 
