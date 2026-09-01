@@ -107,6 +107,11 @@ from core.trade_manager_telegram import (
     format_manager_trade_detail as _format_manager_trade_detail,
     manager_trade_buttons as _manager_trade_buttons,
 )
+from core.trade_manager import (
+    ensure_trade_manager_schema as _ensure_trade_manager_schema,
+    register_pending_signals as _register_pending_manager_signals,
+    manager_cycle as _trade_manager_cycle,
+)
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 from core.telegram_dashboard import (
     fetch_strategy_stats as _fetch_strategy_stats,
@@ -3404,6 +3409,7 @@ async def auto_scan_job():
 
 
 _auto_trade_reconcile_task = None
+_trade_manager_task = None
 _market_scan_lock = asyncio.Lock()
 _active_market_scan = None
 _active_market_scan_started = 0.0
@@ -3511,6 +3517,46 @@ async def auto_trade_reconcile_job():
         logging.debug("[AutoTrading] previous reconciliation still running; tick skipped")
         return
     _auto_trade_reconcile_task = asyncio.create_task(_run_auto_trade_reconcile_once())
+
+
+async def _run_trade_manager_once():
+    """Manage activated analytics trades using Gate data, outside the scan lock."""
+    try:
+        updates = await asyncio.to_thread(
+            _trade_manager_cycle,
+            get_live_prices,
+            get_candles,
+            ask_groq,
+            db_path=DB_PATH,
+        )
+        for update in updates:
+            logging.info(
+                "[TradeManager] signal=%s symbol=%s events=%s action=%s notify=%s",
+                update.get("signal_id"), update.get("symbol"), update.get("events"),
+                update.get("review", {}).get("action"), update.get("notify"),
+            )
+            if not update.get("notify"):
+                continue
+            for admin_id in ADMIN_IDS:
+                await _send_with_retry(
+                    admin_id,
+                    update.get("telegram", ""),
+                    parse_mode="HTML",
+                )
+    except asyncio.CancelledError:
+        logging.info("[TradeManager] cycle stopped during process shutdown")
+    except Exception as exc:
+        # Management is advisory and must never stop scanners or Telegram.
+        logging.warning("[TradeManager] cycle failed safely: %s", exc)
+
+
+async def trade_manager_job():
+    """Start one manager pass; overlapping scheduler ticks are ignored."""
+    global _trade_manager_task
+    if _trade_manager_task and not _trade_manager_task.done():
+        logging.debug("[TradeManager] previous cycle still running; tick skipped")
+        return
+    _trade_manager_task = asyncio.create_task(_run_trade_manager_once())
 
 
 def pick_best_signal(signals: list) -> dict | None:
@@ -5592,6 +5638,19 @@ def _schedule_market_scans(scheduler):
         id="market_intelligence_primary", **common,
     )
 
+
+def _schedule_trade_manager(scheduler):
+    """Review active trades after each possible 5m candle close."""
+    scheduler.add_job(
+        trade_manager_job,
+        "cron",
+        minute="1,6,11,16,21,26,31,36,41,46,51,56",
+        timezone="UTC",
+        id="trade_manager",
+        max_instances=1,
+        coalesce=True,
+    )
+
 async def on_startup(app):
     # Логирование конфигурации при старте
     logging.info(f"WEBHOOK_URL = {os.environ.get('WEBHOOK_URL', 'НЕТ')}")
@@ -5602,6 +5661,8 @@ async def on_startup(app):
     init_db()                        # потом применяем миграции к восстановленной БД
     _ensure_control_schema(DB_PATH)
     _ensure_experience_schema(DB_PATH)
+    _ensure_trade_manager_schema(DB_PATH)
+    _register_pending_manager_signals(DB_PATH)
     _rebuild_strategy_risk_states(DB_PATH)
     if _TRADE_EXECUTION_OK:
         try:
@@ -5644,6 +5705,7 @@ async def on_startup(app):
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
     _schedule_market_scans(webhook_scheduler)
+    _schedule_trade_manager(webhook_scheduler)
     # Pump/accumulation detector notifications are intentionally not scheduled.
     webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
     # timing_queue отключена — MTF отправляет сигналы напрямую по скору
@@ -5925,6 +5987,8 @@ def main():
             init_db()
             _ensure_control_schema(DB_PATH)
             _ensure_experience_schema(DB_PATH)
+            _ensure_trade_manager_schema(DB_PATH)
+            _register_pending_manager_signals(DB_PATH)
             _rebuild_strategy_risk_states(DB_PATH)
             if _TRADE_EXECUTION_OK:
                 try:
@@ -5953,6 +6017,7 @@ def main():
             scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
             scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
             _schedule_market_scans(scheduler)
+            _schedule_trade_manager(scheduler)
             # 1d и 1w — только контекст, сигналы не генерируем
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
