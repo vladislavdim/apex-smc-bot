@@ -1354,7 +1354,9 @@ async def handle_callback(callback: CallbackQuery):
     elif data == "menu_system":
         try:
             health = await asyncio.to_thread(_fetch_system_health, DB_PATH)
-            execution = await asyncio.to_thread(_execution_status, DB_PATH) if _TRADE_EXECUTION_OK else {}
+            execution = await asyncio.to_thread(
+                _execution_status, DB_PATH, refresh_balance=True
+            ) if _TRADE_EXECUTION_OK else {}
             mode = str(execution.get("mode", "OFF")).upper() if execution.get("enabled") else "OFF"
             live = "готова" if execution.get("live_armed") else "не активна"
             active_live = int(execution.get("live_active_count", 0) or 0)
@@ -1363,7 +1365,14 @@ async def handle_callback(callback: CallbackQuery):
             elif active_live:
                 binance_state = f"сопровождает LIVE-ордера: {active_live}"
             else:
-                binance_state = "ожидает готовый ордер · без фоновых запросов"
+                binance_state = "баланс по запросу · ордера только готовые"
+            account = execution.get("account", {})
+            if account.get("available"):
+                balance_label = f"${float(account.get('wallet_balance', 0) or 0):.4f}"
+                if account.get("stale"):
+                    balance_label += " · сохранённый"
+            else:
+                balance_label = "временно недоступен"
             external_state = "модуль загружен" if _MARKET_INTELLIGENCE_OK else "недоступен"
             quality_state = "модуль загружен" if _SIGNAL_QUALITY_GATE_OK else "недоступен"
             integrity_state = "модуль загружен" if _SIGNAL_INTEGRITY_OK else "недоступен"
@@ -1378,6 +1387,7 @@ async def handle_callback(callback: CallbackQuery):
                 f"Решений Groq за 24ч: <b>{health.get('groq_24h', 0)}</b>\n"
                 f"Открытых ошибок: <b>{health.get('open_errors', 0)}</b>\n\n"
                 f"Автоторговля: <b>{mode}</b> · LIVE {live}\n"
+                f"Futures-баланс: <b>{balance_label}</b>\n"
                 f"Binance: <b>{binance_state}</b>\n"
                 f"Риск: <b>{execution.get('risk_pct', 0)}%</b> · плечо "
                 f"<b>x{execution.get('leverage', 1)}</b>\n\n"
@@ -1468,7 +1478,9 @@ async def handle_callback(callback: CallbackQuery):
         ) if macro_summary else ""
         if _TRADE_EXECUTION_OK:
             try:
-                _exec_state = await asyncio.to_thread(_execution_status, DB_PATH)
+                _exec_state = await asyncio.to_thread(
+                    _execution_status, DB_PATH, refresh_balance=True
+                )
                 _exec_mode = str(_exec_state.get("mode", "paper")).upper()
                 _exec_enabled = bool(_exec_state.get("enabled"))
                 _exec_live = bool(_exec_state.get("live_armed"))
@@ -1486,11 +1498,22 @@ async def handle_callback(callback: CallbackQuery):
                 elif _active_live:
                     _binance_label = f"сопровождает LIVE-ордера: {_active_live}"
                 else:
-                    _binance_label = "ожидает готовый ордер · без фоновых запросов"
+                    _binance_label = "баланс по запросу · ордера только готовые"
+                _account = _exec_state.get("account", {})
+                if _account.get("available"):
+                    _balance_label = (
+                        f"${float(_account.get('wallet_balance', 0) or 0):.4f} · свободно "
+                        f"${float(_account.get('available_balance', 0) or 0):.4f}"
+                    )
+                    if _account.get("stale"):
+                        _balance_label += " · сохранённый"
+                else:
+                    _balance_label = "временно недоступен"
                 execution_block = (
                     f"\n⚙️ Автоторговля: <b>{_exec_label}</b>\n"
                     f"🛡 Риск: <b>{_exec_state.get('risk_pct', 0)}%</b> · "
                     f"плечо: <b>x{_exec_state.get('leverage', 1)}</b>\n"
+                    f"💰 Futures-баланс: <b>{_balance_label}</b>\n"
                     f"🔒 Binance: <b>{_binance_label}</b>\n"
                 )
             except Exception:
