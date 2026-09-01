@@ -238,6 +238,10 @@ Historical zones describe prior reactions only and MUST NOT replace the already
 calculated entry, SL or TP. Closed-loop evidence is statistical context, not
 permission to invent a new strategy. Do not propose or activate a new strategy
 unless new_strategy_research_ready=true.
+Validated experience rules inside technical_evidence are out-of-sample observations.
+An ACTIVE or PROBATION AVOID rule that directly matches this strategy and regime may
+reduce confidence or justify WAIT; a CONFIRM rule may support existing evidence but
+can never approve a candidate by itself. These rules MUST NOT alter any price level.
 Weekly/monthly closed-candle context is background HTF evidence only. It may adjust
 confidence or be listed as a risk, but a conflicting weekly/monthly candle alone is
 NOT sufficient to WAIT or REJECT an otherwise valid candidate.
