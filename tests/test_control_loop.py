@@ -6,6 +6,7 @@ from core.control_loop import (
     ensure_control_schema,
     finish_scan,
     rebuild_strategy_risk_states,
+    scan_heartbeat,
     scanner_dashboard,
     take_persistent_batch,
 )
@@ -73,6 +74,8 @@ def test_dashboard_reports_real_run(tmp_path):
     path = str(tmp_path / "brain.db")
     ensure_control_schema(path)
     run_id = begin_scan("MTF", "auto_scan_1h", 120, 40, path)
+    for index in range(40):
+        scan_heartbeat(run_id, f"PAIR{index}", path)
     finish_scan(run_id, "COMPLETED", db_path=path)
     data = scanner_dashboard(path)
     mtf = next(row for row in data["runs"] if row["strategy"] == "MTF")

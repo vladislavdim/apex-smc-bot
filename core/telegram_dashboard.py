@@ -23,16 +23,22 @@ def _price(value: Any) -> str:
 
 def format_scanner_dashboard(data: dict[str, Any]) -> str:
     """Compact proof that every strategy is scanning and where candidates stop."""
-    lines = ["📡 <b>Сканеры и контроль</b>", ""]
-    labels = {"COMPLETED": "✅", "RUNNING": "🔄", "SKIPPED": "⏭", "TIMEOUT": "⏱",
+    lines = ["📡 <b>Радар · Сканеры и контроль</b>", ""]
+    labels = {"COMPLETED": "✅", "RUNNING": "🔄", "PARTIAL": "◐", "SKIPPED": "⏭", "TIMEOUT": "⏱",
               "ERROR": "⚠️", "CANCELLED": "⏹", "NEVER": "▫️"}
     for run in data.get("runs", []):
         status = str(run.get("status") or "NEVER").upper()
         strategy = html.escape(str(run.get("strategy") or "—"))
         lines.append(
             f"{labels.get(status, '•')} <b>{strategy}</b> · {html.escape(status)} · "
-            f"{int(run.get('pairs_attempted') or 0)}/{int(run.get('batch_size') or 0)} пар"
+            f"партия {int(run.get('pairs_attempted') or 0)}/{int(run.get('batch_size') or 0)}"
         )
+        round_target = int(run.get("round_universe_size") or 0)
+        if round_target:
+            lines.append(
+                f"   круг {int(run.get('round_covered_size') or 0)}/{round_target}"
+                + (f" · повтор данных {int(run.get('round_retry_size') or 0)}" if int(run.get("round_retry_size") or 0) else "")
+            )
         if status == "RUNNING" and run.get("active_symbol"):
             lines.append(f"   сейчас: <code>{html.escape(str(run['active_symbol']))}</code>")
         lines.append(
@@ -41,6 +47,20 @@ def format_scanner_dashboard(data: dict[str, Any]) -> str:
             f"⏳{int(run.get('groq_wait') or 0)} "
             f"🚫{int(run.get('groq_reject') or 0)} · отправлено {int(run.get('delivered') or 0)}"
         )
+    watches = data.get("watches", [])
+    if watches:
+        lines.extend(["", "<b>Младшие ТФ · наблюдение</b>"])
+        for item in watches[:10]:
+            direction = str(item.get("direction") or "").upper()
+            icon = "🟢" if direction == "BULLISH" else "🔴" if direction == "BEARISH" else "👁"
+            lines.append(
+                f"{icon} <code>{html.escape(str(item.get('symbol') or '—'))}</code> · "
+                f"{html.escape(str(item.get('strategy') or '—'))} → "
+                f"{html.escape(str(item.get('required_timeframe') or '—'))} · "
+                f"проверок {int(item.get('attempts') or 0)}"
+            )
+    else:
+        lines.extend(["", "<b>Младшие ТФ · наблюдение</b>", "Сейчас пар в ожидании подтверждения нет."])
     lines.extend(["", "<b>Риск по стратегиям</b>"])
     for state in data.get("risk", []):
         mode = str(state.get("mode") or "NORMAL")
