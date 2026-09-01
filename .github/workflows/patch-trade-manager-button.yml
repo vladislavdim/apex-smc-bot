@@ -1,0 +1,62 @@
+name: Patch Trade Manager Button
+
+on:
+  push:
+    branches: [feature/trade-manager]
+    paths:
+      - '.github/workflows/patch-trade-manager-button.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/trade-manager
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Patch bot.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text(encoding='utf-8')
+
+          import_anchor = "from core.trade_views import format_trade_view as _format_trade_view\n"
+          import_block = import_anchor + "from core.trade_manager_telegram import (\n    fetch_manager_trades as _fetch_manager_trades,\n    fetch_manager_trade as _fetch_manager_trade,\n    format_manager_dashboard as _format_manager_dashboard,\n    format_manager_trade_detail as _format_manager_trade_detail,\n    manager_trade_buttons as _manager_trade_buttons,\n)\n"
+          if "from core.trade_manager_telegram import" not in s:
+              if import_anchor not in s:
+                  raise SystemExit('trade view import anchor not found')
+              s = s.replace(import_anchor, import_block, 1)
+
+          menu_anchor = '        [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],\n        [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]\n'
+          menu_block = '        [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],\n        [InlineKeyboardButton(text="🧠 Менеджер сделок", callback_data="menu_trade_manager")],\n        [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]\n'
+          if 'callback_data="menu_trade_manager"' not in s:
+              if menu_anchor not in s:
+                  raise SystemExit('main menu anchor not found')
+              s = s.replace(menu_anchor, menu_block, 1)
+
+          callback_anchor = '''    elif data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:\n'''
+          callback_block = '''    elif data == "menu_trade_manager":\n        try:\n            items = await asyncio.to_thread(_fetch_manager_trades, DB_PATH, 12)\n            text = _format_manager_dashboard(items)\n            rows = []\n            for label, callback_data in _manager_trade_buttons(items):\n                rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])\n            rows.append([\n                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_trade_manager"),\n                InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),\n            ])\n            markup = InlineKeyboardMarkup(inline_keyboard=rows)\n        except Exception as exc:\n            logging.error("Telegram Trade Manager dashboard: %s", exc)\n            text = "⚠️ Не удалось прочитать состояние менеджера сделок. Сканер продолжает работать."\n            markup = InlineKeyboardMarkup(inline_keyboard=[[\n                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_trade_manager"),\n                InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),\n            ]])\n        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)\n\n    elif data.startswith("manager_trade_"):\n        try:\n            signal_id = int(data.rsplit("_", 1)[-1])\n            payload = await asyncio.to_thread(_fetch_manager_trade, DB_PATH, signal_id, 12)\n            if payload:\n                text = _format_manager_trade_detail(payload)\n            else:\n                text = "⚠️ Сделка больше не найдена в памяти Trade Manager."\n        except Exception as exc:\n            logging.error("Telegram Trade Manager trade detail: %s", exc)\n            text = "⚠️ Не удалось прочитать историю этой сделки."\n        await callback.message.edit_text(\n            text,\n            parse_mode="HTML",\n            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],\n                [InlineKeyboardButton(text="🔙 К менеджеру", callback_data="menu_trade_manager"),\n                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )\n\n    elif data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:\n'''
+          if 'elif data == "menu_trade_manager":' not in s:
+              if callback_anchor not in s:
+                  raise SystemExit('callback anchor not found')
+              s = s.replace(callback_anchor, callback_block, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Syntax check
+        run: python -m py_compile bot.py core/trade_manager.py core/trade_manager_telegram.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py
+          git diff --cached --check
+          git commit -m "Connect Trade Manager Telegram button"
+          git push origin HEAD:feature/trade-manager

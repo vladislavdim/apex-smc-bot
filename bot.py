@@ -100,6 +100,13 @@ from market import get_relevant_rules as _market_relevant_rules
 from core.session_clock import fast_session
 from core.trade_views import fetch_trades as _fetch_trade_view_rows
 from core.trade_views import format_trade_view as _format_trade_view
+from core.trade_manager_telegram import (
+    fetch_manager_trades as _fetch_manager_trades,
+    fetch_manager_trade as _fetch_manager_trade,
+    format_manager_dashboard as _format_manager_dashboard,
+    format_manager_trade_detail as _format_manager_trade_detail,
+    manager_trade_buttons as _manager_trade_buttons,
+)
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 from core.telegram_dashboard import (
     fetch_strategy_stats as _fetch_strategy_stats,
@@ -209,6 +216,7 @@ def main_menu():
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
          InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")],
         [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],
+        [InlineKeyboardButton(text="🧠 Менеджер сделок", callback_data="menu_trade_manager")],
         [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]
     ])
 
@@ -865,6 +873,48 @@ async def handle_callback(callback: CallbackQuery):
 
     if data == "menu_back":
         await callback.message.edit_text("Главное меню 👇", reply_markup=main_menu())
+
+    elif data == "menu_trade_manager":
+        try:
+            items = await asyncio.to_thread(_fetch_manager_trades, DB_PATH, 12)
+            text = _format_manager_dashboard(items)
+            rows = []
+            for label, callback_data in _manager_trade_buttons(items):
+                rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
+            rows.append([
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_trade_manager"),
+                InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),
+            ])
+            markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        except Exception as exc:
+            logging.error("Telegram Trade Manager dashboard: %s", exc)
+            text = "⚠️ Не удалось прочитать состояние менеджера сделок. Сканер продолжает работать."
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_trade_manager"),
+                InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),
+            ]])
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+
+    elif data.startswith("manager_trade_"):
+        try:
+            signal_id = int(data.rsplit("_", 1)[-1])
+            payload = await asyncio.to_thread(_fetch_manager_trade, DB_PATH, signal_id, 12)
+            if payload:
+                text = _format_manager_trade_detail(payload)
+            else:
+                text = "⚠️ Сделка больше не найдена в памяти Trade Manager."
+        except Exception as exc:
+            logging.error("Telegram Trade Manager trade detail: %s", exc)
+            text = "⚠️ Не удалось прочитать историю этой сделки."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],
+                [InlineKeyboardButton(text="🔙 К менеджеру", callback_data="menu_trade_manager"),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
 
     elif data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:
         category = {
