@@ -160,13 +160,13 @@ async def refresh_pair_registry(symbols: list[str], force: bool = False) -> dict
                 return False, fallback
 
         enabled = set(configured_market_data_providers())
-        gate_enabled, binance_enabled = "gate" in enabled, "binance" in enabled
+        gate_enabled = "gate" in enabled
+        binance_enabled = False  # execution-only; never queried by the registry
         bybit_enabled, hyper_enabled = "bybit" in enabled, "hyperliquid" in enabled
         gate_result, binance_result, bybit_result, hyper_result = await asyncio.gather(
             safe(http_client.get_json("https://api.gateio.ws/api/v4/futures/usdt/contracts"), [])
             if gate_enabled else asyncio.sleep(0, result=(False, [])),
-            safe(http_client.get_json("https://fapi.binance.com/fapi/v1/exchangeInfo"), {})
-            if binance_enabled else asyncio.sleep(0, result=(False, {})),
+            asyncio.sleep(0, result=(False, {})),
             safe(http_client.get_json("https://api.bybit.com/v5/market/instruments-info", {"category": "linear", "limit": 1000}), {})
             if bybit_enabled else asyncio.sleep(0, result=(False, {})),
             safe(http_client.post_json("https://api.hyperliquid.xyz/info", {"type": "metaAndAssetCtxs"}), [])

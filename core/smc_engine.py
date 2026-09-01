@@ -29,10 +29,6 @@ except ImportError:  # market.py also imports this module from the core path.
 # ── WAL патч ──
 
 
-BINANCE_INTERVALS = {
-    "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
-    "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"1w"
-}
 CC_INTERVALS = {
     "1m":("histominute",1),"3m":("histominute",3),"5m":("histominute",5),
     "15m":("histominute",15),"30m":("histominute",30),
@@ -40,9 +36,6 @@ CC_INTERVALS = {
     "1d":("histoday",1),
 }
 KRAKEN_INTERVALS = {"1m":1,"5m":5,"15m":15,"30m":30,"1h":60,"4h":240,"1d":1440}
-BINANCE_F = "https://fapi.binance.com"
-BINANCE_S = "https://api.binance.com"
-
 COINGECKO_IDS = {
     "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
     "BNBUSDT":"binancecoin","XRPUSDT":"ripple","DOGEUSDT":"dogecoin",
@@ -138,12 +131,11 @@ def _learn_fact(fact, context=""):
 def _ordered_sources(symbol):
     _load_reliability()
     defaults = {
-        "bybit":0.82, "cryptocompare":0.80, "binance_futures":0.75, "binance_spot":0.70,
+        "bybit":0.82, "cryptocompare":0.80,
         "mexc":0.60, "kraken":0.58, "gate_io":0.55, "coingecko":0.50, "synthetic":0.10
     }
     provider_sources = {
         "gate": ["gate_io"],
-        "binance": ["binance_futures"],
         "bybit": ["bybit"],
         "hyperliquid": [],
     }
@@ -196,26 +188,6 @@ def _fetch_cryptocompare(symbol, interval, limit):
     if not data: raise ValueError("Empty CC")
     return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),
              "close":float(c["close"]),"volume":float(c.get("volumeto",0))} for c in data if c.get("close")]
-
-def _fetch_binance_futures(symbol, interval, limit):
-    bi = BINANCE_INTERVALS.get(interval,"1h")
-    r = requests.get(f"{BINANCE_F}/fapi/v1/klines",
-        params={"symbol":symbol,"interval":bi,"limit":limit},
-        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}")
-    data = r.json()
-    if not isinstance(data,list) or not data: raise ValueError("Empty BF")
-    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4]),"volume":float(c[5])} for c in data]
-
-def _fetch_binance_spot(symbol, interval, limit):
-    bi = BINANCE_INTERVALS.get(interval,"1h")
-    r = requests.get(f"{BINANCE_S}/api/v3/klines",
-        params={"symbol":symbol,"interval":bi,"limit":limit},
-        headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}")
-    data = r.json()
-    if not isinstance(data,list) or not data: raise ValueError("Empty BS")
-    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4]),"volume":float(c[5])} for c in data]
 
 def _fetch_mexc(symbol, interval, limit):
     mi_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d"}
@@ -312,8 +284,7 @@ def _fetch_synthetic(symbol, interval, limit):
     return candles[-limit:]
 
 _FETCHERS = {
-    "bybit":_fetch_bybit, "cryptocompare":_fetch_cryptocompare, "binance_futures":_fetch_binance_futures,
-    "binance_spot":_fetch_binance_spot, "mexc":_fetch_mexc,
+    "bybit":_fetch_bybit, "cryptocompare":_fetch_cryptocompare, "mexc":_fetch_mexc,
     "kraken":_fetch_kraken, "gate_io":_fetch_gate,
     "coingecko":_fetch_coingecko, "synthetic":_fetch_synthetic,
 }
@@ -482,8 +453,11 @@ def get_source_stats() -> str:
         barriers = conn.execute("SELECT ts,symbol,source,error FROM barrier_log WHERE success=0 ORDER BY id DESC LIMIT 5").fetchall()
         facts    = conn.execute("SELECT COUNT(*) FROM source_knowledge").fetchone()[0]
         conn.close()
-        if not rows: return "📡 Статистики ещё нет — запусти несколько сканов"
-        lines = [f"📡 <b>Надёжность источников</b> | Фактов в мозге: {facts}\n"]
+        allowed_sources = set(_ordered_sources(""))
+        rows = [row for row in rows if row[0] in allowed_sources]
+        barriers = [row for row in barriers if row[2] in allowed_sources]
+        if not rows: return "📡 Gate.io Futures: статистики ещё нет — запусти несколько сканов"
+        lines = [f"📡 <b>Gate.io Futures — рынок сканеров</b> | Фактов в мозге: {facts}\n"]
         for src,ok,fail,avg_c,last in rows:
             total = ok+fail
             pct = round(ok/total*100) if total>0 else 0

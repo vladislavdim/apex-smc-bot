@@ -203,19 +203,10 @@ async def start(symbols: list[str]) -> dict[str, Any]:
     _stop_event = asyncio.Event()
     enabled = set(configured_market_data_providers())
     gate = [get_pair(s)["gate_symbol"] for s in _configured_symbols if get_pair(s).get("gate_supported")]
-    binance = [get_pair(s)["binance_symbol"] for s in _configured_symbols if get_pair(s).get("binance_supported")]
     bybit = [get_pair(s)["bybit_symbol"] for s in _configured_symbols if get_pair(s).get("bybit_supported")]
     if gate and "gate" in enabled:
         subs = [{"time": int(time.time()), "channel": channel, "event": "subscribe", "payload": gate} for channel in ("futures.trades", "futures.book_ticker", "futures.tickers")]
         _tasks.append(asyncio.create_task(_consume("gate", "wss://fx-ws.gateio.ws/v4/ws/usdt", subs, ingest_gate)))
-    if binance and "binance" in enabled:
-        public_streams = [f"{symbol.lower()}@bookTicker" for symbol in binance]
-        market_streams = [stream for symbol in binance for stream in (f"{symbol.lower()}@aggTrade", f"{symbol.lower()}@forceOrder")]
-        for route, streams in (("public", public_streams), ("market", market_streams)):
-            for offset in range(0, len(streams), 80):
-                chunk = streams[offset:offset + 80]
-                url = f"wss://fstream.binance.com/{route}/stream?streams=" + "/".join(chunk)
-                _tasks.append(asyncio.create_task(_consume(f"binance-{route}", url, [], ingest_binance)))
     if bybit and "bybit" in enabled:
         args = [topic for symbol in bybit for topic in (f"publicTrade.{symbol}", f"allLiquidation.{symbol}", f"tickers.{symbol}")]
         subs = [{"op": "subscribe", "args": args[i:i + 50]} for i in range(0, len(args), 50)]

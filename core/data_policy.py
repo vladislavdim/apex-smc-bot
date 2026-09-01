@@ -1,9 +1,9 @@
 """Central market-data policy for APEX.
 
-Strategy calculations are Gate USD-M first and, by default, Gate only.  Other
-exchange adapters remain available for explicit diagnostics, but they are not
-allowed to fan out during normal scans.  Binance is reserved for deterministic
-execution after a candidate has passed the strategy and Groq quality gates.
+Strategy calculations and exchange market context use Gate USD-M only.  Other
+exchange adapters remain in the codebase for isolated development diagnostics,
+but configuration cannot add them to normal scans.  Binance is reserved for
+deterministic execution after a candidate passes every quality gate.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 
 DEFAULT_MARKET_DATA_PROVIDERS = ("gate",)
-_ALLOWED_PROVIDERS = {"gate", "binance", "bybit", "hyperliquid"}
+_ALLOWED_MARKET_DATA_PROVIDERS = {"gate"}
 
 
 def configured_market_data_providers(
@@ -24,7 +24,9 @@ def configured_market_data_providers(
     providers: list[str] = []
     for item in raw.split(","):
         provider = item.strip().lower()
-        if provider in _ALLOWED_PROVIDERS and provider not in providers:
+        # Ignore stale/accidental environment configuration that would
+        # otherwise fan scans out across exchanges. Binance is execution-only.
+        if provider in _ALLOWED_MARKET_DATA_PROVIDERS and provider not in providers:
             providers.append(provider)
     return tuple(providers) or DEFAULT_MARKET_DATA_PROVIDERS
 

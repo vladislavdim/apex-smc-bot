@@ -1357,11 +1357,13 @@ async def handle_callback(callback: CallbackQuery):
             execution = await asyncio.to_thread(_execution_status, DB_PATH) if _TRADE_EXECUTION_OK else {}
             mode = str(execution.get("mode", "OFF")).upper() if execution.get("enabled") else "OFF"
             live = "готова" if execution.get("live_armed") else "не активна"
-            account = execution.get("account") or {}
-            balance = (
-                f"${float(account.get('wallet_balance', 0) or 0):.4f}"
-                if account.get("available") else "недоступен"
-            )
+            active_live = int(execution.get("live_active_count", 0) or 0)
+            if not execution.get("live_armed"):
+                binance_state = "не активна"
+            elif active_live:
+                binance_state = f"сопровождает LIVE-ордера: {active_live}"
+            else:
+                binance_state = "ожидает готовый ордер · без фоновых запросов"
             external_state = "модуль загружен" if _MARKET_INTELLIGENCE_OK else "недоступен"
             quality_state = "модуль загружен" if _SIGNAL_QUALITY_GATE_OK else "недоступен"
             integrity_state = "модуль загружен" if _SIGNAL_INTEGRITY_OK else "недоступен"
@@ -1376,7 +1378,7 @@ async def handle_callback(callback: CallbackQuery):
                 f"Решений Groq за 24ч: <b>{health.get('groq_24h', 0)}</b>\n"
                 f"Открытых ошибок: <b>{health.get('open_errors', 0)}</b>\n\n"
                 f"Автоторговля: <b>{mode}</b> · LIVE {live}\n"
-                f"Futures-баланс: <b>{balance}</b>\n"
+                f"Binance: <b>{binance_state}</b>\n"
                 f"Риск: <b>{execution.get('risk_pct', 0)}%</b> · плечо "
                 f"<b>x{execution.get('leverage', 1)}</b>\n\n"
                 "<i>Новости работают автоматически внутри Groq-фильтра и не требуют отдельной кнопки.</i>"
@@ -1478,55 +1480,18 @@ async def handle_callback(callback: CallbackQuery):
                     _exec_label = "LIVE включена"
                 else:
                     _exec_label = "LIVE не подтверждена"
-                _account = _exec_state.get("account") or {}
-                if _account.get("available"):
-                    _wallet = float(_account.get("wallet_balance", 0) or 0)
-                    _available = float(_account.get("available_balance", 0) or 0)
-                    _pnl = _account.get("pnl") or {}
-                    if _pnl.get("available"):
-                        _net = float(_pnl.get("net_trading_pnl", 0) or 0)
-                        _profit = float(_pnl.get("gross_profit", 0) or 0)
-                        _loss = float(_pnl.get("gross_loss", 0) or 0)
-                        _fees = float(_pnl.get("commission", 0) or 0) + float(_pnl.get("funding", 0) or 0)
-                        _recent_lines = []
-                        for _item in (_pnl.get("recent") or [])[:5]:
-                            _amount = float(_item.get("amount", 0) or 0)
-                            _sign = "+" if _amount >= 0 else ""
-                            _event_time = int(_item.get("time", 0) or 0)
-                            _event_date = (
-                                datetime.utcfromtimestamp(_event_time / 1000).strftime("%d.%m %H:%M")
-                                if _event_time else "—"
-                            )
-                            _recent_lines.append(
-                                f"• <code>{_item.get('symbol', 'FUTURES')}</code> "
-                                f"<b>{_sign}${_amount:.4f}</b> · {_event_date} UTC"
-                            )
-                        _recent_block = (
-                            "\n<b>Последние закрытия:</b>\n" + "\n".join(_recent_lines)
-                            if _recent_lines else "\nПоследних закрытий пока нет."
-                        )
-                        _pnl_block = (
-                            f"📊 P&amp;L за 7 дней: <b>{'+' if _net >= 0 else ''}${_net:.4f}</b>\n"
-                            f"✅ Плюс: <b>+${_profit:.4f}</b> ({int(_pnl.get('positive_count', 0) or 0)}) · "
-                            f"❌ Минус: <b>-${abs(_loss):.4f}</b> ({int(_pnl.get('negative_count', 0) or 0)})\n"
-                            f"💸 Комиссии/funding: <b>{'+' if _fees >= 0 else ''}${_fees:.4f}</b>"
-                            f"{_recent_block}\n"
-                        )
-                    else:
-                        _pnl_block = "📊 P&amp;L за 7 дней: <b>история временно недоступна</b>\n"
-                    _account_block = (
-                        f"💰 Futures-баланс: <b>${_wallet:.4f}</b> · свободно <b>${_available:.4f}</b>\n"
-                        f"{_pnl_block}"
-                    )
-                elif _exec_live:
-                    _account_block = "💰 Futures-баланс: <b>недоступен — проверь API Futures</b>\n"
+                _active_live = int(_exec_state.get("live_active_count", 0) or 0)
+                if not _exec_live:
+                    _binance_label = "не активна"
+                elif _active_live:
+                    _binance_label = f"сопровождает LIVE-ордера: {_active_live}"
                 else:
-                    _account_block = ""
+                    _binance_label = "ожидает готовый ордер · без фоновых запросов"
                 execution_block = (
                     f"\n⚙️ Автоторговля: <b>{_exec_label}</b>\n"
                     f"🛡 Риск: <b>{_exec_state.get('risk_pct', 0)}%</b> · "
                     f"плечо: <b>x{_exec_state.get('leverage', 1)}</b>\n"
-                    f"{_account_block}"
+                    f"🔒 Binance: <b>{_binance_label}</b>\n"
                 )
             except Exception:
                 execution_block = "\n⚙️ Автоторговля: <b>статус недоступен</b>\n"
@@ -1571,15 +1536,8 @@ async def handle_callback(callback: CallbackQuery):
             else:
                 full_text = (
                     "📡 <b>Статус источников данных</b>\n\n"
-                    "<b>Свечи (приоритет):</b>\n"
-                    "1️⃣ CryptoCompare — ✅ основной\n"
-                    "2️⃣ Binance Futures REST — ✅ fallback\n"
-                    "3️⃣ Binance Spot REST — ✅ fallback\n"
-                    "4️⃣ Binance API (авторизованный) — ✅\n"
-                    "5️⃣ TwelveData — ✅ (если есть ключ)\n"
-                    "6️⃣ CoinGecko — ✅ последний резерв\n\n"
-                    "<b>Цены:</b> Binance Futures + Spot + CryptoCompare + Yahoo Finance\n"
-                    "<b>Пары:</b> Binance Futures топ-100 → Spot fallback\n"
+                    "<b>Свечи и пары:</b> Gate.io Futures — ✅ основной и единственный рынок сканеров\n"
+                    "<b>Binance:</b> 🔒 только исполнение готовых LIVE-ордеров\n"
                     "<b>Новости:</b> CoinTelegraph, CoinDesk, Decrypt, Reuters RSS\n\n"
                     "<i>ℹ️ smc_engine.py не в корне — используется встроенный SMC движок бота.</i>"
                 )

@@ -38,14 +38,17 @@ except ImportError:  # direct core/ import compatibility
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
 LIVE_CONFIRMATION = "ENABLE_LIVE_BINANCE_FUTURES"
 _TRUTHY = {"1", "true", "yes", "on"}
-_ACCOUNT_STATUS_TTL_SECONDS = 30.0
-_account_status_lock = threading.Lock()
-_account_status_cache: tuple[float, dict[str, Any]] | None = None
 _reconcile_process_lock = threading.Lock()
 _binance_circuit_lock = threading.Lock()
 _binance_blocked_until = 0.0
 _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
+_LIVE_RECONCILE_STATUSES = (
+    "ENTRY_PENDING",
+    "PROTECTED",
+    "PROTECTED_NO_TP",
+    "CLEANUP_PENDING",
+)
 
 
 def _binance_circuit_remaining(now: float | None = None) -> float:
@@ -621,6 +624,47 @@ def ensure_execution_schema(db_path: str = DB_PATH) -> None:
     conn.close()
 
 
+def _live_reconcile_rows(db_path: str) -> list[sqlite3.Row]:
+    """Return only live executions that currently require Binance I/O.
+
+    The scheduler calls reconciliation frequently, so the database is the
+    first gate.  A Binance client must not even be constructed when there is
+    no submitted entry or active order to protect/clean up.
+    """
+    ensure_execution_schema(db_path)
+    conn = _connect(db_path)
+    conn.row_factory = sqlite3.Row
+    has_signals = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signals'"
+    ).fetchone()
+    placeholders = ",".join("?" for _ in _LIVE_RECONCILE_STATUSES)
+    if has_signals:
+        rows = conn.execute(
+            f"""SELECT te.*, COALESCE(s.result, 'pending') AS signal_result
+                FROM trade_executions te LEFT JOIN signals s ON s.id=te.signal_id
+                WHERE te.mode='live' AND te.status IN ({placeholders})""",
+            _LIVE_RECONCILE_STATUSES,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""SELECT te.*, 'pending' AS signal_result
+                FROM trade_executions te
+                WHERE te.mode='live' AND te.status IN ({placeholders})""",
+            _LIVE_RECONCILE_STATUSES,
+        ).fetchall()
+    conn.close()
+
+    actionable: list[sqlite3.Row] = []
+    for row in rows:
+        status = str(row["status"])
+        signal_pending = str(row["signal_result"]) == "pending"
+        if status in {"ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING"}:
+            actionable.append(row)
+        elif status == "PROTECTED" and not signal_pending:
+            actionable.append(row)
+    return actionable
+
+
 def _store_execution(
     db_path: str, signal_id: int, config: ExecutionConfig, candidate: dict[str, Any],
     status: str, plan: dict[str, Any] | None = None, error: str = "", entry_order_id: str = "",
@@ -1011,17 +1055,10 @@ def _reconcile_live_executions_unlocked(
     config = config or ExecutionConfig.from_env()
     if not config.live_armed:
         return []
-    ensure_execution_schema(db_path)
+    rows = _live_reconcile_rows(db_path)
+    if not rows:
+        return []
     client = client or BinanceFuturesClient(config)
-    conn = _connect(db_path)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """SELECT te.*, COALESCE(s.result, 'cancelled') AS signal_result
-           FROM trade_executions te LEFT JOIN signals s ON s.id=te.signal_id
-           WHERE te.mode='live' AND te.status IN
-                 ('ENTRY_PENDING','PROTECTED','PROTECTED_NO_TP','CLEANUP_PENDING')"""
-    ).fetchall()
-    conn.close()
     outcomes = []
     for row in rows:
         try:
@@ -1130,42 +1167,19 @@ def _income_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _live_account_status(
-    config: ExecutionConfig,
-    client: BinanceFuturesClient | None = None,
-) -> dict[str, Any]:
-    """Fetch a bounded, cached live account summary for Telegram."""
-    global _account_status_cache
-
-    def fetch(active_client: BinanceFuturesClient) -> dict[str, Any]:
-        balance = active_client.usdt_balance_details()
-        try:
-            pnl = _income_summary(active_client.income_history(limit=1000))
-        except Exception as exc:
-            logging.warning("[AutoTrading] P&L history unavailable: %s", exc)
-            pnl = {"available": False, "error": str(exc)[:300], "period": "7d"}
-        return {
-            "available": True,
-            **balance,
-            "pnl": pnl,
-        }
-
-    # Explicit clients are used by tests and diagnostics and must not share a
-    # process-global cache with the real configured Binance account.
-    if client is not None:
-        return fetch(client)
-
-    now = time.monotonic()
-    with _account_status_lock:
-        if _account_status_cache and now - _account_status_cache[0] < _ACCOUNT_STATUS_TTL_SECONDS:
-            return dict(_account_status_cache[1])
-        try:
-            value = fetch(BinanceFuturesClient(config))
-        except Exception as exc:
-            logging.warning("[AutoTrading] account status unavailable: %s", exc)
-            value = {"available": False, "error": str(exc)[:300]}
-        _account_status_cache = (time.monotonic(), value)
-        return dict(value)
+def _live_account_status(client: BinanceFuturesClient) -> dict[str, Any]:
+    """Fetch account data only through an explicitly supplied diagnostic client."""
+    balance = client.usdt_balance_details()
+    try:
+        pnl = _income_summary(client.income_history(limit=1000))
+    except Exception as exc:
+        logging.warning("[AutoTrading] P&L history unavailable: %s", exc)
+        pnl = {"available": False, "error": str(exc)[:300], "period": "7d"}
+    return {
+        "available": True,
+        **balance,
+        "pnl": pnl,
+    }
 
 
 def execution_status(
@@ -1182,6 +1196,8 @@ def execution_status(
         "leverage": config.leverage,
         "risk_pct": config.risk_pct,
         "counts": {},
+        "live_active_count": 0,
+        "live_reconcile_pending": 0,
         "account": {"available": False},
     }
     try:
@@ -1190,9 +1206,27 @@ def execution_status(
         summary["counts"] = dict(conn.execute(
             "SELECT status, COUNT(*) FROM trade_executions GROUP BY status"
         ).fetchall())
+        placeholders = ",".join("?" for _ in _LIVE_RECONCILE_STATUSES)
+        summary["live_active_count"] = int(conn.execute(
+            f"""SELECT COUNT(*) FROM trade_executions
+                WHERE mode='live' AND status IN ({placeholders})""",
+            _LIVE_RECONCILE_STATUSES,
+        ).fetchone()[0])
         conn.close()
+        summary["live_reconcile_pending"] = len(_live_reconcile_rows(db_path))
     except Exception as exc:
         summary["error"] = str(exc)
     if config.live_armed:
-        summary["account"] = _live_account_status(config, client=client)
+        if client is None:
+            summary["account"] = {
+                "available": False,
+                "deferred": True,
+                "reason": "Binance account is queried only for submitted or active live orders",
+            }
+        else:
+            try:
+                summary["account"] = _live_account_status(client)
+            except Exception as exc:
+                logging.warning("[AutoTrading] explicit account diagnostic unavailable: %s", exc)
+                summary["account"] = {"available": False, "error": str(exc)[:300]}
     return summary

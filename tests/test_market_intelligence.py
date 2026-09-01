@@ -26,7 +26,10 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def test_pair_registry_verifies_provider_symbols_and_scaled_gate_contract(self):
+        requested_urls = []
+
         async def get_json(url, params=None, headers=None):
+            requested_urls.append(url)
             if "gateio" in url:
                 return [
                     {"name": "BTC_USDT", "quanto_multiplier": "0.0001"},
@@ -54,11 +57,15 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(rows["PEPEUSDT"]["gate_symbol"], "1000PEPE_USDT")
         self.assertEqual(rows["PEPEUSDT"]["binance_symbol"], "1000PEPEUSDT")
-        self.assertEqual(rows["PEPEUSDT"]["bybit_symbol"], "PEPEUSDT")
         self.assertEqual(rows["PEPEUSDT"]["gate_status"], "supported")
-        self.assertTrue(rows["BTCUSDT"]["binance_supported"])
-        self.assertTrue(rows["BTCUSDT"]["bybit_supported"])
-        self.assertTrue(rows["BTCUSDT"]["hyperliquid_supported"])
+        self.assertFalse(rows["BTCUSDT"]["binance_supported"])
+        self.assertEqual(rows["BTCUSDT"]["binance_status"], "disabled")
+        self.assertFalse(rows["BTCUSDT"]["bybit_supported"])
+        self.assertEqual(rows["BTCUSDT"]["bybit_status"], "disabled")
+        self.assertFalse(rows["BTCUSDT"]["hyperliquid_supported"])
+        self.assertEqual(rows["BTCUSDT"]["hyperliquid_status"], "disabled")
+        self.assertFalse(any("binance.com" in url for url in requested_urls))
+        self.assertFalse(any("bybit.com" in url for url in requested_urls))
 
         failure = AsyncMock(side_effect=TimeoutError())
         with patch.dict(os.environ, {"APEX_MARKET_DATA_PROVIDERS": "gate,binance,bybit,hyperliquid"}), \
@@ -67,7 +74,7 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
              patch.object(pair_registry.http_client, "post_json", new=failure):
             fallback = await pair_registry.refresh_pair_registry(["BTCUSDT"], force=True)
         self.assertTrue(fallback["BTCUSDT"]["gate_supported"])
-        self.assertTrue(fallback["BTCUSDT"]["binance_supported"])
+        self.assertFalse(fallback["BTCUSDT"]["binance_supported"])
         self.assertEqual(fallback["BTCUSDT"]["gate_status"], "unavailable")
 
     async def test_pair_registry_defaults_to_gate_without_other_exchange_requests(self):

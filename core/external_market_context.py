@@ -16,6 +16,11 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+try:
+    from .data_policy import provider_enabled
+except ImportError:  # direct core/ import compatibility
+    from data_policy import provider_enabled
+
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL_SECONDS = 120
 _HTTP_TIMEOUT_SECONDS = 7.0
@@ -38,42 +43,6 @@ def _get_json_sync(url: str, params: dict | None = None) -> Any:
 
 async def _get_json(url: str, params: dict | None = None) -> Any:
     return await asyncio.to_thread(_get_json_sync, url, params)
-
-
-async def _binance_context(symbol: str) -> dict[str, Any]:
-    """Collect public Binance Futures positioning data."""
-    base = "https://fapi.binance.com"
-    premium, oi_now, oi_hist, ratio = await asyncio.gather(
-        _get_json(f"{base}/fapi/v1/premiumIndex", {"symbol": symbol}),
-        _get_json(f"{base}/fapi/v1/openInterest", {"symbol": symbol}),
-        _get_json(
-            f"{base}/futures/data/openInterestHist",
-            {"symbol": symbol, "period": "5m", "limit": 2},
-        ),
-        _get_json(
-            f"{base}/futures/data/globalLongShortAccountRatio",
-            {"symbol": symbol, "period": "5m", "limit": 1},
-        ),
-    )
-
-    oi_change_pct = None
-    if isinstance(oi_hist, list) and len(oi_hist) >= 2:
-        old = _number(oi_hist[-2].get("sumOpenInterestValue"))
-        new = _number(oi_hist[-1].get("sumOpenInterestValue"))
-        if old and new is not None:
-            oi_change_pct = round((new - old) / old * 100, 4)
-
-    ratio_row = ratio[-1] if isinstance(ratio, list) and ratio else {}
-    return {
-        "source": "binance_futures_public",
-        "funding_rate": _number(premium.get("lastFundingRate")) if isinstance(premium, dict) else None,
-        "mark_price": _number(premium.get("markPrice")) if isinstance(premium, dict) else None,
-        "open_interest_contracts": _number(oi_now.get("openInterest")) if isinstance(oi_now, dict) else None,
-        "open_interest_value_change_5m_pct": oi_change_pct,
-        "global_long_short_ratio": _number(ratio_row.get("longShortRatio")),
-        "long_account_pct": _number(ratio_row.get("longAccount")),
-        "short_account_pct": _number(ratio_row.get("shortAccount")),
-    }
 
 
 async def _bybit_context(symbol: str) -> dict[str, Any]:
@@ -149,11 +118,11 @@ async def collect_external_market_context(symbol: str) -> dict[str, Any]:
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:
         return cached[1]
 
-    jobs: list[tuple[str, Any]] = [
-        ("binance", _binance_context(normalized)),
-        ("bybit", _bybit_context(normalized)),
-        ("gateio", _gate_context(normalized)),
-    ]
+    jobs: list[tuple[str, Any]] = []
+    if provider_enabled("gate"):
+        jobs.append(("gateio", _gate_context(normalized)))
+    if provider_enabled("bybit"):
+        jobs.append(("bybit", _bybit_context(normalized)))
     # DeepBlue's public index is Ethereum-wide, so it is useful only for
     # ETH candidates.  Do not present it to Groq as coin-specific data.
     if normalized.startswith("ETH"):
