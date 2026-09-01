@@ -21,9 +21,9 @@ class HTFCloseContextTests(unittest.TestCase):
     def test_only_slow_strategies_use_context(self):
         self.assertTrue(strategy_uses_htf_close_context("MTF"))
         self.assertTrue(strategy_uses_htf_close_context("SWING A"))
+        self.assertTrue(strategy_uses_htf_close_context("ZONE"))
         self.assertTrue(strategy_uses_htf_close_context("WYCKOFF"))
         self.assertFalse(strategy_uses_htf_close_context("FAST"))
-        self.assertFalse(strategy_uses_htf_close_context("ZONE"))
 
     def test_uses_last_closed_not_forming_bar(self):
         ctx = build_htf_close_context("BTCUSDT", "SWING", _loader)
