@@ -51,9 +51,13 @@ from core.control_loop import (
     record_scan_event as _record_scan_event,
     scan_heartbeat as _scan_heartbeat,
     set_scan_scope as _set_scan_scope,
+    set_scan_round as _set_scan_round,
     mark_scan_skipped as _mark_scan_skipped,
     finish_latest_running as _finish_latest_running,
-    take_persistent_batch as _take_persistent_batch,
+    take_strategy_round_batch as _take_strategy_round_batch,
+    upsert_ltf_watch as _upsert_ltf_watch,
+    due_ltf_watches as _due_ltf_watches,
+    touch_ltf_watch as _touch_ltf_watch,
     rebuild_strategy_risk_states as _rebuild_strategy_risk_states,
     strategy_risk_state as _strategy_risk_state,
     scanner_dashboard as _scanner_dashboard,
@@ -204,7 +208,7 @@ def main_menu():
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
          InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")],
-        [InlineKeyboardButton(text="📡 Сканеры и контроль", callback_data="menu_scanners")],
+        [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],
         [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]
     ])
 
@@ -3372,6 +3376,11 @@ async def _control_scan_scope(pairs, universe_size=None):
         )
 
 
+async def _control_scan_round(round_id):
+    if _active_scan_run_id:
+        await asyncio.to_thread(_set_scan_round, _active_scan_run_id, round_id, DB_PATH)
+
+
 async def _control_scan_pair(symbol):
     if _active_scan_run_id:
         await asyncio.to_thread(_scan_heartbeat, _active_scan_run_id, symbol, DB_PATH)
@@ -3496,8 +3505,13 @@ async def auto_scan_1h():
 
 async def _auto_scan_1h_impl():
     logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
-    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-    await _control_scan_scope(pairs)
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "MTF", universe, (len(universe) + 1) // 2, DB_PATH
+    )
+    pairs = batch["pairs"]
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
     all_signals = []
 
     for symbol in pairs:
@@ -3515,8 +3529,15 @@ async def _auto_scan_1h_impl():
 
             # MTF — если включён для этого режима
             if "MTF" in enabled:
-                sig = await asyncio.to_thread(full_scan_raw, symbol, "1h", True)
-                if sig and sig.get("confluence_score", 0) >= 35:
+                sig = await asyncio.to_thread(full_scan_raw, symbol, "1h", True, True)
+                if sig and sig.get("_pending_ltf"):
+                    await asyncio.to_thread(
+                        _upsert_ltf_watch, "MTF", symbol, sig.get("direction", ""),
+                        sig.get("required_timeframe", "15m"), sig.get("reason", "WAIT_LTF_CONFIRMATION"),
+                        4, DB_PATH,
+                    )
+                    await _control_scan_outcome(symbol, "FILTERED", "WAIT_LTF_CONFIRMATION", sig)
+                elif sig and sig.get("confluence_score", 0) >= 35:
                     sig["grade"] = "MTF"
                     all_signals.append(sig)
                 else:
@@ -3527,7 +3548,7 @@ async def _auto_scan_1h_impl():
             await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
-            break
+            raise
         except Exception as e:
             await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_scan_1h] {symbol}: {e}")
@@ -3565,14 +3586,16 @@ async def auto_scan_swing():
 
 async def _auto_scan_swing_impl():
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-    pairs = await asyncio.to_thread(
-        _take_persistent_batch, "swing", universe, (len(universe) + 1) // 2, DB_PATH
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "SWING", universe, (len(universe) + 1) // 2, DB_PATH
     )
+    pairs = batch["pairs"]
     logging.info(
         "[auto_scan_swing] ЗАПУЩЕН batch=%s universe=%s",
         len(pairs), len(universe),
     )
-    await _control_scan_scope(pairs, len(universe))
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
     found = []
     blocked = 0
     for symbol in pairs:
@@ -3592,8 +3615,8 @@ async def _auto_scan_swing_impl():
                 await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0.15)
         except asyncio.CancelledError:
-            logging.info("[auto_scan_swing] Прерван планировщиком — продолжаем")
-            break
+            logging.info("[auto_scan_swing] Прерван планировщиком")
+            raise
         except Exception as e:
             await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_scan_swing] {symbol}: {e}")
@@ -3687,16 +3710,49 @@ async def auto_zone_scan():
     except Exception as e:
         logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
 
+
+def _zone_candidate_from_setup(r):
+    """Format an already validated ZONE setup without changing its levels."""
+    symbol = r["symbol"]
+    direction = r["direction"]
+    dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
+    htf = r.get("htf_dir", "")
+    tp2_text = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
+    text = (
+        f"📦 <b>[ZONE]</b> | <b>{symbol}</b> — {dir_label}\n"
+        f"📊 Контекст: 4h | 1d: {htf} | {r['zone']} зона ({r['zone_type']})\n\n"
+        f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code>{tp2_text}\n"
+        f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
+        f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n\n"
+        f"📈 Логика: {r['logic']}\n\n"
+        f"⭐ Quality: {r['q_score']}/8 | RR: {r['rr']}\n"
+        f"⏱ Горизонт: ~{r.get('est_hours', 12)}ч\n\n"
+        "💡 Это аналитика, не совет. Торгуй осознанно"
+    )
+    tp2 = r.get("tp2") or r["tp"]
+    return {
+        "symbol": symbol, "direction": direction,
+        "timeframe": "4h", "entry": r["entry"],
+        "sl": r["sl"], "tp1": r["tp"], "tp2": tp2, "tp3": tp2,
+        "rr": r.get("rr"), "grade": "ZONE", "text": text,
+        "confluence_score": int(r["rr"] * 20), "regime": "ZONE", "scan_type": "zone",
+        "technical_evidence": {key: r.get(key) for key in (
+            "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning"
+        ) if r.get(key) is not None},
+    }
+
 async def _auto_zone_scan_impl():
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-    pairs = await asyncio.to_thread(
-        _take_persistent_batch, "zone", universe, (len(universe) + 2) // 3, DB_PATH
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "ZONE", universe, (len(universe) + 2) // 3, DB_PATH
     )
+    pairs = batch["pairs"]
     logging.info(
         "[auto_zone_scan] ЗАПУЩЕН batch=%s universe=%s",
         len(pairs), len(universe),
     )
-    await _control_scan_scope(pairs, len(universe))
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
     found = []
     for symbol in pairs:
         await _control_scan_pair(symbol)
@@ -3705,15 +3761,22 @@ async def _auto_zone_scan_impl():
             if not _liq_z["ok"]:
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
-            r = await asyncio.to_thread(detect_zone_setup, symbol, "4h")
-            if r:
+            r = await asyncio.to_thread(detect_zone_setup, symbol, "4h", True)
+            if r and r.get("_pending_ltf"):
+                await asyncio.to_thread(
+                    _upsert_ltf_watch, "ZONE", symbol, r.get("direction", ""),
+                    r.get("required_timeframe", "1h"), r.get("reason", "WAIT_LTF_CONFIRMATION"),
+                    8, DB_PATH,
+                )
+                await _control_scan_outcome(symbol, "FILTERED", "WAIT_LTF_CONFIRMATION", r)
+            elif r:
                 found.append(r)
                 logging.info(f"[auto_zone_scan] {symbol} НАЙДЕН: {r['direction']} RR={r['rr']} zone={r['zone']}")
             else:
                 await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0.2)
         except asyncio.CancelledError:
-            break
+            raise
         except Exception as e:
             await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
             logging.warning(f"[auto_zone_scan] {symbol}: {e}")
@@ -3728,40 +3791,7 @@ async def _auto_zone_scan_impl():
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
-            dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-            htf       = r.get("htf_dir", "")
-
-            _z_tp2_str = f"\n🎯 TP2:  <code>{smart_price_fmt(r['tp2'])}</code>" if r.get("tp2") else ""
-            text = (
-                f"📦 <b>[ZONE]</b> | <b>{symbol}</b> — {dir_label}\n"
-                f"📊 Контекст: 4h | 1d: {htf} | {r['zone']} зона ({r['zone_type']})\n"
-                f"\n"
-                f"🎯 TP1:  <code>{smart_price_fmt(r['tp'])}</code>{_z_tp2_str}\n"
-                f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
-                f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n"
-                f"\n"
-                f"📈 Логика: {r['logic']}\n"
-                f"\n"
-                f"⭐ Quality: {r['q_score']}/8 | RR: {r['rr']}\n"
-                f"⏱ Горизонт: ~{r.get('est_hours', 12)}ч"
-            )
-            text += "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
-
-            _z_tp2_val = r.get("tp2") or r["tp"]
-            sd = {
-                "symbol": symbol, "direction": direction,
-                "timeframe": "4h", "entry": r["entry"],
-                "sl": r["sl"], "tp1": r["tp"],
-                "tp2": _z_tp2_val, "tp3": _z_tp2_val,
-                "rr": r.get("rr"),
-                "grade": "ZONE", "text": text,
-                "confluence_score": int(r["rr"] * 20),
-                "regime": "ZONE",
-                "scan_type": "zone",
-                "technical_evidence": {key: r.get(key) for key in (
-                    "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning"
-                ) if r.get(key) is not None},
-            }
+            sd = _zone_candidate_from_setup(r)
 
             if not await asyncio.to_thread(_is_entry_still_valid, sd, max_drift_pct=2.0):
                 continue
@@ -3892,7 +3922,7 @@ async def auto_scan_mega():
 
 
 async def auto_wyckoff_scan():
-    """Каждые 4ч: сканируем все пары на Wyckoff Spring (LONG) и Distribution (SHORT)"""
+    """Hourly quarter-batch; one full Wyckoff universe is covered every 4h."""
     try:
         await _run_market_scan_exclusive("auto_wyckoff_scan", _auto_wyckoff_scan_impl, 300)
     except asyncio.TimeoutError:
@@ -3902,8 +3932,13 @@ async def auto_wyckoff_scan():
 
 async def _auto_wyckoff_scan_impl():
     logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
-    pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-    await _control_scan_scope(pairs)
+    universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "WYCKOFF", universe, max(1, (len(universe) + 3) // 4), DB_PATH
+    )
+    pairs = batch["pairs"]
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
     found = []
     for symbol in pairs:
         await _control_scan_pair(symbol)
@@ -4063,8 +4098,13 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
         update_global_candles("BTCUSDT", "1h", _shared_btc_1h)
 
     found = []
-    await _control_scan_scope(FAST_PAIRS)
-    for symbol in FAST_PAIRS:
+    batch = await asyncio.to_thread(
+        _take_strategy_round_batch, "FAST", FAST_PAIRS, len(FAST_PAIRS), DB_PATH
+    )
+    pairs = batch["pairs"]
+    await _control_scan_round(batch["round_id"])
+    await _control_scan_scope(pairs, batch["target"])
+    for symbol in pairs:
         await _control_scan_pair(symbol)
         try:
             _liq_fast = await asyncio.to_thread(check_session_liquidity, symbol)
@@ -4175,6 +4215,74 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
         except Exception as e:
             logging.error(f"[FastDeal] {r.get('symbol')}: {e}")
 
+
+async def auto_ltf_watch_scan():
+    """Passively recheck only setups waiting for an existing LTF requirement."""
+    if _market_scan_lock.locked():
+        logging.debug("[LTFWatch] heavy scanner active; retry on the next tick")
+        return
+    try:
+        await _run_market_scan_exclusive("auto_ltf_watch_scan", _auto_ltf_watch_scan_impl, 90)
+    except asyncio.TimeoutError:
+        logging.warning("[LTFWatch] timeout 90s; remaining observations stay queued")
+    except Exception as exc:
+        logging.warning("[LTFWatch] failed safely: %s", exc)
+
+
+async def _auto_ltf_watch_scan_impl():
+    watches = await asyncio.to_thread(_due_ltf_watches, 12, DB_PATH)
+    if not watches:
+        return
+    await _control_scan_scope(watches, len(watches))
+    for item in watches:
+        strategy = str(item.get("strategy") or "").upper()
+        symbol = str(item.get("symbol") or "")
+        await _control_scan_pair(symbol)
+        try:
+            if strategy == "MTF":
+                result = await asyncio.to_thread(full_scan_raw, symbol, "1h", True, True)
+            elif strategy == "ZONE":
+                result = await asyncio.to_thread(detect_zone_setup, symbol, "4h", True)
+            else:
+                await asyncio.to_thread(
+                    _touch_ltf_watch, strategy, symbol, "unsupported passive strategy", False, DB_PATH
+                )
+                continue
+
+            if result and result.get("_pending_ltf"):
+                await asyncio.to_thread(
+                    _touch_ltf_watch, strategy, symbol,
+                    result.get("reason", "LTF confirmation is still pending"), False, DB_PATH,
+                )
+                continue
+            if not result:
+                await asyncio.to_thread(
+                    _touch_ltf_watch, strategy, symbol,
+                    "base setup or LTF trigger is not complete", False, DB_PATH,
+                )
+                continue
+
+            candidate = result if strategy == "MTF" else _zone_candidate_from_setup(result)
+            if strategy == "MTF":
+                candidate["grade"] = "MTF"
+            if not await asyncio.to_thread(_is_entry_still_valid, candidate, max_drift_pct=2.0):
+                await asyncio.to_thread(
+                    _touch_ltf_watch, strategy, symbol, "entry drift; keep observing", False, DB_PATH
+                )
+                continue
+            await asyncio.to_thread(
+                _touch_ltf_watch, strategy, symbol, "required LTF confirmation completed", True, DB_PATH
+            )
+            await _send_signal(candidate)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.warning("[LTFWatch] %s %s: %s", strategy, symbol, exc)
+            await asyncio.to_thread(
+                _touch_ltf_watch, strategy, symbol, f"safe retry: {str(exc)[:160]}", False, DB_PATH
+            )
+        await asyncio.sleep(0)
+
 async def auto_accumulation_scan():
     """Каждый час: сканируем Gate USD-M universe на накопление."""
     try:
@@ -4246,7 +4354,7 @@ def scan_all_for_deals(limit=40):
     return found
 
 
-def full_scan_raw(symbol, timeframe="1h", auto=False):
+def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
     """Возвращает dict с текстом и grade для фильтрации"""
     try:
         # Проверяем есть ли уже открытый сигнал по этому символу в БД
@@ -4742,6 +4850,15 @@ def full_scan_raw(symbol, timeframe="1h", auto=False):
 
         # Для MTF-сетапов нужны минимум 2 из 4 подтверждений,
         # включая реальную структуру (BOS/CHoCH), а не только сессию.
+        if passive_watch and not _mtf_score_bos:
+            return {
+                "_pending_ltf": True,
+                "symbol": symbol,
+                "strategy": "MTF",
+                "direction": direction,
+                "required_timeframe": "15m",
+                "reason": "ожидается закрытый 15m BOS/CHoCH",
+            }
         if _mtf_score < 2 or not _mtf_score_bos:
             logging.debug(f"[MTF] {symbol}: score {_mtf_score}/4 — пропускаем")
             return None
@@ -5407,25 +5524,22 @@ def _schedule_market_scans(scheduler):
     their working timeframe can produce materially new information.
     """
     common = {"timezone": "UTC", "max_instances": 1, "coalesce": True}
-    scheduler.add_job(auto_scan_1h, "cron", minute=2, id="market_mtf_1h", **common)
+    scheduler.add_job(auto_scan_1h, "cron", minute="2,24", id="market_mtf_1h", **common)
     scheduler.add_job(shadow_experience_job, "cron", minute=58, id="experience_shadow", **common)
     scheduler.add_job(auto_fast_deal_scan, "cron", minute="8,28,48", id="market_fast", **common)
     scheduler.add_job(auto_zone_scan, "cron", minute="14,34,54", id="market_zone", **common)
     scheduler.add_job(auto_scan_swing, "cron", minute="20,50", id="market_swing", **common)
     scheduler.add_job(
-        auto_wyckoff_scan, "cron", hour="*/4", minute=40,
+        auto_ltf_watch_scan, "cron", minute="6,16,26,36,46,56",
+        id="market_ltf_watch", **common,
+    )
+    scheduler.add_job(
+        auto_wyckoff_scan, "cron", minute=40,
         id="market_wyckoff", **common,
     )
     scheduler.add_job(
-        market_intelligence_job, "cron", minute=24,
+        market_intelligence_job, "cron", minute=10,
         id="market_intelligence_primary", **common,
-    )
-    # The second refresh is omitted in Wyckoff hours because that scan owns
-    # the 40-45 minute slot. This prevents a known, deterministic collision.
-    scheduler.add_job(
-        market_intelligence_job, "cron",
-        hour="1,2,3,5,6,7,9,10,11,13,14,15,17,18,19,21,22,23",
-        minute=44, id="market_intelligence_secondary", **common,
     )
 
 async def on_startup(app):

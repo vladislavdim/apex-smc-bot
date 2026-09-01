@@ -7783,7 +7783,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
 # ===== СТРАТЕГИЯ 5: ZONE — вход из Discount/Premium зоны =====
 
-def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
+def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = False) -> dict | None:
     """
     ZONE стратегия: вход из Discount/Premium зоны с OB/FVG подтверждением.
     Не требует sweep — опирается на зону интереса и отбой от неё.
@@ -7952,6 +7952,15 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 _zone_ltf_structure = True
         except Exception:
             pass
+        if passive_watch and not _zone_ltf_structure:
+            return {
+                "_pending_ltf": True,
+                "symbol": symbol,
+                "strategy": "ZONE",
+                "direction": direction,
+                "required_timeframe": "1h",
+                "reason": "зона подтверждена; ожидается свежий 1h BOS/CHoCH",
+            }
         if not _zone_ltf_structure:
             return None
 

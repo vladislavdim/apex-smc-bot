@@ -84,6 +84,54 @@ def ensure_control_schema(db_path: str = DB_PATH) -> None:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS scan_coverage_rounds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            universe_size INTEGER NOT NULL DEFAULT 0,
+            covered_size INTEGER NOT NULL DEFAULT 0,
+            retry_size INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_coverage_rounds_strategy
+            ON scan_coverage_rounds(strategy,status,id DESC);
+
+        CREATE TABLE IF NOT EXISTS scan_coverage_pairs (
+            round_id INTEGER NOT NULL,
+            strategy TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_run_id INTEGER,
+            last_outcome TEXT,
+            last_reason TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(round_id,symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_coverage_pairs_due
+            ON scan_coverage_pairs(round_id,status,attempts,position);
+
+        CREATE TABLE IF NOT EXISTS ltf_watchlist (
+            strategy TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            direction TEXT,
+            required_timeframe TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'WAITING',
+            reason TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            misses INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_checked_at TEXT,
+            expires_at TEXT NOT NULL,
+            resolved_at TEXT,
+            PRIMARY KEY(strategy,symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ltf_watchlist_due
+            ON ltf_watchlist(state,last_checked_at,expires_at);
+
         CREATE TABLE IF NOT EXISTS strategy_risk_state (
             strategy TEXT PRIMARY KEY,
             consecutive_losses INTEGER NOT NULL DEFAULT 0,
@@ -124,6 +172,12 @@ def ensure_control_schema(db_path: str = DB_PATH) -> None:
             "INSERT OR IGNORE INTO strategy_risk_state(strategy) VALUES (?)",
             (strategy,),
         )
+    scan_run_columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_runs)")}
+    if "round_id" not in scan_run_columns:
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN round_id INTEGER")
+    coverage_columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_coverage_pairs)")}
+    if "last_run_id" not in coverage_columns:
+        conn.execute("ALTER TABLE scan_coverage_pairs ADD COLUMN last_run_id INTEGER")
     # A fresh database historically received two incompatible error_patterns
     # definitions.  Keep both operational and trade-pattern columns together.
     conn.execute(
@@ -178,6 +232,14 @@ def scan_heartbeat(run_id: int, symbol: str = "", db_path: str = DB_PATH) -> Non
                       pairs_attempted=pairs_attempted+1 WHERE id=?""",
             (symbol, int(run_id)),
         )
+        run = conn.execute("SELECT round_id FROM scan_runs WHERE id=?", (int(run_id),)).fetchone()
+        if run and run[0] and symbol:
+            conn.execute(
+                """UPDATE scan_coverage_pairs
+                   SET status='IN_PROGRESS',attempts=attempts+1,last_run_id=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE round_id=? AND symbol=?""",
+                (int(run_id), int(run[0]), symbol),
+            )
         conn.commit(); conn.close()
     except sqlite3.Error:
         return
@@ -190,6 +252,15 @@ def set_scan_scope(run_id: int, universe_size: int, batch_size: int, db_path: st
             "UPDATE scan_runs SET universe_size=?,batch_size=? WHERE id=?",
             (int(universe_size), int(batch_size), int(run_id)),
         )
+        conn.commit(); conn.close()
+    except sqlite3.Error:
+        return
+
+
+def set_scan_round(run_id: int, round_id: int | None, db_path: str = DB_PATH) -> None:
+    try:
+        conn = _connect(db_path)
+        conn.execute("UPDATE scan_runs SET round_id=? WHERE id=?", (round_id, int(run_id)))
         conn.commit(); conn.close()
     except sqlite3.Error:
         return
@@ -217,6 +288,40 @@ def record_scan_event(
         }.get(str(outcome).upper())
         if field:
             conn.execute(f"UPDATE scan_runs SET {field}={field}+1 WHERE id=?", (int(run_id),))
+        run = conn.execute("SELECT round_id FROM scan_runs WHERE id=?", (int(run_id),)).fetchone()
+        round_id = int(run[0]) if run and run[0] else None
+        normalized_outcome = str(outcome).upper()
+        if round_id and symbol:
+            if normalized_outcome in {"FILTERED", "CANDIDATE"}:
+                conn.execute(
+                    """UPDATE scan_coverage_pairs
+                       SET status='DONE',last_outcome=?,last_reason=?,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE round_id=? AND symbol=?""",
+                    (normalized_outcome, reason_code, round_id, symbol),
+                )
+            elif normalized_outcome == "DATA_FAILED":
+                conn.execute(
+                    """UPDATE scan_coverage_pairs
+                       SET status='RETRY',last_outcome=?,last_reason=?,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE round_id=? AND symbol=?""",
+                    (normalized_outcome, reason_code, round_id, symbol),
+                )
+            covered, retry, target = conn.execute(
+                """SELECT SUM(status='DONE'),SUM(status='RETRY'),COUNT(*)
+                   FROM scan_coverage_pairs WHERE round_id=?""",
+                (round_id,),
+            ).fetchone()
+            covered, retry, target = int(covered or 0), int(retry or 0), int(target or 0)
+            complete = bool(target and covered == target)
+            conn.execute(
+                """UPDATE scan_coverage_rounds
+                   SET covered_size=?,retry_size=?,status=?,updated_at=CURRENT_TIMESTAMP,
+                       completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END
+                   WHERE id=?""",
+                (covered, retry, "COMPLETED" if complete else "ACTIVE", int(complete), round_id),
+            )
         conn.commit(); conn.close()
     except sqlite3.Error:
         return
@@ -225,13 +330,55 @@ def record_scan_event(
 def finish_scan(run_id: int, status: str = "COMPLETED", error: str = "", db_path: str = DB_PATH) -> None:
     try:
         conn = _connect(db_path)
+        requested = str(status).upper()
+        row = conn.execute(
+            "SELECT pairs_attempted,batch_size FROM scan_runs WHERE id=?", (int(run_id),)
+        ).fetchone()
+        if requested == "COMPLETED" and row and int(row[1] or 0) > int(row[0] or 0):
+            requested = "PARTIAL"
+            if not error:
+                error = f"processed {int(row[0] or 0)} of {int(row[1] or 0)} pairs"
+        round_row = conn.execute("SELECT round_id FROM scan_runs WHERE id=?", (int(run_id),)).fetchone()
+        round_id = int(round_row[0]) if round_row and round_row[0] else None
+        if round_id:
+            if requested == "COMPLETED":
+                conn.execute(
+                    """UPDATE scan_coverage_pairs
+                       SET status='DONE',last_outcome=COALESCE(last_outcome,'CHECKED'),
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE round_id=? AND last_run_id=? AND status='IN_PROGRESS'""",
+                    (round_id, int(run_id)),
+                )
+            else:
+                conn.execute(
+                    """UPDATE scan_coverage_pairs SET status='PENDING',updated_at=CURRENT_TIMESTAMP
+                       WHERE round_id=? AND last_run_id=? AND status='IN_PROGRESS'""",
+                    (round_id, int(run_id)),
+                )
+            covered, retry, target = conn.execute(
+                """SELECT SUM(status='DONE'),SUM(status='RETRY'),COUNT(*)
+                   FROM scan_coverage_pairs WHERE round_id=?""",
+                (round_id,),
+            ).fetchone()
+            covered, retry, target = int(covered or 0), int(retry or 0), int(target or 0)
+            complete = bool(target and covered == target)
+            conn.execute(
+                """UPDATE scan_coverage_rounds SET covered_size=?,retry_size=?,status=?,
+                          updated_at=CURRENT_TIMESTAMP,
+                          completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END
+                   WHERE id=?""",
+                (covered, retry, "COMPLETED" if complete else "ACTIVE", int(complete), round_id),
+            )
         conn.execute(
             """UPDATE scan_runs SET status=?,error=?,active_symbol=NULL,
                       heartbeat_at=CURRENT_TIMESTAMP,completed_at=CURRENT_TIMESTAMP WHERE id=?""",
-            (str(status).upper(), str(error)[:1000], int(run_id)),
+            (requested, str(error)[:1000], int(run_id)),
         )
         conn.execute("DELETE FROM scan_pair_events WHERE created_at < datetime('now','-14 days')")
         conn.execute("DELETE FROM scan_runs WHERE started_at < datetime('now','-90 days')")
+        conn.execute("DELETE FROM scan_coverage_pairs WHERE round_id IN (SELECT id FROM scan_coverage_rounds WHERE started_at < datetime('now','-30 days'))")
+        conn.execute("DELETE FROM scan_coverage_rounds WHERE started_at < datetime('now','-30 days')")
+        conn.execute("DELETE FROM ltf_watchlist WHERE state IN ('RESOLVED','EXPIRED','INVALIDATED') AND resolved_at < datetime('now','-14 days')")
         conn.commit(); conn.close()
     except sqlite3.Error:
         return
@@ -261,6 +408,121 @@ def take_persistent_batch(scanner: str, items: list[Any], size: int, db_path: st
     )
     conn.commit(); conn.close()
     return result
+
+
+def take_strategy_round_batch(
+    strategy: str, items: list[Any], size: int, db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    """Take a restart-safe batch from one complete strategy coverage round."""
+    values = list(dict.fromkeys(items))
+    normalized = _strategy_name(strategy)
+    if not values:
+        return {"round_id": None, "pairs": [], "covered": 0, "target": 0, "retry": 0}
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    conn.execute("BEGIN IMMEDIATE")
+    active = conn.execute(
+        "SELECT id FROM scan_coverage_rounds WHERE strategy=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1",
+        (normalized,),
+    ).fetchone()
+    if active:
+        round_id = int(active[0])
+    else:
+        cursor = conn.execute(
+            "INSERT INTO scan_coverage_rounds(strategy,universe_size) VALUES (?,?)",
+            (normalized, len(values)),
+        )
+        round_id = int(cursor.lastrowid)
+        conn.executemany(
+            """INSERT INTO scan_coverage_pairs(round_id,strategy,symbol,position)
+               VALUES (?,?,?,?)""",
+            [(round_id, normalized, str(symbol), position) for position, symbol in enumerate(values)],
+        )
+    # A process restart can leave the last pair IN_PROGRESS.  No strategy can
+    # own two market-lock runs, so it is safe to return such rows to the queue.
+    conn.execute(
+        "UPDATE scan_coverage_pairs SET status='PENDING' WHERE round_id=? AND status='IN_PROGRESS'",
+        (round_id,),
+    )
+    count = min(len(values), max(1, int(size)))
+    rows = conn.execute(
+        """SELECT symbol FROM scan_coverage_pairs
+           WHERE round_id=? AND status IN ('PENDING','RETRY')
+           ORDER BY attempts ASC,position ASC LIMIT ?""",
+        (round_id, count),
+    ).fetchall()
+    stats = conn.execute(
+        """SELECT SUM(status='DONE'),SUM(status='RETRY'),COUNT(*)
+           FROM scan_coverage_pairs WHERE round_id=?""",
+        (round_id,),
+    ).fetchone()
+    conn.commit(); conn.close()
+    return {
+        "round_id": round_id,
+        "pairs": [row[0] for row in rows],
+        "covered": int(stats[0] or 0),
+        "retry": int(stats[1] or 0),
+        "target": int(stats[2] or 0),
+    }
+
+
+def upsert_ltf_watch(
+    strategy: str, symbol: str, direction: str, required_timeframe: str,
+    reason: str, ttl_hours: int, db_path: str = DB_PATH,
+) -> None:
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    conn.execute(
+        """INSERT INTO ltf_watchlist
+           (strategy,symbol,direction,required_timeframe,state,reason,expires_at)
+           VALUES (?,?,?,?, 'WAITING', ?, datetime('now', ?))
+           ON CONFLICT(strategy,symbol) DO UPDATE SET
+             direction=excluded.direction,required_timeframe=excluded.required_timeframe,
+             state='WAITING',reason=excluded.reason,expires_at=excluded.expires_at,
+             resolved_at=NULL""",
+        (_strategy_name(strategy), symbol, direction, required_timeframe, reason, f"+{int(ttl_hours)} hours"),
+    )
+    conn.commit(); conn.close()
+
+
+def due_ltf_watches(limit: int = 12, db_path: str = DB_PATH) -> list[dict[str, Any]]:
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    conn.execute(
+        """UPDATE ltf_watchlist SET state='EXPIRED',resolved_at=CURRENT_TIMESTAMP
+           WHERE state='WAITING' AND expires_at <= CURRENT_TIMESTAMP"""
+    )
+    rows = conn.execute(
+        """SELECT * FROM ltf_watchlist WHERE state='WAITING'
+           ORDER BY CASE WHEN last_checked_at IS NULL THEN 0 ELSE 1 END,
+                    last_checked_at ASC,created_at ASC LIMIT ?""",
+        (max(1, int(limit)),),
+    ).fetchall()
+    conn.commit(); conn.close()
+    return [dict(row) for row in rows]
+
+
+def touch_ltf_watch(
+    strategy: str, symbol: str, result: str, resolved: bool = False,
+    db_path: str = DB_PATH,
+) -> None:
+    ensure_control_schema(db_path)
+    conn = _connect(db_path)
+    if resolved:
+        conn.execute(
+            """UPDATE ltf_watchlist SET state='RESOLVED',attempts=attempts+1,
+                      reason=?,last_checked_at=CURRENT_TIMESTAMP,resolved_at=CURRENT_TIMESTAMP
+               WHERE strategy=? AND symbol=?""",
+            (result, _strategy_name(strategy), symbol),
+        )
+    else:
+        conn.execute(
+            """UPDATE ltf_watchlist SET attempts=attempts+1,misses=misses+1,
+                      reason=?,last_checked_at=CURRENT_TIMESTAMP
+               WHERE strategy=? AND symbol=?""",
+            (result, _strategy_name(strategy), symbol),
+        )
+    conn.commit(); conn.close()
 
 
 def _strategy_name(value: Any) -> str:
@@ -367,7 +629,15 @@ def scanner_dashboard(db_path: str = DB_PATH) -> dict[str, Any]:
         row = conn.execute(
             "SELECT * FROM scan_runs WHERE strategy=? ORDER BY id DESC LIMIT 1", (strategy,)
         ).fetchone()
-        runs.append(dict(row) if row else {"strategy": strategy, "status": "NEVER"})
+        run = dict(row) if row else {"strategy": strategy, "status": "NEVER"}
+        coverage = conn.execute(
+            """SELECT id,status,universe_size,covered_size,retry_size,started_at,completed_at
+               FROM scan_coverage_rounds WHERE strategy=? ORDER BY id DESC LIMIT 1""",
+            (strategy,),
+        ).fetchone()
+        if coverage:
+            run.update({f"round_{key}": value for key, value in dict(coverage).items()})
+        runs.append(run)
     reasons = conn.execute(
         """SELECT strategy,COALESCE(NULLIF(reason_code,''),'UNSPECIFIED') reason_code,COUNT(*) count
            FROM scan_pair_events WHERE created_at >= datetime('now','-24 hours')
@@ -376,8 +646,26 @@ def scanner_dashboard(db_path: str = DB_PATH) -> dict[str, Any]:
            ORDER BY count DESC LIMIT 12"""
     ).fetchall()
     risk = conn.execute("SELECT * FROM strategy_risk_state ORDER BY strategy").fetchall()
+    watches = conn.execute(
+        """SELECT strategy,symbol,direction,required_timeframe,state,reason,attempts,
+                  created_at,last_checked_at,expires_at
+           FROM ltf_watchlist WHERE state='WAITING'
+             AND expires_at > CURRENT_TIMESTAMP
+           ORDER BY created_at ASC LIMIT 20"""
+    ).fetchall()
+    watch_counts = conn.execute(
+        """SELECT strategy,required_timeframe,COUNT(*) count
+           FROM ltf_watchlist WHERE state='WAITING' AND expires_at > CURRENT_TIMESTAMP
+           GROUP BY strategy,required_timeframe ORDER BY strategy,required_timeframe"""
+    ).fetchall()
     conn.close()
-    return {"runs": runs, "reasons": [dict(row) for row in reasons], "risk": [dict(row) for row in risk]}
+    return {
+        "runs": runs,
+        "reasons": [dict(row) for row in reasons],
+        "risk": [dict(row) for row in risk],
+        "watches": [dict(row) for row in watches],
+        "watch_counts": [dict(row) for row in watch_counts],
+    }
 
 
 def finish_latest_running(scanner: str, status: str, error: str = "", db_path: str = DB_PATH) -> None:
