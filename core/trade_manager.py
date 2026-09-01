@@ -10,6 +10,7 @@ replaces the original targets.
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import sqlite3
@@ -493,16 +494,23 @@ def format_telegram_update(
     target = review.get("management_target") or state.get("manager_target")
     protection = f"\n🛡 Структурная защита: <code>{protect}</code>" if protect not in (None, "", 0) else ""
     target_text = f"\n🎯 Новая структурная цель: <code>{target}</code>" if target not in (None, "", 0) else "\n🎯 Новая цель: не подтверждена"
+    symbol = html.escape(str(state.get("symbol") or "—"))
+    strategy = html.escape(str(state.get("strategy") or "—"))
+    direction = html.escape(str(state.get("direction") or "—"))
+    event_text = html.escape(", ".join(str(event) for event in events))
+    action_text = html.escape(str(action))
+    reason = html.escape(str(review.get("reason") or "—"))
+    next_trigger = html.escape(str(review.get("next_trigger") or "следующее значимое событие"))
     return (
-        f"🧠 <b>APEX MANAGER — {state['symbol']}</b>\n"
-        f"Стратегия: <b>{state['strategy']} {state['direction']}</b>\n"
+        f"🧠 <b>APEX MANAGER — {symbol}</b>\n"
+        f"Стратегия: <b>{strategy} {direction}</b>\n"
         f"Цена: <code>{price}</code> | результат: <b>{r_now:+.2f}R</b>\n"
-        f"Событие: <code>{', '.join(events)}</code>\n\n"
-        f"{icon} Решение: <b>{action}</b>\n"
+        f"Событие: <code>{event_text}</code>\n\n"
+        f"{icon} Решение: <b>{action_text}</b>\n"
         f"Уверенность: <b>{float(review.get('confidence') or 0)*100:.0f}%</b>\n"
-        f"Причина: {review.get('reason') or '—'}"
+        f"Причина: {reason}"
         f"{protection}{target_text}\n"
-        f"Следующая проверка: {review.get('next_trigger') or 'следующее значимое событие'}"
+        f"Следующая проверка: {next_trigger}"
     )
 
 
