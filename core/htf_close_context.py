@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-_SUPPORTED = ("MTF", "SWING", "WYCKOFF")
+_SUPPORTED = ("MTF", "SWING", "ZONE", "WYCKOFF")
 
 
 def strategy_uses_htf_close_context(strategy: str) -> bool:
