@@ -58,6 +58,14 @@ from core.control_loop import (
     strategy_risk_state as _strategy_risk_state,
     scanner_dashboard as _scanner_dashboard,
 )
+from core.experience_memory import (
+    ensure_experience_schema as _ensure_experience_schema,
+    capture_candidate as _capture_experience_candidate,
+    record_decision as _record_experience_decision,
+    refresh_shadow_positions as _refresh_shadow_positions,
+    active_rule_evidence as _active_experience_rules,
+    experience_dashboard as _experience_dashboard,
+)
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
 _orig_edit_text = _msg_module.Message.edit_text
@@ -98,6 +106,7 @@ from core.telegram_dashboard import (
     format_watchlist as _format_watchlist,
     format_groq_rejections as _format_groq_rejections,
     format_scanner_dashboard as _format_scanner_dashboard,
+    format_experience_dashboard as _format_experience_dashboard,
 )
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
@@ -195,7 +204,8 @@ def main_menu():
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
          InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")],
-        [InlineKeyboardButton(text="📡 Сканеры и контроль", callback_data="menu_scanners")]
+        [InlineKeyboardButton(text="📡 Сканеры и контроль", callback_data="menu_scanners")],
+        [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]
     ])
 
 def tf_keyboard():
@@ -906,6 +916,22 @@ async def handle_callback(callback: CallbackQuery):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
+    elif data == "menu_experience":
+        try:
+            experience = await asyncio.to_thread(_experience_dashboard, DB_PATH)
+            text = _format_experience_dashboard(experience)
+        except Exception as exc:
+            logging.error("Telegram experience dashboard: %s", exc)
+            text = "⚠️ Не удалось прочитать Experience Memory."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_experience"),
                  InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
             ]),
         )
@@ -3037,12 +3063,25 @@ def _attach_learning_evidence(sd: dict) -> None:
         )[:2000]
     except Exception:
         evidence["recent_bot_errors"] = "bot_errors_unavailable"
+    try:
+        evidence["validated_experience_rules"] = _active_experience_rules(
+            strategy, str(sd.get("regime") or ""), DB_PATH
+        )[:2000]
+    except Exception:
+        evidence["validated_experience_rules"] = "experience_rules_unavailable"
     sd["technical_evidence"] = evidence
 
 
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
+    await asyncio.to_thread(_capture_experience_candidate, sd, DB_PATH)
+
+    async def _remember(decision, reason="", review=None):
+        await asyncio.to_thread(
+            _record_experience_decision, sd, decision, reason, review, DB_PATH
+        )
+
     _run_id = sd.get("_scan_run_id") or _active_scan_run_id
     _strategy = _signal_type_from_candidate(sd)
     if _run_id:
@@ -3054,6 +3093,7 @@ async def _send_signal(sd):
     sd["_strategy_risk_state"] = risk_state
     if risk_state.get("mode") == "PAUSED":
         reason = f"{_strategy} LIVE paused after {risk_state.get('consecutive_losses', 0)} consecutive SL"
+        await _remember("WAIT", reason)
         _record_strategy_decision(sd, "WAIT", "strategy_risk", reason, db_path=DB_PATH)
         if _run_id:
             await asyncio.to_thread(
@@ -3064,6 +3104,7 @@ async def _send_signal(sd):
     if not _SIGNAL_INTEGRITY_OK:
         logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
         _record_strategy_decision(sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
+        await _remember("REJECT", "integrity validator unavailable")
         return False
     try:
         _integrity_prices = get_live_prices()
@@ -3077,6 +3118,7 @@ async def _send_signal(sd):
             sd.get("symbol"), sd.get("direction"), integrity.get("errors"),
         )
         _record_strategy_decision(sd, "REJECT", "integrity", "; ".join(integrity.get("errors", [])), db_path=DB_PATH)
+        await _remember("REJECT", "; ".join(integrity.get("errors", [])))
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
@@ -3086,6 +3128,7 @@ async def _send_signal(sd):
             sd.get("symbol"),
         )
         _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
+        await _remember("WAIT", "existing pending thesis owns pair")
         return False
     _attach_learning_evidence(sd)
     if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
@@ -3121,6 +3164,7 @@ async def _send_signal(sd):
                     "candidate": {key: sd.get(key) for key in ("entry", "sl", "tp1", "tp2")},
                 }, db_path=DB_PATH,
             )
+            await _remember(decision, "; ".join(review.get("reasons", [])), review)
             return False
         if _run_id:
             await asyncio.to_thread(
@@ -3128,9 +3172,22 @@ async def _send_signal(sd):
                 "GROQ", "GROQ_APPROVE", "QUALITY_GATE",
                 {"confidence": review.get("confidence")}, DB_PATH,
             )
+        await _remember("APPROVE", "; ".join(review.get("reasons", [])), review)
+    else:
+        existing_review = sd.get("_external_quality_review")
+        if isinstance(existing_review, dict):
+            existing_decision = str(existing_review.get("decision") or "APPROVE").upper()
+            await _remember(
+                existing_decision,
+                "; ".join(existing_review.get("reasons", [])),
+                existing_review,
+            )
+        else:
+            await _remember("APPROVE", "quality gate unavailable; analytical candidate retained")
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
+        await _remember("APPROVE", "approved but Telegram ADMIN_IDS empty")
         return False
     now_ts = time.time()
     cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
@@ -3143,6 +3200,7 @@ async def _send_signal(sd):
             _cd.close()
             logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
             _record_strategy_decision(sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
+            await _remember("WAIT", "duplicate signal cooldown")
             return False
         _cd.close()
     except Exception as _cde:
@@ -3150,6 +3208,7 @@ async def _send_signal(sd):
         last_sent = _sent_signal_cache.get(cache_key, 0)
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
+            await _remember("WAIT", "duplicate signal cooldown cache")
             return False
         # Значение кладём в fallback-кэш только после подтверждённой отправки.
         pass
@@ -3186,6 +3245,7 @@ async def _send_signal(sd):
     if not delivered:
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
         _record_strategy_decision(sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
+        await _remember("APPROVE", "approved; Telegram delivery failed")
         return False
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
     if signal_id:
@@ -3207,6 +3267,7 @@ async def _send_signal(sd):
         logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
         _sent_signal_cache[cache_key] = now_ts
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
+    await _remember("APPROVE", "signal delivered", sd.get("_external_quality_review"))
     if _run_id:
         await asyncio.to_thread(
             _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -5344,6 +5405,19 @@ async def _start_market_intelligence_background():
         logging.warning("[MarketIntelligence] startup failed safely: %s", exc)
 
 
+async def shadow_experience_job():
+    """Hourly passive replay; historical candles make higher frequency unnecessary."""
+    async def refresh():
+        result = await asyncio.to_thread(_refresh_shadow_positions, get_candles, DB_PATH)
+        logging.info("[ExperienceMemory] shadow refresh: %s", result)
+    try:
+        await _run_market_scan_exclusive("experience_shadow", refresh, 60)
+    except asyncio.TimeoutError:
+        logging.warning("[ExperienceMemory] shadow refresh timed out safely")
+    except Exception as exc:
+        logging.warning("[ExperienceMemory] shadow refresh failed safely: %s", exc)
+
+
 def _schedule_market_scans(scheduler):
     """Stagger heavy scans in UTC so normal cycles do not contend for the lock.
 
@@ -5353,6 +5427,7 @@ def _schedule_market_scans(scheduler):
     """
     common = {"timezone": "UTC", "max_instances": 1, "coalesce": True}
     scheduler.add_job(auto_scan_1h, "cron", minute=2, id="market_mtf_1h", **common)
+    scheduler.add_job(shadow_experience_job, "cron", minute=58, id="experience_shadow", **common)
     scheduler.add_job(auto_fast_deal_scan, "cron", minute="8,28,48", id="market_fast", **common)
     scheduler.add_job(auto_zone_scan, "cron", minute="14,34,54", id="market_zone", **common)
     scheduler.add_job(auto_scan_swing, "cron", minute="20,50", id="market_swing", **common)
@@ -5381,6 +5456,7 @@ async def on_startup(app):
     await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
     init_db()                        # потом применяем миграции к восстановленной БД
     _ensure_control_schema(DB_PATH)
+    _ensure_experience_schema(DB_PATH)
     _rebuild_strategy_risk_states(DB_PATH)
     if _TRADE_EXECUTION_OK:
         try:
@@ -5703,6 +5779,7 @@ def main():
                 logging.warning(f"restore_db_from_github: {_re}")
             init_db()
             _ensure_control_schema(DB_PATH)
+            _ensure_experience_schema(DB_PATH)
             _rebuild_strategy_risk_states(DB_PATH)
             if _TRADE_EXECUTION_OK:
                 try:
