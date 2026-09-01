@@ -43,6 +43,8 @@ _binance_circuit_lock = threading.Lock()
 _binance_blocked_until = 0.0
 _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
+_account_cache_lock = threading.Lock()
+_DEFAULT_BALANCE_CACHE_TTL_SECONDS = 900
 _LIVE_RECONCILE_STATUSES = (
     "ENTRY_PENDING",
     "PROTECTED",
@@ -620,6 +622,16 @@ def ensure_execution_schema(db_path: str = DB_PATH) -> None:
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS execution_account_cache (
+        exchange TEXT PRIMARY KEY,
+        wallet_balance REAL,
+        available_balance REAL,
+        cross_unrealized_pnl REAL,
+        fetched_at_epoch REAL,
+        attempted_at_epoch REAL NOT NULL,
+        last_error TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     conn.close()
 
@@ -1182,10 +1194,129 @@ def _live_account_status(client: BinanceFuturesClient) -> dict[str, Any]:
     }
 
 
+def _read_balance_cache(db_path: str, now: float | None = None) -> dict[str, Any]:
+    """Read the last Binance balance snapshot without network access."""
+    current = time.time() if now is None else now
+    ensure_execution_schema(db_path)
+    conn = _connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """SELECT wallet_balance, available_balance, cross_unrealized_pnl,
+                  fetched_at_epoch, attempted_at_epoch, last_error
+           FROM execution_account_cache WHERE exchange='binance_futures'"""
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return {"available": False, "cached": True}
+    fetched_at = float(row["fetched_at_epoch"] or 0)
+    result = {
+        "available": fetched_at > 0,
+        "cached": True,
+        "fetched_at_epoch": fetched_at or None,
+        "attempted_at_epoch": float(row["attempted_at_epoch"] or 0),
+        "cache_age_seconds": max(0, int(current - fetched_at)) if fetched_at else None,
+    }
+    if fetched_at:
+        result.update({
+            "wallet_balance": float(row["wallet_balance"] or 0),
+            "available_balance": float(row["available_balance"] or 0),
+            "cross_unrealized_pnl": float(row["cross_unrealized_pnl"] or 0),
+        })
+    if row["last_error"]:
+        result["error"] = str(row["last_error"])
+    return result
+
+
+def _store_balance_attempt(
+    db_path: str,
+    *,
+    attempted_at: float,
+    balance: Mapping[str, Any] | None = None,
+    error: str = "",
+) -> None:
+    ensure_execution_schema(db_path)
+    conn = _connect(db_path)
+    if balance is not None:
+        conn.execute(
+            """INSERT INTO execution_account_cache
+               (exchange, wallet_balance, available_balance, cross_unrealized_pnl,
+                fetched_at_epoch, attempted_at_epoch, last_error, updated_at)
+               VALUES ('binance_futures', ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+               ON CONFLICT(exchange) DO UPDATE SET
+                   wallet_balance=excluded.wallet_balance,
+                   available_balance=excluded.available_balance,
+                   cross_unrealized_pnl=excluded.cross_unrealized_pnl,
+                   fetched_at_epoch=excluded.fetched_at_epoch,
+                   attempted_at_epoch=excluded.attempted_at_epoch,
+                   last_error=NULL,
+                   updated_at=CURRENT_TIMESTAMP""",
+            (
+                float(balance.get("wallet_balance", 0) or 0),
+                float(balance.get("available_balance", 0) or 0),
+                float(balance.get("cross_unrealized_pnl", 0) or 0),
+                attempted_at,
+                attempted_at,
+            ),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO execution_account_cache
+               (exchange, attempted_at_epoch, last_error, updated_at)
+               VALUES ('binance_futures', ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(exchange) DO UPDATE SET
+                   attempted_at_epoch=excluded.attempted_at_epoch,
+                   last_error=excluded.last_error,
+                   updated_at=CURRENT_TIMESTAMP""",
+            (attempted_at, str(error)[:300]),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _cached_live_balance_status(
+    db_path: str,
+    config: ExecutionConfig,
+    client: BinanceFuturesClient | None = None,
+    ttl_seconds: int = _DEFAULT_BALANCE_CACHE_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Refresh one persisted balance snapshot at most once per TTL.
+
+    This is an explicit Telegram diagnostic read, not a background market or
+    account poll. Failed attempts are throttled by the same persistent TTL.
+    """
+    ttl = max(300, min(int(ttl_seconds), 3600))
+    with _account_cache_lock:
+        now = time.time()
+        cached = _read_balance_cache(db_path, now)
+        attempted_at = float(cached.get("attempted_at_epoch", 0) or 0)
+        if attempted_at and now - attempted_at < ttl:
+            cached["stale"] = bool(
+                cached.get("fetched_at_epoch")
+                and now - float(cached["fetched_at_epoch"]) >= ttl
+            )
+            return cached
+        if _binance_circuit_remaining(now) > 0:
+            cached["stale"] = bool(cached.get("available"))
+            cached["error"] = "Binance circuit is temporarily open"
+            return cached
+        try:
+            balance_client = client or BinanceFuturesClient(config)
+            balance = balance_client.usdt_balance_details()
+            _store_balance_attempt(db_path, attempted_at=now, balance=balance)
+        except Exception as exc:
+            logging.warning("[AutoTrading] cached balance refresh unavailable: %s", exc)
+            _store_balance_attempt(db_path, attempted_at=now, error=str(exc))
+        refreshed = _read_balance_cache(db_path, now)
+        refreshed["stale"] = bool(refreshed.get("error") and refreshed.get("available"))
+        return refreshed
+
+
 def execution_status(
     db_path: str = DB_PATH,
     config: ExecutionConfig | None = None,
     client: BinanceFuturesClient | None = None,
+    refresh_balance: bool = False,
+    balance_cache_ttl_seconds: int = _DEFAULT_BALANCE_CACHE_TTL_SECONDS,
 ) -> dict[str, Any]:
     """Safe status summary for Telegram; never exposes credentials."""
     config = config or ExecutionConfig.from_env()
@@ -1217,11 +1348,19 @@ def execution_status(
     except Exception as exc:
         summary["error"] = str(exc)
     if config.live_armed:
-        if client is None:
+        if refresh_balance:
+            summary["account"] = _cached_live_balance_status(
+                db_path,
+                config,
+                client=client,
+                ttl_seconds=balance_cache_ttl_seconds,
+            )
+        elif client is None:
+            cached = _read_balance_cache(db_path)
             summary["account"] = {
-                "available": False,
+                **cached,
                 "deferred": True,
-                "reason": "Binance account is queried only for submitted or active live orders",
+                "reason": "Balance refresh is limited to an explicit cached Telegram diagnostic",
             }
         else:
             try:
