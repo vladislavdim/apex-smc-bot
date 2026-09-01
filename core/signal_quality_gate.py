@@ -17,6 +17,7 @@ from external_sources.storage import persist_context
 from news_context.aggregator import collect_news_context, format_news_context
 from news_context.storage import persist_news_context
 from core.htf_close_context import build_htf_close_context, format_htf_close_context
+from core.setup_evidence import assess_candidate, persist_assessment
 
 try:
     from .market_memory import build_memory_context, format_market_memory_context
@@ -217,6 +218,7 @@ async def review_signal_candidate(
     htf_close = await asyncio.to_thread(
         build_htf_close_context, str(view.get("symbol") or ""), strategy, candle_loader
     )
+    setup_assessment = assess_candidate(candidate, context)
     external_block = format_external_context(context, strategy)
     news_block = format_news_context(news)
     memory_block = format_market_memory_context(memory)
@@ -245,9 +247,15 @@ can never approve a candidate by itself. These rules MUST NOT alter any price le
 Weekly/monthly closed-candle context is background HTF evidence only. It may adjust
 confidence or be listed as a risk, but a conflicting weekly/monthly candle alone is
 NOT sufficient to WAIT or REJECT an otherwise valid candidate.
+The deterministic SETUP EVIDENCE assessment is authoritative about causal completeness.
+You may downgrade its class, but you MUST NOT promote INVALID or DEVELOPING to APPROVE.
+Correlated observations inside one domain are one body of evidence, not multiple votes.
 
 CANDIDATE:
 {json.dumps(view, ensure_ascii=False, default=str)}
+
+SETUP EVIDENCE (deterministic, read-only levels):
+{json.dumps(setup_assessment, ensure_ascii=False, default=str)}
 
 {external_block}
 
@@ -291,6 +299,14 @@ Return JSON only:
     if not review["degraded"] and review["decision"] == "APPROVE" and review["confidence"] < min_confidence:
         review["decision"] = "WAIT"
         review["risks"].append(f"Groq approval confidence below {min_confidence:.2f}")
+    matrix_ready = bool((candidate.get("technical_evidence") or {}).get("causal_matrix_ready"))
+    if matrix_ready and setup_assessment.get("state") == "INVALID":
+        review["decision"] = "REJECT"
+        review["reasons"].append("Deterministic setup evidence: INVALID")
+    elif matrix_ready and setup_assessment.get("state") == "DEVELOPING":
+        review["decision"] = "WAIT"
+        review["reasons"].append("Deterministic setup evidence: causal chain is still DEVELOPING")
+    review["setup_assessment"] = setup_assessment
     review["context"] = context
     review["news_context"] = news
     review["market_memory"] = memory
@@ -299,4 +315,6 @@ Return JSON only:
     await asyncio.to_thread(persist_context, context, strategy, True, review.get("decision"))
     await asyncio.to_thread(persist_news_context, news, strategy, review.get("decision"))
     await asyncio.to_thread(_persist_review, candidate, context, news, memory, zones, learning, review)
+    if matrix_ready:
+        await asyncio.to_thread(persist_assessment, candidate, setup_assessment, "FINAL", DB_PATH)
     return review

@@ -127,6 +127,58 @@ def format_experience_dashboard(data: dict[str, Any]) -> str:
     return "\n".join(lines)[:4000]
 
 
+def format_setup_evidence_dashboard(data: dict[str, Any]) -> str:
+    """Explain causal setup classes; intentionally contains no control buttons."""
+    lines = ["🧭 <b>Качество сетапов</b>", ""]
+    summary = data.get("summary", [])
+    if not summary:
+        lines.extend([
+            "Завершённых причинных оценок пока нет.",
+            "<i>Записи появятся после первого технического кандидата.</i>",
+        ])
+    else:
+        grouped: dict[str, dict[str, int]] = defaultdict(dict)
+        for row in summary:
+            grouped[str(row.get("strategy") or "—")][str(row.get("state") or "—")] = int(row.get("count") or 0)
+        lines.append(f"<b>За {int(data.get('hours') or 24)}ч</b>")
+        icons = {"INVALID": "⛔", "DEVELOPING": "🟡", "VALID": "🔵", "STRONG": "🟢", "EXCEPTIONAL": "💎"}
+        for strategy, states in grouped.items():
+            values = " ".join(f"{icons.get(state, '•')}{state} {count}" for state, count in states.items())
+            lines.append(f"• <b>{html.escape(strategy)}</b>: {html.escape(values)}")
+
+    recent = data.get("recent", [])
+    if recent:
+        lines.extend(["", "<b>Последние кандидаты</b>"])
+        icons = {"INVALID": "⛔", "DEVELOPING": "🟡", "VALID": "🔵", "STRONG": "🟢", "EXCEPTIONAL": "💎"}
+        for row in recent[:10]:
+            state = str(row.get("state") or "—")
+            direction = str(row.get("direction") or "").upper()
+            arrow = "LONG" if direction == "BULLISH" else "SHORT" if direction == "BEARISH" else direction
+            lines.append(
+                f"{icons.get(state, '•')} <code>{html.escape(str(row.get('symbol') or '—'))}</code> · "
+                f"{html.escape(str(row.get('strategy') or '—'))} {html.escape(arrow)} · <b>{html.escape(state)}</b>"
+            )
+            try:
+                assessment = json.loads(row.get("assessment_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                assessment = {}
+            dimensions = assessment.get("dimensions") if isinstance(assessment.get("dimensions"), dict) else {}
+            if dimensions:
+                lines.append(
+                    "   Основа {context_quality} · Триггер {trigger_quality} · "
+                    "Подтв. {confirmation_quality} · Вход {entry_quality} · Риск {conflict_risk}".format(
+                        **{key: html.escape(str(dimensions.get(key) or "—")) for key in (
+                            "context_quality", "trigger_quality", "confirmation_quality", "entry_quality", "conflict_risk"
+                        )}
+                    )
+                )
+            missing = assessment.get("missing") if isinstance(assessment.get("missing"), list) else []
+            if missing:
+                lines.append(f"   ждёт: {html.escape('; '.join(str(x) for x in missing[:2]))}")
+    lines.extend(["", "<i>Класс задаёт целостность цепочки, а не число индикаторов. Уровни сделки здесь не изменяются.</i>"])
+    return "\n".join(lines)[:4000]
+
+
 def fetch_watchlist(db_path: str, limit: int = 20) -> list[dict[str, Any]]:
     """Return only persisted candidates; never manufacture future trades."""
     conn = sqlite3.connect(db_path, timeout=20)

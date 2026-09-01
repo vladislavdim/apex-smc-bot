@@ -113,6 +113,12 @@ from core.trade_manager import (
     manager_cycle as _trade_manager_cycle,
 )
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
+from core.setup_evidence import (
+    assess_candidate as _assess_setup_candidate,
+    ensure_setup_evidence_schema as _ensure_setup_evidence_schema,
+    persist_assessment as _persist_setup_assessment,
+    setup_evidence_dashboard as _setup_evidence_dashboard,
+)
 from core.telegram_dashboard import (
     fetch_strategy_stats as _fetch_strategy_stats,
     fetch_system_health as _fetch_system_health,
@@ -123,6 +129,7 @@ from core.telegram_dashboard import (
     format_groq_rejections as _format_groq_rejections,
     format_scanner_dashboard as _format_scanner_dashboard,
     format_experience_dashboard as _format_experience_dashboard,
+    format_setup_evidence_dashboard as _format_setup_evidence_dashboard,
 )
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
@@ -221,6 +228,7 @@ def main_menu():
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
          InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")],
         [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],
+        [InlineKeyboardButton(text="🧭 Качество сетапов", callback_data="menu_setup_evidence")],
         [InlineKeyboardButton(text="🧠 Менеджер сделок", callback_data="menu_trade_manager")],
         [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]
     ])
@@ -991,6 +999,22 @@ async def handle_callback(callback: CallbackQuery):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_experience"),
+                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
+    elif data == "menu_setup_evidence":
+        try:
+            setup_data = await asyncio.to_thread(_setup_evidence_dashboard, DB_PATH, 24, 12)
+            text = _format_setup_evidence_dashboard(setup_data)
+        except Exception as exc:
+            logging.error("Telegram setup evidence dashboard: %s", exc)
+            text = "⚠️ Не удалось прочитать журнал качества сетапов."
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_setup_evidence"),
                  InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
             ]),
         )
@@ -3171,10 +3195,29 @@ async def _send_signal(sd):
         await _remember("WAIT", "existing pending thesis owns pair")
         return False
     _attach_learning_evidence(sd)
+    setup_assessment = _assess_setup_candidate(sd)
+    sd["setup_assessment"] = setup_assessment
+    await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "TECHNICAL", DB_PATH)
+    if setup_assessment.get("blocking"):
+        setup_state = str(setup_assessment.get("state") or "DEVELOPING")
+        decision = "REJECT" if setup_state == "INVALID" else "WAIT"
+        reason = str(setup_assessment.get("thesis") or f"setup evidence {setup_state}")
+        _record_strategy_decision(sd, decision, "setup_evidence", reason, evidence=setup_assessment, db_path=DB_PATH)
+        await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "FINAL", DB_PATH)
+        await _remember(decision, reason)
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "SETUP_EVIDENCE", decision, setup_state, setup_assessment, DB_PATH,
+            )
+        logging.info("[SetupEvidence] %s %s → %s: %s", sd.get("symbol"), _strategy, setup_state, reason)
+        return False
     if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
         review = await _review_signal_candidate(sd, ask_groq, get_candles)
         sd["_external_quality_reviewed"] = True
         sd["_external_quality_review"] = review
+        if isinstance(review.get("setup_assessment"), dict):
+            sd["setup_assessment"] = review["setup_assessment"]
         decision = review.get("decision", "APPROVE")
         min_confidence = float(risk_state.get("groq_min_confidence", 0.65) or 0.65)
         if decision == "APPROVE" and float(review.get("confidence", 0.0) or 0.0) < min_confidence:
@@ -3224,6 +3267,12 @@ async def _send_signal(sd):
             )
         else:
             await _remember("APPROVE", "quality gate unavailable; analytical candidate retained")
+    setup_state = str((sd.get("setup_assessment") or {}).get("state") or "")
+    if setup_state in {"VALID", "STRONG", "EXCEPTIONAL"} and sd.get("text"):
+        setup_line = f"\n🧭 Класс сетапа: <b>{setup_state}</b>"
+        disclaimer = "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
+        if setup_line not in sd["text"]:
+            sd["text"] = sd["text"].replace(disclaimer, setup_line + disclaimer) if disclaimer in sd["text"] else sd["text"] + setup_line
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
@@ -3767,9 +3816,10 @@ async def _auto_scan_swing_impl():
                 "scan_type": "swing",
                 "technical_evidence": {key: r.get(key) for key in (
                     "logic", "htf_dir", "htf_1w", "weekly_warning", "confirms",
-                    "funding_warning", "ob", "fvg"
+                    "funding_warning", "ob", "fvg", "structure_event", "structure_event_1h"
                 ) if r.get(key) is not None},
             }
+            sd["technical_evidence"]["causal_matrix_ready"] = True
 
             # Проверка актуальности цены входа
             if not await asyncio.to_thread(_is_entry_still_valid, sd, max_drift_pct=3.0):
@@ -3826,16 +3876,18 @@ def _zone_candidate_from_setup(r):
         "💡 Это аналитика, не совет. Торгуй осознанно"
     )
     tp2 = r.get("tp2") or r["tp"]
-    return {
+    candidate = {
         "symbol": symbol, "direction": direction,
         "timeframe": "4h", "entry": r["entry"],
         "sl": r["sl"], "tp1": r["tp"], "tp2": tp2, "tp3": tp2,
         "rr": r.get("rr"), "grade": "ZONE", "text": text,
         "confluence_score": int(r["rr"] * 20), "regime": "ZONE", "scan_type": "zone",
         "technical_evidence": {key: r.get(key) for key in (
-            "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning"
+            "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning", "structure_event"
         ) if r.get(key) is not None},
     }
+    candidate["technical_evidence"]["causal_matrix_ready"] = True
+    return candidate
 
 async def _auto_zone_scan_impl():
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
@@ -4144,9 +4196,13 @@ async def _auto_wyckoff_scan_impl():
                 "regime": "WYCKOFF",
                 "scan_type": "wyckoff",
                 "technical_evidence": {key: r.get(key) for key in (
-                    "logic", "phases", "spring", "sos", "drawdown_pct", "acc_range", "ob", "fvg"
+                    "logic", "phases", "spring", "sos", "utad", "sow", "drawdown_pct",
+                    "pump_pct", "acc_range", "dist_range", "ob", "fvg", "signals"
                 ) if r.get(key) is not None},
             }
+            if "RE-ACCUMULATION" in str(r.get("phases") or "").upper():
+                sd["technical_evidence"]["reacc_trigger_validated"] = True
+            sd["technical_evidence"]["causal_matrix_ready"] = True
 
             delivered = await _send_signal(sd)
             if delivered:
@@ -4298,9 +4354,11 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
                 "grade": "FAST", "scan_type": "fast",
                 "confluence_score": int(r["rr"] * 20), "regime": "FAST",
                 "technical_evidence": {key: r.get(key) for key in (
-                    "logic", "zone", "direction_1d", "funding_warning", "ob", "fvg"
+                    "logic", "zone", "direction_1d", "funding_warning", "ob", "fvg",
+                    "structure_event", "entry_drift_pct"
                 ) if r.get(key) is not None},
             }
+            _fast_sd["technical_evidence"]["causal_matrix_ready"] = True
             _fast_sd["text"] = text
             delivered = await _send_signal(_fast_sd)
             if delivered:
@@ -5004,6 +5062,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             "estimated_hours": est_hours,
             "scan_type": "mtf",
             "technical_evidence": {
+                "causal_matrix_ready": True,
                 "timeframe_alignment": {"15m": _dir_15m, "1h": _dir_1h, "4h": _dir_4h, "1d": _dir_1d},
                 "mtf_match": _tf_match,
                 "positive_confluence": _positive_confluence[:8],
@@ -5661,6 +5720,7 @@ async def on_startup(app):
     init_db()                        # потом применяем миграции к восстановленной БД
     _ensure_control_schema(DB_PATH)
     _ensure_experience_schema(DB_PATH)
+    _ensure_setup_evidence_schema(DB_PATH)
     _ensure_trade_manager_schema(DB_PATH)
     _register_pending_manager_signals(DB_PATH)
     _rebuild_strategy_risk_states(DB_PATH)
@@ -5987,6 +6047,7 @@ def main():
             init_db()
             _ensure_control_schema(DB_PATH)
             _ensure_experience_schema(DB_PATH)
+            _ensure_setup_evidence_schema(DB_PATH)
             _ensure_trade_manager_schema(DB_PATH)
             _register_pending_manager_signals(DB_PATH)
             _rebuild_strategy_risk_states(DB_PATH)
