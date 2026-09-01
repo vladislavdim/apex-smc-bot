@@ -62,6 +62,51 @@ def format_scanner_dashboard(data: dict[str, Any]) -> str:
     return "\n".join(lines)[:4000]
 
 
+def format_experience_dashboard(data: dict[str, Any]) -> str:
+    lines = ["🧠 <b>Experience / Shadow</b>", ""]
+    funnel = data.get("funnel", [])
+    if not funnel:
+        lines.extend(["Кандидатов пока нет.",
+                      "<i>Память начнёт наблюдение с первого технического сетапа.</i>"])
+    else:
+        lines.append("<b>Воронка по стратегиям</b>")
+        for row in funnel:
+            lines.append(
+                f"• <b>{html.escape(str(row.get('strategy') or '—'))}</b>: "
+                f"кандидаты {int(row.get('candidates') or 0)} · "
+                f"✅{int(row.get('approve') or 0)} ⏳{int(row.get('wait') or 0)} "
+                f"🚫{int(row.get('reject') or 0)} · shadow активны {int(row.get('active') or 0)} · "
+                f"TP/SL {int(row.get('wins') or 0)}/{int(row.get('losses') or 0)}"
+            )
+    active = data.get("active", [])
+    if active:
+        lines.extend(["", "<b>Виртуально активные</b>"])
+        for row in active[:8]:
+            icon = "🟢" if str(row.get("direction")).upper() == "BULLISH" else "🔴"
+            lines.append(
+                f"{icon} {html.escape(str(row.get('symbol') or '—'))} · "
+                f"{html.escape(str(row.get('strategy') or '—'))} · "
+                f"MFE {float(row.get('mfe_r') or 0):.2f}R / MAE {float(row.get('mae_r') or 0):.2f}R"
+            )
+    rules = data.get("rules", [])
+    if rules:
+        lines.extend(["", "<b>Автоматические гипотезы</b>"])
+        icons = {"OBSERVING": "👁", "PROBATION": "🧪", "ACTIVE": "✅",
+                 "ROLLED_BACK": "↩️", "EXPIRED": "⌛", "HYPOTHESIS": "💭"}
+        for row in rules[:10]:
+            state = str(row.get("state") or "HYPOTHESIS")
+            if state == "PROBATION":
+                progress = f"{int(row.get('probation_samples') or 0)}/20"
+            else:
+                progress = f"{int(row.get('samples') or 0)}/30"
+            lines.append(
+                f"{icons.get(state, '•')} {html.escape(str(row.get('strategy') or '—'))} "
+                f"{html.escape(str(row.get('regime') or 'UNKNOWN'))} · {state} · {progress}"
+            )
+    lines.extend(["", "<i>Shadow-наблюдение не открывает ордера и не меняет уровни сделок.</i>"])
+    return "\n".join(lines)[:4000]
+
+
 def fetch_watchlist(db_path: str, limit: int = 20) -> list[dict[str, Any]]:
     """Return only persisted candidates; never manufacture future trades."""
     conn = sqlite3.connect(db_path, timeout=20)
