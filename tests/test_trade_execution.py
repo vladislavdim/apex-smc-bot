@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from core.trade_execution import (
     LIVE_CONFIRMATION,
@@ -252,6 +253,55 @@ class TradeExecutionTests(unittest.TestCase):
         finally:
             trade_execution._reconcile_process_lock.release()
         self.assertEqual(result, [])
+
+    def test_idle_reconciliation_never_constructs_binance_client(self):
+        with patch.object(
+            trade_execution,
+            "BinanceFuturesClient",
+            side_effect=AssertionError("idle reconciliation touched Binance"),
+        ) as client_class:
+            result = reconcile_live_executions(
+                db_path=self.db_path,
+                config=live_config(),
+            )
+        self.assertEqual(result, [])
+        client_class.assert_not_called()
+
+    def test_telegram_status_defers_binance_account_probe(self):
+        with patch.object(
+            trade_execution,
+            "BinanceFuturesClient",
+            side_effect=AssertionError("status view touched Binance"),
+        ) as client_class:
+            status = execution_status(self.db_path, config=live_config())
+        self.assertTrue(status["account"]["deferred"])
+        self.assertEqual(status["live_reconcile_pending"], 0)
+        client_class.assert_not_called()
+
+    def test_protected_order_is_visible_but_not_polled_while_signal_is_open(self):
+        trade_execution.ensure_execution_schema(self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO trade_executions
+                   (signal_id, mode, symbol, direction, status)
+                   VALUES (501, 'live', 'BTCUSDT', 'BULLISH', 'PROTECTED')"""
+            )
+
+        with patch.object(
+            trade_execution,
+            "BinanceFuturesClient",
+            side_effect=AssertionError("protected order was polled without a state change"),
+        ) as client_class:
+            outcomes = reconcile_live_executions(
+                db_path=self.db_path,
+                config=live_config(),
+            )
+            status = execution_status(self.db_path, config=live_config())
+
+        self.assertEqual(outcomes, [])
+        self.assertEqual(status["live_active_count"], 1)
+        self.assertEqual(status["live_reconcile_pending"], 0)
+        client_class.assert_not_called()
 
     def test_environment_caps_leverage_and_risk(self):
         config = ExecutionConfig.from_env({

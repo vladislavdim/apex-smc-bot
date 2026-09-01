@@ -899,27 +899,6 @@ def extract_and_save_profile(user_id, user_name, message, ai_response):
         logging.error(f"Profile extract error: {e}")
         update_user_memory(user_id, name=user_name)
 
-# ===== BINANCE DATA =====
-
-BINANCE = "https://api.binance.com"
-BINANCE_F = "https://fapi.binance.com"
-BYBIT_URL = "https://api.bybit.com/v5/market/kline"
-BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
-
-# Все таймфреймы: от 1м до 1М
-BYBIT_INTERVALS = {
-    "1m": "1", "3m": "3", "5m": "5", "15m": "15",
-    "30m": "30", "1h": "60", "2h": "120", "4h": "240",
-    "1d": "D", "3d": "D", "1w": "W", "1M": "M"
-}
-
-# Binance API intervals (официальные строки)
-BINANCE_INTERVALS = {
-    "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m",
-    "30m": "30m", "1h": "1h", "2h": "2h", "4h": "4h",
-    "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M"
-}
-
 # Категории таймфреймов для разных типов сделок
 TF_CATEGORIES = {
     "scalp":  ["1m", "5m", "15m"],
@@ -939,44 +918,6 @@ TF_HOURS = {
     "1h": 12, "2h": 24, "4h": 48,
     "1d": 336, "3d": 360, "1w": 720, "1M": 2880
 }
-
-# ===== BINANCE API CLIENT (авторизованный) =====
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
-_binance_client = None
-
-def get_binance_client():
-    """Возвращает авторизованный Binance клиент (lazy init)"""
-    global _binance_client
-    if _binance_client:
-        return _binance_client
-    # python-binance заблокирован на Render (geo restriction) — используем только REST
-    return None
-
-
-def get_full_history_binance(symbol, interval, limit=1000):
-    """
-    Получаем ПОЛНУЮ историю с авторизованного Binance API.
-    Используется для старших ТФ (1d, 1w, 1M) и скальпа (1m, 5m).
-    """
-    client = get_binance_client()
-    if not client:
-        return []
-    try:
-        bi = BINANCE_INTERVALS.get(interval, interval)
-        klines = client.get_klines(symbol=symbol, interval=bi, limit=limit)
-        if not klines:
-            return []
-        candles = [{
-            "open": float(k[1]), "high": float(k[2]),
-            "low": float(k[3]), "close": float(k[4]),
-            "volume": float(k[5])
-        } for k in klines]
-        logging.info(f"Binance API: {symbol} {interval} — {len(candles)} свечей")
-        return candles
-    except Exception as e:
-        logging.warning(f"Binance API get_klines {symbol} {interval}: {e}")
-        return []
 
 # Динамический кэш топ-100 пар
 pairs_cache = []
@@ -1157,56 +1098,6 @@ def select_structural_targets(
     tp2 = levels[tp1_index + 1] if tp1_index + 1 < len(levels) else None
     return smart_round(tp1), smart_round(tp2) if tp2 is not None else None
 
-
-
-# ═══════════════════════════════════════════════════════════════
-# OPEN INTEREST + FUNDING RATE + LIQUIDATION DATA
-# ═══════════════════════════════════════════════════════════════
-
-def get_open_interest(symbol: str) -> dict:
-    """Open Interest с Binance Futures — накопление позиций крупных игроков"""
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/openInterest",
-            params={"symbol": symbol},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8
-        )
-        if r.status_code == 200:
-            data = r.json()
-            oi = float(data.get("openInterest", 0))
-            return {"oi": oi, "symbol": symbol, "ok": True}
-    except Exception as e:
-        logging.debug(f"OI {symbol}: {e}")
-    return {"oi": 0, "ok": False}
-
-
-def get_funding_rate(symbol: str) -> dict:
-    """Funding Rate с Binance Futures — перегрев рынка"""
-    try:
-        r = requests.get(
-            f"{BINANCE_F}/fapi/v1/premiumIndex",
-            params={"symbol": symbol},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8
-        )
-        if r.status_code == 200:
-            data = r.json()
-            fr = float(data.get("lastFundingRate", 0))
-            # Интерпретация
-            if fr > 0.001:
-                signal = "BEARISH"  # Лонги перегреты — скоро выбьют
-                desc = f"Funding +{fr*100:.3f}% — лонги перегреты"
-            elif fr < -0.001:
-                signal = "BULLISH"  # Шорты перегреты — скоро выбьют
-                desc = f"Funding {fr*100:.3f}% — шорты перегреты"
-            else:
-                signal = "NEUTRAL"
-                desc = f"Funding {fr*100:.3f}% — нейтрально"
-            return {"rate": fr, "signal": signal, "desc": desc, "ok": True}
-    except Exception as e:
-        logging.debug(f"Funding {symbol}: {e}")
-    return {"rate": 0, "signal": "NEUTRAL", "desc": "", "ok": False}
 
 
 def get_liquidation_ratio(symbol: str) -> dict:
@@ -6706,7 +6597,29 @@ async def night_brain_tasks():
 # ===== СИСТЕМА 4: УМНЫЙ ASK_AI С АВТО-РЕСЁРЧЕМ =====
 
 def get_price_realtime(symbol="BTCUSDT"):
-    """Получаем цену прямо сейчас из нескольких источников"""
+    """Get the current Gate USD-M price with a non-exchange fallback."""
+    try:
+        from external_sources.pair_registry import get_pair
+        contract = str(get_pair(symbol).get("gate_symbol") or symbol.replace("USDT", "_USDT"))
+        r = requests.get(
+            "https://api.gateio.ws/api/v4/futures/usdt/tickers",
+            params={"contract": contract},
+            headers={"User-Agent": "APEX-SMC/1.0"},
+            timeout=8
+        )
+        r.raise_for_status()
+        data = r.json()
+        row = data[0] if isinstance(data, list) and data else {}
+        price = float(row.get("last") or row.get("mark_price") or 0)
+        if price > 0:
+            return {
+                "price": price,
+                "change": round(float(row.get("change_percentage") or 0), 2),
+                "source": "Gate.io Futures",
+            }
+    except Exception:
+        pass
+
     cg_id = COINGECKO_IDS.get(symbol)
     try:
         if not cg_id:
@@ -6717,17 +6630,15 @@ def get_price_realtime(symbol="BTCUSDT"):
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=8
         )
+        r.raise_for_status()
         data = r.json()
         if cg_id in data:
-            return {"price": data[cg_id]["usd"], "change": round(data[cg_id].get("usd_24h_change", 0), 2), "source": "CoinGecko"}
-    except:
-        pass
-    try:
-        r = requests.get(f"{BINANCE}/api/v3/ticker/price", params={"symbol": symbol}, timeout=6)
-        data = r.json()
-        if "price" in data:
-            return {"price": float(data["price"]), "change": 0, "source": "Binance"}
-    except:
+            return {
+                "price": data[cg_id]["usd"],
+                "change": round(data[cg_id].get("usd_24h_change", 0), 2),
+                "source": "CoinGecko",
+            }
+    except Exception:
         pass
     return None
 

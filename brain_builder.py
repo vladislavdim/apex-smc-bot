@@ -210,6 +210,36 @@ def save_self_rule(category, rule, confidence=0.5, source="brain_builder"):
 # ДАННЫЕ ИЗ ИНТЕРНЕТА
 # ──────────────────────────────────────────────
 
+def _response_json(response, source):
+    """Decode an HTTP response with a useful provider-specific error."""
+    status = getattr(response, "status_code", "unknown")
+    try:
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"{source} HTTP {status}") from exc
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} returned non-JSON HTTP {status}") from exc
+    if payload is None:
+        raise ValueError(f"{source} returned empty JSON HTTP {status}")
+    return payload
+
+
+def _last_btc_dominance():
+    """Use the most recent persisted value when CoinGecko is unavailable."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                """SELECT btc_dominance FROM market_context
+                   WHERE btc_dominance IS NOT NULL AND btc_dominance > 0
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+        return round(float(row[0]), 2) if row else None
+    except Exception:
+        return None
+
+
 def fetch_btc_dominance():
     try:
         r = requests.get(
@@ -217,13 +247,18 @@ def fetch_btc_dominance():
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
-        data = r.json().get("data", {})
+        payload = _response_json(r, "CoinGecko global")
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
         dom = data.get("market_cap_percentage", {}).get("btc", 0)
         total_mcap = data.get("total_market_cap", {}).get("usd", 0)
-        return round(dom, 2), total_mcap
+        if not dom:
+            raise ValueError("CoinGecko global response has no BTC dominance")
+        return round(float(dom), 2), total_mcap
     except Exception as e:
-        logging.warning(f"BTC dominance: {e}")
-        return None, None
+        cached = _last_btc_dominance()
+        fallback = f"; using stored {cached}%" if cached is not None else "; no stored value"
+        logging.warning("[BrainBuilder] BTC dominance unavailable: %s%s", e, fallback)
+        return cached, None
 
 
 def fetch_fear_greed():
@@ -643,6 +678,20 @@ TOP_COINS = [
     "ADAUSDT", "DOTUSDT", "NEARUSDT", "INJUSDT", "SUIUSDT",
 ]
 
+
+def _parse_groq_json_array(result):
+    """Extract one complete JSON array without treating prose as valid rules."""
+    clean = str(result or "").replace("```json", "").replace("```", "").strip()
+    start = clean.find("[")
+    end = clean.rfind("]")
+    if start < 0 or end < start:
+        raise ValueError("Groq response does not contain a complete JSON array")
+    payload = json.loads(clean[start:end + 1])
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise ValueError("Groq coin rules must be an array of JSON objects")
+    return payload
+
+
 def learn_coin_rules(prices_snapshot=None):
     """Groq анализирует каждую монету и записывает правила торговли"""
     logging.info("🪙 Изучаю правила торговли по монетам...")
@@ -682,10 +731,7 @@ def learn_coin_rules(prices_snapshot=None):
     result = ask_groq(batch_prompt, max_tokens=1500)
     if result:
         try:
-            clean = result.replace("```json", "").replace("```", "").strip()
-            start = clean.find("[")
-            end = clean.rfind("]") + 1
-            coins_data = json.loads(clean[start:end])
+            coins_data = _parse_groq_json_array(result)
 
             for coin in coins_data:
                 symbol = coin.get("symbol", "")
@@ -717,8 +763,8 @@ def learn_coin_rules(prices_snapshot=None):
                     )
                 logging.info(f"  ✅ {symbol} правила записаны")
 
-        except Exception as e:
-            logging.error(f"Парсинг coin rules: {e}")
+        except (TypeError, ValueError) as e:
+            logging.warning("[BrainBuilder] coin rules skipped: %s", e)
             # Сохраняем как текст если JSON не распарсился
             save_knowledge("coin_trading_rules", result, "coin_rules")
 

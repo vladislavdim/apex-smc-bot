@@ -10,12 +10,15 @@ class DataPolicyTests(unittest.TestCase):
         self.assertFalse(provider_enabled("bybit", {}))
         self.assertFalse(provider_enabled("hyperliquid", {}))
 
-    def test_explicit_diagnostic_providers_are_opt_in(self):
+    def test_other_exchanges_cannot_be_enabled_as_market_data_providers(self):
         env = {"APEX_MARKET_DATA_PROVIDERS": "gate,binance,bybit,hyperliquid"}
         self.assertEqual(
             configured_market_data_providers(env),
-            ("gate", "binance", "bybit", "hyperliquid"),
+            ("gate",),
         )
+        self.assertFalse(provider_enabled("binance", env))
+        self.assertFalse(provider_enabled("bybit", env))
+        self.assertFalse(provider_enabled("hyperliquid", env))
 
 
 if __name__ == "__main__":

@@ -32,12 +32,6 @@ MOBULA_KEY = os.environ.get("MOBULA_API_KEY", "")
 COINALYZE_KEY = os.environ.get("COINALYZE_API_KEY", "")
 LUNARCRUSH_KEY = os.environ.get("LUNARCRUSH_API_KEY", "")
 
-BINANCE = "https://api.binance.com"
-BINANCE_F = "https://fapi.binance.com"
-BINANCE_INTERVALS = {
-    "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
-    "1h":"1h","2h":"2h","4h":"4h","1d":"1d","1w":"1w","1M":"1M"
-}
 CC_INTERVALS = {
     "1m":("histominute",1),"3m":("histominute",3),"5m":("histominute",5),
     "15m":("histominute",15),"30m":("histominute",30),"1h":("histohour",1),
@@ -269,7 +263,6 @@ def _get_best_sources(symbol: str, interval: str) -> list:
     """Rank only providers explicitly allowed by the market-data policy."""
     provider_sources = {
         "gate": ["gateio"],
-        "binance": ["binance_futures"],
         "bybit": ["bybit"],
         "hyperliquid": [],
     }
@@ -335,30 +328,6 @@ def _fetch_cryptocompare(symbol: str, interval: str, limit: int) -> list:
                 "volume": float(c.get("volumeto", 0))}
                for c in data if isinstance(c, dict) and c.get("close", 0) > 0]
     return candles[-limit:]
-
-def _fetch_binance_futures(symbol: str, interval: str, limit: int) -> list:
-    bi = BINANCE_INTERVALS.get(interval, interval)
-    r = requests.get(f"{BINANCE_F}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": bi, "limit": limit},
-        headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    data = r.json()
-    if not isinstance(data, list) or len(data) < 5:
-        raise ValueError(f"BF empty {symbol}")
-    return [{"open": float(c[1]), "high": float(c[2]),
-             "low": float(c[3]), "close": float(c[4]),
-             "volume": float(c[5])} for c in data]
-
-def _fetch_binance_spot(symbol: str, interval: str, limit: int) -> list:
-    bi = BINANCE_INTERVALS.get(interval, interval)
-    r = requests.get(f"{BINANCE}/api/v3/klines",
-        params={"symbol": symbol, "interval": bi, "limit": limit},
-        headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    data = r.json()
-    if not isinstance(data, list) or len(data) < 5:
-        raise ValueError(f"BS empty {symbol}")
-    return [{"open": float(c[1]), "high": float(c[2]),
-             "low": float(c[3]), "close": float(c[4]),
-             "volume": float(c[5])} for c in data]
 
 def _fetch_twelvedata(symbol: str, interval: str, limit: int) -> list:
     if not TWELVEDATA_KEY:
@@ -608,8 +577,6 @@ def _smart_fetch(symbol: str, interval: str, limit: int) -> list:
         "mexc": _fetch_mexc,
         "kraken": _fetch_kraken,
         "cryptocompare": _fetch_cryptocompare,
-        "binance_futures": _fetch_binance_futures,
-        "binance_spot": _fetch_binance_spot,
         "twelvedata": _fetch_twelvedata,
         "coingecko": _fetch_coingecko,
     }
