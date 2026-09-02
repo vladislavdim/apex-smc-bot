@@ -11,6 +11,7 @@ from core.setup_evidence import (
     ensure_setup_evidence_schema,
     persist_assessment,
     setup_evidence_dashboard,
+    bind_assessment_to_signal,
 )
 from core.signal_quality_gate import review_signal_candidate
 from core.telegram_dashboard import format_setup_evidence_dashboard
@@ -35,6 +36,22 @@ def mtf(direction="BULLISH"):
 
 
 class SetupEvidenceTests(unittest.TestCase):
+    def test_old_schema_migrates_signal_link_idempotently(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "old.db")
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    """CREATE TABLE setup_assessments (
+                       id INTEGER PRIMARY KEY,candidate_key TEXT,stage TEXT,symbol TEXT,strategy TEXT,
+                       direction TEXT,timeframe TEXT,state TEXT,thesis TEXT,assessment_json TEXT,
+                       created_at TEXT,updated_at TEXT,UNIQUE(candidate_key,stage))"""
+                )
+            ensure_setup_evidence_schema(path)
+            ensure_setup_evidence_schema(path)
+            with sqlite3.connect(path) as conn:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(setup_assessments)")}
+            self.assertIn("signal_id", columns)
+
     def test_long_and_short_use_mirrored_geometry(self):
         self.assertEqual(assess_candidate(mtf("BULLISH"))["state"], "STRONG")
         self.assertEqual(assess_candidate(mtf("BEARISH"))["state"], "STRONG")
@@ -115,8 +132,10 @@ class SetupEvidenceTests(unittest.TestCase):
             ensure_setup_evidence_schema(path)
             persist_assessment(candidate, assessment, "FINAL", path)
             persist_assessment(candidate, assessment, "FINAL", path)
+            bind_assessment_to_signal(candidate, 77, path)
             with sqlite3.connect(path) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM setup_assessments").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT signal_id FROM setup_assessments").fetchone()[0], 77)
             text = format_setup_evidence_dashboard(setup_evidence_dashboard(path))
         self.assertIn("STRONG", text)
         self.assertNotIn("Активировать", text)

@@ -317,6 +317,7 @@ def ensure_setup_evidence_schema(db_path: str) -> None:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS setup_assessments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id INTEGER,
             candidate_key TEXT NOT NULL,
             stage TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -333,6 +334,11 @@ def ensure_setup_evidence_schema(db_path: str) -> None:
         CREATE INDEX IF NOT EXISTS idx_setup_assessments_recent ON setup_assessments(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_setup_assessments_strategy_state ON setup_assessments(strategy,state,created_at DESC);
         """)
+        try:
+            conn.execute("ALTER TABLE setup_assessments ADD COLUMN signal_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_setup_assessments_signal ON setup_assessments(signal_id,stage)")
 
 
 def persist_assessment(candidate: dict[str, Any], assessment: dict[str, Any], stage: str, db_path: str) -> bool:
@@ -357,6 +363,18 @@ def persist_assessment(candidate: dict[str, Any], assessment: dict[str, Any], st
     except sqlite3.Error as exc:
         logging.warning("[SetupEvidence] persistence unavailable; assessment retained in memory: %s", exc)
         return False
+
+
+def bind_assessment_to_signal(candidate: dict[str, Any], signal_id: int, db_path: str) -> None:
+    """Attach immutable technical/final assessments to the delivered signal."""
+    if int(signal_id or 0) <= 0:
+        return
+    ensure_setup_evidence_schema(db_path)
+    with sqlite3.connect(db_path, timeout=20) as conn:
+        conn.execute(
+            "UPDATE setup_assessments SET signal_id=?,updated_at=? WHERE candidate_key=?",
+            (int(signal_id), datetime.now(timezone.utc).isoformat(), candidate_key(candidate)),
+        )
 
 
 def setup_evidence_dashboard(db_path: str, hours: int = 24, limit: int = 12) -> dict[str, Any]:

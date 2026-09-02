@@ -10,6 +10,9 @@ from core.experience_memory import (
     record_decision,
     refresh_shadow_positions,
     wilson_lower,
+    bind_candidate_to_signal,
+    record_management_review,
+    resolve_management_reviews,
 )
 from core.telegram_dashboard import format_experience_dashboard
 
@@ -34,6 +37,24 @@ def test_capture_is_idempotent_and_survives_restart(tmp_path):
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT COUNT(*) FROM experience_candidates").fetchone()[0] == 1
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_old_experience_schema_adds_signal_link_before_index(tmp_path):
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE experience_candidates (
+           id INTEGER PRIMARY KEY,status TEXT,detected_at TEXT,strategy TEXT,
+           regime TEXT,direction TEXT,outcome TEXT)"""
+    )
+    conn.commit(); conn.close()
+    ensure_experience_schema(path)
+    ensure_experience_schema(path)
+    conn = sqlite3.connect(path)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(experience_candidates)")}
+    indexes = {row[1] for row in conn.execute("PRAGMA index_list(experience_candidates)")}
+    assert "signal_id" in columns
+    assert "idx_experience_signal" in indexes
 
 
 def test_wait_and_reject_are_persisted_with_context(tmp_path):
@@ -153,3 +174,36 @@ def test_wilson_and_dashboard_have_no_control_buttons(tmp_path):
     assert "Experience / Shadow" in text
     assert "Активировать" not in text
     assert "Отклонить" not in text
+
+
+def test_management_decisions_are_linked_and_resolved_objectively(tmp_path):
+    path = str(tmp_path / "brain.db")
+    ensure_experience_schema(path)
+    item = candidate()
+    capture_candidate(item, path)
+    bind_candidate_to_signal(item, 1, path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE signals (id INTEGER PRIMARY KEY,result TEXT,direction TEXT,
+           entry REAL,sl REAL,tp1 REAL,tp2 REAL,tp3 REAL)"""
+    )
+    conn.execute("INSERT INTO signals VALUES (1,'pending','BULLISH',100,95,110,115,120)")
+    conn.commit(); conn.close()
+    state = {"signal_id": 1, "strategy": "MTF", "direction": "BULLISH", "current_r": .4}
+    facts = {"management_candle_id": "123"}
+    review = {"action": "LET_RUN", "reason": "continuation", "protect_level": None,
+              "management_target": None}
+    record_management_review(state, 102, ["BOS"], facts, review, path)
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE signals SET result='tp1' WHERE id=1")
+    conn.commit(); conn.close()
+    assert resolve_management_reviews(path) == 1
+    conn = sqlite3.connect(path)
+    row = conn.execute(
+        "SELECT status,effect,final_r FROM experience_management_reviews"
+    ).fetchone()
+    assert row[0:2] == ("RESOLVED", "HELPED")
+    assert row[2] == 2.0
+    text = format_experience_dashboard(experience_dashboard(path))
+    assert "LET_RUN" in text
+    assert "помогло" in text
