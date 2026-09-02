@@ -2,6 +2,8 @@
 bot.py — Telegram хендлеры, команды, scheduler, запуск APEX.
 Вся рыночная логика — в market.py
 """
+# APEX_STRATEGY_STATS_V1
+from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail
 import asyncio
 import logging
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
@@ -4543,6 +4545,7 @@ def scan_all_for_deals(limit=40):
     return found
 
 
+@_audit_strategy("MTF")
 def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
     """Возвращает dict с текстом и grade для фильтрации"""
     try:
@@ -4553,14 +4556,14 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                     "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result=\'pending\' LIMIT 1",
                     (symbol, timeframe)
                 ).fetchone()
-                if _row:
-                    return None  # уже есть открытая сделка по этой паре+ТФ — не дублируем
+                if _audit_test('MTF_FULL_SCAN_RAW_G4558', (_row), '_row', '_row', 4558):
+                    return _audit_fail('MTF_FULL_SCAN_RAW_R4559', '_row', locals(), '_row', 4559)  # уже есть открытая сделка по этой паре+ТФ — не дублируем
         except Exception as _e:
             pass
 
         mtf = multi_tf_analysis(symbol, ["15m", "1h", "4h", "1d"])  # основной анализ, 1d как контекст
-        if not mtf:
-            return None
+        if _audit_test('MTF_FULL_SCAN_RAW_G4564', (not mtf), 'not mtf', 'not mtf', 4564):
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4565', 'not mtf', locals(), 'not mtf', 4565)
 
         direction = mtf["direction"]
 
@@ -4568,27 +4571,27 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         # пытаемся сразу открыть ещё одну сделку в том же направлении.
         try:
             _skip_symbol, _skip_reason = should_skip_symbol(symbol, direction)
-            if _skip_symbol:
+            if _audit_test('MTF_FULL_SCAN_RAW_G4573', (_skip_symbol), 'пытаемся сразу открыть ещё одну сделку в том же направлении.', '_skip_symbol', 4573):
                 logging.info(f"[MTF] {symbol} {direction} — блок обучения: {_skip_reason}")
-                return None
+                return _audit_fail('MTF_FULL_SCAN_RAW_R4575', 'пытаемся сразу открыть ещё одну сделку в том же направлении.', locals(), '_skip_symbol', 4575)
         except Exception:
             pass
 
         # Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает
-        if symbol != "BTCUSDT":
+        if _audit_test('MTF_FULL_SCAN_RAW_G4580', (symbol != "BTCUSDT"), 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', 'symbol != "BTCUSDT"', 4580):
             try:
                 btc_mtf = multi_tf_analysis("BTCUSDT", ["1h", "4h"])
-                if btc_mtf:
+                if _audit_test('MTF_FULL_SCAN_RAW_G4583', (btc_mtf), 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', 'btc_mtf', 4583):
                     btc_dir = btc_mtf.get("direction")
-                    if direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",):
-                        return None  # не шортим альты когда BTC растёт на 1h
-                    if direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",):
-                        return None  # не лонгуем альты когда BTC падает на 1h
+                    if _audit_test('MTF_FULL_SCAN_RAW_G4585', (direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",)), 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', 'direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",)', 4585):
+                        return _audit_fail('MTF_FULL_SCAN_RAW_R4586', 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', locals(), 'direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",)', 4586)  # не шортим альты когда BTC растёт на 1h
+                    if _audit_test('MTF_FULL_SCAN_RAW_G4587', (direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",)), 'direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",)', 'direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",)', 4587):
+                        return _audit_fail('MTF_FULL_SCAN_RAW_R4588', 'direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",)', locals(), 'direction == "BULLISH" and btc_dir == "BEARISH" and timeframe in ("1h",)', 4588)  # не лонгуем альты когда BTC падает на 1h
             except Exception:
                 pass
         raw_candles = get_candles(symbol, timeframe, 101)
-        if len(raw_candles) < 21:
-            return None
+        if _audit_test('MTF_FULL_SCAN_RAW_G4592', (len(raw_candles) < 21), 'len(raw_candles) < 21', 'len(raw_candles) < 21', 4592):
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4593', 'len(raw_candles) < 21', locals(), 'len(raw_candles) < 21', 4593)
         live_price = raw_candles[-1]["close"]
         candles = get_confirmed_candles(raw_candles)
 
@@ -4605,22 +4608,22 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             _in_fvg = (_fvg_check and
                        abs(live_price - (_fvg_check["top"] + _fvg_check["bottom"]) / 2)
                        <= _atr_check * _vf_mtf)
-            if not _in_ob and not _in_fvg:
+            if _audit_test('MTF_FULL_SCAN_RAW_G4610', (not _in_ob and not _in_fvg), 'not _in_ob and not _in_fvg', 'not _in_ob and not _in_fvg', 4610):
                 logging.debug(f"[MTF] {symbol}: цена не у OB/FVG зоны — блок")
-                return None
+                return _audit_fail('MTF_FULL_SCAN_RAW_R4612', 'not _in_ob and not _in_fvg', locals(), 'not _in_ob and not _in_fvg', 4612)
         except Exception as _mtf_zone_error:
             logging.warning("[MTF] %s: обязательная проверка OB/FVG недоступна: %s", symbol, _mtf_zone_error)
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4615', 'detector returned None', locals(), '', 4615)
 
         # ── MUST 2: Тренд EMA50/EMA20 + структура HH/HL ──
         try:
             _ema_candles = get_confirmed_candles(get_candles(symbol, "4h", 61))
-            if _ema_candles and len(_ema_candles) >= 50:
+            if _audit_test('MTF_FULL_SCAN_RAW_G4620', (_ema_candles and len(_ema_candles) >= 50), 'MUST 2: Тренд EMA50/EMA20 + структура HH/HL', '_ema_candles and len(_ema_candles) >= 50', 4620):
                 _closes = [c["close"] for c in _ema_candles]
                 _ema50 = ema_value(_closes, 50)
                 _ema20 = ema_value(_closes, 20)
-                if _ema20 is None or _ema50 is None:
-                    return None
+                if _audit_test('MTF_FULL_SCAN_RAW_G4624', (_ema20 is None or _ema50 is None), '_ema20 is None or _ema50 is None', '_ema20 is None or _ema50 is None', 4624):
+                    return _audit_fail('MTF_FULL_SCAN_RAW_R4625', '_ema20 is None or _ema50 is None', locals(), '_ema20 is None or _ema50 is None', 4625)
                 _price_4h = _closes[-1]
                 _mtf_highs, _mtf_lows = find_swings(_ema_candles, lookback=5)
                 _hh_hl = (
@@ -4635,47 +4638,47 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 )
 
                 _mtf_adx_weak = _ap_mtf.get("adx_weak", False)
-                if direction == "BULLISH":
+                if _audit_test('MTF_FULL_SCAN_RAW_G4640', (direction == "BULLISH"), 'direction == "BULLISH"', 'direction == "BULLISH"', 4640):
                     if _mtf_adx_weak:
                         _trend_ok = _hh_hl or (_ema20 > _ema50)
                     else:
                         _trend_ok = (_price_4h > _ema50 and _ema20 > _ema50) or _hh_hl
-                    if not _trend_ok:
+                    if _audit_test('MTF_FULL_SCAN_RAW_G4645', (not _trend_ok), 'not _trend_ok', 'not _trend_ok', 4645):
                         logging.debug(f"[MTF] {symbol}: тренд не подтверждён для LONG — блок")
-                        return None
+                        return _audit_fail('MTF_FULL_SCAN_RAW_R4647', 'not _trend_ok', locals(), 'not _trend_ok', 4647)
                 else:
                     if _mtf_adx_weak:
                         _trend_ok = _ll_lh or (_ema20 < _ema50)
                     else:
                         _trend_ok = (_price_4h < _ema50 and _ema20 < _ema50) or _ll_lh
-                    if not _trend_ok:
+                    if _audit_test('MTF_FULL_SCAN_RAW_G4653', (not _trend_ok), 'not _trend_ok', 'not _trend_ok', 4653):
                         logging.debug(f"[MTF] {symbol}: тренд не подтверждён для SHORT — блок")
-                        return None
+                        return _audit_fail('MTF_FULL_SCAN_RAW_R4655', 'not _trend_ok', locals(), 'not _trend_ok', 4655)
             else:
-                return None
+                return _audit_fail('MTF_FULL_SCAN_RAW_R4657', '_ema_candles and len(_ema_candles) >= 50', locals(), '_ema_candles and len(_ema_candles) >= 50', 4657)
         except Exception as _mtf_trend_error:
             logging.warning("[MTF] %s: обязательная проверка тренда недоступна: %s", symbol, _mtf_trend_error)
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4660', 'detector returned None', locals(), '', 4660)
 
         # ── Premium/Discount зона — реальный расчёт ──
         try:
             _pd_raw = get_candles(symbol, "4h", 51)
             _pd_candles = get_confirmed_candles(_pd_raw)
-            if _pd_candles and len(_pd_candles) >= 20:
+            if _audit_test('MTF_FULL_SCAN_RAW_G4666', (_pd_candles and len(_pd_candles) >= 20), 'Premium/Discount зона — реальный расчёт', '_pd_candles and len(_pd_candles) >= 20', 4666):
                 _pd_high = max(c["high"] for c in _pd_candles[-20:])
                 _pd_low = min(c["low"] for c in _pd_candles[-20:])
                 _pd_mid = (_pd_high + _pd_low) / 2
                 _pd_price = _pd_raw[-1]["close"]
 
-                if direction == "BULLISH" and _pd_price > _pd_mid:
+                if _audit_test('MTF_FULL_SCAN_RAW_G4672', (direction == "BULLISH" and _pd_price > _pd_mid), 'direction == "BULLISH" and _pd_price > _pd_mid', 'direction == "BULLISH" and _pd_price > _pd_mid', 4672):
                     logging.debug(f"[MTF] {symbol}: цена в Premium зоне — LONG заблокирован")
-                    return None
-                elif direction == "BEARISH" and _pd_price < _pd_mid:
+                    return _audit_fail('MTF_FULL_SCAN_RAW_R4674', 'direction == "BULLISH" and _pd_price > _pd_mid', locals(), 'direction == "BULLISH" and _pd_price > _pd_mid', 4674)
+                elif _audit_test('MTF_FULL_SCAN_RAW_G4675', (direction == "BEARISH" and _pd_price < _pd_mid), 'direction == "BEARISH" and _pd_price < _pd_mid', 'direction == "BEARISH" and _pd_price < _pd_mid', 4675):
                     logging.debug(f"[MTF] {symbol}: цена в Discount зоне — SHORT заблокирован")
-                    return None
+                    return _audit_fail('MTF_FULL_SCAN_RAW_R4677', 'direction == "BEARISH" and _pd_price < _pd_mid', locals(), 'direction == "BEARISH" and _pd_price < _pd_mid', 4677)
         except Exception as _mtf_pd_error:
             logging.warning("[MTF] %s: обязательная Premium/Discount проверка недоступна: %s", symbol, _mtf_pd_error)
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4680', 'detector returned None', locals(), '', 4680)
 
         price = live_price
         ob = find_ob(candles, direction)
@@ -4762,9 +4765,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         # сетапов нужны реальные положительные confluence.
         _positive_confluence = [c for c in confluence if c.lstrip().startswith(("✅", "🎯", "🔥", "🚀"))]
         min_conf = {"1h": 3, "4h": 4, "1d": 4, "1w": 3}
-        if len(_positive_confluence) < min_conf.get(timeframe, 4):
+        if _audit_test('MTF_FULL_SCAN_RAW_G4767', (len(_positive_confluence) < min_conf.get(timeframe, 4)), 'сетапов нужны реальные положительные confluence.', 'len(_positive_confluence) < min_conf.get(timeframe, 4)', 4767):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (positive confluence {len(_positive_confluence)} < {min_conf.get(timeframe,4)})")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4769', 'сетапов нужны реальные положительные confluence.', locals(), 'len(_positive_confluence) < min_conf.get(timeframe, 4)', 4769)
 
         # ══════════════════════════════════════
         # 🔴 ОСНОВА — 1h+4h direction, 15m closed-bar structure trigger
@@ -4780,31 +4783,31 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         # 15m confirms that the pullback has ended.  Requiring 15m to remain
         # trend-aligned throughout the pullback rejects the very entries the
         # lower timeframe is supposed to time.
-        if _core_tf_match < 2:
+        if _audit_test('MTF_FULL_SCAN_RAW_G4785', (_core_tf_match < 2), 'lower timeframe is supposed to time.', '_core_tf_match < 2', 4785):
             logging.debug(f"[MTF] {symbol}: 1h/4h не совпадают — пропускаем")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4787', 'lower timeframe is supposed to time.', locals(), '_core_tf_match < 2', 4787)
 
         # Для редких сделок дневной тренд должен подтверждать направление.
         _htf_1d_agrees = _dir_1d == direction
-        if _dir_1d and not _htf_1d_agrees:
+        if _audit_test('MTF_FULL_SCAN_RAW_G4791', (_dir_1d and not _htf_1d_agrees), 'Для редких сделок дневной тренд должен подтверждать направление.', '_dir_1d and not _htf_1d_agrees', 4791):
             logging.debug(f"[MTF] {symbol}: 1d против направления — блок")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4793', 'Для редких сделок дневной тренд должен подтверждать направление.', locals(), '_dir_1d and not _htf_1d_agrees', 4793)
 
         _weak_mtf_warn = ""  # 1h/4h mandatory; 15m is the closed-bar trigger.
 
         # Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)
-        if timeframe not in ("1h", "4h"):
-            return None
+        if _audit_test('MTF_FULL_SCAN_RAW_G4798', (timeframe not in ("1h", "4h")), 'Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)', 'timeframe not in ("1h", "4h")', 4798):
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4799', 'Только 1h и 4h — 1d/1w не торгуем (используем только для контекста)', locals(), 'timeframe not in ("1h", "4h")', 4799)
 
         # Расчёт уровней по реальной рыночной структуре (SMC)
         levels = calc_smart_levels(candles, direction, price, timeframe)
-        if not levels:
-            return None
+        if _audit_test('MTF_FULL_SCAN_RAW_G4803', (not levels), 'Расчёт уровней по реальной рыночной структуре (SMC)', 'not levels', 4803):
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4804', 'Расчёт уровней по реальной рыночной структуре (SMC)', locals(), 'not levels', 4804)
         entry = levels["entry"]
         _ob_mitigated = levels.get("mitigated", False)
-        if _ob_mitigated:
+        if _audit_test('MTF_FULL_SCAN_RAW_G4807', (_ob_mitigated), '_ob_mitigated', '_ob_mitigated', 4807):
             logging.info(f"[MTF] {symbol} {direction} — OB mitigated, пропускаем")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4809', '_ob_mitigated', locals(), '_ob_mitigated', 4809)
         entry = levels["entry"]
         sl    = levels["sl"]
         tp1   = levels["tp1"]
@@ -4812,16 +4815,16 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         tp3   = levels["tp3"]
         # RR — контекст для Groq
         _rr_val = levels.get("rr", 0)
-        if not 2.0 <= _rr_val <= 4.0:
+        if _audit_test('MTF_FULL_SCAN_RAW_G4817', (not 2.0 <= _rr_val <= 4.0), 'RR — контекст для Groq', 'not 2.0 <= _rr_val <= 4.0', 4817):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} вне диапазона 2.0–4.0 — пропускаем")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4819', 'RR — контекст для Groq', locals(), 'not 2.0 <= _rr_val <= 4.0', 4819)
 
         # OTE/структурный entry обязан быть рядом с текущей ценой. Не
         # отправляем отложенный сетап как будто это вход прямо сейчас.
         _atr_entry = sum(c["high"] - c["low"] for c in candles[-14:]) / min(14, len(candles))
-        if abs(price - entry) > _atr_entry * 0.75:
+        if _audit_test('MTF_FULL_SCAN_RAW_G4824', (abs(price - entry) > _atr_entry * 0.75), 'отправляем отложенный сетап как будто это вход прямо сейчас.', 'abs(price - entry) > _atr_entry * 0.75', 4824):
             logging.debug(f"[MTF] {symbol}: entry слишком далеко от текущей цены")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4826', 'отправляем отложенный сетап как будто это вход прямо сейчас.', locals(), 'abs(price - entry) > _atr_entry * 0.75', 4826)
 
         # VWAP — контекст для Groq
         vwap_warning = any("перекуплен" in c or "перепродан" in c for c in confluence)
@@ -4950,7 +4953,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 f"{_self_rules}"
             )
             groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
-            if groq_response and len(groq_response) > 5:
+            if _audit_test('MTF_FULL_SCAN_RAW_G4955', (groq_response and len(groq_response) > 5), 'groq_response and len(groq_response) > 5', 'groq_response and len(groq_response) > 5', 4955):
                 try:
                     import json as _json, re as _re
                     clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
@@ -4959,9 +4962,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                         clean = json_match.group()
                     parsed = _json.loads(clean)
                     # Groq как фильтр — если valid=false, блокируем
-                    if not parsed.get("valid", True):
+                    if _audit_test('MTF_FULL_SCAN_RAW_G4964', (not parsed.get("valid", True)), 'Groq как фильтр — если valid=false, блокируем', 'not parsed.get("valid", True)', 4964):
                         logging.info(f"[MTF Groq] {symbol} {direction}: Groq отклонил сигнал")
-                        return None
+                        return _audit_fail('MTF_FULL_SCAN_RAW_R4966', 'Groq как фильтр — если valid=false, блокируем', locals(), 'not parsed.get("valid", True)', 4966)
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
                         raw_logic = str(parsed["logic"]).strip()
                         # Убираем JSON артефакты если Groq вернул сырой JSON
@@ -5048,9 +5051,9 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 "required_timeframe": "15m",
                 "reason": "ожидается закрытый 15m BOS/CHoCH",
             }
-        if _mtf_score < 2 or not _mtf_score_bos:
+        if _audit_test('MTF_FULL_SCAN_RAW_G5053', (_mtf_score < 2 or not _mtf_score_bos), '_mtf_score < 2 or not _mtf_score_bos', '_mtf_score < 2 or not _mtf_score_bos', 5053):
             logging.debug(f"[MTF] {symbol}: score {_mtf_score}/4 — пропускаем")
-            return None
+            return _audit_fail('MTF_FULL_SCAN_RAW_R5055', '_mtf_score < 2 or not _mtf_score_bos', locals(), '_mtf_score < 2 or not _mtf_score_bos', 5055)
 
         _signal_strength = "🔥 Сильный" if _mtf_score >= 3 else "✅ Норм" if _mtf_score >= 2 else "⚡ Базовый"
 
@@ -5113,7 +5116,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
 
     except Exception as e:
         logging.error(f"full_scan_raw error {symbol}: {e}")
-        return None
+        return _audit_fail('MTF_FULL_SCAN_RAW_R5118', 'detector returned None', locals(), '', 5118)
 
 
 # Conversational and button-triggered scans must use this same canonical MTF

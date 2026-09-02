@@ -1,3 +1,5 @@
+# APEX_STRATEGY_STATS_V1
+from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail
 import asyncio
 import logging
 import os
@@ -7109,6 +7111,7 @@ def detect_bos_choch(candles: list, direction: str, lookback: int = 15) -> bool:
     return get_bos_choch_event(candles, direction, lookback=lookback) is not None
 
 
+@_audit_strategy("SWING")
 def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     """
     Ловит swing сетапы: sweep экстремума → CHoCH → вход.
@@ -7118,8 +7121,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     try:
         raw_candles = get_candles(symbol, timeframe, 101)
         candles = get_confirmed_candles(raw_candles)
-        if not candles or len(candles) < 20:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7123', (not candles or len(candles) < 20), 'not candles or len(candles) < 20', 'not candles or len(candles) < 20', 7123):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7124', 'not candles or len(candles) < 20', locals(), 'not candles or len(candles) < 20', 7124)
 
         live_price = raw_candles[-1]["close"]
 
@@ -7137,8 +7140,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # ── Swing highs/lows (lookback=12) ──
         swing_highs, swing_lows = find_swings(candles, lookback=12)
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7142', (len(swing_highs) < 2 or len(swing_lows) < 2), 'Swing highs/lows (lookback=12)', 'len(swing_highs) < 2 or len(swing_lows) < 2', 7142):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7143', 'Swing highs/lows (lookback=12)', locals(), 'len(swing_highs) < 2 or len(swing_lows) < 2', 7143)
 
         # Берём последние 3 свинга
         recent_highs = sorted(swing_highs[-3:], key=lambda x: x[0])
@@ -7241,7 +7244,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 pass
 
         # ── ВАРИАНТ 2: Реакция от OB/FVG без sweep ──
-        if not direction:
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7246', (not direction), 'ВАРИАНТ 2: Реакция от OB/FVG без sweep', 'not direction', 7246):
             try:
                 _ob_sw = find_ob(candles, "BULLISH")
                 _fvg_sw = find_fvg(candles, "BULLISH")
@@ -7282,12 +7285,12 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         trigger_lookback = 1
 
                 # Variant 2: минимум RR 2.0
-                if direction and entry and sl and tp:
+                if _audit_test('SWING_DETECT_SWING_SETUP_G7287', (direction and entry and sl and tp), 'Variant 2: минимум RR 2.0', 'direction and entry and sl and tp', 7287):
                     _v2_risk = abs(entry - sl)
                     _v2_reward = abs(tp - entry)
-                    if _v2_risk > 0 and _v2_reward / _v2_risk < 2.0:
+                    if _audit_test('SWING_DETECT_SWING_SETUP_G7290', (_v2_risk > 0 and _v2_reward / _v2_risk < 2.0), 'Variant 2: минимум RR 2.0', '_v2_risk > 0 and _v2_reward / _v2_risk < 2.0', 7290):
                         logging.info(f"[SWING V2] {symbol}: RR {_v2_reward/_v2_risk:.2f} < 2.0 — пропуск")
-                        return None
+                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7292', 'Variant 2: минимум RR 2.0', locals(), '_v2_risk > 0 and _v2_reward / _v2_risk < 2.0', 7292)
             except Exception:
                 pass
 
@@ -7331,23 +7334,23 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             except Exception:
                 pass
 
-        if not direction:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7336', (not direction), 'not direction', 'not direction', 7336):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7337', 'not direction', locals(), 'not direction', 7337)
 
         try:
             _skip_symbol, _skip_reason = _learn_should_skip(symbol, direction)
-            if _skip_symbol:
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7341', (_skip_symbol), '_skip_symbol', '_skip_symbol', 7341):
                 logging.info(f"[SWING] {symbol}: {_skip_reason}")
-                return None
+                return _audit_fail('SWING_DETECT_SWING_SETUP_R7343', '_skip_symbol', locals(), '_skip_symbol', 7343)
         except Exception:
             pass
 
         # ── BTC фильтр для SWING ──
-        if symbol != "BTCUSDT":
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7348', (symbol != "BTCUSDT"), 'BTC фильтр для SWING', 'symbol != "BTCUSDT"', 7348):
             btc_ok, btc_reason = btc_allows_signal(direction)
-            if not btc_ok:
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7350', (not btc_ok), 'BTC фильтр для SWING', 'not btc_ok', 7350):
                 logging.info(f"[SWING BTC Filter] {symbol} {direction} пропущен: {btc_reason}")
-                return None
+                return _audit_fail('SWING_DETECT_SWING_SETUP_R7352', 'BTC фильтр для SWING', locals(), 'not btc_ok', 7352)
 
         # ── Фильтр объёма на sweep свече (адаптивный: 1.5x active / 1.2x off-hours) ──
         try:
@@ -7357,37 +7360,37 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = trigger_candle or candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if avg_vol > 0 and sweep_vol < avg_vol * _vol_mult:
-                return None
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7362', (avg_vol > 0 and sweep_vol < avg_vol * _vol_mult), 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', 7362):
+                return _audit_fail('SWING_DETECT_SWING_SETUP_R7363', 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', locals(), 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', 7363)
         except Exception as _swing_volume_error:
             logging.debug("[SWING] %s: volume validation failed: %s", symbol, _swing_volume_error)
-            return None
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7366', 'detector returned None', locals(), '', 7366)
 
         # ── Displacement candle — свеча после sweep должна быть импульсной ──
         # Адаптивный порог: если ATR < median → 50%, иначе 60%
         try:
-            if trigger_lookback >= 2:
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7371', (trigger_lookback >= 2), 'Адаптивный порог: если ATR < median → 50%, иначе 60%', 'trigger_lookback >= 2', 7371):
                 _disp_candle = candles[-trigger_lookback + 1]
                 _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
                 _disp_range = _disp_candle["high"] - _disp_candle["low"]
-                if _disp_range > 0:
+                if _audit_test('SWING_DETECT_SWING_SETUP_G7375', (_disp_range > 0), 'Адаптивный порог: если ATR < median → 50%, иначе 60%', '_disp_range > 0', 7375):
                     _disp_ratio = _disp_body / _disp_range
-                    if _disp_ratio < 0.50:
-                        return None
+                    if _audit_test('SWING_DETECT_SWING_SETUP_G7377', (_disp_ratio < 0.50), '_disp_ratio < 0.50', '_disp_ratio < 0.50', 7377):
+                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7378', '_disp_ratio < 0.50', locals(), '_disp_ratio < 0.50', 7378)
                     # Проверяем направление displacement
-                    if direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]:
-                        return None
-                    if direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]:
-                        return None
+                    if _audit_test('SWING_DETECT_SWING_SETUP_G7380', (direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]), 'Проверяем направление displacement', 'direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]', 7380):
+                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7381', 'Проверяем направление displacement', locals(), 'direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]', 7381)
+                    if _audit_test('SWING_DETECT_SWING_SETUP_G7382', (direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]), 'Проверяем направление displacement', 'direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]', 7382):
+                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7383', 'Проверяем направление displacement', locals(), 'direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]', 7383)
             else:
                 _disp_candle = trigger_candle or candles[-1]
                 _disp_range = _disp_candle["high"] - _disp_candle["low"]
                 _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
-                if _disp_range <= 0 or _disp_body / _disp_range < 0.50:
-                    return None
+                if _audit_test('SWING_DETECT_SWING_SETUP_G7388', (_disp_range <= 0 or _disp_body / _disp_range < 0.50), '_disp_range <= 0 or _disp_body / _disp_range < 0.50', '_disp_range <= 0 or _disp_body / _disp_range < 0.50', 7388):
+                    return _audit_fail('SWING_DETECT_SWING_SETUP_R7389', '_disp_range <= 0 or _disp_body / _disp_range < 0.50', locals(), '_disp_range <= 0 or _disp_body / _disp_range < 0.50', 7389)
         except Exception as _swing_displacement_error:
             logging.debug("[SWING] %s: displacement validation failed: %s", symbol, _swing_displacement_error)
-            return None
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7392', 'detector returned None', locals(), '', 7392)
 
         # ── BOS/CHoCH after the sweep, confirmed by candle close ──
         # The canonical engine distinguishes continuation (BOS) from a real
@@ -7398,16 +7401,16 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             lookback=30,
             max_break_age=max(1, trigger_lookback),
         )
-        if not _swing_structure_event:
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7403', (not _swing_structure_event), 'not _swing_structure_event', 'not _swing_structure_event', 7403):
             logging.info(f"[SWING] {symbol}: нет подтверждённого BOS/CHoCH после триггера")
-            return None
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7405', 'not _swing_structure_event', locals(), 'not _swing_structure_event', 7405)
 
         # ── Reaction speed: sweep recovery within 1-2 candles ──
         try:
             if trigger_lookback <= 2:
                 pass  # Быстрая реакция — ОК
-            elif trigger_lookback > 6:
-                return None  # Слишком долгое восстановление после sweep
+            elif _audit_test('SWING_DETECT_SWING_SETUP_G7411', (trigger_lookback > 6), 'Reaction speed: sweep recovery within 1-2 candles', 'trigger_lookback > 6', 7411):
+                return _audit_fail('SWING_DETECT_SWING_SETUP_R7412', 'Reaction speed: sweep recovery within 1-2 candles', locals(), 'trigger_lookback > 6', 7412)  # Слишком долгое восстановление после sweep
         except Exception:
             pass
 
@@ -7485,51 +7488,51 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # Если sweep был давно — цена могла уйти далеко от входа
         current_price = live_price
-        if abs(current_price - entry) > atr * 4:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7490', (abs(current_price - entry) > atr * 4), 'Если sweep был давно — цена могла уйти далеко от входа', 'abs(current_price - entry) > atr * 4', 7490):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7491', 'Если sweep был давно — цена могла уйти далеко от входа', locals(), 'abs(current_price - entry) > atr * 4', 7491)
 
         # ── Проверка противоположного OB между entry и TP ──
         _adj_tp = check_opposing_ob(candles, direction, entry, tp)
-        if _adj_tp is None:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7495', (_adj_tp is None), 'Проверка противоположного OB между entry и TP', '_adj_tp is None', 7495):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7496', 'Проверка противоположного OB между entry и TP', locals(), '_adj_tp is None', 7496)
         tp = _adj_tp
 
         # A structural stop is immutable.  If it is too wide, reject the
         # candidate instead of pulling SL inside market noise.
         _sl_max_pct = 0.04
-        if abs(entry - sl) / max(abs(entry), 1e-12) > _sl_max_pct:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7502', (abs(entry - sl) / max(abs(entry), 1e-12) > _sl_max_pct), 'candidate instead of pulling SL inside market noise.', 'abs(entry - sl) / max(abs(entry), 1e-12) > _sl_max_pct', 7502):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7503', 'candidate instead of pulling SL inside market noise.', locals(), 'abs(entry - sl) / max(abs(entry), 1e-12) > _sl_max_pct', 7503)
 
         # ── Фильтр RR ──
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
-        if risk == 0:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7508', (risk == 0), 'Фильтр RR', 'risk == 0', 7508):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7509', 'Фильтр RR', locals(), 'risk == 0', 7509)
         rr_check = reward / risk
-        if rr_check < 2.0 or rr_check > 4.0:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7511', (rr_check < 2.0 or rr_check > 4.0), 'rr_check < 2.0 or rr_check > 4.0', 'rr_check < 2.0 or rr_check > 4.0', 7511):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7512', 'rr_check < 2.0 or rr_check > 4.0', locals(), 'rr_check < 2.0 or rr_check > 4.0', 7512)
 
         # ── Фильтр — цель должна быть реальной ──
-        if direction == "BULLISH" and tp <= entry:
-            return None
-        if direction == "BEARISH" and tp >= entry:
-            return None
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7515', (direction == "BULLISH" and tp <= entry), 'Фильтр — цель должна быть реальной', 'direction == "BULLISH" and tp <= entry', 7515):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7516', 'Фильтр — цель должна быть реальной', locals(), 'direction == "BULLISH" and tp <= entry', 7516)
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7517', (direction == "BEARISH" and tp >= entry), 'Фильтр — цель должна быть реальной', 'direction == "BEARISH" and tp >= entry', 7517):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7518', 'Фильтр — цель должна быть реальной', locals(), 'direction == "BEARISH" and tp >= entry', 7518)
 
         # ── HTF: блок только если ОБА (4h И 1d) против ──
         htf_4h_sw = smc_on_tf(symbol, "4h")
         htf_1d_sw = smc_on_tf(symbol, "1d")
         htf_dir = htf_1d_sw  # для совместимости ниже
 
-        if direction == "BULLISH":
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7525', (direction == "BULLISH"), 'HTF: блок только если ОБА (4h И 1d) против', 'direction == "BULLISH"', 7525):
             _4h_against = htf_4h_sw and "BEARISH" in str(htf_4h_sw).upper()
             _1d_against = htf_1d_sw and "BEARISH" in str(htf_1d_sw).upper()
-            if _4h_against and _1d_against:
-                return None  # оба HTF против — блок
-        elif direction == "BEARISH":
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7528', (_4h_against and _1d_against), '_4h_against and _1d_against', '_4h_against and _1d_against', 7528):
+                return _audit_fail('SWING_DETECT_SWING_SETUP_R7529', '_4h_against and _1d_against', locals(), '_4h_against and _1d_against', 7529)  # оба HTF против — блок
+        elif _audit_test('SWING_DETECT_SWING_SETUP_G7530', (direction == "BEARISH"), 'direction == "BEARISH"', 'direction == "BEARISH"', 7530):
             _4h_against = htf_4h_sw and "BULLISH" in str(htf_4h_sw).upper()
             _1d_against = htf_1d_sw and "BULLISH" in str(htf_1d_sw).upper()
-            if _4h_against and _1d_against:
-                return None  # оба HTF против — блок
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7533', (_4h_against and _1d_against), '_4h_against and _1d_against', '_4h_against and _1d_against', 7533):
+                return _audit_fail('SWING_DETECT_SWING_SETUP_R7534', '_4h_against and _1d_against', locals(), '_4h_against and _1d_against', 7534)  # оба HTF против — блок
 
         # 1w — дополнительное подтверждение (бонус/штраф, НЕ hard block)
         htf_1w_swing = smc_on_tf(symbol, "1w")
@@ -7578,9 +7581,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         _sw_hour = _dt_sw.utcnow().hour
         _is_dead_hours = 22 <= _sw_hour or _sw_hour <= 5
         _rr_min = 1.8 if _is_dead_hours else 1.5
-        if rr_check < _rr_min:
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7583', (rr_check < _rr_min), 'Dead hours penalty для SWING (22:00-06:00 UTC)', 'rr_check < _rr_min', 7583):
             logging.info(f"[SWING] {symbol}: RR {rr_check} < {_rr_min} {'(dead hours)' if _is_dead_hours else ''} — пропускаем")
-            return None
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7585', 'rr_check < _rr_min', locals(), 'rr_check < _rr_min', 7585)
 
         # ── Groq анализирует реальную картину сетапа (бонус, не блокирует) ──
         _swing_groq_ok = False
@@ -7673,7 +7676,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
-            if groq_response and len(groq_response) > 5:
+            if _audit_test('SWING_DETECT_SWING_SETUP_G7678', (groq_response and len(groq_response) > 5), 'groq_response and len(groq_response) > 5', 'groq_response and len(groq_response) > 5', 7678):
                 try:
                     import json as _json, re as _re
                     clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
@@ -7687,7 +7690,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         _swing_groq_ok = True
                     else:
                         logging.info(f"[SWING Groq] {symbol}: Groq отклонил сигнал")
-                        return None
+                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7692', 'не должен проходить через один случайный Q-бонус.', locals(), 'parsed.get("valid", True)', 7692)
                     if parsed.get("logic") and len(str(parsed["logic"])) > 5:
                         logic = str(parsed["logic"]).strip()
                     if parsed.get("hours") and str(parsed["hours"]).isdigit():
@@ -7724,9 +7727,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             pass
 
         # Fresh 1h structure is part of the SWING thesis, not a bonus vote.
-        if not _swing_1h_choch:
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7729', (not _swing_1h_choch), 'Fresh 1h structure is part of the SWING thesis, not a bonus vote.', 'not _swing_1h_choch', 7729):
             logging.info(f"[SWING Structure] {symbol}: no fresh 1h BOS/CHoCH after sweep — пропуск")
-            return None
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7731', 'Fresh 1h structure is part of the SWING thesis, not a bonus vote.', locals(), 'not _swing_1h_choch', 7731)
 
         _sw_confirms = sum([
             _sw_vol_ok,           # Volume ≥1.2x
@@ -7736,9 +7739,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             _swing_15m_confirms,  # 15m impulse in trade direction
         ])
         _sw_quality = f" [Q:{_sw_confirms}/5]"
-        if _sw_confirms < 2:
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7741', (_sw_confirms < 2), '_sw_confirms < 2', '_sw_confirms < 2', 7741):
             logging.info(f"[SWING Quality] {symbol}: confirms={_sw_confirms}/5 < 2 — пропуск")
-            return None
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7743', '_sw_confirms < 2', locals(), '_sw_confirms < 2', 7743)
 
         # TP2 is optional and must be another real structural swing.  No
         # synthetic distance multiplier is used when the market has no target.
@@ -7776,13 +7779,14 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
     except Exception as e:
         logging.debug(f"detect_swing_setup {symbol}: {e}")
-        return None
+        return _audit_fail('SWING_DETECT_SWING_SETUP_R7781', 'detector returned None', locals(), '', 7781)
 
 
 
 
 # ===== СТРАТЕГИЯ 5: ZONE — вход из Discount/Premium зоны =====
 
+@_audit_strategy("ZONE")
 def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = False) -> dict | None:
     """
     ZONE стратегия: вход из Discount/Premium зоны с OB/FVG подтверждением.
@@ -7791,8 +7795,8 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
     try:
         raw_candles = get_candles(symbol, timeframe, 101)
         candles = get_confirmed_candles(raw_candles)
-        if not candles or len(candles) < 50:
-            return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7796', (not candles or len(candles) < 50), 'not candles or len(candles) < 50', 'not candles or len(candles) < 50', 7796):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7797', 'not candles or len(candles) < 50', locals(), 'not candles or len(candles) < 50', 7797)
 
         price = raw_candles[-1]["close"]
         atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
@@ -7806,15 +7810,15 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         range_mid  = (range_high + range_low) / 2
         range_size = range_high - range_low
 
-        if range_size < atr * 2:
-            return None  # Диапазон слишком мал
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7811', (range_size < atr * 2), 'range_size < atr * 2', 'range_size < atr * 2', 7811):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7812', 'range_size < atr * 2', locals(), 'range_size < atr * 2', 7812)  # Диапазон слишком мал
 
         # Require a real range extreme and leave the middle 40% neutral.
         in_discount = price <= range_low + range_size * 0.30
         in_premium = price >= range_high - range_size * 0.30
 
-        if not in_discount and not in_premium:
-            return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7818', (not in_discount and not in_premium), 'Require a real range extreme and leave the middle 40% neutral.', 'not in_discount and not in_premium', 7818):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7819', 'Require a real range extreme and leave the middle 40% neutral.', locals(), 'not in_discount and not in_premium', 7819)
 
         # Определяем направление
         direction = "BULLISH" if in_discount else "BEARISH"
@@ -7847,11 +7851,11 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                     zone_level = fvg["top"]
                     zone_type  = "FVG"
 
-        if not zone_level:
-            return None  # Нет зоны интереса рядом с ценой
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7852', (not zone_level), 'not zone_level', 'not zone_level', 7852):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7853', 'not zone_level', locals(), 'not zone_level', 7853)  # Нет зоны интереса рядом с ценой
 
         # ── 2.5. Проверка свежести зоны (unmitigated + strong move away) ──
-        if zone_level and zone_type:
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7856', (zone_level and zone_type), '2.5. Проверка свежести зоны (unmitigated + strong move away)', 'zone_level and zone_type', 7856):
             try:
                 _test_count = 0
                 _zone_top = ob["top"] if zone_type == "OB" and ob else (fvg["top"] if fvg else zone_level * 1.01)
@@ -7861,9 +7865,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                     if _zone_bot <= c["low"] <= _zone_top or _zone_bot <= c["high"] <= _zone_top:
                         _test_count += 1
 
-                if _test_count > 2:
+                if _audit_test('ZONE_DETECT_ZONE_SETUP_G7866', (_test_count > 2), '_test_count > 2', '_test_count > 2', 7866):
                     logging.debug(f"[ZONE] {symbol}: зона протестирована {_test_count} раз — mitigated")
-                    return None
+                    return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7868', '_test_count > 2', locals(), '_test_count > 2', 7868)
 
                 # Strong move away: displacement ≥0.5 + body > ATR×1.0
                 _strong_move = False
@@ -7879,13 +7883,13 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                             _strong_move = True
                             break
 
-                if not _strong_move:
+                if _audit_test('ZONE_DETECT_ZONE_SETUP_G7884', (not _strong_move), 'not _strong_move', 'not _strong_move', 7884):
                     logging.debug(f"[ZONE] {symbol}: нет сильного импульса (displacement < 0.5)")
-                    return None
+                    return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7886', 'not _strong_move', locals(), 'not _strong_move', 7886)
 
             except Exception as _zone_freshness_error:
                 logging.debug("[ZONE] %s: zone freshness unavailable: %s", symbol, _zone_freshness_error)
-                return None
+                return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7890', 'zone_level and zone_type', locals(), 'zone_level and zone_type', 7890)
 
         # ── 3. Подтверждение отбоя — хотя бы 1 свеча в направлении ──
         last = candles[-1]
@@ -7894,24 +7898,24 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         rebound_bear = (last["close"] < last["open"] and
                         last["high"] >= zone_level - atr * 0.3)
 
-        if direction == "BULLISH" and not rebound_bull:
-            return None
-        if direction == "BEARISH" and not rebound_bear:
-            return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7899', (direction == "BULLISH" and not rebound_bull), 'direction == "BULLISH" and not rebound_bull', 'direction == "BULLISH" and not rebound_bull', 7899):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7900', 'direction == "BULLISH" and not rebound_bull', locals(), 'direction == "BULLISH" and not rebound_bull', 7900)
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7901', (direction == "BEARISH" and not rebound_bear), 'direction == "BEARISH" and not rebound_bear', 'direction == "BEARISH" and not rebound_bear', 7901):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7902', 'direction == "BEARISH" and not rebound_bear', locals(), 'direction == "BEARISH" and not rebound_bear', 7902)
 
         # ── 4. HTF фильтры ──
         htf_1d = smc_on_tf(symbol, "1d")
-        if htf_1d:
-            if direction == "BULLISH" and "BEARISH" in str(htf_1d).upper():
-                return None
-            if direction == "BEARISH" and "BULLISH" in str(htf_1d).upper():
-                return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7906', (htf_1d), '4. HTF фильтры', 'htf_1d', 7906):
+            if _audit_test('ZONE_DETECT_ZONE_SETUP_G7907', (direction == "BULLISH" and "BEARISH" in str(htf_1d).upper()), '4. HTF фильтры', 'direction == "BULLISH" and "BEARISH" in str(htf_1d).upper()', 7907):
+                return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7908', '4. HTF фильтры', locals(), 'direction == "BULLISH" and "BEARISH" in str(htf_1d).upper()', 7908)
+            if _audit_test('ZONE_DETECT_ZONE_SETUP_G7909', (direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()), '4. HTF фильтры', 'direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()', 7909):
+                return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7910', 'direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()', locals(), 'direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()', 7910)
 
         # ── 5. BTC фильтр ──
-        if symbol != "BTCUSDT":
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7913', (symbol != "BTCUSDT"), '5. BTC фильтр', 'symbol != "BTCUSDT"', 7913):
             btc_ok, btc_reason = btc_allows_signal(direction)
-            if not btc_ok:
-                return None
+            if _audit_test('ZONE_DETECT_ZONE_SETUP_G7915', (not btc_ok), '5. BTC фильтр', 'not btc_ok', 7915):
+                return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7916', '5. BTC фильтр', locals(), 'not btc_ok', 7916)
 
         # ── 6. Funding is risk context, not an automatic direction block ──
         try:
@@ -7961,8 +7965,8 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                 "required_timeframe": "1h",
                 "reason": "зона подтверждена; ожидается свежий 1h BOS/CHoCH",
             }
-        if not _zone_ltf_structure:
-            return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7966', (not _zone_ltf_structure), 'not _zone_ltf_structure', 'not _zone_ltf_structure', 7966):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7967', 'not _zone_ltf_structure', locals(), 'not _zone_ltf_structure', 7967)
 
         # Volume is scored once below on the actual rejection candle.
 
@@ -8045,36 +8049,36 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         _zone_ap = get_adaptive_params(symbol, candles)
         _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0
         _q_min = 3
-        if q_score < _q_min:
-            return None  # Недостаточно независимых подтверждений
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G8050', (q_score < _q_min), 'wick/RSI/FVG/BTC/funding/rejection-volume, without double-counting.', 'q_score < _q_min', 8050):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8051', 'wick/RSI/FVG/BTC/funding/rejection-volume, without double-counting.', locals(), 'q_score < _q_min', 8051)  # Недостаточно независимых подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
-        if direction == "BULLISH":
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G8054', (direction == "BULLISH"), '8. Расчёт entry / SL / TP', 'direction == "BULLISH"', 8054):
             entry = smart_round(price)
             sl    = smart_round(zone_level - atr * 0.5)
             # TP = ближайший swing high
             swing_highs, _ = find_swings(candles, lookback=5)
             tp_candidates = [sh[1] for sh in swing_highs if sh[1] > entry * 1.005]
-            if not tp_candidates:
-                return None
+            if _audit_test('ZONE_DETECT_ZONE_SETUP_G8060', (not tp_candidates), 'TP = ближайший swing high', 'not tp_candidates', 8060):
+                return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8061', 'TP = ближайший swing high', locals(), 'not tp_candidates', 8061)
             tp = smart_round(min(tp_candidates))
         else:
             entry = smart_round(price)
             sl    = smart_round(zone_level + atr * 0.5)
             _, swing_lows = find_swings(candles, lookback=5)
             tp_candidates = [sw[1] for sw in swing_lows if sw[1] < entry * 0.995]
-            if not tp_candidates:
-                return None
+            if _audit_test('ZONE_DETECT_ZONE_SETUP_G8068', (not tp_candidates), 'not tp_candidates', 'not tp_candidates', 8068):
+                return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8069', 'not tp_candidates', locals(), 'not tp_candidates', 8069)
             tp = smart_round(max(tp_candidates))
 
         # ── 9. RR фильтр ──
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
-        if risk == 0:
-            return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G8075', (risk == 0), '9. RR фильтр', 'risk == 0', 8075):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8076', '9. RR фильтр', locals(), 'risk == 0', 8076)
         rr = round(reward / risk, 2)
-        if rr < 2.0:
-            return None
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G8078', (rr < 2.0), 'rr < 2.0', 'rr < 2.0', 8078):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8079', 'rr < 2.0', locals(), 'rr < 2.0', 8079)
 
         # ── 10. Groq анализ ──
         logic = f"Вход из {'Discount' if direction == 'BULLISH' else 'Premium'} зоны ({zone_type})"
@@ -8116,14 +8120,14 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                 f"{_recent_errors}"
             )
             _zone_resp = ask_groq(_zone_prompt, max_tokens=80) if legacy_strategy_groq_enabled() else None
-            if _zone_resp:
+            if _audit_test('ZONE_DETECT_ZONE_SETUP_G8121', (_zone_resp), '_zone_resp', '_zone_resp', 8121):
                 import json as _j, re as _re
                 _clean = _re.sub(r'```json|```', '', _zone_resp).strip()
                 _m = _re.search(r'\{[^}]+\}', _clean, _re.DOTALL)
-                if _m:
+                if _audit_test('ZONE_DETECT_ZONE_SETUP_G8125', (_m), '_m', '_m', 8125):
                     _parsed = _j.loads(_m.group())
-                    if not _parsed.get("valid", True):
-                        return None
+                    if _audit_test('ZONE_DETECT_ZONE_SETUP_G8127', (not _parsed.get("valid", True)), 'not _parsed.get("valid", True)', 'not _parsed.get("valid", True)', 8127):
+                        return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8128', 'not _parsed.get("valid", True)', locals(), 'not _parsed.get("valid", True)', 8128)
                     if _parsed.get("logic"):
                         logic = str(_parsed["logic"]).strip()
         except Exception:
@@ -8163,7 +8167,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
 
     except Exception as e:
         logging.warning(f"detect_zone_setup {symbol}: {e}")
-        return None
+        return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8168', 'detector returned None', locals(), '', 8168)
 
 
 # ===== СТРАТЕГИЯ 3: WYCKOFF ACCUMULATION + DISTRIBUTION =====
@@ -8354,6 +8358,7 @@ def _find_wyckoff_phases_distribution(candles_1d, candles_4h):
     return phases
 
 
+@_audit_strategy("WYCKOFF", subtype='SPRING')
 def detect_wyckoff_spring(symbol: str) -> dict | None:
     """
     Wyckoff Accumulation Spring — LONG сигнал.
@@ -8362,29 +8367,29 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
     """
     try:
         _skip_symbol, _skip_reason = _learn_should_skip(symbol, "BULLISH")
-        if _skip_symbol:
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8367', (_skip_symbol), '_skip_symbol', '_skip_symbol', 8367):
             logging.info(f"[WYCKOFF] {symbol}: {_skip_reason}")
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8369', '_skip_symbol', locals(), '_skip_symbol', 8369)
         raw_candles_1d = get_candles(symbol, "1d", 61)
         raw_candles_4h = get_candles(symbol, "4h", 121)
         candles_1d = get_confirmed_candles(raw_candles_1d)
         candles_4h = get_confirmed_candles(raw_candles_4h)
 
-        if not candles_1d or len(candles_1d) < 40:
-            return None
-        if not candles_4h or len(candles_4h) < 40:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8375', (not candles_1d or len(candles_1d) < 40), 'not candles_1d or len(candles_1d) < 40', 'not candles_1d or len(candles_1d) < 40', 8375):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8376', 'not candles_1d or len(candles_1d) < 40', locals(), 'not candles_1d or len(candles_1d) < 40', 8376)
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8377', (not candles_4h or len(candles_4h) < 40), 'not candles_4h or len(candles_4h) < 40', 'not candles_4h or len(candles_4h) < 40', 8377):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8378', 'not candles_4h or len(candles_4h) < 40', locals(), 'not candles_4h or len(candles_4h) < 40', 8378)
 
         price_now = raw_candles_1d[-1]["close"]
         score = 0
         signals = []
 
         # ── BTC фильтр для WYCKOFF (4h) ──
-        if symbol != "BTCUSDT":
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8385', (symbol != "BTCUSDT"), 'BTC фильтр для WYCKOFF (4h)', 'symbol != "BTCUSDT"', 8385):
             btc_ok, btc_reason = btc_allows_signal("BULLISH", use_4h=True)
-            if not btc_ok:
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8387', (not btc_ok), 'BTC фильтр для WYCKOFF (4h)', 'not btc_ok', 8387):
                 logging.info(f"[WYCKOFF BTC Filter] {symbol} LONG пропущен: {btc_reason}")
-                return None
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8389', 'BTC фильтр для WYCKOFF (4h)', locals(), 'not btc_ok', 8389)
 
         # ── 1. ДАУНТРЕНД 30+ дней ──
         price_peak = max(c["high"] for c in candles_1d[-50:-15])
@@ -8399,7 +8404,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             score += 15
             signals.append(f"⚡️ Коррекция -{drawdown_pct:.0f}% от пика")
         else:
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8404', 'drawdown_pct >= _wyckoff_min_drawdown', locals(), 'drawdown_pct >= _wyckoff_min_drawdown', 8404)
 
         # ── 2. БОКОВИК У ОСНОВАНИЯ (последние 30 дней) ──
         accumulation_candles = candles_1d[-30:]
@@ -8414,13 +8419,13 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             score += 10
             signals.append(f"⚡️ Диапазон {acc_range_pct:.1f}% за 20 дней")
         else:
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8419', 'acc_range_pct < 25', locals(), 'acc_range_pct < 25', 8419)
 
         # ── 3. ФАЗЫ WYCKOFF ──
         phases = _find_wyckoff_phases_accumulation(candles_1d, candles_4h)
 
-        if not phases:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8424', (not phases), '3. ФАЗЫ WYCKOFF', 'not phases', 8424):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8425', '3. ФАЗЫ WYCKOFF', locals(), 'not phases', 8425)
 
         # SC найден
         if "SC" in phases:
@@ -8461,11 +8466,11 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             signals.append(f"✅ Объём сжался {vol_compression:.0%} (тихое накопление)")
 
         # ── Минимальный порог ──
-        if score < 50:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8466', (score < 50), 'Минимальный порог', 'score < 50', 8466):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8467', 'Минимальный порог', locals(), 'score < 50', 8467)
         # Требуем Spring И SOS одновременно (AND, не OR)
-        if not spring_found or not sos_found:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8469', (not spring_found or not sos_found), 'Требуем Spring И SOS одновременно (AND, не OR)', 'not spring_found or not sos_found', 8469):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8470', 'Требуем Spring И SOS одновременно (AND, не OR)', locals(), 'not spring_found or not sos_found', 8470)
 
         # ── Volume/range compression перед входом ──
         # Последние 5-7 свечей должны иметь уменьшающийся диапазон и объём ниже среднего
@@ -8478,10 +8483,10 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             _avg_vol_last = sum(c["volume"] for c in _last_7) / len(_last_7)
             _range_compress = _avg_range_last / _avg_range_prev if _avg_range_prev > 0 else 1
             _vol_compress = _avg_vol_last / _avg_vol_prev if _avg_vol_prev > 0 else 1
-            if _range_compress > 0.85 and _vol_compress > 0.85:
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8483', (_range_compress > 0.85 and _vol_compress > 0.85), '_range_compress > 0.85 and _vol_compress > 0.85', '_range_compress > 0.85 and _vol_compress > 0.85', 8483):
                 # Нет сжатия — ещё рано входить
                 logging.info(f"[WYCKOFF] {symbol}: нет сжатия (range {_range_compress:.2f}, vol {_vol_compress:.2f}) — ждём")
-                return None
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8486', 'Нет сжатия — ещё рано входить', locals(), '_range_compress > 0.85 and _vol_compress > 0.85', 8486)
             if _range_compress < 0.7:
                 score += 10
                 signals.append(f"✅ Диапазон сжат {_range_compress:.0%}")
@@ -8491,9 +8496,9 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         # ── check_entry_timing() — валидация тайминга входа ──
         try:
             _wy_timing = check_entry_timing(candles_4h, "BULLISH", price_now, "4h")
-            if not _wy_timing.get("valid", True):
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8496', (not _wy_timing.get("valid", True)), 'check_entry_timing() — валидация тайминга входа', 'not _wy_timing.get("valid", True)', 8496):
                 logging.info(f"[WYCKOFF] {symbol}: тайминг входа не подтверждён")
-                return None
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8498', 'check_entry_timing() — валидация тайминга входа', locals(), 'not _wy_timing.get("valid", True)', 8498)
         except Exception:
             pass
 
@@ -8508,13 +8513,13 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             entry = price_now  # Цена ниже Creek (ещё в зоне накопления) — входим
         else:
             # Цена далеко выше Creek — пропускаем, поезд ушёл
-            if price_now > creek * 1.05:
-                return None
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8513', (price_now > creek * 1.05), 'Цена далеко выше Creek — пропускаем, поезд ушёл', 'price_now > creek * 1.05', 8513):
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8514', 'Цена далеко выше Creek — пропускаем, поезд ушёл', locals(), 'price_now > creek * 1.05', 8514)
             entry = price_now
 
         atr_1d = average_true_range(candles_1d)
-        if not atr_1d:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8518', (not atr_1d), 'Цена далеко выше Creek — пропускаем, поезд ушёл', 'not atr_1d', 8518):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8519', 'not atr_1d', locals(), 'not atr_1d', 8519)
         spring_low = phases.get("Spring", {}).get("price")
         sc_low = phases.get("SC", {}).get("price")
         structural_low = min(level for level in (spring_low, sc_low, acc_low) if level)
@@ -8535,8 +8540,8 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             [ar_price, fib_1272, fib_1618, price_peak],
             "BULLISH", 2.0, 4.0,
         )
-        if tp is None:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8540', (tp is None), 'tp is None', 'tp is None', 8540):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8541', 'tp is None', locals(), 'tp is None', 8541)
         logic = ""
         try:
             phase_summary = []
@@ -8614,16 +8619,16 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120) if legacy_strategy_groq_enabled() else None
-            if groq_resp:
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8619', (groq_resp), 'groq_resp', 'groq_resp', 8619):
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if m:
+                if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8623', (m), 'm', 'm', 8623):
                     parsed = _j.loads(m.group())
                     # Groq как фильтр — если valid=false, блокируем
-                    if not parsed.get("valid", True):
+                    if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8626', (not parsed.get("valid", True)), 'Groq как фильтр — если valid=false, блокируем', 'not parsed.get("valid", True)', 8626):
                         logging.info(f"[WYCKOFF Groq] {symbol} LONG: Groq отклонил сигнал")
-                        return None
+                        return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8628', 'Groq как фильтр — если valid=false, блокируем', locals(), 'not parsed.get("valid", True)', 8628)
                     if parsed.get("logic"):
                         logic = str(parsed["logic"]).strip()
         except Exception:
@@ -8634,8 +8639,8 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
-        if risk == 0 or not 2.0 <= reward / risk <= 4.0:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8639', (risk == 0 or not 2.0 <= reward / risk <= 4.0), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8639):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8640', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', locals(), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8640)
 
         rr     = round(reward / risk, 2)
         tp_pct = round((tp - entry) / entry * 100, 1)
@@ -8659,9 +8664,10 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
     except Exception as e:
         logging.debug(f"detect_wyckoff_spring {symbol}: {e}")
-        return None
+        return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8664', 'detector returned None', locals(), '', 8664)
 
 
+@_audit_strategy("WYCKOFF", subtype='DISTRIBUTION')
 def detect_wyckoff_distribution(symbol: str) -> dict | None:
     """
     Wyckoff Distribution UTAD — SHORT сигнал.
@@ -8670,29 +8676,29 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
     """
     try:
         _skip_symbol, _skip_reason = _learn_should_skip(symbol, "BEARISH")
-        if _skip_symbol:
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8675', (_skip_symbol), '_skip_symbol', '_skip_symbol', 8675):
             logging.info(f"[WYCKOFF] {symbol}: {_skip_reason}")
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8677', '_skip_symbol', locals(), '_skip_symbol', 8677)
         raw_candles_1d = get_candles(symbol, "1d", 61)
         raw_candles_4h = get_candles(symbol, "4h", 121)
         candles_1d = get_confirmed_candles(raw_candles_1d)
         candles_4h = get_confirmed_candles(raw_candles_4h)
 
-        if not candles_1d or len(candles_1d) < 40:
-            return None
-        if not candles_4h or len(candles_4h) < 40:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8683', (not candles_1d or len(candles_1d) < 40), 'not candles_1d or len(candles_1d) < 40', 'not candles_1d or len(candles_1d) < 40', 8683):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8684', 'not candles_1d or len(candles_1d) < 40', locals(), 'not candles_1d or len(candles_1d) < 40', 8684)
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8685', (not candles_4h or len(candles_4h) < 40), 'not candles_4h or len(candles_4h) < 40', 'not candles_4h or len(candles_4h) < 40', 8685):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8686', 'not candles_4h or len(candles_4h) < 40', locals(), 'not candles_4h or len(candles_4h) < 40', 8686)
 
         price_now = raw_candles_1d[-1]["close"]
         score = 0
         signals = []
 
         # ── BTC фильтр для WYCKOFF DISTRIBUTION (4h) ──
-        if symbol != "BTCUSDT":
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8693', (symbol != "BTCUSDT"), 'BTC фильтр для WYCKOFF DISTRIBUTION (4h)', 'symbol != "BTCUSDT"', 8693):
             btc_ok, btc_reason = btc_allows_signal("BEARISH", use_4h=True)
-            if not btc_ok:
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8695', (not btc_ok), 'BTC фильтр для WYCKOFF DISTRIBUTION (4h)', 'not btc_ok', 8695):
                 logging.info(f"[WYCKOFF BTC Filter] {symbol} SHORT пропущен: {btc_reason}")
-                return None
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8697', 'BTC фильтр для WYCKOFF DISTRIBUTION (4h)', locals(), 'not btc_ok', 8697)
 
         # ── 1. АПТРЕНД 30+ дней ──
         price_bottom = min(c["low"] for c in candles_1d[-50:-15])
@@ -8705,7 +8711,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             score += 15
             signals.append(f"⚡️ Рост +{pump_pct:.0f}% от основания")
         else:
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8710', 'pump_pct >= 30', locals(), 'pump_pct >= 30', 8710)
 
         # ── 2. БОКОВИК У ВЕРШИНЫ (последние 30 дней) ──
         distribution_candles = candles_1d[-30:]
@@ -8720,13 +8726,13 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             score += 10
             signals.append(f"⚡️ Диапазон {dist_range_pct:.1f}% у вершины")
         else:
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8725', 'dist_range_pct < 25', locals(), 'dist_range_pct < 25', 8725)
 
         # ── 3. ФАЗЫ WYCKOFF DISTRIBUTION ──
         phases = _find_wyckoff_phases_distribution(candles_1d, candles_4h)
 
-        if not phases:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8730', (not phases), '3. ФАЗЫ WYCKOFF DISTRIBUTION', 'not phases', 8730):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8731', '3. ФАЗЫ WYCKOFF DISTRIBUTION', locals(), 'not phases', 8731)
 
         if "BC" in phases:
             score += 15
@@ -8761,11 +8767,11 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             score += 15
             signals.append(f"✅ Объём сжался {vol_compression:.0%} (тихое распределение)")
 
-        if score < 50:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8766', (score < 50), 'score < 50', 'score < 50', 8766):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8767', 'score < 50', locals(), 'score < 50', 8767)
         # Требуем UTAD И SOW одновременно (AND, не OR)
-        if not utad_found or not sow_found:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8769', (not utad_found or not sow_found), 'Требуем UTAD И SOW одновременно (AND, не OR)', 'not utad_found or not sow_found', 8769):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8770', 'Требуем UTAD И SOW одновременно (AND, не OR)', locals(), 'not utad_found or not sow_found', 8770)
 
         # ── Volume/range compression перед входом ──
         try:
@@ -8777,16 +8783,16 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             _avg_vol_last_d = sum(c["volume"] for c in _last_7d) / len(_last_7d)
             _range_comp_d = _avg_range_last_d / _avg_range_prev_d if _avg_range_prev_d > 0 else 1
             _vol_comp_d = _avg_vol_last_d / _avg_vol_prev_d if _avg_vol_prev_d > 0 else 1
-            if _range_comp_d > 0.85 and _vol_comp_d > 0.85:
-                return None  # Нет сжатия
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8782', (_range_comp_d > 0.85 and _vol_comp_d > 0.85), '_range_comp_d > 0.85 and _vol_comp_d > 0.85', '_range_comp_d > 0.85 and _vol_comp_d > 0.85', 8782):
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8783', '_range_comp_d > 0.85 and _vol_comp_d > 0.85', locals(), '_range_comp_d > 0.85 and _vol_comp_d > 0.85', 8783)  # Нет сжатия
         except Exception:
             pass
 
         # ── check_entry_timing() ──
         try:
             _wy_timing_d = check_entry_timing(candles_4h, "BEARISH", price_now, "4h")
-            if not _wy_timing_d.get("valid", True):
-                return None
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8790', (not _wy_timing_d.get("valid", True)), 'check_entry_timing()', 'not _wy_timing_d.get("valid", True)', 8790):
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8791', 'check_entry_timing()', locals(), 'not _wy_timing_d.get("valid", True)', 8791)
         except Exception:
             pass
 
@@ -8800,13 +8806,13 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             entry = price_now  # Цена выше Creek (ещё в зоне дистрибуции) — входим
         else:
             # Цена далеко ниже Creek — поезд ушёл
-            if price_now < creek_d * 0.95:
-                return None
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8805', (price_now < creek_d * 0.95), 'Цена далеко ниже Creek — поезд ушёл', 'price_now < creek_d * 0.95', 8805):
+                return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8806', 'Цена далеко ниже Creek — поезд ушёл', locals(), 'price_now < creek_d * 0.95', 8806)
             entry = price_now
 
         atr_1d = average_true_range(candles_1d)
-        if not atr_1d:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8810', (not atr_1d), 'Цена далеко ниже Creek — поезд ушёл', 'not atr_1d', 8810):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8811', 'not atr_1d', locals(), 'not atr_1d', 8811)
         utad_high = phases.get("UTAD", {}).get("price")
         bc_high = phases.get("BC", {}).get("price")
         structural_high = max(level for level in (utad_high, bc_high, dist_high) if level)
@@ -8827,8 +8833,8 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             [ar_price, fib_1272, fib_1618, price_bottom],
             "BEARISH", 2.0, 4.0,
         )
-        if tp is None:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8832', (tp is None), 'tp is None', 'tp is None', 8832):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8833', 'tp is None', locals(), 'tp is None', 8833)
         logic = ""
         try:
             phase_summary = []
@@ -8901,16 +8907,16 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120) if legacy_strategy_groq_enabled() else None
-            if groq_resp:
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8906', (groq_resp), 'groq_resp', 'groq_resp', 8906):
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if m:
+                if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8910', (m), 'm', 'm', 8910):
                     parsed = _j.loads(m.group())
                     # Groq как фильтр — если valid=false, блокируем
-                    if not parsed.get("valid", True):
+                    if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8913', (not parsed.get("valid", True)), 'Groq как фильтр — если valid=false, блокируем', 'not parsed.get("valid", True)', 8913):
                         logging.info(f"[WYCKOFF Groq] {symbol} SHORT: Groq отклонил сигнал")
-                        return None
+                        return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8915', 'Groq как фильтр — если valid=false, блокируем', locals(), 'not parsed.get("valid", True)', 8915)
                     if parsed.get("logic"):
                         logic = str(parsed["logic"]).strip()
         except Exception:
@@ -8921,8 +8927,8 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         risk   = abs(sl - entry)
         reward = abs(entry - tp)
-        if risk == 0 or not 2.0 <= reward / risk <= 4.0:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8926', (risk == 0 or not 2.0 <= reward / risk <= 4.0), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8926):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8927', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', locals(), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8927)
 
         rr     = round(reward / risk, 2)
         tp_pct = round((entry - tp) / entry * 100, 1)
@@ -8946,9 +8952,10 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
     except Exception as e:
         logging.debug(f"detect_wyckoff_distribution {symbol}: {e}")
-        return None
+        return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8951', 'detector returned None', locals(), '', 8951)
 
 
+@_audit_strategy("WYCKOFF", subtype='REACCUMULATION')
 def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
     """
     Re-accumulation: боковик после коррекции + higher lows + ликвидность выше
@@ -8956,15 +8963,15 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
     """
     try:
         _skip_symbol, _skip_reason = _learn_should_skip(symbol, "BULLISH")
-        if _skip_symbol:
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8961', (_skip_symbol), '_skip_symbol', '_skip_symbol', 8961):
             logging.info(f"[WYCKOFF] {symbol}: {_skip_reason}")
-            return None
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R8963', '_skip_symbol', locals(), '_skip_symbol', 8963)
         raw_candles_1d = get_candles(symbol, "1d", 61)
         raw_candles_4h = get_candles(symbol, "4h", 101)
         candles_1d = get_confirmed_candles(raw_candles_1d)
         candles_4h = get_confirmed_candles(raw_candles_4h)
-        if not candles_1d or len(candles_1d) < 30: return None
-        if not candles_4h or len(candles_4h) < 50: return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8968', (not candles_1d or len(candles_1d) < 30), 'not candles_1d or len(candles_1d) < 30', 'not candles_1d or len(candles_1d) < 30', 8968): return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R8968', 'not candles_1d or len(candles_1d) < 30', locals(), 'not candles_1d or len(candles_1d) < 30', 8968)
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8969', (not candles_4h or len(candles_4h) < 50), 'not candles_4h or len(candles_4h) < 50', 'not candles_4h or len(candles_4h) < 50', 8969): return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R8969', 'not candles_4h or len(candles_4h) < 50', locals(), 'not candles_4h or len(candles_4h) < 50', 8969)
 
         price_now = raw_candles_1d[-1]["close"]
 
@@ -8972,16 +8979,16 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         price_peak = max(c["high"] for c in candles_1d[-40:-10])
         drawdown_pct = (price_peak - price_now) / price_peak * 100
         _min_drawdown = 3 if symbol in ["BTCUSDT", "ETHUSDT", "BNBUSDT"] else 5
-        if drawdown_pct < _min_drawdown:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8977', (drawdown_pct < _min_drawdown), '1. Коррекция от пика (5% для BTC/ETH/BNB, 8% для остальных)', 'drawdown_pct < _min_drawdown', 8977):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R8978', '1. Коррекция от пика (5% для BTC/ETH/BNB, 8% для остальных)', locals(), 'drawdown_pct < _min_drawdown', 8978)
 
         # ── 2. Боковик последние 10-30 дней (range < 15%) ──
         acc_candles = candles_1d[-30:]
         acc_high = max(c["high"] for c in acc_candles)
         acc_low = min(c["low"] for c in acc_candles)
         acc_range_pct = (acc_high - acc_low) / acc_low * 100
-        if acc_range_pct > 15:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8985', (acc_range_pct > 15), '2. Боковик последние 10-30 дней (range < 15%)', 'acc_range_pct > 15', 8985):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R8986', 'acc_range_pct > 15', locals(), 'acc_range_pct > 15', 8986)
 
         # ── 3. Higher lows — покупатели давят снизу ──
         lows_20 = [c["low"] for c in acc_candles]
@@ -8990,15 +8997,15 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
             if lows_20[i] < lows_20[i-1] and lows_20[i] < lows_20[i+1]:
                 local_lows.append(lows_20[i])
         higher_lows = len(local_lows) >= 2 and local_lows[-1] > local_lows[-2]
-        if not higher_lows:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8995', (not higher_lows), 'not higher_lows', 'not higher_lows', 8995):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R8996', 'not higher_lows', locals(), 'not higher_lows', 8996)
 
         # ── 4. Volume compression — объём снижается в боковике ──
         avg_vol_before = sum(c["volume"] for c in candles_1d[-40:-20]) / 20
         avg_vol_acc = sum(c["volume"] for c in acc_candles) / len(acc_candles)
         vol_compressed = avg_vol_acc < avg_vol_before * 0.8
-        if not vol_compressed:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9002', (not vol_compressed), '4. Volume compression — объём снижается в боковике', 'not vol_compressed', 9002):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9003', '4. Volume compression — объём снижается в боковике', locals(), 'not vol_compressed', 9003)
 
         # ── 5. Volume expansion — первый взрыв объёма после compression ──
         last_vol = candles_1d[-1]["volume"]
@@ -9011,15 +9018,15 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         liquidity_target = acc_high if len(eqh_levels) >= 2 else price_peak
 
         # ── 7. BTC фильтр ──
-        if symbol != "BTCUSDT":
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9016', (symbol != "BTCUSDT"), '7. BTC фильтр', 'symbol != "BTCUSDT"', 9016):
             btc_ok, _ = btc_allows_signal("BULLISH")
-            if not btc_ok: return None
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9018', (not btc_ok), '7. BTC фильтр', 'not btc_ok', 9018): return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9018', '7. BTC фильтр', locals(), 'not btc_ok', 9018)
 
         # ── 8. Расчёт уровней ──
         entry = smart_round(price_now)
         atr_1d = average_true_range(candles_1d)
-        if not atr_1d:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9023', (not atr_1d), '8. Расчёт уровней', 'not atr_1d', 9023):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9024', '8. Расчёт уровней', locals(), 'not atr_1d', 9024)
         sl = smart_round(acc_low - atr_1d * 0.25)
         acc_range = acc_high - acc_low
         fib_1272 = acc_low + acc_range * 1.272
@@ -9029,8 +9036,8 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
             [liquidity_target, fib_1272, fib_1618, price_peak],
             "BULLISH", 2.5, 4.0,
         )
-        if tp is None:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9034', (tp is None), 'tp is None', 'tp is None', 9034):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9035', 'tp is None', locals(), 'tp is None', 9035)
 
         risk = abs(entry - sl)
         reward = abs(tp - entry)
@@ -9079,23 +9086,23 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             _resp = ask_groq(_wyk_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
-            if _resp:
+            if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9084', (_resp), '_resp', '_resp', 9084):
                 import json as _j, re as _re
                 _m = _re.search(r'\{[^}]+\}', _resp, _re.DOTALL)
-                if _m:
+                if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9087', (_m), '_m', '_m', 9087):
                     _p = _j.loads(_m.group())
-                    if not _p.get("valid", True): return None
+                    if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9089', (not _p.get("valid", True)), 'not _p.get("valid", True)', 'not _p.get("valid", True)', 9089): return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9089', 'not _p.get("valid", True)', locals(), 'not _p.get("valid", True)', 9089)
         except Exception:
             pass
 
         # TP remains the structural liquidity target calculated above.
         risk = abs(entry - sl)
         reward = abs(tp - entry)
-        if risk == 0:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9096', (risk == 0), 'TP remains the structural liquidity target calculated above.', 'risk == 0', 9096):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9097', 'TP remains the structural liquidity target calculated above.', locals(), 'risk == 0', 9097)
         rr = round(reward / risk, 2)
-        if not 2.5 <= rr <= 4.0:
-            return None
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9099', (not 2.5 <= rr <= 4.0), 'not 2.5 <= rr <= 4.0', 'not 2.5 <= rr <= 4.0', 9099):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9100', 'not 2.5 <= rr <= 4.0', locals(), 'not 2.5 <= rr <= 4.0', 9100)
         tp_pct = round((tp - entry) / entry * 100, 1)
         sl_pct = round((entry - sl) / entry * 100, 1)
         return {
@@ -9109,7 +9116,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         }
     except Exception as e:
         logging.warning(f"detect_wyckoff_reaccumulation {symbol}: {e}")
-        return None
+        return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9114', 'detector returned None', locals(), '', 9114)
 
 
 # ===== СТРАТЕГИЯ 4: FAST DEAL 5M СКАЛЬПИНГ =====
@@ -9121,6 +9128,7 @@ FAST_PAIRS = [
     "SUIUSDT", "INJUSDT", "FETUSDT", "WIFUSDT", "PEPEUSDT"
 ]
 
+@_audit_strategy("FAST")
 def detect_fast_deal(symbol: str) -> dict | None:
     """
     SMC FAST: 4h context, confirmed 15m setup and optional 5m control:
@@ -9133,8 +9141,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
     try:
         # One DST-aware session clock is shared with bot.py so scheduled and
         # manual FAST scans make the same decision in summer and winter.
-        if not _fast_session():
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9138', (not _fast_session()), 'manual FAST scans make the same decision in summer and winter.', 'not _fast_session()', 9138):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9139', 'manual FAST scans make the same decision in summer and winter.', locals(), 'not _fast_session()', 9139)
 
         # ── 1. BTC направление ──
         btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
@@ -9143,23 +9151,23 @@ def detect_fast_deal(symbol: str) -> dict | None:
         # ── 2. 4h+1h consensus (мягкий — один из двух достаточно) ──
         direction_4h = smc_on_tf(symbol, "4h")
         direction_1h = smc_on_tf(symbol, "1h")
-        if not direction_4h and not direction_1h:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9148', (not direction_4h and not direction_1h), '2. 4h+1h consensus (мягкий — один из двух достаточно)', 'not direction_4h and not direction_1h', 9148):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9149', '2. 4h+1h consensus (мягкий — один из двух достаточно)', locals(), 'not direction_4h and not direction_1h', 9149)
         # Берём направление: приоритет 4h, fallback 1h
         direction_1d = direction_4h or direction_1h
         # Для редкого скальпа не берём конфликтующие 4h/1h направления.
-        if direction_4h and direction_1h and direction_4h != direction_1h:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9153', (direction_4h and direction_1h and direction_4h != direction_1h), 'Для редкого скальпа не берём конфликтующие 4h/1h направления.', 'direction_4h and direction_1h and direction_4h != direction_1h', 9153):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9154', 'Для редкого скальпа не берём конфликтующие 4h/1h направления.', locals(), 'direction_4h and direction_1h and direction_4h != direction_1h', 9154)
 
         # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
-        if symbol != "BTCUSDT":
-            if direction_1d == "BULLISH" and btc_trend == "BEARISH":
-                return None
-            if direction_1d == "BEARISH" and btc_trend == "BULLISH":
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9157', (symbol != "BTCUSDT"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'symbol != "BTCUSDT"', 9157):
+            if _audit_test('FAST_DETECT_FAST_DEAL_G9158', (direction_1d == "BULLISH" and btc_trend == "BEARISH"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'direction_1d == "BULLISH" and btc_trend == "BEARISH"', 9158):
+                return _audit_fail('FAST_DETECT_FAST_DEAL_R9159', 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', locals(), 'direction_1d == "BULLISH" and btc_trend == "BEARISH"', 9159)
+            if _audit_test('FAST_DETECT_FAST_DEAL_G9160', (direction_1d == "BEARISH" and btc_trend == "BULLISH"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'direction_1d == "BEARISH" and btc_trend == "BULLISH"', 9160):
                 try:
                     btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
-                    if btc_change > 1.0:
-                        return None  # BTC растёт >1% — шорт альт опасен
+                    if _audit_test('FAST_DETECT_FAST_DEAL_G9163', (btc_change > 1.0), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'btc_change > 1.0', 9163):
+                        return _audit_fail('FAST_DETECT_FAST_DEAL_R9164', 'btc_change > 1.0', locals(), 'btc_change > 1.0', 9164)  # BTC растёт >1% — шорт альт опасен
                 except Exception:
                     pass
 
@@ -9167,9 +9175,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
         try:
             _skip_symbol, _skip_reason = _learn_should_skip(symbol, direction)
-            if _skip_symbol:
+            if _audit_test('FAST_DETECT_FAST_DEAL_G9172', (_skip_symbol), '_skip_symbol', '_skip_symbol', 9172):
                 logging.info(f"[FAST] {symbol}: {_skip_reason}")
-                return None
+                return _audit_fail('FAST_DETECT_FAST_DEAL_R9174', '_skip_symbol', locals(), '_skip_symbol', 9174)
         except Exception:
             pass
 
@@ -9187,8 +9195,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
         # ── 3. 4h OB/FVG зона ──
         raw_candles_4h = get_candles(symbol, "4h", 51)
         candles_4h = get_confirmed_candles(raw_candles_4h)
-        if not candles_4h or len(candles_4h) < 20:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9192', (not candles_4h or len(candles_4h) < 20), '3. 4h OB/FVG зона', 'not candles_4h or len(candles_4h) < 20', 9192):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9193', '3. 4h OB/FVG зона', locals(), 'not candles_4h or len(candles_4h) < 20', 9193)
 
         price_now = raw_candles_4h[-1]["close"]
         ob_4h  = find_ob(candles_4h, direction)
@@ -9219,8 +9227,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 in_zone = True
                 zone_desc = f"4h FVG ${zone_bottom:.4f}–${zone_top:.4f}"
 
-        if not in_zone:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9224', (not in_zone), 'not in_zone', 'not in_zone', 9224):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9225', 'not in_zone', locals(), 'not in_zone', 9225)
 
         # Не скальпим из середины диапазона: LONG только из discount,
         # SHORT только из premium.
@@ -9232,25 +9240,25 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _in_discount = price_now < _range_mid - _range_size * 0.1
         _no_middle_ok = (direction == "BULLISH" and _in_discount) or \
                         (direction == "BEARISH" and _in_premium)
-        if not _no_middle_ok:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9237', (not _no_middle_ok), 'not _no_middle_ok', 'not _no_middle_ok', 9237):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9238', 'not _no_middle_ok', locals(), 'not _no_middle_ok', 9238)
 
         # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
         candles_15m_imp = get_confirmed_candles(get_candles(symbol, "15m", 21))
-        if not candles_15m_imp or len(candles_15m_imp) < 3:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9242', (not candles_15m_imp or len(candles_15m_imp) < 3), '4. 15m импульсная свеча (подтверждение на младшем ТФ)', 'not candles_15m_imp or len(candles_15m_imp) < 3', 9242):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9243', '4. 15m импульсная свеча (подтверждение на младшем ТФ)', locals(), 'not candles_15m_imp or len(candles_15m_imp) < 3', 9243)
 
         last_15m = candles_15m_imp[-1]
 
         # Volume check на 15m impulse — должен быть выше среднего
         _avg_vol_15m_imp = sum(c.get("volume", 0) for c in candles_15m_imp[:-1]) / max(len(candles_15m_imp) - 1, 1)
-        if _avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1:
-            return None  # Импульс без объёма — ненадёжный
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9249', (_avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1), 'Volume check на 15m impulse — должен быть выше среднего', '_avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1', 9249):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9250', 'Volume check на 15m impulse — должен быть выше среднего', locals(), '_avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1', 9250)  # Импульс без объёма — ненадёжный
 
         # ── 5. 15m Engulfing + Displacement + Volume Spike ──
         candles_15m = get_confirmed_candles(get_candles(symbol, "15m", 31))
-        if not candles_15m or len(candles_15m) < 10:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9254', (not candles_15m or len(candles_15m) < 10), '5. 15m Engulfing + Displacement + Volume Spike', 'not candles_15m or len(candles_15m) < 10', 9254):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9255', '5. 15m Engulfing + Displacement + Volume Spike', locals(), 'not candles_15m or len(candles_15m) < 10', 9255)
 
         atr_15m = sum(c["high"] - c["low"] for c in candles_15m[-14:]) / 14
         engulfing_found = False
@@ -9298,8 +9306,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _sweep_candles_ago = i
             break
 
-        if not engulfing_found or entry is None:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9303', (not engulfing_found or entry is None), 'not engulfing_found or entry is None', 'not engulfing_found or entry is None', 9303):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9304', 'not engulfing_found or entry is None', locals(), 'not engulfing_found or entry is None', 9304)
 
         # ── Acceptance — проверяем на свече engulfing (не текущей) ──
         _eng_idx = _sweep_candles_ago if '_sweep_candles_ago' in dir() else 1
@@ -9315,9 +9323,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
         else:
             _acceptance = False
 
-        if not _acceptance:
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9320', (not _acceptance), 'not _acceptance', 'not _acceptance', 9320):
             logging.debug(f"[FAST] {symbol}: нет acceptance — цена не закрылась за зоной")
-            return None
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9322', 'not _acceptance', locals(), 'not _acceptance', 9322)
 
         # FAST still needs a real, recent close-confirmed structural break.
         # Engulfing/volume alone cannot substitute for BOS/CHoCH.
@@ -9327,9 +9335,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
             lookback=15,
             max_break_age=min(3, max(1, _sweep_candles_ago)),
         )
-        if not _fast_structure_event:
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9332', (not _fast_structure_event), 'not _fast_structure_event', 'not _fast_structure_event', 9332):
             logging.debug(f"[FAST] {symbol}: нет свежего 15m BOS/CHoCH")
-            return None
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9334', 'not _fast_structure_event', locals(), 'not _fast_structure_event', 9334)
 
         # ── TP = confirmed 15m swing liquidity ──
         _fast_highs, _fast_lows = find_swings(candles_15m, lookback=3)
@@ -9339,8 +9347,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _fast_targets = sorted(
                 {level for _, level in _fast_lows if level < entry * 0.999}, reverse=True
             )
-        if not _fast_targets:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9344', (not _fast_targets), 'not _fast_targets', 'not _fast_targets', 9344):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9345', 'not _fast_targets', locals(), 'not _fast_targets', 9345)
         tp1 = smart_round(_fast_targets[0])
         tp2 = smart_round(_fast_targets[1]) if len(_fast_targets) > 1 else tp1
         tp = tp2  # основной TP для RR расчёта
@@ -9348,11 +9356,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
         # ── RR проверка ──
         risk   = abs(entry - sl)
         reward = abs(tp1 - entry)
-        if risk == 0:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9353', (risk == 0), 'RR проверка', 'risk == 0', 9353):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9354', 'RR проверка', locals(), 'risk == 0', 9354)
         rr = round(reward / risk, 2)
-        if not 2.0 <= rr <= 4.0:
-            return None
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9356', (not 2.0 <= rr <= 4.0), 'not 2.0 <= rr <= 4.0', 'not 2.0 <= rr <= 4.0', 9356):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9357', 'not 2.0 <= rr <= 4.0', locals(), 'not 2.0 <= rr <= 4.0', 9357)
 
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp1 - entry) / entry * 100, 2)
@@ -9437,15 +9445,15 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80) if legacy_strategy_groq_enabled() else None
-            if groq_resp:
+            if _audit_test('FAST_DETECT_FAST_DEAL_G9442', (groq_resp), 'groq_resp', 'groq_resp', 9442):
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if m:
+                if _audit_test('FAST_DETECT_FAST_DEAL_G9446', (m), 'm', 'm', 9446):
                     parsed = _j.loads(m.group())
                     # Groq как фильтр — блокируем только если явно valid=false
-                    if not parsed.get("valid", True):
-                        return None
+                    if _audit_test('FAST_DETECT_FAST_DEAL_G9449', (not parsed.get("valid", True)), 'Groq как фильтр — блокируем только если явно valid=false', 'not parsed.get("valid", True)', 9449):
+                        return _audit_fail('FAST_DETECT_FAST_DEAL_R9450', 'Groq как фильтр — блокируем только если явно valid=false', locals(), 'not parsed.get("valid", True)', 9450)
                     if parsed.get("logic"):
                         logic = str(parsed["logic"]).strip()
             else:
@@ -9483,7 +9491,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
     except Exception as e:
         logging.debug(f"detect_fast_deal {symbol}: {e}")
-        return None
+        return _audit_fail('FAST_DETECT_FAST_DEAL_R9488', 'detector returned None', locals(), '', 9488)
 
 
 # ═══════════════════════════════════════════════════════════════

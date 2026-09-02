@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import sqlite3
 from collections import defaultdict
 from typing import Any
@@ -70,14 +71,10 @@ def format_scanner_dashboard(data: dict[str, Any]) -> str:
             f"SL подряд {int(state.get('consecutive_losses') or 0)} · "
             f"риск ×{float(state.get('live_risk_multiplier') or 0):.1f}"
         )
-    reasons = data.get("reasons", [])
-    if reasons:
-        lines.extend(["", "<b>Главные причины за 24ч</b>"])
-        for row in reasons[:8]:
-            lines.append(
-                f"• {html.escape(str(row.get('strategy') or '—'))}: "
-                f"{html.escape(str(row.get('reason_code') or 'UNSPECIFIED'))} ×{int(row.get('count') or 0)}"
-            )
+    stats_url = os.environ.get("APEX_STATS_URL", "").strip()
+    if stats_url:
+        safe_url = html.escape(stats_url, quote=True)
+        lines.extend(["", f'<a href="{safe_url}">📊 Полная статистика</a>'])
     lines.extend(["", "<i>Панель показывает фактические проходы, а не расписание.</i>"])
     return "\n".join(lines)[:4000]
 
