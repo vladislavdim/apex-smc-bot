@@ -20,7 +20,7 @@ def repair(path):
         direct_fail=any(isinstance(st,ast.Return) and is_name_call(st.value,'_audit_fail') for st in node.body)
         if direct_fail: continue
         if len(node.test.args)<2: raise RuntimeError(f'bad audit wrapper at {path}:{node.lineno}')
-        original=ast.get_source_segment(src,node.test.args[1])
+        original=ast.unparse(node.test.args[1])
         if not original: raise RuntimeError(f'cannot recover condition at {path}:{node.lineno}')
         a,b=pos(o,node.test); edits.append((a,b,original))
     for a,b,r in sorted(edits,reverse=True): src=src[:a]+r+src[b:]
