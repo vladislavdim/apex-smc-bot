@@ -71,6 +71,8 @@ jobs:
             if d(cur)!=d(base): raise SystemExit(rel+' trading semantics differ')
           print('trading semantic AST unchanged')
           PY
+      - name: Restore production DB after tests
+        run: git checkout origin/main -- brain.db
       - run: git diff --exit-code origin/main -- brain.db
       - name: Commit verified implementation
         run: |
