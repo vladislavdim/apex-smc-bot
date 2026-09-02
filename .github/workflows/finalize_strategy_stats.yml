@@ -20,86 +20,59 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          # 1) Keep telemetry outbox completely separate from trading brain.db.
           p=Path('core/setup_audit.py'); s=p.read_text(encoding='utf-8')
           old='DB_PATH = os.environ.get("APEX_DB_PATH", os.environ.get("APEX_BRAIN_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")))'
           new='DB_PATH = os.environ.get("APEX_SETUP_AUDIT_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "setup_audit.db"))'
           if old not in s and new not in s: raise SystemExit('setup_audit DB_PATH anchor missing')
-          s=s.replace(old,new)
-          p.write_text(s,encoding='utf-8')
+          p.write_text(s.replace(old,new),encoding='utf-8')
 
-          # 2) Add exact date-from/date-to filtering to API and HTML.
           p=Path('stats_server.py'); s=p.read_text(encoding='utf-8')
-          s=s.replace(
-          'def _fetch(days: int, strategy: str, symbol: str) -> list[dict[str, Any]]:\n    days = max(1, min(int(days), 30)); where = ["occurred_at >= NOW() - (%s * INTERVAL \'1 day\')"]; params: list[Any] = [days]',
-          'def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: str = "") -> list[dict[str, Any]]:\n    days = max(1, min(int(days), 30)); where: list[str] = []; params: list[Any] = []\n    if from_date and re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", from_date): where.append("occurred_at >= %s::date"); params.append(from_date)\n    else: where.append("occurred_at >= NOW() - (%s * INTERVAL \'1 day\')"); params.append(days)\n    if to_date and re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", to_date): where.append("occurred_at < (%s::date + INTERVAL \'1 day\')"); params.append(to_date)')
-          s=s.replace(
-          'def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",\n                    min_rr: float | None = None, max_rr: float | None = None, page: int = 1, page_size: int = 100) -> dict[str, Any]:\n    events = _fetch(days, strategy, symbol);',
-          'def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",\n                    min_rr: float | None = None, max_rr: float | None = None, from_date: str = "", to_date: str = "",\n                    page: int = 1, page_size: int = 100) -> dict[str, Any]:\n    events = _fetch(days, strategy, symbol, from_date, to_date);')
-          controls='<div class=controls><input id=symbol placeholder="Пара, напр. BTCUSDT"><select id=outcome>'
-          controls2='<div class=controls><input id=symbol placeholder="Пара, напр. BTCUSDT"><input id=fromdate type=date title="Дата от"><input id=todate type=date title="Дата до"><select id=outcome>'
-          if controls not in s and 'id=fromdate' not in s: raise SystemExit('HTML controls anchor missing')
-          s=s.replace(controls,controls2)
+          s=s.replace('def _fetch(days: int, strategy: str, symbol: str) -> list[dict[str, Any]]:\n    days = max(1, min(int(days), 30)); where = ["occurred_at >= NOW() - (%s * INTERVAL \'1 day\')"]; params: list[Any] = [days]', 'def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: str = "") -> list[dict[str, Any]]:\n    days = max(1, min(int(days), 30)); where: list[str] = []; params: list[Any] = []\n    if from_date and re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", from_date): where.append("occurred_at >= %s::date"); params.append(from_date)\n    else: where.append("occurred_at >= NOW() - (%s * INTERVAL \'1 day\')"); params.append(days)\n    if to_date and re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", to_date): where.append("occurred_at < (%s::date + INTERVAL \'1 day\')"); params.append(to_date)')
+          s=s.replace('def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",\n                    min_rr: float | None = None, max_rr: float | None = None, page: int = 1, page_size: int = 100) -> dict[str, Any]:\n    events = _fetch(days, strategy, symbol);', 'def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",\n                    min_rr: float | None = None, max_rr: float | None = None, from_date: str = "", to_date: str = "",\n                    page: int = 1, page_size: int = 100) -> dict[str, Any]:\n    events = _fetch(days, strategy, symbol, from_date, to_date);')
+          s=s.replace('<div class=controls><input id=symbol placeholder="Пара, напр. BTCUSDT"><select id=outcome>', '<div class=controls><input id=symbol placeholder="Пара, напр. BTCUSDT"><input id=fromdate type=date title="Дата от"><input id=todate type=date title="Дата до"><select id=outcome>')
           s=s.replace("for(const id of ['symbol','outcome','groq'])", "for(const id of ['symbol','outcome','groq','fromdate','todate'])")
-          old_call='data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,int(val("page","1")),int(val("page_size","100")))'
-          new_call='data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")))'
-          if old_call not in s and new_call not in s: raise SystemExit('dashboard handler anchor missing')
-          s=s.replace(old_call,new_call)
+          s=s.replace('data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,int(val("page","1")),int(val("page_size","100")))', 'data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")))')
           p.write_text(s,encoding='utf-8')
 
-          # 3) Add a real Telegram URL button in Radar (not only an HTML text link).
           p=Path('bot.py'); s=p.read_text(encoding='utf-8')
           old='''        await callback.message.edit_text(\n            text,\n            parse_mode="HTML",\n            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),\n                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )'''
-          new='''        _scanner_buttons = []\n        _stats_url = os.environ.get("APEX_STATS_URL", "").strip()\n        if _stats_url:\n            _scanner_buttons.append([InlineKeyboardButton(text="📊 Полная статистика", url=_stats_url)])\n        _scanner_buttons.append([\n            InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),\n            InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),\n        ])\n        await callback.message.edit_text(\n            text,\n            parse_mode="HTML",\n            reply_markup=InlineKeyboardMarkup(inline_keyboard=_scanner_buttons),\n        )'''
-          if old not in s and '_scanner_buttons = []' not in s: raise SystemExit('menu_scanners markup anchor missing')
-          s=s.replace(old,new)
+          new='''        _scanner_buttons = []\n        _stats_url = os.environ.get("APEX_STATS_URL", "").strip()\n        if _stats_url:\n            _scanner_buttons.append([InlineKeyboardButton(text="📊 Полная статистика", url=_stats_url)])\n        _scanner_buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"), InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")])\n        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=_scanner_buttons))'''
+          if old in s: s=s.replace(old,new)
+          elif '_scanner_buttons = []' not in s: raise SystemExit('menu_scanners anchor missing')
           p.write_text(s,encoding='utf-8')
 
-          # 4) Focused regression tests for the final UX/isolation promises.
-          t=Path('tests/test_strategy_stats_final.py')
-          t.write_text('''import inspect\nimport os\nimport unittest\n\nimport core.setup_audit as audit\nimport stats_server\n\n\nclass StrategyStatsFinalTests(unittest.TestCase):\n    def test_setup_audit_uses_separate_default_database(self):\n        if not os.environ.get("APEX_SETUP_AUDIT_DB_PATH"):\n            self.assertTrue(audit.DB_PATH.endswith("setup_audit.db"), audit.DB_PATH)\n            self.assertFalse(audit.DB_PATH.endswith("brain.db"), audit.DB_PATH)\n\n    def test_dashboard_has_exact_date_filters(self):\n        self.assertIn("id=fromdate", stats_server.HTML)\n        self.assertIn("id=todate", stats_server.HTML)\n        params = inspect.signature(stats_server.build_dashboard).parameters\n        self.assertIn("from_date", params)\n        self.assertIn("to_date", params)\n\n    def test_stats_server_remains_trading_code_free(self):\n        source = inspect.getsource(stats_server)\n        self.assertNotIn("import bot", source)\n        self.assertNotIn("import market", source)\n        self.assertNotIn("trade_execution", source)\n\n\nif __name__ == "__main__":\n    unittest.main()\n''',encoding='utf-8')
+          Path('tests/test_strategy_stats_final.py').write_text('''import inspect\nimport unittest\nfrom pathlib import Path\nimport stats_server\n\nclass StrategyStatsFinalTests(unittest.TestCase):\n    def test_setup_audit_default_is_separate(self):\n        src=Path("core/setup_audit.py").read_text(encoding="utf-8")\n        self.assertIn("APEX_SETUP_AUDIT_DB_PATH",src)\n        self.assertIn("setup_audit.db",src)\n        self.assertNotIn("APEX_BRAIN_DB_PATH",src)\n    def test_dashboard_exact_dates(self):\n        self.assertIn("id=fromdate",stats_server.HTML); self.assertIn("id=todate",stats_server.HTML)\n        p=inspect.signature(stats_server.build_dashboard).parameters\n        self.assertIn("from_date",p); self.assertIn("to_date",p)\n    def test_stats_server_does_not_import_trading(self):\n        src=inspect.getsource(stats_server)\n        self.assertNotIn("import bot",src); self.assertNotIn("import market",src); self.assertNotIn("trade_execution",src)\nif __name__=="__main__": unittest.main()\n''',encoding='utf-8')
           PY
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Compile project
-        run: python -m compileall -q .
-      - name: Run full tests
-        run: python -m unittest discover -s tests -p 'test*.py'
+      - run: pip install -r requirements.txt
+      - run: python -m compileall -q .
+      - run: python -m unittest discover -s tests -p 'test*.py'
       - name: Verify trading semantics unchanged
         run: |
           python - <<'PY'
-          import ast, subprocess
+          import ast,re,subprocess
           from pathlib import Path
-          class StripAudit(ast.NodeTransformer):
-              def visit_ImportFrom(self,node):
-                  if node.module=='core.setup_audit': return None
-                  return self.generic_visit(node)
-              def visit_FunctionDef(self,node):
-                  self.generic_visit(node)
-                  node.decorator_list=[d for d in node.decorator_list if not (isinstance(d,ast.Call) and isinstance(d.func,ast.Name) and d.func.id=='_audit_strategy')]
-                  return node
-              def visit_Call(self,node):
-                  node=self.generic_visit(node)
-                  if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='_audit_test' and len(node.args)>=2: return node.args[1]
-                  if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='_audit_fail': return ast.Constant(value=None)
-                  return node
-          def dump(text):
-              tree=StripAudit().visit(ast.parse(text)); ast.fix_missing_locations(tree); return ast.dump(tree,include_attributes=False)
+          class S(ast.NodeTransformer):
+            def visit_ImportFrom(self,n):
+              if n.module=='core.setup_audit': return None
+              return self.generic_visit(n)
+            def visit_FunctionDef(self,n):
+              self.generic_visit(n); n.decorator_list=[d for d in n.decorator_list if not(isinstance(d,ast.Call) and isinstance(d.func,ast.Name) and d.func.id=='_audit_strategy')]; return n
+            def visit_Call(self,n):
+              n=self.generic_visit(n)
+              if isinstance(n.func,ast.Name) and n.func.id=='_audit_test' and len(n.args)>=2:return n.args[1]
+              if isinstance(n.func,ast.Name) and n.func.id=='_audit_fail':return ast.Constant(value=None)
+              return n
+          def d(x):
+            t=S().visit(ast.parse(x));ast.fix_missing_locations(t);return ast.dump(t,include_attributes=False)
           for rel in ('market.py','bot.py'):
-              cur=Path(rel).read_text(encoding='utf-8')
-              base=subprocess.check_output(['git','show',f'origin/main:{rel}'],text=True)
-              if rel=='bot.py':
-                  # The only intentional non-observability UI difference is the Radar URL button.
-                  # Strip that small block before semantic comparison.
-                  import re
-                  cur=re.sub(r'\n        _scanner_buttons = \[\].*?reply_markup=InlineKeyboardMarkup\(inline_keyboard=_scanner_buttons\),\n        \)', '\n        await callback.message.edit_text(\n            text,\n            parse_mode="HTML",\n            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),\n                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )', cur, count=1, flags=re.S)
-              if dump(cur)!=dump(base): raise SystemExit(f'{rel}: trading semantics differ from main')
+            cur=Path(rel).read_text(encoding='utf-8'); base=subprocess.check_output(['git','show',f'origin/main:{rel}'],text=True)
+            if rel=='bot.py':
+              cur=re.sub(r'\n        _scanner_buttons = \[\].*?await callback\.message\.edit_text\(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup\(inline_keyboard=_scanner_buttons\)\)', '\n        await callback.message.edit_text(\n            text,\n            parse_mode="HTML",\n            reply_markup=InlineKeyboardMarkup(inline_keyboard=[\n                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),\n                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],\n            ]),\n        )', cur, count=1, flags=re.S)
+            if d(cur)!=d(base): raise SystemExit(rel+' trading semantics differ')
           print('trading semantic AST unchanged')
           PY
-      - name: Verify production database untouched
-        run: git diff --exit-code origin/main -- brain.db
-      - name: Check diff and commit finalized branch
+      - run: git diff --exit-code origin/main -- brain.db
+      - name: Commit verified implementation
         run: |
           git diff --check
           rm -f .github/workflows/finalize_strategy_stats.yml
