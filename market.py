@@ -7244,7 +7244,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 pass
 
         # ── ВАРИАНТ 2: Реакция от OB/FVG без sweep ──
-        if _audit_test('SWING_DETECT_SWING_SETUP_G7246', (not direction), 'ВАРИАНТ 2: Реакция от OB/FVG без sweep', 'not direction', 7246):
+        if not direction:
             try:
                 _ob_sw = find_ob(candles, "BULLISH")
                 _fvg_sw = find_fvg(candles, "BULLISH")
@@ -7285,7 +7285,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         trigger_lookback = 1
 
                 # Variant 2: минимум RR 2.0
-                if _audit_test('SWING_DETECT_SWING_SETUP_G7287', (direction and entry and sl and tp), 'Variant 2: минимум RR 2.0', 'direction and entry and sl and tp', 7287):
+                if direction and entry and sl and tp:
                     _v2_risk = abs(entry - sl)
                     _v2_reward = abs(tp - entry)
                     if _audit_test('SWING_DETECT_SWING_SETUP_G7290', (_v2_risk > 0 and _v2_reward / _v2_risk < 2.0), 'Variant 2: минимум RR 2.0', '_v2_risk > 0 and _v2_reward / _v2_risk < 2.0', 7290):
@@ -7346,7 +7346,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             pass
 
         # ── BTC фильтр для SWING ──
-        if _audit_test('SWING_DETECT_SWING_SETUP_G7348', (symbol != "BTCUSDT"), 'BTC фильтр для SWING', 'symbol != "BTCUSDT"', 7348):
+        if symbol != 'BTCUSDT':
             btc_ok, btc_reason = btc_allows_signal(direction)
             if _audit_test('SWING_DETECT_SWING_SETUP_G7350', (not btc_ok), 'BTC фильтр для SWING', 'not btc_ok', 7350):
                 logging.info(f"[SWING BTC Filter] {symbol} {direction} пропущен: {btc_reason}")
@@ -7369,11 +7369,11 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         # ── Displacement candle — свеча после sweep должна быть импульсной ──
         # Адаптивный порог: если ATR < median → 50%, иначе 60%
         try:
-            if _audit_test('SWING_DETECT_SWING_SETUP_G7371', (trigger_lookback >= 2), 'Адаптивный порог: если ATR < median → 50%, иначе 60%', 'trigger_lookback >= 2', 7371):
+            if trigger_lookback >= 2:
                 _disp_candle = candles[-trigger_lookback + 1]
                 _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
                 _disp_range = _disp_candle["high"] - _disp_candle["low"]
-                if _audit_test('SWING_DETECT_SWING_SETUP_G7375', (_disp_range > 0), 'Адаптивный порог: если ATR < median → 50%, иначе 60%', '_disp_range > 0', 7375):
+                if _disp_range > 0:
                     _disp_ratio = _disp_body / _disp_range
                     if _audit_test('SWING_DETECT_SWING_SETUP_G7377', (_disp_ratio < 0.50), '_disp_ratio < 0.50', '_disp_ratio < 0.50', 7377):
                         return _audit_fail('SWING_DETECT_SWING_SETUP_R7378', '_disp_ratio < 0.50', locals(), '_disp_ratio < 0.50', 7378)
@@ -7523,12 +7523,12 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         htf_1d_sw = smc_on_tf(symbol, "1d")
         htf_dir = htf_1d_sw  # для совместимости ниже
 
-        if _audit_test('SWING_DETECT_SWING_SETUP_G7525', (direction == "BULLISH"), 'HTF: блок только если ОБА (4h И 1d) против', 'direction == "BULLISH"', 7525):
+        if direction == 'BULLISH':
             _4h_against = htf_4h_sw and "BEARISH" in str(htf_4h_sw).upper()
             _1d_against = htf_1d_sw and "BEARISH" in str(htf_1d_sw).upper()
             if _audit_test('SWING_DETECT_SWING_SETUP_G7528', (_4h_against and _1d_against), '_4h_against and _1d_against', '_4h_against and _1d_against', 7528):
                 return _audit_fail('SWING_DETECT_SWING_SETUP_R7529', '_4h_against and _1d_against', locals(), '_4h_against and _1d_against', 7529)  # оба HTF против — блок
-        elif _audit_test('SWING_DETECT_SWING_SETUP_G7530', (direction == "BEARISH"), 'direction == "BEARISH"', 'direction == "BEARISH"', 7530):
+        elif direction == 'BEARISH':
             _4h_against = htf_4h_sw and "BULLISH" in str(htf_4h_sw).upper()
             _1d_against = htf_1d_sw and "BULLISH" in str(htf_1d_sw).upper()
             if _audit_test('SWING_DETECT_SWING_SETUP_G7533', (_4h_against and _1d_against), '_4h_against and _1d_against', '_4h_against and _1d_against', 7533):
@@ -7676,7 +7676,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             )
 
             groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
-            if _audit_test('SWING_DETECT_SWING_SETUP_G7678', (groq_response and len(groq_response) > 5), 'groq_response and len(groq_response) > 5', 'groq_response and len(groq_response) > 5', 7678):
+            if groq_response and len(groq_response) > 5:
                 try:
                     import json as _json, re as _re
                     clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
@@ -7855,7 +7855,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7853', 'not zone_level', locals(), 'not zone_level', 7853)  # Нет зоны интереса рядом с ценой
 
         # ── 2.5. Проверка свежести зоны (unmitigated + strong move away) ──
-        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7856', (zone_level and zone_type), '2.5. Проверка свежести зоны (unmitigated + strong move away)', 'zone_level and zone_type', 7856):
+        if zone_level and zone_type:
             try:
                 _test_count = 0
                 _zone_top = ob["top"] if zone_type == "OB" and ob else (fvg["top"] if fvg else zone_level * 1.01)
@@ -7905,14 +7905,14 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
 
         # ── 4. HTF фильтры ──
         htf_1d = smc_on_tf(symbol, "1d")
-        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7906', (htf_1d), '4. HTF фильтры', 'htf_1d', 7906):
+        if htf_1d:
             if _audit_test('ZONE_DETECT_ZONE_SETUP_G7907', (direction == "BULLISH" and "BEARISH" in str(htf_1d).upper()), '4. HTF фильтры', 'direction == "BULLISH" and "BEARISH" in str(htf_1d).upper()', 7907):
                 return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7908', '4. HTF фильтры', locals(), 'direction == "BULLISH" and "BEARISH" in str(htf_1d).upper()', 7908)
             if _audit_test('ZONE_DETECT_ZONE_SETUP_G7909', (direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()), '4. HTF фильтры', 'direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()', 7909):
                 return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7910', 'direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()', locals(), 'direction == "BEARISH" and "BULLISH" in str(htf_1d).upper()', 7910)
 
         # ── 5. BTC фильтр ──
-        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7913', (symbol != "BTCUSDT"), '5. BTC фильтр', 'symbol != "BTCUSDT"', 7913):
+        if symbol != 'BTCUSDT':
             btc_ok, btc_reason = btc_allows_signal(direction)
             if _audit_test('ZONE_DETECT_ZONE_SETUP_G7915', (not btc_ok), '5. BTC фильтр', 'not btc_ok', 7915):
                 return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7916', '5. BTC фильтр', locals(), 'not btc_ok', 7916)
@@ -8053,7 +8053,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8051', 'wick/RSI/FVG/BTC/funding/rejection-volume, without double-counting.', locals(), 'q_score < _q_min', 8051)  # Недостаточно независимых подтверждений
 
         # ── 8. Расчёт entry / SL / TP ──
-        if _audit_test('ZONE_DETECT_ZONE_SETUP_G8054', (direction == "BULLISH"), '8. Расчёт entry / SL / TP', 'direction == "BULLISH"', 8054):
+        if direction == 'BULLISH':
             entry = smart_round(price)
             sl    = smart_round(zone_level - atr * 0.5)
             # TP = ближайший swing high
@@ -8120,11 +8120,11 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                 f"{_recent_errors}"
             )
             _zone_resp = ask_groq(_zone_prompt, max_tokens=80) if legacy_strategy_groq_enabled() else None
-            if _audit_test('ZONE_DETECT_ZONE_SETUP_G8121', (_zone_resp), '_zone_resp', '_zone_resp', 8121):
+            if _zone_resp:
                 import json as _j, re as _re
                 _clean = _re.sub(r'```json|```', '', _zone_resp).strip()
                 _m = _re.search(r'\{[^}]+\}', _clean, _re.DOTALL)
-                if _audit_test('ZONE_DETECT_ZONE_SETUP_G8125', (_m), '_m', '_m', 8125):
+                if _m:
                     _parsed = _j.loads(_m.group())
                     if _audit_test('ZONE_DETECT_ZONE_SETUP_G8127', (not _parsed.get("valid", True)), 'not _parsed.get("valid", True)', 'not _parsed.get("valid", True)', 8127):
                         return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8128', 'not _parsed.get("valid", True)', locals(), 'not _parsed.get("valid", True)', 8128)
@@ -8385,7 +8385,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         signals = []
 
         # ── BTC фильтр для WYCKOFF (4h) ──
-        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8385', (symbol != "BTCUSDT"), 'BTC фильтр для WYCKOFF (4h)', 'symbol != "BTCUSDT"', 8385):
+        if symbol != 'BTCUSDT':
             btc_ok, btc_reason = btc_allows_signal("BULLISH", use_4h=True)
             if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8387', (not btc_ok), 'BTC фильтр для WYCKOFF (4h)', 'not btc_ok', 8387):
                 logging.info(f"[WYCKOFF BTC Filter] {symbol} LONG пропущен: {btc_reason}")
@@ -8619,11 +8619,11 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120) if legacy_strategy_groq_enabled() else None
-            if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8619', (groq_resp), 'groq_resp', 'groq_resp', 8619):
+            if groq_resp:
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8623', (m), 'm', 'm', 8623):
+                if m:
                     parsed = _j.loads(m.group())
                     # Groq как фильтр — если valid=false, блокируем
                     if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8626', (not parsed.get("valid", True)), 'Groq как фильтр — если valid=false, блокируем', 'not parsed.get("valid", True)', 8626):
@@ -8694,7 +8694,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         signals = []
 
         # ── BTC фильтр для WYCKOFF DISTRIBUTION (4h) ──
-        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8693', (symbol != "BTCUSDT"), 'BTC фильтр для WYCKOFF DISTRIBUTION (4h)', 'symbol != "BTCUSDT"', 8693):
+        if symbol != 'BTCUSDT':
             btc_ok, btc_reason = btc_allows_signal("BEARISH", use_4h=True)
             if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8695', (not btc_ok), 'BTC фильтр для WYCKOFF DISTRIBUTION (4h)', 'not btc_ok', 8695):
                 logging.info(f"[WYCKOFF BTC Filter] {symbol} SHORT пропущен: {btc_reason}")
@@ -8907,11 +8907,11 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=120) if legacy_strategy_groq_enabled() else None
-            if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8906', (groq_resp), 'groq_resp', 'groq_resp', 8906):
+            if groq_resp:
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8910', (m), 'm', 'm', 8910):
+                if m:
                     parsed = _j.loads(m.group())
                     # Groq как фильтр — если valid=false, блокируем
                     if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8913', (not parsed.get("valid", True)), 'Groq как фильтр — если valid=false, блокируем', 'not parsed.get("valid", True)', 8913):
@@ -9018,7 +9018,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         liquidity_target = acc_high if len(eqh_levels) >= 2 else price_peak
 
         # ── 7. BTC фильтр ──
-        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9016', (symbol != "BTCUSDT"), '7. BTC фильтр', 'symbol != "BTCUSDT"', 9016):
+        if symbol != 'BTCUSDT':
             btc_ok, _ = btc_allows_signal("BULLISH")
             if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9018', (not btc_ok), '7. BTC фильтр', 'not btc_ok', 9018): return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9018', '7. BTC фильтр', locals(), 'not btc_ok', 9018)
 
@@ -9086,10 +9086,10 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             _resp = ask_groq(_wyk_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
-            if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9084', (_resp), '_resp', '_resp', 9084):
+            if _resp:
                 import json as _j, re as _re
                 _m = _re.search(r'\{[^}]+\}', _resp, _re.DOTALL)
-                if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9087', (_m), '_m', '_m', 9087):
+                if _m:
                     _p = _j.loads(_m.group())
                     if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9089', (not _p.get("valid", True)), 'not _p.get("valid", True)', 'not _p.get("valid", True)', 9089): return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9089', 'not _p.get("valid", True)', locals(), 'not _p.get("valid", True)', 9089)
         except Exception:
@@ -9160,10 +9160,10 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9154', 'Для редкого скальпа не берём конфликтующие 4h/1h направления.', locals(), 'direction_4h and direction_1h and direction_4h != direction_1h', 9154)
 
         # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9157', (symbol != "BTCUSDT"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'symbol != "BTCUSDT"', 9157):
+        if symbol != 'BTCUSDT':
             if _audit_test('FAST_DETECT_FAST_DEAL_G9158', (direction_1d == "BULLISH" and btc_trend == "BEARISH"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'direction_1d == "BULLISH" and btc_trend == "BEARISH"', 9158):
                 return _audit_fail('FAST_DETECT_FAST_DEAL_R9159', 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', locals(), 'direction_1d == "BULLISH" and btc_trend == "BEARISH"', 9159)
-            if _audit_test('FAST_DETECT_FAST_DEAL_G9160', (direction_1d == "BEARISH" and btc_trend == "BULLISH"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'direction_1d == "BEARISH" and btc_trend == "BULLISH"', 9160):
+            if direction_1d == 'BEARISH' and btc_trend == 'BULLISH':
                 try:
                     btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
                     if _audit_test('FAST_DETECT_FAST_DEAL_G9163', (btc_change > 1.0), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'btc_change > 1.0', 9163):
@@ -9445,11 +9445,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 f"{_recent_errors}"
             )
             groq_resp = ask_groq(groq_prompt, max_tokens=80) if legacy_strategy_groq_enabled() else None
-            if _audit_test('FAST_DETECT_FAST_DEAL_G9442', (groq_resp), 'groq_resp', 'groq_resp', 9442):
+            if groq_resp:
                 import json as _j, re as _re
                 clean = groq_resp.strip().replace("```json", "").replace("```", "").strip()
                 m = _re.search(r'\{[^}]+\}', clean, _re.DOTALL)
-                if _audit_test('FAST_DETECT_FAST_DEAL_G9446', (m), 'm', 'm', 9446):
+                if m:
                     parsed = _j.loads(m.group())
                     # Groq как фильтр — блокируем только если явно valid=false
                     if _audit_test('FAST_DETECT_FAST_DEAL_G9449', (not parsed.get("valid", True)), 'Groq как фильтр — блокируем только если явно valid=false', 'not parsed.get("valid", True)', 9449):

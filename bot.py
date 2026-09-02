@@ -4578,10 +4578,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             pass
 
         # Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает
-        if _audit_test('MTF_FULL_SCAN_RAW_G4580', (symbol != "BTCUSDT"), 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', 'symbol != "BTCUSDT"', 4580):
+        if symbol != 'BTCUSDT':
             try:
                 btc_mtf = multi_tf_analysis("BTCUSDT", ["1h", "4h"])
-                if _audit_test('MTF_FULL_SCAN_RAW_G4583', (btc_mtf), 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', 'btc_mtf', 4583):
+                if btc_mtf:
                     btc_dir = btc_mtf.get("direction")
                     if _audit_test('MTF_FULL_SCAN_RAW_G4585', (direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",)), 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', 'direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",)', 4585):
                         return _audit_fail('MTF_FULL_SCAN_RAW_R4586', 'Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает', locals(), 'direction == "BEARISH" and btc_dir == "BULLISH" and timeframe in ("1h",)', 4586)  # не шортим альты когда BTC растёт на 1h
@@ -4618,7 +4618,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         # ── MUST 2: Тренд EMA50/EMA20 + структура HH/HL ──
         try:
             _ema_candles = get_confirmed_candles(get_candles(symbol, "4h", 61))
-            if _audit_test('MTF_FULL_SCAN_RAW_G4620', (_ema_candles and len(_ema_candles) >= 50), 'MUST 2: Тренд EMA50/EMA20 + структура HH/HL', '_ema_candles and len(_ema_candles) >= 50', 4620):
+            if _ema_candles and len(_ema_candles) >= 50:
                 _closes = [c["close"] for c in _ema_candles]
                 _ema50 = ema_value(_closes, 50)
                 _ema20 = ema_value(_closes, 20)
@@ -4638,7 +4638,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 )
 
                 _mtf_adx_weak = _ap_mtf.get("adx_weak", False)
-                if _audit_test('MTF_FULL_SCAN_RAW_G4640', (direction == "BULLISH"), 'direction == "BULLISH"', 'direction == "BULLISH"', 4640):
+                if direction == 'BULLISH':
                     if _mtf_adx_weak:
                         _trend_ok = _hh_hl or (_ema20 > _ema50)
                     else:
@@ -4664,7 +4664,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         try:
             _pd_raw = get_candles(symbol, "4h", 51)
             _pd_candles = get_confirmed_candles(_pd_raw)
-            if _audit_test('MTF_FULL_SCAN_RAW_G4666', (_pd_candles and len(_pd_candles) >= 20), 'Premium/Discount зона — реальный расчёт', '_pd_candles and len(_pd_candles) >= 20', 4666):
+            if _pd_candles and len(_pd_candles) >= 20:
                 _pd_high = max(c["high"] for c in _pd_candles[-20:])
                 _pd_low = min(c["low"] for c in _pd_candles[-20:])
                 _pd_mid = (_pd_high + _pd_low) / 2
@@ -4953,7 +4953,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 f"{_self_rules}"
             )
             groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
-            if _audit_test('MTF_FULL_SCAN_RAW_G4955', (groq_response and len(groq_response) > 5), 'groq_response and len(groq_response) > 5', 'groq_response and len(groq_response) > 5', 4955):
+            if groq_response and len(groq_response) > 5:
                 try:
                     import json as _json, re as _re
                     clean = groq_response.strip().replace("```json", "").replace("```", "").strip()
