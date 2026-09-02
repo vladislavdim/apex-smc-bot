@@ -9,12 +9,18 @@ def offsets(src):
     for m in re.finditer('\n',src): out.append(m.end())
     return out
 
-def pos(o,n): return o[n.lineno-1]+n.col_offset, o[(n.end_lineno or n.lineno)-1]+(n.end_col_offset or n.col_offset)
+def char_col(line, byte_col):
+    raw=line.encode('utf-8')[:byte_col]
+    return len(raw.decode('utf-8'))
+def pos(o,lines,n):
+    end_line=n.end_lineno or n.lineno
+    end_col=n.end_col_offset if n.end_col_offset is not None else n.col_offset
+    return o[n.lineno-1]+char_col(lines[n.lineno-1],n.col_offset), o[end_line-1]+char_col(lines[end_line-1],end_col)
 def is_name_call(node,name): return isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id==name
 
 
 def repair(path):
-    src=path.read_text(encoding='utf-8'); tree=ast.parse(src); o=offsets(src); edits=[]
+    src=path.read_text(encoding='utf-8'); tree=ast.parse(src); o=offsets(src); lines=src.splitlines(keepends=True); edits=[]
     for node in ast.walk(tree):
         if not isinstance(node,ast.If) or not is_name_call(node.test,'_audit_test'): continue
         direct_fail=any(isinstance(st,ast.Return) and is_name_call(st.value,'_audit_fail') for st in node.body)
@@ -22,7 +28,7 @@ def repair(path):
         if len(node.test.args)<2: raise RuntimeError(f'bad audit wrapper at {path}:{node.lineno}')
         original=ast.unparse(node.test.args[1])
         if not original: raise RuntimeError(f'cannot recover condition at {path}:{node.lineno}')
-        a,b=pos(o,node.test); edits.append((a,b,original))
+        a,b=pos(o,lines,node.test); edits.append((a,b,original))
     for a,b,r in sorted(edits,reverse=True): src=src[:a]+r+src[b:]
     ast.parse(src); path.write_text(src,encoding='utf-8'); return len(edits)
 
