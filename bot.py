@@ -994,14 +994,12 @@ async def handle_callback(callback: CallbackQuery):
         except Exception as exc:
             logging.error("Telegram scanner dashboard: %s", exc)
             text = "⚠️ Не удалось прочитать состояние сканеров."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
+        _scanner_buttons = []
+        _stats_url = os.environ.get("APEX_STATS_URL", "").strip()
+        if _stats_url:
+            _scanner_buttons.append([InlineKeyboardButton(text="📊 Полная статистика", url=_stats_url)])
+        _scanner_buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"), InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")])
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=_scanner_buttons))
 
     elif data == "menu_experience":
         try:

@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-DB_PATH = os.environ.get("APEX_DB_PATH", os.environ.get("APEX_BRAIN_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")))
+DB_PATH = os.environ.get("APEX_SETUP_AUDIT_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "setup_audit.db"))
 _MAX_PAYLOAD_CHARS = 60000
 _EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=10000)
 _WORKER_LOCK = threading.Lock()
