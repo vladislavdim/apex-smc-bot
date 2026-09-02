@@ -83,7 +83,7 @@ def format_scanner_dashboard(data: dict[str, Any]) -> str:
 
 
 def format_experience_dashboard(data: dict[str, Any]) -> str:
-    lines = ["🧠 <b>Experience / Shadow</b>", ""]
+    lines = ["🧬 <b>Experience / Shadow</b>", ""]
     funnel = data.get("funnel", [])
     if not funnel:
         lines.extend(["Кандидатов пока нет.",
@@ -122,6 +122,19 @@ def format_experience_dashboard(data: dict[str, Any]) -> str:
             lines.append(
                 f"{icons.get(state, '•')} {html.escape(str(row.get('strategy') or '—'))} "
                 f"{html.escape(str(row.get('regime') or 'UNKNOWN'))} · {state} · {progress}"
+            )
+    management = data.get("management", [])
+    management_open = int(data.get("management_open") or 0)
+    if management or management_open:
+        lines.extend(["", "<b>Обучение на решениях менеджера</b>"])
+        lines.append(f"• ожидают объективного исхода: {management_open}")
+        effects = {"HELPED": "✅ помогло", "HARMED": "⚠️ навредило",
+                   "NEUTRAL": "➖ нейтрально", "INCONCLUSIVE": "❔ недостаточно данных"}
+        for row in management[:12]:
+            lines.append(
+                f"• {html.escape(str(row.get('action') or '—'))}: "
+                f"{effects.get(str(row.get('effect') or ''), html.escape(str(row.get('effect') or '—')))} "
+                f"×{int(row.get('count') or 0)}"
             )
     lines.extend(["", "<i>Shadow-наблюдение не открывает ордера и не меняет уровни сделок.</i>"])
     return "\n".join(lines)[:4000]

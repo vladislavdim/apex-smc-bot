@@ -69,6 +69,7 @@ from core.experience_memory import (
     refresh_shadow_positions as _refresh_shadow_positions,
     active_rule_evidence as _active_experience_rules,
     experience_dashboard as _experience_dashboard,
+    bind_candidate_to_signal as _bind_experience_to_signal,
 )
 # Патч edit_text и edit_reply_markup — подавляем "message is not modified"
 import aiogram.types.message as _msg_module
@@ -111,6 +112,7 @@ from core.trade_manager import (
     ensure_trade_manager_schema as _ensure_trade_manager_schema,
     register_pending_signals as _register_pending_manager_signals,
     manager_cycle as _trade_manager_cycle,
+    load_active_states as _load_active_manager_states,
 )
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 from core.setup_evidence import (
@@ -118,7 +120,9 @@ from core.setup_evidence import (
     ensure_setup_evidence_schema as _ensure_setup_evidence_schema,
     persist_assessment as _persist_setup_assessment,
     setup_evidence_dashboard as _setup_evidence_dashboard,
+    bind_assessment_to_signal as _bind_setup_assessment_to_signal,
 )
+from external_sources.aggregator import collect_external_context as _collect_external_context
 from core.telegram_dashboard import (
     fetch_strategy_stats as _fetch_strategy_stats,
     fetch_system_health as _fetch_system_health,
@@ -219,18 +223,16 @@ except NameError: _groq_tokens_used = 0
 
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades"),
+        [InlineKeyboardButton(text="📊 Сделки", callback_data="menu_trades"),
          InlineKeyboardButton(text="👀 Наблюдаемые", callback_data="menu_watchlist")],
-        [InlineKeyboardButton(text="✅ По тейку", callback_data="menu_take_closed"),
-         InlineKeyboardButton(text="🛑 По стопу", callback_data="menu_stop_closed")],
         [InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
-         InlineKeyboardButton(text="🧠 Знания APEX", callback_data="menu_brain")],
+         InlineKeyboardButton(text="📚 Знания APEX", callback_data="menu_brain")],
         [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],
         [InlineKeyboardButton(text="🧭 Качество сетапов", callback_data="menu_setup_evidence")],
-        [InlineKeyboardButton(text="🧠 Менеджер сделок", callback_data="menu_trade_manager")],
-        [InlineKeyboardButton(text="🧠 Experience / Shadow", callback_data="menu_experience")]
+        [InlineKeyboardButton(text="🛠 Менеджер сделок", callback_data="menu_trade_manager")],
+        [InlineKeyboardButton(text="🧬 Experience / Shadow", callback_data="menu_experience")]
     ])
 
 def tf_keyboard():
@@ -929,6 +931,18 @@ async def handle_callback(callback: CallbackQuery):
             ]),
         )
 
+    elif data == "menu_trades":
+        await callback.message.edit_text(
+            "📊 <b>Сделки APEX</b>\n\nВыберите состояние сделки:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades")],
+                [InlineKeyboardButton(text="✅ Закрыты по тейку", callback_data="menu_take_closed")],
+                [InlineKeyboardButton(text="🛑 Закрыты по стопу", callback_data="menu_stop_closed")],
+                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+            ]),
+        )
+
     elif data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:
         category = {
             "menu_active_trades": "active",
@@ -949,7 +963,7 @@ async def handle_callback(callback: CallbackQuery):
                  InlineKeyboardButton(text="✅ Тейки", callback_data="menu_take_closed"),
                  InlineKeyboardButton(text="🛑 Стопы", callback_data="menu_stop_closed")],
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data=data),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+                 InlineKeyboardButton(text="🔙 Сделки", callback_data="menu_trades")],
             ]),
         )
 
@@ -1605,7 +1619,7 @@ async def handle_callback(callback: CallbackQuery):
             execution_block = "\n⚙️ Автоторговля: <b>модуль недоступен</b>\n"
 
         await callback.message.edit_text(
-            f"🧠 <b>Знания APEX</b>\n"
+            f"📚 <b>Знания APEX</b>\n"
             f"{'━'*24}\n\n"
             f"📚 База знаний: <b>{knowledge_count + web_knowledge_count}</b>\n"
             f"🌐 Web Research: <b>{web_knowledge_count}</b> · за 24ч <b>{web_24h}</b>\n"
@@ -3340,6 +3354,10 @@ async def _send_signal(sd):
     if signal_id:
         try: await asyncio.to_thread(_capture_signal_evidence, signal_id, sd, DB_PATH)
         except Exception as exc: logging.warning("[ClosedLoop] capture signal %s: %s", signal_id, exc)
+        try: await asyncio.to_thread(_bind_setup_assessment_to_signal, sd, signal_id, DB_PATH)
+        except Exception as exc: logging.warning("[SetupEvidence] bind signal %s: %s", signal_id, exc)
+        try: await asyncio.to_thread(_bind_experience_to_signal, sd, signal_id, DB_PATH)
+        except Exception as exc: logging.warning("[Experience] bind signal %s: %s", signal_id, exc)
     if signal_id and _TRADE_EXECUTION_OK:
         execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
         logging.info(
@@ -3571,11 +3589,28 @@ async def auto_trade_reconcile_job():
 async def _run_trade_manager_once():
     """Manage activated analytics trades using Gate data, outside the scan lock."""
     try:
+        await asyncio.to_thread(_register_pending_manager_signals, DB_PATH)
+        manager_states = await asyncio.to_thread(_load_active_manager_states, DB_PATH)
+        pairs = sorted({
+            (str(state.get("symbol") or "").upper(), str(state.get("direction") or "").upper())
+            for state in manager_states if state.get("symbol")
+        })
+        external_results = await asyncio.gather(
+            *(_collect_external_context(symbol, direction) for symbol, direction in pairs),
+            return_exceptions=True,
+        )
+        external_by_trade = {
+            pair: result for pair, result in zip(pairs, external_results)
+            if isinstance(result, dict)
+        }
         updates = await asyncio.to_thread(
             _trade_manager_cycle,
             get_live_prices,
             get_candles,
             ask_groq,
+            external_context=lambda symbol, direction: external_by_trade.get(
+                (str(symbol).upper(), str(direction).upper()), {}
+            ),
             db_path=DB_PATH,
         )
         for update in updates:

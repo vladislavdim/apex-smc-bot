@@ -45,6 +45,7 @@ def ensure_experience_schema(db_path: str = DB_PATH) -> None:
         """
         CREATE TABLE IF NOT EXISTS experience_candidates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id INTEGER,
             fingerprint TEXT UNIQUE NOT NULL,
             symbol TEXT NOT NULL,
             strategy TEXT NOT NULL,
@@ -130,8 +131,39 @@ def ensure_experience_schema(db_path: str = DB_PATH) -> None:
             evidence_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS experience_management_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_key TEXT UNIQUE NOT NULL,
+            signal_id INTEGER NOT NULL,
+            candidate_id INTEGER,
+            strategy TEXT NOT NULL,
+            regime TEXT NOT NULL DEFAULT 'UNKNOWN',
+            direction TEXT NOT NULL,
+            action TEXT NOT NULL,
+            event_type TEXT,
+            decision_price REAL,
+            decision_r REAL,
+            protect_level REAL,
+            management_target REAL,
+            status TEXT NOT NULL DEFAULT 'OBSERVING',
+            final_result TEXT,
+            final_r REAL,
+            effect TEXT,
+            reason TEXT,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_experience_management_open
+          ON experience_management_reviews(status,signal_id);
         """
     )
+    try:
+        conn.execute("ALTER TABLE experience_candidates ADD COLUMN signal_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_experience_signal ON experience_candidates(signal_id)")
     conn.commit(); conn.close()
 
 
@@ -243,6 +275,114 @@ def record_decision(
         conn.commit(); conn.close()
     except (sqlite3.Error, TypeError, ValueError):
         return
+
+
+def bind_candidate_to_signal(candidate: dict[str, Any], signal_id: int, db_path: str = DB_PATH) -> None:
+    """Link the shadow observation to its persisted analytics signal."""
+    experience_id = capture_candidate(candidate, db_path)
+    if not experience_id or int(signal_id or 0) <= 0:
+        return
+    conn = _connect(db_path)
+    conn.execute(
+        "UPDATE experience_candidates SET signal_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (int(signal_id), int(experience_id)),
+    )
+    conn.commit(); conn.close()
+
+
+def record_management_review(
+    state: dict[str, Any], price: float, events: list[str], facts: dict[str, Any],
+    review: dict[str, Any], db_path: str = DB_PATH,
+) -> None:
+    """Persist one advisory decision for later objective counterfactual review."""
+    ensure_experience_schema(db_path)
+    signal_id = int(state.get("signal_id") or 0)
+    if signal_id <= 0:
+        return
+    material = "|".join(map(str, (
+        signal_id, facts.get("management_candle_id"), ",".join(events),
+        review.get("action"), review.get("protect_level"), review.get("management_target"),
+    )))
+    review_key = hashlib.sha256(material.encode()).hexdigest()
+    conn = _connect(db_path)
+    candidate = conn.execute(
+        "SELECT id,regime FROM experience_candidates WHERE signal_id=? ORDER BY id DESC LIMIT 1",
+        (signal_id,),
+    ).fetchone()
+    conn.execute(
+        """INSERT OR IGNORE INTO experience_management_reviews
+           (review_key,signal_id,candidate_id,strategy,regime,direction,action,event_type,
+            decision_price,decision_r,protect_level,management_target,reason,evidence_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (review_key, signal_id, int(candidate["id"]) if candidate else None,
+         str(state.get("strategy") or "MTF"), str(candidate["regime"] if candidate else "UNKNOWN"),
+         str(state.get("direction") or ""), str(review.get("action") or "HOLD"),
+         ",".join(events), float(price), float(state.get("current_r") or 0),
+         review.get("protect_level"), review.get("management_target"),
+         str(review.get("reason") or "")[:1500],
+         _json({"facts": facts, "review": review})),
+    )
+    conn.commit(); conn.close()
+
+
+def _result_r(row: sqlite3.Row) -> float | None:
+    result = str(row["result"] or "").lower()
+    direction = str(row["direction"] or "").upper()
+    entry, sl = float(row["entry"]), float(row["sl"])
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    if result == "sl":
+        return -1.0
+    target = (row["tp3"] if result == "tp3" else row["tp2"] if result == "tp2"
+              else row["tp1"] if result == "tp1" else None)
+    if target is None:
+        return None
+    move = float(target) - entry if direction == "BULLISH" else entry - float(target)
+    return move / risk
+
+
+def resolve_management_reviews(db_path: str = DB_PATH) -> int:
+    """Label advisory actions only after the underlying trade has an objective outcome."""
+    ensure_experience_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT r.*,s.result,s.entry,s.sl,s.tp1,s.tp2,s.tp3
+               FROM experience_management_reviews r JOIN signals s ON s.id=r.signal_id
+               WHERE r.status='OBSERVING' AND s.result<>'pending'"""
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    resolved = 0
+    for row in rows:
+        final_r = _result_r(row)
+        if final_r is None:
+            effect, reason = "INCONCLUSIVE", "terminal result has no objective R mapping"
+        else:
+            decision_r = float(row["decision_r"] or 0)
+            action = str(row["action"] or "HOLD").upper()
+            if action in {"EXIT", "PARTIAL_EXIT"}:
+                delta = decision_r - final_r
+                effect = "HELPED" if delta >= .25 else "HARMED" if delta <= -.25 else "NEUTRAL"
+                reason = "early exit compared with final objective outcome"
+            elif action == "LET_RUN":
+                delta = final_r - decision_r
+                effect = "HELPED" if delta >= .25 else "HARMED" if delta <= -.25 else "NEUTRAL"
+                reason = "continuation compared with final objective outcome"
+            elif action == "PROTECT" and row["protect_level"] is not None:
+                effect = "HELPED" if str(row["result"] or "").lower() == "sl" else "INCONCLUSIVE"
+                reason = "an initial SL proves price crossed the proposed protection; favourable outcomes need candle-path evidence"
+            else:
+                effect, reason = "NEUTRAL", "advisory observation without a counterfactual level change"
+        conn.execute(
+            """UPDATE experience_management_reviews SET status='RESOLVED',final_result=?,final_r=?,
+               effect=?,reason=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (row["result"], final_r, effect, reason, row["id"]),
+        )
+        resolved += 1
+    conn.commit(); conn.close()
+    return resolved
 
 
 def _candle(candle: Any) -> dict[str, float]:
@@ -533,8 +673,16 @@ def experience_dashboard(db_path: str = DB_PATH) -> dict[str, Any]:
                   probation_samples,probation_wins,probation_losses,reason
            FROM experience_rules ORDER BY state='ACTIVE' DESC,updated_at DESC LIMIT 15"""
     )]
+    management = [dict(row) for row in conn.execute(
+        """SELECT action,effect,COUNT(*) count FROM experience_management_reviews
+           WHERE status='RESOLVED' GROUP BY action,effect ORDER BY action,effect"""
+    )]
+    management_open = int(conn.execute(
+        "SELECT COUNT(*) FROM experience_management_reviews WHERE status='OBSERVING'"
+    ).fetchone()[0])
     conn.close()
-    return {"funnel": funnel, "active": active, "rules": rules}
+    return {"funnel": funnel, "active": active, "rules": rules,
+            "management": management, "management_open": management_open}
 
 
 def _cleanup(db_path: str) -> None:

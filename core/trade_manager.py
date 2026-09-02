@@ -35,6 +35,43 @@ MANAGEMENT_TF = {
     "SWING": "1h",
     "WYCKOFF": "1h",
 }
+MANAGEMENT_MATRIX = {
+    "FAST": {
+        "cadence": "every closed 5m candle",
+        "protect": "only after TP1 or a fresh 5m continuation BOS; use the confirmed 5m HL/LH",
+        "exit": "confirmed opposite 5m CHoCH or immutable SL; FAST momentum failure matters quickly",
+        "partial": "TP1 or a confirmed loss of FAST momentum after positive excursion",
+        "let_run": "fresh continuation BOS plus non-conflicting participation",
+    },
+    "MTF": {
+        "cadence": "every closed 15m candle",
+        "protect": "after TP1 or confirmed 15m continuation; use the latest confirmed 15m HL/LH",
+        "exit": "confirmed 15m reversal aligned against the original 1h/4h thesis, or immutable SL",
+        "partial": "TP1 or material conflict after the 15m trigger has failed",
+        "let_run": "15m continuation structure remains aligned with the original MTF thesis",
+    },
+    "ZONE": {
+        "cadence": "every closed 15m candle",
+        "protect": "only after the zone reaction has produced continuation structure or TP1",
+        "exit": "confirmed failure back through the zone thesis or immutable SL",
+        "partial": "TP1 or a confirmed opposite reaction while leaving the source zone",
+        "let_run": "the original Premium/Discount reaction continues toward structural liquidity",
+    },
+    "SWING": {
+        "cadence": "every closed 1h candle",
+        "protect": "after TP1 or a confirmed 1h continuation swing; use the latest 1h HL/LH",
+        "exit": "confirmed 1h thesis reversal or immutable SL; ignore isolated lower-timeframe noise",
+        "partial": "at an original target or after confirmed 1h deterioration, never from one wick",
+        "let_run": "1h continuation agrees with the original HTF core and has room to liquidity",
+    },
+    "WYCKOFF": {
+        "cadence": "every closed 1h candle",
+        "protect": "after SOS/SOW continuation or TP1, at the latest confirmed phase HL/LH",
+        "exit": "confirmed failure of Spring/SOS, UTAD/SOW or re-accumulation thesis, or immutable SL",
+        "partial": "at an original target or a confirmed opposing phase transition",
+        "let_run": "phase progression and structure both confirm continuation",
+    },
+}
 
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
@@ -66,6 +103,7 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
             current_r REAL NOT NULL DEFAULT 0,
             tp1_seen INTEGER NOT NULL DEFAULT 0,
             tp2_seen INTEGER NOT NULL DEFAULT 0,
+            tp3_seen INTEGER NOT NULL DEFAULT 0,
             manager_target REAL,
             manager_protect_level REAL,
             last_event TEXT,
@@ -100,6 +138,7 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
         ("trade_manager_state", "manager_protect_level", "REAL"),
         ("trade_manager_events", "manager_target", "REAL"),
         ("trade_manager_events", "manager_protect_level", "REAL"),
+        ("trade_manager_state", "tp3_seen", "INTEGER NOT NULL DEFAULT 0"),
     ):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
@@ -120,6 +159,10 @@ def normalize_strategy(value: Any) -> str:
     if "WYCKOFF" in raw:
         return "WYCKOFF"
     return "MTF"
+
+
+def management_matrix(strategy: Any) -> dict[str, str]:
+    return dict(MANAGEMENT_MATRIX[normalize_strategy(strategy)])
 
 
 def r_multiple(direction: str, entry: float, sl: float, price: float) -> float:
@@ -194,6 +237,8 @@ def build_structure_facts(
         "confirmed_protection_level": protection,
         "structural_target": structural_target,
         "latest_close": float(closed[-1]["close"]),
+        "latest_closed_high": float(closed[-1]["high"]),
+        "latest_closed_low": float(closed[-1]["low"]),
     }
 
 
@@ -202,13 +247,28 @@ def detect_events(state: dict[str, Any], price: float, facts: dict[str, Any]) ->
     bullish = str(state["direction"]).upper() == "BULLISH"
     tp1 = float(state["initial_tp1"])
     tp2 = float(state.get("initial_tp2") or tp1)
+    tp3 = float(state.get("initial_tp3") or tp2)
     sl = float(state["initial_sl"])
-    if not int(state.get("tp1_seen") or 0) and ((bullish and price >= tp1) or (not bullish and price <= tp1)):
+    use_bar = bool(facts.get("closed_candle") and facts.get("new_management_candle"))
+    high_value = facts.get("latest_closed_high") if use_bar else price
+    low_value = facts.get("latest_closed_low") if use_bar else price
+    observed_high = float(price if high_value is None else high_value)
+    observed_low = float(price if low_value is None else low_value)
+    tp1_hit = (bullish and observed_high >= tp1) or (not bullish and observed_low <= tp1)
+    tp2_hit = (bullish and observed_high >= tp2) or (not bullish and observed_low <= tp2)
+    tp3_hit = (bullish and observed_high >= tp3) or (not bullish and observed_low <= tp3)
+    sl_hit = (bullish and observed_low <= sl) or (not bullish and observed_high >= sl)
+    tp1_new = not int(state.get("tp1_seen") or 0) and tp1_hit
+    if tp1_new:
         events.append("TP1_HIT")
-    if int(state.get("tp1_seen") or 0) and not int(state.get("tp2_seen") or 0) and ((bullish and price >= tp2) or (not bullish and price <= tp2)):
+    if (int(state.get("tp1_seen") or 0) or tp1_new) and not int(state.get("tp2_seen") or 0) and tp2_hit:
         events.append("TP2_HIT")
-    if (bullish and price <= sl) or (not bullish and price >= sl):
+    if (int(state.get("tp2_seen") or 0) or tp2_hit) and not int(state.get("tp3_seen") or 0) and tp3_hit:
+        events.append("TP3_HIT")
+    if sl_hit:
         events.append("INVALIDATION_HIT")
+    if use_bar and sl_hit and (tp1_hit or tp2_hit or tp3_hit):
+        events.append("AMBIGUOUS_BARRIERS")
     structure = str(facts.get("structure_event") or "").upper()
     if structure in {"BOS", "CHOCH"} and facts.get("new_management_candle"):
         events.append(structure)
@@ -219,7 +279,52 @@ def detect_events(state: dict[str, Any], price: float, facts: dict[str, Any]) ->
     return list(dict.fromkeys(events))
 
 
+def compact_external_context(context: dict[str, Any], direction: str) -> dict[str, Any]:
+    """Keep fresh decision evidence while excluding bulky provider payloads."""
+    context = context if isinstance(context, dict) else {}
+    result: dict[str, Any] = {}
+    fields = {
+        "open_interest": ("value", "change_1h_pct", "change_4h_pct", "trend", "status", "age_seconds", "source"),
+        "funding": ("rate", "extreme", "bias", "status", "age_seconds", "source"),
+        "liquidations": ("long_usd", "short_usd", "dominance", "status", "age_seconds", "source"),
+        "large_orders": ("buy_pressure", "sell_pressure", "bias", "status", "age_seconds", "source"),
+        "exchange_flow": ("inflow_usd", "outflow_usd", "bias", "status", "age_seconds", "source"),
+        "smart_money": ("buy_usd", "sell_usd", "bias", "confidence", "status", "age_seconds", "source"),
+        "live_tape": ("buy_usd_60s", "sell_usd_60s", "long_liq_usd_300s", "short_liq_usd_300s", "bias", "status", "age_seconds"),
+    }
+    for section, keys in fields.items():
+        source = context.get(section)
+        if isinstance(source, dict):
+            compact = {key: source.get(key) for key in keys if source.get(key) is not None}
+            if compact:
+                result[section] = compact
+    for key in ("external_bias", "external_confidence", "conflicts"):
+        if context.get(key) not in (None, "", [], {}):
+            result[key] = context.get(key)
+    quality = context.get("data_quality")
+    if isinstance(quality, dict):
+        result["data_quality"] = {
+            "available_sources": quality.get("available_sources") or [],
+            "failed_sources": quality.get("failed_sources") or [],
+        }
+    expected = "bullish" if str(direction).upper() == "BULLISH" else "bearish"
+    bias = str(context.get("external_bias") or "unknown").lower()
+    try:
+        confidence = float(context.get("external_confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    explicit = bool(context.get("conflict") or context.get("significant_conflict") or context.get("conflicts"))
+    result["significant_conflict"] = explicit or (
+        bias not in {"unknown", "neutral", expected} and confidence >= .6
+    )
+    return result
+
+
 def _prompt(state: dict[str, Any], events: list[str], facts: dict[str, Any]) -> str:
+    try:
+        original_thesis = json.loads(state.get("thesis_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        original_thesis = {}
     payload = {
         "trade": {
             key: state.get(key)
@@ -228,14 +333,17 @@ def _prompt(state: dict[str, Any], events: list[str], facts: dict[str, Any]) -> 
                 "initial_entry", "initial_sl", "initial_tp1", "initial_tp2",
                 "initial_tp3", "initial_rr", "last_price", "best_price",
                 "current_r", "tp1_seen", "tp2_seen", "manager_target",
-                "manager_protect_level",
+                "tp3_seen", "manager_protect_level",
             )
         },
         "events": events,
+        "original_thesis": original_thesis,
+        "management_matrix": facts.get("management_matrix") or management_matrix(state.get("strategy")),
         "facts": facts,
     }
     return """You are APEX Trade Manager. Manage an already-open trading thesis; do not create a new trade.
 Initial entry, initial SL, TP1/TP2/TP3 and initial RR are immutable historical facts. Never rewrite them.
+Use the supplied original CORE, TRIGGER, setup class and conflicts as the immutable thesis context. Do not silently replace that thesis.
 Use only supplied facts; never invent candles, structure, volume, OI, funding, news, levels or probabilities.
 Choose exactly one action: HOLD, PROTECT, PARTIAL_EXIT, LET_RUN, EXIT, WAIT_CONFIRMATION.
 A management_target is NOT a replacement for the original TP. It may be returned only when facts.structural_target is present, lies beyond the current continuation direction, and continuation is structurally confirmed. Otherwise return null.
@@ -254,7 +362,7 @@ def _numeric_or_none(value: Any) -> float | None:
         return None
 
 
-def _parse_review(raw: Any, facts: dict[str, Any]) -> dict[str, Any]:
+def _parse_review(raw: Any, facts: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     try:
         text = str(raw or "").strip().replace("```json", "").replace("```", "").strip()
         start, end = text.find("{"), text.rfind("}")
@@ -274,17 +382,26 @@ def _parse_review(raw: Any, facts: dict[str, Any]) -> dict[str, Any]:
     supplied_protect = _numeric_or_none(facts.get("confirmed_protection_level"))
     proposed_protect = _numeric_or_none(obj.get("protect_level"))
     protect_level = None
-    if supplied_protect and proposed_protect:
+    current_price = (_numeric_or_none(facts.get("current_price"))
+                     or _numeric_or_none(facts.get("latest_close"))
+                     or _numeric_or_none(state.get("last_price")))
+    initial_sl = float(state.get("initial_sl") or 0)
+    bullish = str(state.get("direction") or "").upper() == "BULLISH"
+    previous_protect = _numeric_or_none(state.get("manager_protect_level"))
+    if supplied_protect and proposed_protect and current_price:
         tol = max(abs(supplied_protect), 1.0) * 1e-8
-        if abs(supplied_protect - proposed_protect) <= tol:
+        geometry_ok = initial_sl < supplied_protect < current_price if bullish else current_price < supplied_protect < initial_sl
+        improves = previous_protect is None or (supplied_protect > previous_protect if bullish else supplied_protect < previous_protect)
+        if abs(supplied_protect - proposed_protect) <= tol and geometry_ok and improves:
             protect_level = supplied_protect
 
     supplied_target = _numeric_or_none(facts.get("structural_target"))
     proposed_target = _numeric_or_none(obj.get("management_target"))
     management_target = None
-    if supplied_target and proposed_target:
+    if supplied_target and proposed_target and current_price and facts.get("structure_with_trade"):
         tol = max(abs(supplied_target), 1.0) * 1e-8
-        if abs(supplied_target - proposed_target) <= tol:
+        geometry_ok = supplied_target > current_price if bullish else supplied_target < current_price
+        if abs(supplied_target - proposed_target) <= tol and geometry_ok:
             management_target = supplied_target
 
     return {
@@ -319,7 +436,7 @@ def review_active_trade(
         }
     try:
         raw = ask_groq(_prompt(state, events, facts), max_tokens=300)
-        review = _parse_review(raw, facts)
+        review = _parse_review(raw, facts, state)
         review["groq_called"] = True
         return review
     except Exception as exc:
@@ -366,6 +483,46 @@ def register_active_trade(
     conn.close()
 
 
+def _load_setup_thesis(signal_id: int, signal: dict[str, Any], db_path: str) -> dict[str, Any]:
+    """Load the final causal assessment, with a safe legacy fallback."""
+    conn = _connect(db_path)
+    row = None
+    try:
+        row = conn.execute(
+            """SELECT assessment_json FROM setup_assessments WHERE signal_id=?
+               ORDER BY CASE stage WHEN 'FINAL' THEN 0 ELSE 1 END,updated_at DESC LIMIT 1""",
+            (int(signal_id),),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """SELECT assessment_json FROM setup_assessments
+                   WHERE symbol=? AND strategy=? AND direction=?
+                   ORDER BY CASE stage WHEN 'FINAL' THEN 0 ELSE 1 END,updated_at DESC LIMIT 1""",
+                (str(signal.get("symbol") or "").upper(),
+                 normalize_strategy(signal.get("grade") or signal.get("signal_type")),
+                 str(signal.get("direction") or "").upper()),
+            ).fetchone()
+    except sqlite3.Error:
+        row = None
+    conn.close()
+    if row:
+        try:
+            assessment = json.loads(row["assessment_json"] or "{}")
+            return {
+                "source": "setup_evidence",
+                "setup_class": assessment.get("state"),
+                "thesis": assessment.get("thesis"),
+                "CORE": (assessment.get("evidence_roles") or {}).get("CORE") or [],
+                "TRIGGER": (assessment.get("evidence_roles") or {}).get("TRIGGER") or [],
+                "TIER1": (assessment.get("evidence_roles") or {}).get("TIER1") or [],
+                "conflicts": assessment.get("conflicts") or [],
+                "dimensions": assessment.get("dimensions") or {},
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return {"source": "legacy_signal", "setup_class": "UNKNOWN", "CORE": [], "TRIGGER": [], "conflicts": []}
+
+
 def register_pending_signals(db_path: str = DB_PATH) -> int:
     """Idempotently attach manager state to analytics signals that are already active.
 
@@ -392,7 +549,20 @@ def register_pending_signals(db_path: str = DB_PATH) -> int:
         if str(data.pop("lifecycle_status", "active")).lower() != "active":
             continue
         before = load_state(int(data["id"]), db_path)
-        register_active_trade(data, thesis={"source": "signals"}, db_path=db_path)
+        thesis = _load_setup_thesis(int(data["id"]), data, db_path)
+        register_active_trade(data, thesis=thesis, db_path=db_path)
+        if before is not None and thesis.get("source") == "setup_evidence":
+            try:
+                current_thesis = json.loads(before.get("thesis_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                current_thesis = {}
+            if current_thesis.get("source") != "setup_evidence":
+                conn = _connect(db_path)
+                conn.execute(
+                    "UPDATE trade_manager_state SET thesis_json=?,updated_at=CURRENT_TIMESTAMP WHERE signal_id=?",
+                    (json.dumps(thesis, ensure_ascii=False, default=str)[:20000], int(data["id"])),
+                )
+                conn.commit(); conn.close()
         if before is None and load_state(int(data["id"]), db_path) is not None:
             registered += 1
     return registered
@@ -440,17 +610,18 @@ def persist_review(
     best = max(best, price) if bullish else min(best, price)
     tp1_seen = int(state.get("tp1_seen") or 0) or int("TP1_HIT" in events)
     tp2_seen = int(state.get("tp2_seen") or 0) or int("TP2_HIT" in events)
+    tp3_seen = int(state.get("tp3_seen") or 0) or int("TP3_HIT" in events)
     manager_target = review.get("management_target") or state.get("manager_target")
     protect_level = review.get("protect_level") or state.get("manager_protect_level")
     candle_id = facts.get("management_candle_id") or state.get("last_reviewed_candle")
     conn = _connect(db_path)
     conn.execute(
         """UPDATE trade_manager_state
-           SET last_price=?,best_price=?,current_r=?,tp1_seen=?,tp2_seen=?,manager_target=?,
+           SET last_price=?,best_price=?,current_r=?,tp1_seen=?,tp2_seen=?,tp3_seen=?,manager_target=?,
                manager_protect_level=?,last_event=?,last_action=?,last_confidence=?,
                last_reviewed_candle=?,updated_at=CURRENT_TIMESTAMP WHERE signal_id=?""",
         (
-            price, best, current_r, tp1_seen, tp2_seen, manager_target, protect_level,
+            price, best, current_r, tp1_seen, tp2_seen, tp3_seen, manager_target, protect_level,
             ",".join(events), review.get("action"), review.get("confidence"),
             str(candle_id) if candle_id is not None else None, int(state["signal_id"]),
         ),
@@ -468,6 +639,14 @@ def persist_review(
     )
     conn.commit()
     conn.close()
+    try:
+        from core.experience_memory import record_management_review
+        observed_state = dict(state)
+        observed_state["current_r"] = current_r
+        record_management_review(observed_state, price, events, facts, review, db_path)
+    except Exception:
+        # Experience linkage is fail-safe and never blocks advisory management.
+        pass
 
 
 def should_notify(state: dict[str, Any], events: list[str], review: dict[str, Any]) -> bool:
@@ -475,7 +654,7 @@ def should_notify(state: dict[str, Any], events: list[str], review: dict[str, An
         return False
     action = str(review.get("action") or "").upper()
     previous = str(state.get("last_action") or "").upper()
-    important = {"TP1_HIT", "TP2_HIT", "INVALIDATION_HIT", "BOS", "CHOCH", "EXTERNAL_CONFLICT"}
+    important = {"TP1_HIT", "TP2_HIT", "TP3_HIT", "INVALIDATION_HIT", "BOS", "CHOCH", "EXTERNAL_CONFLICT"}
     return action != previous or bool(important.intersection(events))
 
 
@@ -502,7 +681,7 @@ def format_telegram_update(
     reason = html.escape(str(review.get("reason") or "—"))
     next_trigger = html.escape(str(review.get("next_trigger") or "следующее значимое событие"))
     return (
-        f"🧠 <b>APEX MANAGER — {symbol}</b>\n"
+        f"🛠 <b>APEX MANAGER — {symbol}</b>\n"
         f"Стратегия: <b>{strategy} {direction}</b>\n"
         f"Цена: <code>{price}</code> | результат: <b>{r_now:+.2f}R</b>\n"
         f"Событие: <code>{event_text}</code>\n\n"
@@ -519,7 +698,7 @@ def manager_cycle(
     get_candles: Callable[[str, str, int], list[Any]],
     ask_groq: Callable[..., Any],
     *,
-    external_context: Callable[[str], dict[str, Any]] | None = None,
+    external_context: Callable[..., dict[str, Any]] | None = None,
     db_path: str = DB_PATH,
 ) -> list[dict[str, Any]]:
     """Run one non-blocking-by-design management pass over active analytics trades.
@@ -548,12 +727,18 @@ def manager_cycle(
         except Exception:
             candles = []
         facts = build_structure_facts(candles, state["direction"], state.get("last_reviewed_candle"))
+        facts["current_price"] = price
+        facts["management_matrix"] = management_matrix(state.get("strategy"))
         if external_context is not None:
             try:
-                extra = external_context(symbol) or {}
+                try:
+                    extra = external_context(symbol, state.get("direction")) or {}
+                except TypeError:
+                    extra = external_context(symbol) or {}
                 if isinstance(extra, dict):
-                    facts["external"] = extra
-                    facts["external_conflict"] = bool(extra.get("conflict") or extra.get("significant_conflict"))
+                    compact = compact_external_context(extra, state.get("direction"))
+                    facts["external"] = compact
+                    facts["external_conflict"] = bool(compact.get("significant_conflict"))
             except Exception:
                 facts["external_data_unavailable"] = True
         events = detect_events(state, price, facts)
@@ -570,4 +755,9 @@ def manager_cycle(
             "notify": notify,
             "telegram": format_telegram_update(state, price, events, review),
         })
+    try:
+        from core.experience_memory import resolve_management_reviews
+        resolve_management_reviews(db_path)
+    except Exception:
+        pass
     return output

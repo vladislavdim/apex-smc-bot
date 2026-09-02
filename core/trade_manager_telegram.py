@@ -90,7 +90,7 @@ def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> 
 
 
 def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
-    lines = ["🧠 <b>Менеджер сделок APEX</b>", "━━━━━━━━━━━━━━━━", ""]
+    lines = ["🛠 <b>Менеджер сделок APEX</b>", "━━━━━━━━━━━━━━━━", ""]
     if not items:
         lines += [
             "Сейчас менеджер не сопровождает активные сделки.",
@@ -110,6 +110,8 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
             tp_state += " · TP2 ✅"
         elif item.get("tp1_seen"):
             tp_state += " · TP2 ⏳"
+        if item.get("tp3_seen"):
+            tp_state += " · TP3 ✅"
         lines += [
             f"<b>#{item['signal_id']} {html.escape(str(item.get('symbol') or ''))}</b> · "
             f"{html.escape(str(item.get('strategy') or 'MTF'))} · {_direction_label(item.get('direction'))}",
