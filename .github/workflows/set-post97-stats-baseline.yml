@@ -1,0 +1,54 @@
+name: Post97 Stats Baseline
+
+on:
+  push:
+    branches: [fix/stats-baseline-post97]
+    paths:
+      - '.github/scripts/set_post97_stats_baseline.py'
+      - '.github/workflows/set-post97-stats-baseline.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/stats-baseline-post97
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply baseline patch
+        run: python .github/scripts/set_post97_stats_baseline.py
+      - name: Compile project
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Run full tests
+        run: python -m unittest discover -s tests -v
+      - name: Restore tracked DB after tests
+        run: git restore --source=HEAD -- brain.db
+      - name: Verify isolated change
+        run: |
+          git diff --check
+          git diff --exit-code -- brain.db
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('stats_server.py').read_text(encoding='utf-8')
+          assert '2026-09-03T14:54:22+00:00' in s
+          assert 'baseline":"post97' in s
+          assert 'Актуальная статистика после #97' in s
+          print('post97 verifier: OK')
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "APEX Stats"
+          git config user.email "actions@users.noreply.github.com"
+          git add stats_server.py tests/test_strategy_stats_post95.py
+          git diff --cached --check
+          git commit -m "Reset dashboard baseline after cache fix"
+          git push origin HEAD:fix/stats-baseline-post97
