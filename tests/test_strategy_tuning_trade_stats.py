@@ -1,5 +1,8 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import stats_server
 
 
 class StrategyTuningTradeStatsTests(unittest.TestCase):
@@ -34,6 +37,43 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
         self.assertIn("Статистика сделок", self.stats)
         self.assertIn("realized_r", self.stats)
         self.assertIn("pnl_pct", self.stats)
+
+    def test_dashboard_aggregates_open_close_pnl_and_realized_r(self):
+        events = [
+            {
+                "event_key": "trade:1:open:open",
+                "kind": "trade_event",
+                "strategy": "FAST",
+                "symbol": "BTCUSDT",
+                "occurred_at": "2026-09-03T10:00:00+00:00",
+                "payload": {"action": "OPEN", "signal_id": 1},
+            },
+            {
+                "event_key": "trade:1:close:tp1",
+                "kind": "trade_event",
+                "strategy": "FAST",
+                "symbol": "BTCUSDT",
+                "occurred_at": "2026-09-03T11:00:00+00:00",
+                "payload": {
+                    "action": "CLOSE",
+                    "signal_id": 1,
+                    "result": "tp1",
+                    "pnl_pct": 2.5,
+                    "realized_r": 2.0,
+                },
+            },
+        ]
+        with patch.object(stats_server, "_fetch", return_value=events):
+            data = stats_server.build_dashboard(days=1)
+        trade = data["trade_stats"]
+        self.assertEqual(trade["opened"], 1)
+        self.assertEqual(trade["closed"], 1)
+        self.assertEqual(trade["wins"], 1)
+        self.assertEqual(trade["losses"], 0)
+        self.assertEqual(trade["win_rate"], 100.0)
+        self.assertEqual(trade["pnl_pct"], 2.5)
+        self.assertEqual(trade["avg_r"], 2.0)
+        self.assertEqual(trade["by_strategy"][0]["strategy"], "FAST")
 
 
 if __name__ == "__main__":
