@@ -1,0 +1,54 @@
+name: Candle Cache Request Limit
+
+on:
+  push:
+    branches: [fix/candle-cache-request-limit]
+    paths:
+      - '.github/scripts/fix_candle_cache_limit.py'
+      - '.github/workflows/fix-candle-cache-request-limit.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/candle-cache-request-limit
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply cache patch
+        run: python .github/scripts/fix_candle_cache_limit.py
+      - name: Compile project
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Run full tests
+        run: python -m unittest discover -s tests -v
+      - name: Restore tracked DB after tests
+        run: git restore --source=HEAD -- brain.db
+      - name: Verify isolated change
+        run: |
+          git diff --check
+          git diff --exit-code -- brain.db
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('market.py').read_text(encoding='utf-8')
+          assert 'len(cached) >= requested_limit' in s
+          assert 'len(_gc) >= requested_limit' in s
+          assert 'len(cached) >= 20:\n            return cached' not in s
+          print('cache verifier: OK')
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "APEX Cache Fix"
+          git config user.email "actions@users.noreply.github.com"
+          git add market.py tests/test_candle_cache_request_limit.py
+          git diff --cached --check
+          git commit -m "Fix candle cache history length reuse"
+          git push origin HEAD:fix/candle-cache-request-limit
