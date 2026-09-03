@@ -11,10 +11,12 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
         cls.market = Path("market.py").read_text(encoding="utf-8")
         cls.stats = Path("stats_server.py").read_text(encoding="utf-8")
 
-    def test_swing_is_relaxed_only_at_initial_structure_gate(self):
+    def test_swing_retains_structure_and_final_rr_after_ltf_refinement(self):
         self.assertIn("find_swings(candles, lookback=7)", self.market)
         self.assertIn("get_bos_choch_event", self.market)
-        self.assertIn("Variant 2: минимум RR 2.0", self.market)
+        self.assertIn("def _swing_build_ltf_entry", self.market)
+        self.assertIn("LTF: fresh 1h BOS/CHoCH", self.market)
+        self.assertIn("rr_check < 2.0 or rr_check > 4.0", self.market)
 
     def test_fast_retains_quality_stack(self):
         self.assertIn("_vol_threshold = 1.6", self.market)

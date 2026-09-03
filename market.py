@@ -7160,6 +7160,124 @@ def detect_bos_choch(candles: list, direction: str, lookback: int = 15) -> bool:
     return get_bos_choch_event(candles, direction, lookback=lookback) is not None
 
 
+def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
+    """Refine a valid 4h SWING thesis into a fresh 1h/15m executable entry.
+
+    The 4h layer defines direction and structural target. Entry timing is delegated
+    to closed 1h/15m candles so a thesis can remain alive while the bot waits for
+    a fresh BOS/CHoCH, OB/FVG retest, displacement and volume confirmation.
+    """
+    out = {
+        "data_ok": False, "structure_ok": False, "zone_ok": False,
+        "retest_ok": False, "displacement_ok": False, "volume_ok": False,
+        "chase_ok": False, "target_ok": False, "ready": False,
+        "entry": None, "sl": None, "structure_event": None,
+        "zone_type": None, "zone": None,
+    }
+    try:
+        c1h = get_confirmed_candles(get_candles(symbol, "1h", 61))
+        c15 = get_confirmed_candles(get_candles(symbol, "15m", 81))
+        if not c1h or len(c1h) < 30 or not c15 or len(c15) < 30:
+            return out
+        out["data_ok"] = True
+
+        event = get_bos_choch_event(c1h, direction, lookback=8, max_break_age=2)
+        if not event:
+            return out
+        out["structure_event"] = event
+        out["structure_ok"] = True
+
+        h1_ranges = [max(0.0, float(c["high"]) - float(c["low"])) for c in c1h[-14:]]
+        atr1h = sum(h1_ranges) / len(h1_ranges) if h1_ranges else 0.0
+        if atr1h <= 0:
+            return out
+
+        zones = []
+        for zone_type, zone in (("OB", find_ob(c1h, direction)), ("FVG", find_fvg(c1h, direction))):
+            if not isinstance(zone, dict):
+                continue
+            try:
+                bottom, top = float(zone["bottom"]), float(zone["top"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if top <= bottom:
+                continue
+            zones.append((zone_type, bottom, top))
+        if not zones:
+            return out
+        out["zone_ok"] = True
+
+        latest = c15[-1]
+        current = float(latest["close"])
+        tolerance = atr1h * 0.15
+        touched = []
+        for zone_type, bottom, top in zones:
+            recent_touch = any(
+                float(c["low"]) <= top + tolerance and float(c["high"]) >= bottom - tolerance
+                for c in c15[-4:]
+            )
+            if not recent_touch:
+                continue
+            distance = 0.0 if bottom <= current <= top else min(abs(current - bottom), abs(current - top))
+            touched.append((distance, zone_type, bottom, top))
+        if not touched:
+            return out
+        touched.sort(key=lambda x: x[0])
+        distance, zone_type, bottom, top = touched[0]
+        out["retest_ok"] = True
+        out["zone_type"] = zone_type
+        out["zone"] = {"bottom": bottom, "top": top}
+
+        candle_range = float(latest["high"]) - float(latest["low"])
+        candle_body = abs(float(latest["close"]) - float(latest["open"]))
+        direction_ok = (
+            direction == "BULLISH" and float(latest["close"]) > float(latest["open"])
+        ) or (
+            direction == "BEARISH" and float(latest["close"]) < float(latest["open"])
+        )
+        displacement_ok = candle_range > 0 and candle_body / candle_range >= 0.50 and direction_ok
+        out["displacement_ok"] = bool(displacement_ok)
+
+        vol_window = c15[-21:-1] if len(c15) >= 21 else c15[:-1]
+        avg_vol = sum(float(c.get("volume", 0) or 0) for c in vol_window) / len(vol_window) if vol_window else 0.0
+        last_vol = float(latest.get("volume", 0) or 0)
+        out["volume_ok"] = bool(avg_vol > 0 and last_vol >= avg_vol * 1.20)
+
+        out["chase_ok"] = bool(distance <= atr1h * 0.75)
+        if not out["displacement_ok"] or not out["volume_ok"] or not out["chase_ok"]:
+            return out
+
+        entry = current
+        sw_highs, sw_lows = find_swings(c15, lookback=2)
+        if direction == "BULLISH":
+            lows_below = [float(level) for _, level in sw_lows if float(level) < entry]
+            nearest_swing = max(lows_below) if lows_below else bottom
+            anchor = min(bottom, nearest_swing)
+            sl = anchor - atr1h * 0.10
+            target_ok = float(tp) > entry
+        else:
+            highs_above = [float(level) for _, level in sw_highs if float(level) > entry]
+            nearest_swing = min(highs_above) if highs_above else top
+            anchor = max(top, nearest_swing)
+            sl = anchor + atr1h * 0.10
+            target_ok = float(tp) < entry
+        out["target_ok"] = bool(target_ok)
+        if not target_ok:
+            return out
+        if direction == "BULLISH" and sl >= entry:
+            return out
+        if direction == "BEARISH" and sl <= entry:
+            return out
+
+        out["entry"] = smart_round(entry)
+        out["sl"] = smart_round(sl)
+        out["ready"] = True
+        return out
+    except Exception as exc:
+        logging.debug("[SWING LTF] %s refinement failed: %s", symbol, exc)
+        return out
+
+
 @_audit_strategy("SWING")
 def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
     """
@@ -7335,13 +7453,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                         trigger_candle = candles[-1]
                         trigger_lookback = 1
 
-                # Variant 2: минимум RR 2.0
-                if direction and entry and sl and tp:
-                    _v2_risk = abs(entry - sl)
-                    _v2_reward = abs(tp - entry)
-                    if _audit_test('SWING_DETECT_SWING_SETUP_G7290', (_v2_risk > 0 and _v2_reward / _v2_risk < 2.0), 'Variant 2: минимум RR 2.0', '_v2_risk > 0 and _v2_reward / _v2_risk < 2.0', 7290):
-                        logging.info(f"[SWING V2] {symbol}: RR {_v2_reward/_v2_risk:.2f} < 2.0 — пропуск")
-                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7292', 'Variant 2: минимум RR 2.0', locals(), '_v2_risk > 0 and _v2_reward / _v2_risk < 2.0', 7292)
+                # RR is validated only after the 1h/15m entry is refined.
+                # The provisional 4h thesis levels are not executable levels.
             except Exception:
                 pass
 
@@ -7403,7 +7516,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
                 logging.info(f"[SWING BTC Filter] {symbol} {direction} пропущен: {btc_reason}")
                 return _audit_fail('SWING_DETECT_SWING_SETUP_R7352', 'BTC фильтр для SWING', locals(), 'not btc_ok', 7352)
 
-        # ── Фильтр объёма на sweep свече (адаптивный: 1.5x active / 1.2x off-hours) ──
+        # ── 4h sweep quality is thesis context; execution quality is checked on 15m. ──
+        _swing_4h_volume_ok = False
+        _swing_4h_displacement_ok = False
         try:
             from datetime import datetime as _dt_vol
             _vol_hour = _dt_vol.utcnow().hour
@@ -7411,37 +7526,22 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
             sweep_candle = trigger_candle or candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
             sweep_vol = sweep_candle.get("volume", 0)
-            if _audit_test('SWING_DETECT_SWING_SETUP_G7362', (avg_vol > 0 and sweep_vol < avg_vol * _vol_mult), 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', 7362):
-                return _audit_fail('SWING_DETECT_SWING_SETUP_R7363', 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', locals(), 'avg_vol > 0 and sweep_vol < avg_vol * _vol_mult', 7363)
-        except Exception as _swing_volume_error:
-            logging.debug("[SWING] %s: volume validation failed: %s", symbol, _swing_volume_error)
-            return _audit_fail('SWING_DETECT_SWING_SETUP_R7366', 'detector returned None', locals(), '', 7366)
-
-        # ── Displacement candle — свеча после sweep должна быть импульсной ──
-        # Адаптивный порог: если ATR < median → 50%, иначе 60%
+            _swing_4h_volume_ok = bool(avg_vol > 0 and sweep_vol >= avg_vol * _vol_mult)
+        except Exception:
+            pass
         try:
-            if trigger_lookback >= 2:
-                _disp_candle = candles[-trigger_lookback + 1]
-                _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
-                _disp_range = _disp_candle["high"] - _disp_candle["low"]
-                if _disp_range > 0:
-                    _disp_ratio = _disp_body / _disp_range
-                    if _audit_test('SWING_DETECT_SWING_SETUP_G7377', (_disp_ratio < 0.50), '_disp_ratio < 0.50', '_disp_ratio < 0.50', 7377):
-                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7378', '_disp_ratio < 0.50', locals(), '_disp_ratio < 0.50', 7378)
-                    # Проверяем направление displacement
-                    if _audit_test('SWING_DETECT_SWING_SETUP_G7380', (direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]), 'Проверяем направление displacement', 'direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]', 7380):
-                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7381', 'Проверяем направление displacement', locals(), 'direction == "BULLISH" and _disp_candle["close"] < _disp_candle["open"]', 7381)
-                    if _audit_test('SWING_DETECT_SWING_SETUP_G7382', (direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]), 'Проверяем направление displacement', 'direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]', 7382):
-                        return _audit_fail('SWING_DETECT_SWING_SETUP_R7383', 'Проверяем направление displacement', locals(), 'direction == "BEARISH" and _disp_candle["close"] > _disp_candle["open"]', 7383)
-            else:
-                _disp_candle = trigger_candle or candles[-1]
-                _disp_range = _disp_candle["high"] - _disp_candle["low"]
-                _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
-                if _audit_test('SWING_DETECT_SWING_SETUP_G7388', (_disp_range <= 0 or _disp_body / _disp_range < 0.50), '_disp_range <= 0 or _disp_body / _disp_range < 0.50', '_disp_range <= 0 or _disp_body / _disp_range < 0.50', 7388):
-                    return _audit_fail('SWING_DETECT_SWING_SETUP_R7389', '_disp_range <= 0 or _disp_body / _disp_range < 0.50', locals(), '_disp_range <= 0 or _disp_body / _disp_range < 0.50', 7389)
-        except Exception as _swing_displacement_error:
-            logging.debug("[SWING] %s: displacement validation failed: %s", symbol, _swing_displacement_error)
-            return _audit_fail('SWING_DETECT_SWING_SETUP_R7392', 'detector returned None', locals(), '', 7392)
+            _disp_candle = candles[-trigger_lookback + 1] if trigger_lookback >= 2 else (trigger_candle or candles[-1])
+            _disp_range = _disp_candle["high"] - _disp_candle["low"]
+            _disp_body = abs(_disp_candle["close"] - _disp_candle["open"])
+            _disp_ratio = _disp_body / _disp_range if _disp_range > 0 else 0.0
+            _disp_direction_ok = (
+                direction == "BULLISH" and _disp_candle["close"] > _disp_candle["open"]
+            ) or (
+                direction == "BEARISH" and _disp_candle["close"] < _disp_candle["open"]
+            )
+            _swing_4h_displacement_ok = bool(_disp_ratio >= 0.50 and _disp_direction_ok)
+        except Exception:
+            pass
 
         # ── BOS/CHoCH after the sweep, confirmed by candle close ──
         # The canonical engine distinguishes continuation (BOS) from a real
@@ -7497,18 +7597,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # ── 1h CHoCH/BOS после 4h sweep ──
+        # 1h/15m execution is refined below after the 4h context bonuses are prepared.
         _swing_1h_choch = False
         _swing_1h_structure_event = None
-        try:
-            _c1h_sw = get_confirmed_candles(get_candles(symbol, "1h", 31))
-            _swing_1h_structure_event = (
-                get_bos_choch_event(_c1h_sw, direction, lookback=8, max_break_age=2)
-                if _c1h_sw else None
-            )
-            _swing_1h_choch = bool(_swing_1h_structure_event)
-        except Exception:
-            pass
 
         # ── Premium/Discount зона для SWING ──
         _swing_pd_ok = False
@@ -7522,20 +7613,36 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # ── Проверка ретеста OB в зоне CHoCH ──
-        _swing_ob = None
-        try:
-            _swing_ob = find_ob(candles, direction)
-            if _swing_ob:
-                # Проверяем что текущая цена вернулась к OB зоне (ретест)
-                _in_ob_zone = (_swing_ob["bottom"] <= candles[-1]["close"] <= _swing_ob["top"] or
-                               abs(candles[-1]["close"] - _swing_ob["top"]) < atr * 0.5 or
-                               abs(candles[-1]["close"] - _swing_ob["bottom"]) < atr * 0.5)
-                if _in_ob_zone:
-                    # Цена в зоне OB — подтверждение ретеста
-                    entry = smart_round(candles[-1]["close"])  # уточняем entry
-        except Exception:
-            pass
+        # ── Two-stage SWING: 4h thesis -> fresh 1h/15m executable entry. ──
+        _swing_thesis_entry = entry
+        _swing_thesis_sl = sl
+        _swing_thesis_tp = tp
+        entry = sl = None  # do not count provisional 4h levels as a near/executable deal
+        _ltf = _swing_build_ltf_entry(symbol, direction, tp)
+        if _audit_test('SWING_LTF_DATA', (not _ltf.get("data_ok")), 'LTF data: 1h + 15m history', 'not _ltf.data_ok', 7460):
+            return _audit_fail('SWING_LTF_R_DATA', 'LTF data: 1h + 15m history', locals(), 'not _ltf.data_ok', 7460)
+        if _audit_test('SWING_LTF_STRUCTURE', (not _ltf.get("structure_ok")), 'LTF: fresh 1h BOS/CHoCH', 'not _ltf.structure_ok', 7461):
+            return _audit_fail('SWING_LTF_R_STRUCTURE', 'LTF: fresh 1h BOS/CHoCH', locals(), 'not _ltf.structure_ok', 7461)
+        if _audit_test('SWING_LTF_ZONE', (not _ltf.get("zone_ok")), 'LTF: 1h OB/FVG zone', 'not _ltf.zone_ok', 7462):
+            return _audit_fail('SWING_LTF_R_ZONE', 'LTF: 1h OB/FVG zone', locals(), 'not _ltf.zone_ok', 7462)
+        if _audit_test('SWING_LTF_RETEST', (not _ltf.get("retest_ok")), 'LTF: recent 15m retest of 1h OB/FVG', 'not _ltf.retest_ok', 7463):
+            return _audit_fail('SWING_LTF_R_RETEST', 'LTF: recent 15m retest of 1h OB/FVG', locals(), 'not _ltf.retest_ok', 7463)
+        if _audit_test('SWING_LTF_DISPLACEMENT', (not _ltf.get("displacement_ok")), 'LTF: 15m displacement >= 50% in direction', 'not _ltf.displacement_ok', 7464):
+            return _audit_fail('SWING_LTF_R_DISPLACEMENT', 'LTF: 15m displacement >= 50% in direction', locals(), 'not _ltf.displacement_ok', 7464)
+        if _audit_test('SWING_LTF_VOLUME', (not _ltf.get("volume_ok")), 'LTF: 15m volume >= 1.2x average', 'not _ltf.volume_ok', 7465):
+            return _audit_fail('SWING_LTF_R_VOLUME', 'LTF: 15m volume >= 1.2x average', locals(), 'not _ltf.volume_ok', 7465)
+        if _audit_test('SWING_LTF_NO_CHASE', (not _ltf.get("chase_ok")), 'LTF: entry still near retest zone', 'not _ltf.chase_ok', 7466):
+            return _audit_fail('SWING_LTF_R_NO_CHASE', 'LTF: entry still near retest zone', locals(), 'not _ltf.chase_ok', 7466)
+        if _audit_test('SWING_LTF_TARGET', (not _ltf.get("target_ok")), 'LTF: 4h structural target remains ahead of entry', 'not _ltf.target_ok', 7467):
+            return _audit_fail('SWING_LTF_R_TARGET', 'LTF: 4h structural target remains ahead of entry', locals(), 'not _ltf.target_ok', 7467)
+        if _audit_test('SWING_LTF_READY', (not _ltf.get("ready")), 'LTF executable entry ready', 'not _ltf.ready', 7468):
+            return _audit_fail('SWING_LTF_R_READY', 'LTF executable entry ready', locals(), 'not _ltf.ready', 7468)
+
+        entry = _ltf["entry"]
+        sl = _ltf["sl"]
+        _swing_1h_structure_event = _ltf.get("structure_event")
+        _swing_1h_choch = bool(_swing_1h_structure_event)
+        logic = logic + f" -> LTF {_ltf.get('zone_type') or 'zone'} retest + 15m trigger"
 
         # Если sweep был давно — цена могла уйти далеко от входа
         current_price = live_price
