@@ -25,11 +25,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Apply conservative tuning and dashboard telemetry patch
-        run: python .github/scripts/tune_gates_trade_stats.py
+        run: |
+          python .github/scripts/tune_gates_trade_stats.py
+          git diff --exit-code -- brain.db
       - name: Compile project
         run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
       - name: Run full tests
         run: python -m unittest discover -s tests -v
+      - name: Restore test-mutated tracked DB
+        run: git restore --source=HEAD -- brain.db
       - name: Verify scope and tracked DB safety
         run: |
           git diff --check
