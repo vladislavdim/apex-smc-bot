@@ -1949,40 +1949,42 @@ def get_candles(symbol, interval="1h", limit=200):
     deterministic execution module after Groq has approved a candidate.
     """
     global candle_cache
+    requested_limit = max(1, int(limit or 1))
     cache_key = f"{symbol}_{interval}"
 
     cache_ttl = 60 if interval in ("1m", "3m", "5m") else 180 if interval in ("15m", "30m") else 300 if interval in ("1h", "2h") else 600
     if cache_key in candle_cache:
         cached, ts = candle_cache[cache_key]
-        if time.time() - ts < cache_ttl and len(cached) >= 20:
-            return cached
+        # Never satisfy a larger history request with a shorter cached sample.
+        if time.time() - ts < cache_ttl and len(cached) >= requested_limit:
+            return cached[-requested_limit:]
 
-    # Проверяем global candles storage
+    # Проверяем global candles storage. Same rule: it must satisfy this request.
     _gc = get_global_candles(symbol, interval)
-    if _gc and len(_gc) >= 20:
+    if _gc and len(_gc) >= requested_limit:
         candle_cache[cache_key] = (_gc, time.time())
-        return _gc
+        return _gc[-requested_limit:]
 
     # 1. Brain Router — Gate USD-M in the default production policy.
     if _ROUTER_OK:
         try:
-            rc = _brain_router.candles(symbol, interval, limit)
+            rc = _brain_router.candles(symbol, interval, requested_limit)
             if rc and len(rc) >= 3:
                 candle_cache[cache_key] = (rc, time.time())
                 update_global_candles(symbol, interval, rc)
-                return rc
+                return rc[-requested_limit:]
         except Exception as e:
             logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
 
     # 2. Core SMC Gate adapter — independent fallback, same venue.
     if _SMC_ENGINE_OK:
         try:
-            result = get_candles_smart(symbol, interval, limit)
+            result = get_candles_smart(symbol, interval, requested_limit)
             candles = result.get("candles", []) if isinstance(result, dict) else []
             if candles and len(candles) >= 3:
                 candle_cache[cache_key] = (candles, time.time())
                 update_global_candles(symbol, interval, candles)
-                return candles
+                return candles[-requested_limit:]
         except Exception as e:
             logging.debug("SMC Gate candles %s %s: %s", symbol, interval, e)
 
