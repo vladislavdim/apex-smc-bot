@@ -1,0 +1,54 @@
+name: Post95 Stats Baseline
+
+on:
+  push:
+    branches: [feature/stats-post95-baseline]
+    paths:
+      - '.github/scripts/post95_stats_baseline.py'
+      - '.github/workflows/post95-stats-baseline.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/stats-post95-baseline
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply baseline patch
+        run: python .github/scripts/post95_stats_baseline.py
+      - name: Compile project
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Run full tests
+        run: python -m unittest discover -s tests -v
+      - name: Restore tracked DB after tests
+        run: git restore --source=HEAD -- brain.db
+      - name: Verify
+        run: |
+          git diff --check
+          git diff --exit-code -- brain.db
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('stats_server.py').read_text(encoding='utf-8')
+          assert 'STATS_BASELINE_UTC' in s
+          assert 'baseline":"post95' in s
+          assert 'Актуальная статистика после #95' in s
+          print('post95 verifier: OK')
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "APEX Stats"
+          git config user.email "actions@users.noreply.github.com"
+          git add stats_server.py tests/test_strategy_stats_post95.py
+          git diff --cached --check
+          git commit -m "Start dashboard statistics from post-95 baseline"
+          git push origin HEAD:feature/stats-post95-baseline
