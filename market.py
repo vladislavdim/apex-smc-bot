@@ -1,5 +1,5 @@
 # APEX_STRATEGY_STATS_V1
-from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail
+from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, emit_event as _emit_stats_event
 import asyncio
 import logging
 import os
@@ -4024,6 +4024,38 @@ def should_skip_symbol(symbol, direction):
     except Exception:
         return False, ""
 
+def _emit_trade_stats_event(action, sig_id, symbol, signal_type, direction, entry, sl, tp1, tp2=None, tp3=None, *, result="", exit_price=None, hours=None):
+    """Passive OPEN/CLOSE telemetry for Strategy Lab; never affects trade state."""
+    try:
+        entry_f = float(entry or 0)
+        sl_f = float(sl or 0)
+        exit_f = float(exit_price) if exit_price is not None else None
+        risk = abs(entry_f - sl_f) if entry_f and sl_f else 0.0
+        pnl_pct = None
+        realized_r = None
+        if exit_f is not None and entry_f > 0:
+            signed = (exit_f - entry_f) if str(direction).upper() == "BULLISH" else (entry_f - exit_f)
+            pnl_pct = round(signed / entry_f * 100.0, 4)
+            if risk > 0:
+                realized_r = round(signed / risk, 3)
+        strategy = str(signal_type or "UNKNOWN").upper()
+        payload = {
+            "action": str(action or "").upper(), "signal_id": int(sig_id),
+            "symbol": str(symbol or "").upper(), "strategy": strategy,
+            "direction": str(direction or "").upper(), "entry": entry_f or None,
+            "sl": sl_f or None, "tp1": float(tp1) if tp1 else None,
+            "tp2": float(tp2) if tp2 else None, "tp3": float(tp3) if tp3 else None,
+            "result": str(result or "").lower(), "exit_price": exit_f,
+            "pnl_pct": pnl_pct, "realized_r": realized_r,
+            "planned_rr": round(abs(float(tp1) - entry_f) / risk, 3) if tp1 and risk > 0 else None,
+            "hours": round(float(hours), 2) if hours is not None else None,
+        }
+        suffix = str(result or "open").lower() if str(action).upper() == "CLOSE" else str(action or "event").lower()
+        _emit_stats_event("trade_event", strategy, symbol, payload, event_key=f"trade:{int(sig_id)}:{str(action).lower()}:{suffix}")
+    except Exception as exc:
+        logging.debug("[TradeStats] emit skipped for %s: %s", sig_id, exc)
+
+
 def check_pending_signals():
     """Проверяем открытые сигналы — сработал ли TP/SL"""
     try:
@@ -4164,6 +4196,10 @@ def check_pending_signals():
                     _lifecycle_mark_active(_ac, sig_id)
                 _ac.commit(); _ac.close()
                 logging.info("[SignalLifecycle] %s entry activated at %s", symbol, entry)
+                _emit_trade_stats_event(
+                    "OPEN", sig_id, symbol, _sig_type_check, direction, entry, sl, tp1, tp2, tp3,
+                    hours=hours_elapsed,
+                )
                 # Never infer entry→TP/SL ordering from the activation bar.
                 continue
 
@@ -4285,6 +4321,17 @@ def check_pending_signals():
                 ).fetchone()
                 conn2.commit()
                 conn2.close()
+
+                if result in ("sl", "tp1", "tp2", "tp3"):
+                    _exit_for_stats = (
+                        _active_sl if result == "sl" else
+                        tp1 if result == "tp1" else
+                        tp2 if result == "tp2" else tp3
+                    )
+                    _emit_trade_stats_event(
+                        "CLOSE", sig_id, symbol, _sig_type_check, direction, entry, sl, tp1, tp2, tp3,
+                        result=result, exit_price=_exit_for_stats, hours=hours_elapsed,
+                    )
 
                 is_win = result in ("tp1", "tp2", "tp3")
                 update_signal_learning(symbol, hours_elapsed, is_win, timeframe, result)
@@ -7138,10 +7185,12 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         _ap_sw = get_adaptive_params(symbol, candles)
         _vf_sw = _ap_sw["volatility_factor"]
 
-        # ── Swing highs/lows (lookback=12) ──
-        swing_highs, swing_lows = find_swings(candles, lookback=12)
-        if _audit_test('SWING_DETECT_SWING_SETUP_G7142', (len(swing_highs) < 2 or len(swing_lows) < 2), 'Swing highs/lows (lookback=12)', 'len(swing_highs) < 2 or len(swing_lows) < 2', 7142):
-            return _audit_fail('SWING_DETECT_SWING_SETUP_R7143', 'Swing highs/lows (lookback=12)', locals(), 'len(swing_highs) < 2 or len(swing_lows) < 2', 7143)
+        # ── Swing highs/lows: still structural, but aligned with the later sweep detector. ──
+        # lookback=12 rejected almost the whole universe before the actual sweep/CHoCH logic.
+        # Seven bars remains selective while allowing genuine 4h swing structure to reach the trigger layer.
+        swing_highs, swing_lows = find_swings(candles, lookback=7)
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7142', (len(swing_highs) < 2 or len(swing_lows) < 2), 'Свинг-структура найдена (lookback=7)', 'len(swing_highs) < 2 or len(swing_lows) < 2', 7142):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7143', 'Свинг-структура найдена (lookback=7)', locals(), 'len(swing_highs) < 2 or len(swing_lows) < 2', 7143)
 
         # Берём последние 3 свинга
         recent_highs = sorted(swing_highs[-3:], key=lambda x: x[0])
@@ -7795,8 +7844,8 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
     try:
         raw_candles = get_candles(symbol, timeframe, 101)
         candles = get_confirmed_candles(raw_candles)
-        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7796', (not candles or len(candles) < 50), 'not candles or len(candles) < 50', 'not candles or len(candles) < 50', 7796):
-            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7797', 'not candles or len(candles) < 50', locals(), 'not candles or len(candles) < 50', 7797)
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7796', (not candles or len(candles) < 40), 'Достаточно 4H истории (≥40 закрытых свечей)', 'not candles or len(candles) < 40', 7796):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7797', 'Достаточно 4H истории (≥40 закрытых свечей)', locals(), 'not candles or len(candles) < 40', 7797)
 
         price = raw_candles[-1]["close"]
         atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
@@ -7875,7 +7924,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                     c = candles[i]
                     c_body = abs(c["close"] - c["open"])
                     c_range = c["high"] - c["low"]
-                    if c_range > 0 and c_body / c_range >= 0.5 and c_body > atr * _vf_zone:
+                    if c_range > 0 and c_body / c_range >= 0.5 and c_body > atr * _vf_zone * 0.8:
                         if direction == "BULLISH" and c["close"] > c["open"]:
                             _strong_move = True
                             break
@@ -9297,7 +9346,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 sl = smart_round(curr["high"] + atr_15m * 0.5)
 
             # Для FAST нужен заметный институциональный объём.
-            _vol_threshold = 2.0
+            _vol_threshold = 1.6
             avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
             if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * _vol_threshold:
                 continue
