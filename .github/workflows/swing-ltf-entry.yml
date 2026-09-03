@@ -1,0 +1,61 @@
+name: SWING LTF Entry Refinement
+
+on:
+  push:
+    branches: [feature/swing-ltf-entry-refinement]
+    paths:
+      - '.github/scripts/patch_swing_ltf_entry.py'
+      - '.github/workflows/swing-ltf-entry.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/swing-ltf-entry-refinement
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply SWING LTF patch
+        run: python .github/scripts/patch_swing_ltf_entry.py
+      - name: Compile project
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Run focused tests
+        run: python -m unittest tests.test_swing_ltf_entry_refinement -v
+      - name: Run full tests
+        run: python -m unittest discover -s tests -v
+      - name: Restore tracked DB after tests
+        run: git restore --source=HEAD -- brain.db || true
+      - name: Verify scope and invariants
+        run: |
+          git diff --check
+          git diff --exit-code -- brain.db
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('market.py').read_text(encoding='utf-8')
+          assert 'def _swing_build_ltf_entry' in s
+          assert 'LTF: fresh 1h BOS/CHoCH' in s
+          assert 'LTF: recent 15m retest of 1h OB/FVG' in s
+          assert 'entry = sl = None  # do not count provisional 4h levels as a near/executable deal' in s
+          assert "return _audit_fail('SWING_DETECT_SWING_SETUP_R7405'" in s
+          assert 'rr_check < 2.0 or rr_check > 4.0' in s
+          helper=s[s.index('def _swing_build_ltf_entry'):s.index('@_audit_strategy("SWING")')]
+          assert 'cooldown' not in helper.lower()
+          print('SWING LTF invariants OK')
+          PY
+      - name: Commit implementation
+        run: |
+          git config user.name "APEX SWING"
+          git config user.email "actions@users.noreply.github.com"
+          git add market.py tests/test_swing_ltf_entry_refinement.py
+          git diff --cached --check
+          git commit -m "Refine SWING entries on 1h and 15m"
+          git push origin HEAD:feature/swing-ltf-entry-refinement
