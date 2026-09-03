@@ -31,10 +31,29 @@ jobs:
       - name: Run focused tests
         run: python -m unittest tests.test_swing_ltf_entry_refinement -v
       - name: Run full tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          set +e
+          python -m unittest discover -s tests -v > /tmp/swing_full_tests.log 2>&1
+          status=$?
+          cat /tmp/swing_full_tests.log
+          exit $status
+      - name: Capture failure report
+        if: failure()
+        run: |
+          git restore --source=HEAD -- brain.db || true
+          if [ -f /tmp/swing_full_tests.log ]; then
+            cp /tmp/swing_full_tests.log .github/swing_ltf_test_failure.log
+            git config user.name "APEX SWING"
+            git config user.email "actions@users.noreply.github.com"
+            git add .github/swing_ltf_test_failure.log
+            git commit -m "Capture SWING LTF test failure" || true
+            git push origin HEAD:feature/swing-ltf-entry-refinement || true
+          fi
       - name: Restore tracked DB after tests
+        if: success()
         run: git restore --source=HEAD -- brain.db || true
       - name: Verify scope and invariants
+        if: success()
         run: |
           git diff --check
           git diff --exit-code -- brain.db
@@ -52,6 +71,7 @@ jobs:
           print('SWING LTF invariants OK')
           PY
       - name: Commit implementation
+        if: success()
         run: |
           git config user.name "APEX SWING"
           git config user.email "actions@users.noreply.github.com"
