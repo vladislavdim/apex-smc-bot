@@ -11,6 +11,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from typing import Any
+from core.setup_audit import emit_scan_event as _emit_setup_audit_scan
 
 
 DB_PATH = os.environ.get(
@@ -272,6 +273,10 @@ def record_scan_event(
     db_path: str = DB_PATH,
 ) -> None:
     try:
+        _emit_setup_audit_scan(run_id, strategy, symbol, stage, outcome, reason_code, detail)
+    except Exception:
+        pass
+    try:
         conn = _connect(db_path)
         conn.execute(
             """INSERT INTO scan_pair_events
@@ -374,7 +379,7 @@ def finish_scan(run_id: int, status: str = "COMPLETED", error: str = "", db_path
                       heartbeat_at=CURRENT_TIMESTAMP,completed_at=CURRENT_TIMESTAMP WHERE id=?""",
             (requested, str(error)[:1000], int(run_id)),
         )
-        conn.execute("DELETE FROM scan_pair_events WHERE created_at < datetime('now','-14 days')")
+        conn.execute("DELETE FROM scan_pair_events WHERE created_at < datetime('now','-90 days')")
         conn.execute("DELETE FROM scan_runs WHERE started_at < datetime('now','-90 days')")
         conn.execute("DELETE FROM scan_coverage_pairs WHERE round_id IN (SELECT id FROM scan_coverage_rounds WHERE started_at < datetime('now','-30 days'))")
         conn.execute("DELETE FROM scan_coverage_rounds WHERE started_at < datetime('now','-30 days')")

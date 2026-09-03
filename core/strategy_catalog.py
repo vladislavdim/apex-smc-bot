@@ -1,0 +1,163 @@
+"""Human-readable registry of the live APEX strategy criteria.
+
+This module is descriptive only.  It does not calculate signals and is safe to
+import from the statistics web service without importing the trading engine.
+Keep it aligned with the deterministic checks in market.py, bot.py,
+core/setup_evidence.py and core/signal_integrity.py.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+
+def _c(code: str, category: str, label: str, *, required: bool = True, detail: str = "") -> dict[str, Any]:
+    return {"code": code, "category": category, "label": label, "required": required, "detail": detail}
+
+
+STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
+    "FAST": {
+        "title": "FAST",
+        "timeframes": "4H context → 15m setup/structure → optional 5m control",
+        "rr": "Detector 2.0–4.0; Signal Integrity min 2.0",
+        "criteria": [
+            _c("fast_session", "Timing", "London/NY session is active", detail="DST-aware session clock; outside the configured FAST session the setup stops."),
+            _c("fast_btc_1h", "Market context", "BTC 1H direction is available"),
+            _c("fast_htf_direction", "HTF", "At least one 4H/1H SMC direction exists"),
+            _c("fast_htf_consensus", "HTF", "4H and 1H do not conflict when both exist"),
+            _c("fast_btc_alignment", "Market context", "Alt direction is not materially opposed by BTC"),
+            _c("fast_learning_filter", "Learning", "No active learned skip condition for symbol/direction"),
+            _c("fast_funding", "Risk context", "Extreme funding recorded as warning", required=False),
+            _c("fast_4h_data", "Data", "Enough confirmed 4H candles"),
+            _c("fast_4h_zone", "Location", "Price is at a 4H OB or FVG within ATR tolerance"),
+            _c("fast_pd", "Location", "LONG in discount / SHORT in premium, not middle of range"),
+            _c("fast_15m_data", "Data", "Enough confirmed 15m candles"),
+            _c("fast_15m_impulse_volume", "Trigger", "Latest confirmed 15m impulse volume ≥ 1.1× average"),
+            _c("fast_displacement", "Trigger", "Recent 15m displacement body/range ≥ 0.65"),
+            _c("fast_engulfing", "Trigger", "15m engulfing in trade direction; body > previous body ×1.1"),
+            _c("fast_engulfing_volume", "Trigger", "Engulfing volume ≥ 2.0× 15m average"),
+            _c("fast_acceptance", "Trigger", "Engulfing candle closes through the relevant 4H OB/FVG"),
+            _c("fast_structure", "Structure", "Fresh close-confirmed 15m BOS/CHoCH in direction"),
+            _c("fast_target", "Geometry", "Real confirmed 15m swing-liquidity target exists"),
+            _c("fast_sl", "Geometry", "SL is structural around the engulfing candle + ATR buffer"),
+            _c("fast_rr", "Geometry", "TP1 RR is between 2.0 and 4.0"),
+            _c("fast_setup_evidence", "Final deterministic gate", "FAST causal matrix is not INVALID/DEVELOPING"),
+            _c("fast_integrity", "Final deterministic gate", "Signal Integrity validates level ordering, freshness and min RR 2.0"),
+            _c("fast_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
+        ],
+    },
+    "MTF": {
+        "title": "MTF",
+        "timeframes": "15m trigger + 1H/4H aligned context, 1D/1W background",
+        "rr": "Detector/geometry target 2.0–4.0; Signal Integrity min 2.0",
+        "criteria": [
+            _c("mtf_data", "Data", "Required confirmed candles are available"),
+            _c("mtf_ob_fvg", "Location", "Price is at an OB/FVG zone within adaptive ATR tolerance"),
+            _c("mtf_ema_structure", "HTF", "4H EMA20/EMA50 and HH/HL or LH/LL structure support direction"),
+            _c("mtf_pd", "Location", "LONG not in premium / SHORT not in discount"),
+            _c("mtf_1h_4h", "HTF", "1H and 4H thesis align with the candidate direction"),
+            _c("mtf_1d", "HTF", "1D context does not invalidate the setup"),
+            _c("mtf_1w", "HTF", "1W context is recorded as background/warning", required=False),
+            _c("mtf_15m_structure", "Trigger", "Fresh close-confirmed 15m BOS/CHoCH"),
+            _c("mtf_ote", "Geometry", "Fresh unmitigated structure/zone overlaps the OTE area where required"),
+            _c("mtf_structural_sl", "Geometry", "SL is behind real structure and within the risk envelope"),
+            _c("mtf_structural_tp", "Geometry", "Targets come from real swing/liquidity/opposing-zone structure"),
+            _c("mtf_rr", "Geometry", "RR is between 2.0 and 4.0"),
+            _c("mtf_learning", "Learning", "Learning/self-rule context does not invalidate the existing thesis", required=False),
+            _c("mtf_setup_evidence", "Final deterministic gate", "MTF causal matrix: 1H+4H direction + OB/FVG + fresh 15m trigger"),
+            _c("mtf_integrity", "Final deterministic gate", "Signal Integrity validates levels, current price and min RR 2.0"),
+            _c("mtf_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
+        ],
+    },
+    "SWING": {
+        "title": "SWING",
+        "timeframes": "4H thesis/trigger + mandatory fresh 1H structure; 1D/1W context",
+        "rr": "Detector accepts 2.0–4.0; final Signal Integrity min 2.5",
+        "criteria": [
+            _c("swing_data", "Data", "Enough confirmed 4H candles and swing points"),
+            _c("swing_trigger", "Trigger", "Structural sweep/EQH-EQL sweep or valid OB reaction is found"),
+            _c("swing_reaction_speed", "Trigger", "Price reacts quickly enough; no prolonged stalling at zone"),
+            _c("swing_learning_filter", "Learning", "No active learned skip condition"),
+            _c("swing_btc", "Market context", "BTC filter allows direction"),
+            _c("swing_volume", "Trigger", "Sweep/reaction volume meets adaptive threshold"),
+            _c("swing_displacement", "Trigger", "Displacement body/range ≥ 0.50 and direction matches"),
+            _c("swing_4h_structure", "Structure", "Confirmed BOS/CHoCH after trigger"),
+            _c("swing_1h_structure", "Structure", "Fresh 1H BOS/CHoCH is present"),
+            _c("swing_pd", "Confirmation", "Premium/Discount supports direction", required=False),
+            _c("swing_fvg", "Confirmation", "FVG lies between entry and target", required=False),
+            _c("swing_15m_impulse", "Confirmation", "15m directional impulse confirms", required=False),
+            _c("swing_cvd_rsi", "Confirmation", "CVD / RSI divergence context", required=False),
+            _c("swing_entry_distance", "Geometry", "Current price is not more than 4 ATR from entry"),
+            _c("swing_opposing_ob", "Geometry", "No invalidating opposing OB before target"),
+            _c("swing_stop_width", "Geometry", "Structural stop width ≤ 4%"),
+            _c("swing_rr_detector", "Geometry", "Detector RR is 2.0–4.0"),
+            _c("swing_htf", "HTF", "4H and 1D are not both against the trade"),
+            _c("swing_quality", "Confirmation", "At least 2/5 independent quality confirmations"),
+            _c("swing_funding", "Risk context", "Extreme funding is warning only", required=False),
+            _c("swing_setup_evidence", "Final deterministic gate", "SWING causal matrix remains complete"),
+            _c("swing_integrity", "Final deterministic gate", "Signal Integrity enforces min RR 2.5"),
+            _c("swing_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
+        ],
+    },
+    "ZONE": {
+        "title": "ZONE",
+        "timeframes": "4H zone/location + mandatory fresh 1H structure",
+        "rr": "Detector and Signal Integrity min 2.0",
+        "criteria": [
+            _c("zone_data", "Data", "At least 50 confirmed 4H candles"),
+            _c("zone_range", "Location", "50-candle range size ≥ 2 ATR"),
+            _c("zone_pd", "Location", "Price is in outer 30% Discount/Premium, not middle 40%"),
+            _c("zone_ob_fvg", "Location", "Matching OB/FVG exists near price in the correct half"),
+            _c("zone_freshness", "Location", "Zone is not over-mitigated (≤2 prior tests)"),
+            _c("zone_move_away", "Structure", "Strong move away: displacement ≥0.5 and body > adaptive ATR"),
+            _c("zone_rebound", "Trigger", "Current confirmed candle rejects/rebounds from zone"),
+            _c("zone_1d", "HTF", "1D context is not against direction"),
+            _c("zone_btc", "Market context", "BTC filter allows direction"),
+            _c("zone_funding", "Risk context", "Funding is scored/warned, not a hard directional veto", required=False),
+            _c("zone_1h_structure", "Structure", "Fresh 1H BOS/CHoCH is mandatory"),
+            _c("zone_wick", "Confirmation", "Wick rejection", required=False),
+            _c("zone_rsi", "Confirmation", "RSI is neutral 30–70", required=False),
+            _c("zone_fvg_target", "Confirmation", "Directional FVG toward target", required=False),
+            _c("zone_btc_4h", "Confirmation", "BTC 4H aligns", required=False),
+            _c("zone_rejection_volume", "Confirmation", "Rejection volume >1.3× average", required=False),
+            _c("zone_imbalance", "Confirmation", "Imbalance/FVG present; absence reduces score", required=False),
+            _c("zone_quality", "Confirmation", "Quality score ≥3"),
+            _c("zone_target", "Geometry", "Real nearest structural swing target exists"),
+            _c("zone_rr", "Geometry", "RR ≥2.0"),
+            _c("zone_setup_evidence", "Final deterministic gate", "ZONE causal matrix is not INVALID/DEVELOPING"),
+            _c("zone_integrity", "Final deterministic gate", "Signal Integrity validates levels and min RR 2.0"),
+            _c("zone_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
+        ],
+    },
+    "WYCKOFF": {
+        "title": "WYCKOFF",
+        "timeframes": "1D phase structure + 4H confirmation/timing",
+        "rr": "Spring/Distribution target 2.0–4.0; Re-accumulation 2.5–4.0; final Signal Integrity min 2.5",
+        "subtypes": ["SPRING", "DISTRIBUTION", "REACCUMULATION"],
+        "criteria": [
+            _c("wy_data", "Data", "Required confirmed 1D/4H history is available"),
+            _c("wy_learning", "Learning", "No learned skip condition"),
+            _c("wy_btc", "Market context", "BTC 4H filter allows direction for alts"),
+            _c("wy_prior_move", "Phase", "Meaningful prior drawdown/pump/correction exists"),
+            _c("wy_range", "Phase", "Accumulation/distribution range is sufficiently tight"),
+            _c("wy_climax", "Phase", "SC or BC climax is identified where classic pattern is used"),
+            _c("wy_ar_st", "Phase", "AR/ST phase evidence is present where applicable", required=False),
+            _c("wy_spring_sos", "Trigger", "Spring + SOS are both present for accumulation Spring"),
+            _c("wy_utad_sow", "Trigger", "UTAD + SOW are both present for distribution"),
+            _c("wy_reacc_hl", "Trigger", "Higher lows for re-accumulation"),
+            _c("wy_compression", "Trigger", "Range/volume compression supports phase completion"),
+            _c("wy_volume_expansion", "Confirmation", "Volume expansion on release", required=False),
+            _c("wy_timing", "Timing", "4H entry-timing validation passes"),
+            _c("wy_creek", "Location", "Entry remains near the Creek/Ice/range; move is not already missed"),
+            _c("wy_sl", "Geometry", "SL is beyond Spring/SC or UTAD/BC/range structure + ATR buffer"),
+            _c("wy_target", "Geometry", "TP derives from AR/liquidity/range extensions/prior extreme"),
+            _c("wy_rr", "Geometry", "RR is within subtype range"),
+            _c("wy_setup_evidence", "Final deterministic gate", "Wyckoff causal sequence is complete"),
+            _c("wy_integrity", "Final deterministic gate", "Signal Integrity validates levels and min RR 2.5"),
+            _c("wy_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
+        ],
+    },
+}
+
+
+def catalog_payload() -> dict[str, Any]:
+    return STRATEGY_CATALOG

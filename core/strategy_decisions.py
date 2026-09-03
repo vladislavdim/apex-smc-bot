@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from typing import Any
+from core.setup_audit import emit_decision_event as _emit_setup_audit_decision
 
 DB_PATH = os.environ.get(
     "APEX_DB_PATH",
@@ -47,6 +48,10 @@ def record_strategy_decision(
     db_path: str = DB_PATH,
 ) -> None:
     """Record evidence without ever blocking the scanner or Telegram delivery."""
+    try:
+        _emit_setup_audit_decision(candidate, outcome, stage, reason, evidence)
+    except Exception:
+        pass
     structure = candidate.get("structure") if isinstance(candidate.get("structure"), dict) else {}
     review = candidate.get("_external_quality_review")
     review = review if isinstance(review, dict) else {}

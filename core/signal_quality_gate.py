@@ -18,6 +18,7 @@ from news_context.aggregator import collect_news_context, format_news_context
 from news_context.storage import persist_news_context
 from core.htf_close_context import build_htf_close_context, format_htf_close_context
 from core.setup_evidence import assess_candidate, persist_assessment
+from core.setup_audit import emit_groq_review_event as _emit_setup_audit_groq
 
 try:
     from .market_memory import build_memory_context, format_market_memory_context
@@ -315,6 +316,7 @@ Return JSON only:
     await asyncio.to_thread(persist_context, context, strategy, True, review.get("decision"))
     await asyncio.to_thread(persist_news_context, news, strategy, review.get("decision"))
     await asyncio.to_thread(_persist_review, candidate, context, news, memory, zones, learning, review)
+    await asyncio.to_thread(_emit_setup_audit_groq, candidate, review)
     if matrix_ready:
         await asyncio.to_thread(persist_assessment, candidate, setup_assessment, "FINAL", DB_PATH)
     return review
