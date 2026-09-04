@@ -66,3 +66,5 @@ jobs:
             git commit -m 'Apply strategy funnel cleanup'
             git push origin HEAD:fix/strategy-funnel-cleanup
           fi
+
+# retrigger: apply verified runtime files after PR #104 merge
