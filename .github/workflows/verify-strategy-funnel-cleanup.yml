@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Apply cleanup patch
-        run: python .github/scripts/patch_strategy_funnel_cleanup.py
+        run: python .github/scripts/patch_strategy_funnel_cleanup_v2.py
       - name: Compile
         run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
       - name: Strategy funnel regression
