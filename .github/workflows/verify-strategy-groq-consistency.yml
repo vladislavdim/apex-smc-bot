@@ -56,10 +56,14 @@ jobs:
         run: |
           mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[q-r]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
           python -m unittest -v $mods
-      - name: Full group S
-        run: |
-          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_s/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
-          python -m unittest -v $mods
+      - name: S scan-session
+        run: python -m unittest -v tests.test_scan_batching tests.test_scan_round_radar tests.test_session_clock tests.test_session_liquidity
+      - name: S setup-signal
+        run: python -m unittest -v tests.test_setup_audit tests.test_setup_evidence tests.test_signal_integrity tests.test_signal_lifecycle tests.test_signal_quality_gate
+      - name: S strategy
+        run: python -m unittest -v tests.test_strategy_catalog tests.test_strategy_observability tests.test_strategy_stats_final tests.test_strategy_stats_post95 tests.test_strategy_tuning_trade_stats
+      - name: S swing
+        run: python -m unittest -v tests.test_swing_ltf_entry_refinement
       - name: Full group T-Z
         run: |
           mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[t-z]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
