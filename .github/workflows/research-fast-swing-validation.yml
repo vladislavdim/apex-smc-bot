@@ -1,0 +1,22 @@
+name: Research FAST and SWING validation
+on:
+  push:
+    branches: [research/fast-swing-validation-20260904]
+    paths:
+      - '.github/scripts/research_fast_swing_validation.py'
+      - '.github/workflows/research-fast-swing-validation.yml'
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/fast-swing-validation-20260904
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Run read-only Gate replay
+        run: python .github/scripts/research_fast_swing_validation.py
