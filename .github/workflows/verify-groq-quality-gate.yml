@@ -1,0 +1,48 @@
+name: Verify Groq Quality Gate Before Deploy
+
+on:
+  push:
+    branches: [verify/groq-quality-gate-before-deploy]
+    paths:
+      - '.github/scripts/verify_groq_quality_gate_retry.py'
+      - '.github/scripts/live_groq_quality_gate_smoke.py'
+      - '.github/workflows/verify-groq-quality-gate.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: verify/groq-quality-gate-before-deploy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply proposed fix in CI workspace only
+        run: python .github/scripts/verify_groq_quality_gate_retry.py
+      - name: Compile
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Focused quality-gate tests
+        run: python -m unittest tests.test_signal_quality_gate -v
+      - name: Full test suite
+        run: python -m unittest discover -s tests -v
+      - name: Verify no trade levels are mutated
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('core/signal_quality_gate.py').read_text(encoding='utf-8')
+          assert 'retry_raw' in s
+          assert 'compact_prompt' in s
+          assert 'Do NOT recalculate or replace entry, SL, TP or RR.' in s
+          assert 'candidate["entry"] =' not in s
+          assert 'candidate["sl"] =' not in s
+          assert 'candidate["tp1"] =' not in s
+          print('quality gate invariants OK')
+          PY
+      - name: Live Groq JSON smoke test
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python .github/scripts/live_groq_quality_gate_smoke.py
