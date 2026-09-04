@@ -40,6 +40,22 @@ jobs:
         run: python -m unittest tests.test_signal_integrity -v
       - name: Execution isolation
         run: python -m unittest tests.test_execution_only_binance -v
+      - name: Full group A-F
+        run: |
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[a-f]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          python -m unittest -v $mods
+      - name: Full group G-M
+        run: |
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[g-m]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          python -m unittest -v $mods
+      - name: Full group N-S
+        run: |
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[n-s]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          python -m unittest -v $mods
+      - name: Full group T-Z
+        run: |
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[t-z]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          python -m unittest -v $mods
       - name: Full tests
         run: python -m unittest discover -s tests -v
       - name: Verify invariants
