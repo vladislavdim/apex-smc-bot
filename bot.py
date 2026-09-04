@@ -3226,13 +3226,24 @@ async def _send_signal(sd):
             )
         logging.info("[SetupEvidence] %s %s → %s: %s", sd.get("symbol"), _strategy, setup_state, reason)
         return False
-    if _SIGNAL_QUALITY_GATE_OK and not sd.get("_external_quality_reviewed"):
+    if not _SIGNAL_QUALITY_GATE_OK:
+        reason = "quality gate unavailable; final Groq confirmation required"
+        logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
+        _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
+        await _remember("WAIT", reason)
+        if _run_id:
+            await asyncio.to_thread(
+                _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
+                "GROQ", "GROQ_WAIT", "QUALITY_GATE_UNAVAILABLE", {"reason": reason}, DB_PATH,
+            )
+        return False
+    if not sd.get("_external_quality_reviewed"):
         review = await _review_signal_candidate(sd, ask_groq, get_candles)
         sd["_external_quality_reviewed"] = True
         sd["_external_quality_review"] = review
         if isinstance(review.get("setup_assessment"), dict):
             sd["setup_assessment"] = review["setup_assessment"]
-        decision = review.get("decision", "APPROVE")
+        decision = str(review.get("decision") or "WAIT").upper()
         min_confidence = float(risk_state.get("groq_min_confidence", 0.65) or 0.65)
         if decision == "APPROVE" and float(review.get("confidence", 0.0) or 0.0) < min_confidence:
             decision = "WAIT"
@@ -3272,15 +3283,19 @@ async def _send_signal(sd):
         await _remember("APPROVE", "; ".join(review.get("reasons", [])), review)
     else:
         existing_review = sd.get("_external_quality_review")
-        if isinstance(existing_review, dict):
-            existing_decision = str(existing_review.get("decision") or "APPROVE").upper()
-            await _remember(
-                existing_decision,
-                "; ".join(existing_review.get("reasons", [])),
-                existing_review,
-            )
-        else:
-            await _remember("APPROVE", "quality gate unavailable; analytical candidate retained")
+        if not isinstance(existing_review, dict):
+            reason = "quality review missing; final Groq confirmation required"
+            logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
+            _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
+            await _remember("WAIT", reason)
+            return False
+        existing_decision = str(existing_review.get("decision") or "WAIT").upper()
+        if existing_decision != "APPROVE":
+            reason = "; ".join(existing_review.get("reasons", [])) or f"existing quality review={existing_decision}"
+            _record_strategy_decision(sd, existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
+            await _remember(existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", reason, existing_review)
+            return False
+        await _remember("APPROVE", "; ".join(existing_review.get("reasons", [])), existing_review)
     setup_state = str((sd.get("setup_assessment") or {}).get("state") or "")
     if setup_state in {"VALID", "STRONG", "EXCEPTIONAL"} and sd.get("text"):
         setup_line = f"\n🧭 Класс сетапа: <b>{setup_state}</b>"
