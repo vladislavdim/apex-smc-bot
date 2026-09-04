@@ -1,0 +1,99 @@
+name: Groq GPT-OSS Output Fix
+
+on:
+  push:
+    branches: [fix/groq-gpt-oss-final-output]
+    paths:
+      - '.github/scripts/patch_groq_gpt_oss_output.py'
+      - '.github/workflows/patch-groq-gpt-oss-output.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/groq-gpt-oss-final-output
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply targeted patch
+        run: python .github/scripts/patch_groq_gpt_oss_output.py
+      - name: Compile
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Focused tests
+        run: |
+          python -m unittest tests.test_signal_quality_gate -v
+          python -m unittest tests.test_groq_gpt_oss_output -v
+          python -m unittest tests.test_groq_models -v
+          python -m unittest tests.test_trade_execution -v
+      - name: Full tests
+        run: python -m unittest discover -s tests -v
+      - name: Live Groq smoke with production model settings
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from groq import Groq
+          from core.signal_quality_gate import _extract_json
+          from core.groq_models import configured_groq_models
+          key=os.environ.get('GROQ_API_KEY','').strip()
+          assert key, 'GROQ_API_KEY unavailable'
+          prompt='''You are the final quality reviewer for an already calculated crypto trade candidate.\nDo NOT recalculate or replace entry, SL, TP or RR.\nCANDIDATE: {"symbol":"KAITOUSDT","strategy":"MTF","direction":"BEARISH","entry":0.303,"sl":0.30656,"tp1":0.2945,"rr":2.39}\nSETUP EVIDENCE: {"state":"VALID","class":"QUALITY"}\nReturn JSON only: {"valid":true,"decision":"APPROVE|WAIT|REJECT","confidence":0.0,"reasons":["specific evidence"],"risks":[]}'''
+          client=Groq(api_key=key)
+          last=None
+          for model in configured_groq_models():
+              try:
+                  kwargs={'model':model,'messages':[{'role':'user','content':prompt}],'timeout':30}
+                  if str(model).startswith('openai/gpt-oss-'):
+                      kwargs.update(max_completion_tokens=350,reasoning_effort='low',include_reasoning=False)
+                  else:
+                      kwargs['max_tokens']=350
+                  r=client.chat.completions.create(**kwargs)
+                  raw=r.choices[0].message.content or ''
+                  parsed=_extract_json(raw)
+                  if not parsed:
+                      raise RuntimeError(f'empty/non-json final content from {model}')
+                  decision=str(parsed.get('decision','')).upper()
+                  confidence=float(parsed.get('confidence',-1))
+                  assert decision in {'APPROVE','WAIT','REJECT'}
+                  assert 0 <= confidence <= 1
+                  print(json.dumps({'model':model,'decision':decision,'confidence':confidence,'valid':parsed.get('valid')},sort_keys=True))
+                  break
+              except Exception as exc:
+                  last=exc
+          else:
+              raise SystemExit(f'live Groq smoke failed: {last}')
+          PY
+      - name: Restore tracked DB and verify scope
+        run: |
+          git restore --source=HEAD -- brain.db || true
+          git diff --check
+          git diff --exit-code -- brain.db
+          python - <<'PY'
+          from pathlib import Path
+          m=Path('market.py').read_text(encoding='utf-8')
+          q=Path('core/signal_quality_gate.py').read_text(encoding='utf-8')
+          assert 'reasoning_effort' in m and 'include_reasoning' in m and 'max_completion_tokens' in m
+          assert 'compact Groq retry' in q
+          assert 'candidate["entry"] =' not in q
+          assert 'candidate["sl"] =' not in q
+          assert 'candidate["tp1"] =' not in q
+          print('scope/invariants OK')
+          PY
+      - name: Commit verified implementation
+        run: |
+          git config user.name "APEX Groq Fix"
+          git config user.email "actions@users.noreply.github.com"
+          git add market.py core/signal_quality_gate.py tests/test_signal_quality_gate.py tests/test_groq_gpt_oss_output.py
+          git diff --cached --check
+          git commit -m "Fix GPT-OSS final output for quality gate"
+          git push origin HEAD:fix/groq-gpt-oss-final-output
