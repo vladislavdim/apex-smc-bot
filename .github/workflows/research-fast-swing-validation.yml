@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/scripts/research_fast_swing_validation.py'
       - '.github/scripts/research_fast_crypto_v2.py'
+      - '.github/scripts/research_fast_variants_v3.py'
       - '.github/workflows/research-fast-swing-validation.yml'
 permissions:
   contents: read
@@ -19,5 +20,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests
-      - name: Run crypto-only FAST LTF-primary replay
-        run: python .github/scripts/research_fast_crypto_v2.py
+      - name: Compare FAST context variants
+        run: python .github/scripts/research_fast_variants_v3.py
