@@ -5,6 +5,7 @@ on:
     branches: [fix/rr-floor-fast-balanced]
     paths:
       - '.github/scripts/patch_rr_fast_balanced.py'
+      - '.github/scripts/fix_rr_fast_test_assertions.py'
       - '.github/workflows/patch-rr-fast-balanced.yml'
 
 permissions:
@@ -26,6 +27,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Apply targeted patch
         run: python .github/scripts/patch_rr_fast_balanced.py
+      - name: Normalize regression assertions
+        run: python .github/scripts/fix_rr_fast_test_assertions.py
       - name: Compile
         run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
       - name: Focused regression tests
