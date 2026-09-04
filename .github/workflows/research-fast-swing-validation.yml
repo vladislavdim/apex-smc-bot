@@ -4,6 +4,7 @@ on:
     branches: [research/fast-swing-validation-20260904]
     paths:
       - '.github/scripts/research_fast_swing_validation.py'
+      - '.github/scripts/research_fast_crypto_v2.py'
       - '.github/workflows/research-fast-swing-validation.yml'
 permissions:
   contents: read
@@ -18,5 +19,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests
-      - name: Run read-only Gate replay
-        run: python .github/scripts/research_fast_swing_validation.py
+      - name: Run crypto-only FAST LTF-primary replay
+        run: python .github/scripts/research_fast_crypto_v2.py
