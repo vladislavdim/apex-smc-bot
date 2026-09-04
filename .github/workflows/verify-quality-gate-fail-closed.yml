@@ -1,0 +1,58 @@
+name: Verify Quality Gate Fail Closed
+
+on:
+  push:
+    branches: [fix/quality-gate-fail-closed]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/quality-gate-fail-closed
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply fail-closed patch
+        run: python .github/scripts/patch_quality_gate_fail_closed.py
+      - name: Compile
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: Fail-closed regression
+        run: python -m unittest tests.test_quality_gate_fail_closed -v
+      - name: Signal quality gate
+        run: python -m unittest tests.test_signal_quality_gate -v
+      - name: Signal integrity
+        run: python -m unittest tests.test_signal_integrity -v
+      - name: Execution isolation
+        run: python -m unittest tests.test_execution_only_binance -v
+      - name: Full tests
+        run: python -m unittest discover -s tests -v
+      - name: Verify invariant
+        run: |
+          git restore --source=HEAD -- brain.db || true
+          git diff --check
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('bot.py').read_text(encoding='utf-8')
+          assert 'quality gate unavailable; analytical candidate retained' not in s
+          assert 'quality gate unavailable; final Groq confirmation required' in s
+          assert 'quality review missing; final Groq confirmation required' in s
+          assert 'decision = str(review.get("decision") or "WAIT").upper()' in s
+          print('fail-closed invariant OK')
+          PY
+      - name: Commit verified runtime files
+        run: |
+          git config user.name "APEX Safety Fix"
+          git config user.email "actions@users.noreply.github.com"
+          git add bot.py tests/test_quality_gate_fail_closed.py
+          git diff --cached --check
+          git commit -m "Fail closed when Groq quality gate is unavailable"
+          git push origin HEAD:fix/quality-gate-fail-closed
