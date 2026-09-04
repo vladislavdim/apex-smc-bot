@@ -44,16 +44,21 @@ client = Groq(api_key=key)
 last_error = None
 for model in configured_groq_models():
     try:
-        response = client.chat.completions.create(
+        kwargs = dict(
             model=model,
             messages=[{'role': 'user', 'content': prompt}],
-            max_tokens=250,
+            max_completion_tokens=350,
             timeout=30,
         )
-        raw = response.choices[0].message.content
+        if model.startswith('openai/gpt-oss-'):
+            kwargs['reasoning_effort'] = 'low'
+            kwargs['include_reasoning'] = False
+        response = client.chat.completions.create(**kwargs)
+        raw = response.choices[0].message.content or ''
         parsed = _extract_json(raw)
         if not parsed:
-            raise RuntimeError(f'model {model} returned non-JSON: {raw[:300]!r}')
+            reasoning = getattr(response.choices[0].message, 'reasoning', None)
+            raise RuntimeError(f'model {model} returned non-JSON content={raw[:200]!r} reasoning_present={bool(reasoning)}')
         decision = str(parsed.get('decision', '')).upper()
         confidence = float(parsed.get('confidence', -1))
         if decision not in {'APPROVE', 'WAIT', 'REJECT'}:
