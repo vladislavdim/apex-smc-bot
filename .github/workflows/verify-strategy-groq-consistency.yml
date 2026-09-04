@@ -48,9 +48,17 @@ jobs:
         run: |
           mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[g-m]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
           python -m unittest -v $mods
-      - name: Full group N-S
+      - name: Full group N-P
         run: |
-          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[n-s]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[n-p]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          python -m unittest -v $mods
+      - name: Full group Q-R
+        run: |
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_[q-r]/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
+          python -m unittest -v $mods
+      - name: Full group S
+        run: |
+          mods=$(find tests -maxdepth 1 -name 'test_*.py' -printf '%f\n' | sort | awk '$0 ~ /^test_s/ {sub(/\.py$/,""); print "tests."$0}' | tr '\n' ' ')
           python -m unittest -v $mods
       - name: Full group T-Z
         run: |
