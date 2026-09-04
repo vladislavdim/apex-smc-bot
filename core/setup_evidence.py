@@ -22,7 +22,7 @@ STRATEGY_CAUSAL_MATRIX = {
     "MTF": {"core": "1h+4h direction and structural OB/FVG location", "trigger": "fresh closed 15m BOS/CHoCH"},
     "SWING": {"core": "HTF thesis and major liquidity/OB/FVG reaction", "trigger": "4h plus fresh closed 1h BOS/CHoCH"},
     "ZONE": {"core": "qualified Discount/Premium extreme", "trigger": "fresh closed 1h BOS/CHoCH from the zone"},
-    "FAST": {"core": "session-qualified 4h OB/FVG location", "trigger": "15m displacement and fresh BOS/CHoCH"},
+    "FAST": {"core": "session-qualified 15m OB/FVG retest with supportive HTF context", "trigger": "15m displacement and fresh BOS/CHoCH"},
     "WYCKOFF": {"core": "qualified accumulation/distribution range", "trigger": "Spring→SOS, UTAD→SOW or re-accumulation release"},
 }
 
@@ -68,8 +68,8 @@ def _geometry(candidate: dict[str, Any], direction: str) -> tuple[bool, str]:
     correct = sl < entry < tp if direction == "BULLISH" else tp < entry < sl if direction == "BEARISH" else False
     if not correct:
         return False, "trade geometry contradicts direction"
-    if rr < 2.0 or rr > 4.05:
-        return False, "RR is outside the strategy safety envelope"
+    if rr < 2.0:
+        return False, "RR is below the universal 2.0 minimum"
     return True, "structural invalidation and target are directionally valid"
 
 
@@ -187,9 +187,9 @@ def _technical_backbone(strategy: str, evidence: dict[str, Any], direction: str)
     elif strategy == "FAST":
         location = _truth(evidence.get("zone")) and (_truth(evidence.get("ob")) or _truth(evidence.get("fvg")))
         structure = _truth(evidence.get("structure_event"))
-        if location: core.append("4h OB/FVG location and session setup are present")
+        if location: core.append("15m OB/FVG retest location and session setup are present")
         else:
-            missing.append("4h OB/FVG location")
+            missing.append("15m OB/FVG retest location")
             core_complete = False
         if structure: trigger.append("15m displacement and fresh BOS/CHoCH confirm intent")
         else: missing.append("fresh 15m displacement/structure trigger")

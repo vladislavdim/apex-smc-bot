@@ -1059,7 +1059,7 @@ def select_structural_targets(
     candidates: list,
     direction: str,
     min_rr: float,
-    max_rr: float,
+    max_rr: float | None,
 ) -> tuple[float | None, float | None]:
     """Select TP1/TP2 only from supplied market-anchored levels.
 
@@ -1090,7 +1090,7 @@ def select_structural_targets(
     tp1_index = None
     for index, level in enumerate(levels):
         rr = abs(level - entry) / risk
-        if min_rr <= rr <= max_rr:
+        if rr >= min_rr and (max_rr is None or rr <= max_rr):
             tp1_index = index
             break
     if tp1_index is None:
@@ -1796,7 +1796,7 @@ def calc_smart_levels(candles, direction, price, timeframe="1h"):
             candidates=target_candidates,
             direction=direction,
             min_rr=2.0,
-            max_rr=4.0,
+            max_rr=None,
         )
         if tp1 is None or tp2 is None:
             raise ValueError("two structural targets are unavailable")
@@ -7682,8 +7682,8 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if _audit_test('SWING_DETECT_SWING_SETUP_G7508', (risk == 0), 'Фильтр RR', 'risk == 0', 7508):
             return _audit_fail('SWING_DETECT_SWING_SETUP_R7509', 'Фильтр RR', locals(), 'risk == 0', 7509)
         rr_check = reward / risk
-        if _audit_test('SWING_DETECT_SWING_SETUP_G7511', (rr_check < 2.0 or rr_check > 4.0), 'rr_check < 2.0 or rr_check > 4.0', 'rr_check < 2.0 or rr_check > 4.0', 7511):
-            return _audit_fail('SWING_DETECT_SWING_SETUP_R7512', 'rr_check < 2.0 or rr_check > 4.0', locals(), 'rr_check < 2.0 or rr_check > 4.0', 7512)
+        if _audit_test('SWING_DETECT_SWING_SETUP_G7511', (rr_check < 2.0), 'rr_check < 2.0', 'rr_check < 2.0', 7511):
+            return _audit_fail('SWING_DETECT_SWING_SETUP_R7512', 'rr_check < 2.0', locals(), 'rr_check < 2.0', 7512)
 
         # ── Фильтр — цель должна быть реальной ──
         if _audit_test('SWING_DETECT_SWING_SETUP_G7515', (direction == "BULLISH" and tp <= entry), 'Фильтр — цель должна быть реальной', 'direction == "BULLISH" and tp <= entry', 7515):
@@ -8711,7 +8711,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         tp, tp2 = select_structural_targets(
             entry, sl,
             [ar_price, fib_1272, fib_1618, price_peak],
-            "BULLISH", 2.0, 4.0,
+            "BULLISH", 2.0, None,
         )
         if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8540', (tp is None), 'tp is None', 'tp is None', 8540):
             return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8541', 'tp is None', locals(), 'tp is None', 8541)
@@ -8812,8 +8812,8 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
 
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
-        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8639', (risk == 0 or not 2.0 <= reward / risk <= 4.0), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8639):
-            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8640', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', locals(), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8640)
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_SPRING_G8639', (risk == 0 or reward / risk < 2.0), 'risk == 0 or reward / risk < 2.0', 'risk == 0 or reward / risk < 2.0', 8639):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_SPRING_R8640', 'risk == 0 or reward / risk < 2.0', locals(), 'risk == 0 or reward / risk < 2.0', 8640)
 
         rr     = round(reward / risk, 2)
         tp_pct = round((tp - entry) / entry * 100, 1)
@@ -9004,7 +9004,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         tp, tp2 = select_structural_targets(
             entry, sl,
             [ar_price, fib_1272, fib_1618, price_bottom],
-            "BEARISH", 2.0, 4.0,
+            "BEARISH", 2.0, None,
         )
         if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8832', (tp is None), 'tp is None', 'tp is None', 8832):
             return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8833', 'tp is None', locals(), 'tp is None', 8833)
@@ -9100,8 +9100,8 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         risk   = abs(sl - entry)
         reward = abs(entry - tp)
-        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8926', (risk == 0 or not 2.0 <= reward / risk <= 4.0), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8926):
-            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8927', 'risk == 0 or not 2.0 <= reward / risk <= 4.0', locals(), 'risk == 0 or not 2.0 <= reward / risk <= 4.0', 8927)
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8926', (risk == 0 or reward / risk < 2.0), 'risk == 0 or reward / risk < 2.0', 'risk == 0 or reward / risk < 2.0', 8926):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8927', 'risk == 0 or reward / risk < 2.0', locals(), 'risk == 0 or reward / risk < 2.0', 8927)
 
         rr     = round(reward / risk, 2)
         tp_pct = round((entry - tp) / entry * 100, 1)
@@ -9207,7 +9207,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         tp, tp2 = select_structural_targets(
             entry, sl,
             [liquidity_target, fib_1272, fib_1618, price_peak],
-            "BULLISH", 2.5, 4.0,
+            "BULLISH", 2.0, None,
         )
         if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9034', (tp is None), 'tp is None', 'tp is None', 9034):
             return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9035', 'tp is None', locals(), 'tp is None', 9035)
@@ -9242,7 +9242,7 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
                 "5. TP на ликвидности (EQH/swing high)\n\n"
                 "БЛОКИРУЙ если:\n"
                 "- Higher lows слабые или нет compression\n"
-                f"- RR={rr} < 2.5\n"
+                f"- RR={rr} < 2.0\n"
                 "- BTC в нисходящем тренде\n"
                 "- Нет чёткой ликвидности выше для TP\n"
                 "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
@@ -9274,8 +9274,8 @@ def detect_wyckoff_reaccumulation(symbol: str) -> dict | None:
         if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9096', (risk == 0), 'TP remains the structural liquidity target calculated above.', 'risk == 0', 9096):
             return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9097', 'TP remains the structural liquidity target calculated above.', locals(), 'risk == 0', 9097)
         rr = round(reward / risk, 2)
-        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9099', (not 2.5 <= rr <= 4.0), 'not 2.5 <= rr <= 4.0', 'not 2.5 <= rr <= 4.0', 9099):
-            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9100', 'not 2.5 <= rr <= 4.0', locals(), 'not 2.5 <= rr <= 4.0', 9100)
+        if _audit_test('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9099', (rr < 2.0), 'rr < 2.0', 'rr < 2.0', 9099):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_R9100', 'rr < 2.0', locals(), 'rr < 2.0', 9100)
         tp_pct = round((tp - entry) / entry * 100, 1)
         sl_pct = round((entry - sl) / entry * 100, 1)
         return {
@@ -9317,34 +9317,36 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_DETECT_FAST_DEAL_G9138', (not _fast_session()), 'manual FAST scans make the same decision in summer and winter.', 'not _fast_session()', 9138):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9139', 'manual FAST scans make the same decision in summer and winter.', locals(), 'not _fast_session()', 9139)
 
-        # ── 1. BTC направление ──
-        btc_candles_1h = get_candles("BTCUSDT", "1h", 10)
-        btc_trend = "BULLISH" if btc_candles_1h and btc_candles_1h[-1]["close"] > btc_candles_1h[-3]["close"] else "BEARISH"
+        # ── 1. 15m creates the FAST thesis; 1h/4h/BTC are context only. ──
+        _fast_context_15m = get_confirmed_candles(get_candles(symbol, "15m", 61))
+        if _audit_test('FAST_LTF_CONTEXT_DATA', (not _fast_context_15m or len(_fast_context_15m) < 30), 'FAST: enough closed 15m context', 'not _fast_context_15m or len(_fast_context_15m) < 30', 9142):
+            return _audit_fail('FAST_LTF_CONTEXT_R_DATA', 'FAST: enough closed 15m context', locals(), 'not _fast_context_15m or len(_fast_context_15m) < 30', 9142)
+        _fast_bull_event = get_bos_choch_event(_fast_context_15m, "BULLISH", lookback=15, max_break_age=4)
+        _fast_bear_event = get_bos_choch_event(_fast_context_15m, "BEARISH", lookback=15, max_break_age=4)
+        if _audit_test('FAST_LTF_CONTEXT_STRUCTURE', (bool(_fast_bull_event) == bool(_fast_bear_event)), 'FAST: one fresh 15m BOS/CHoCH direction', 'bool(_fast_bull_event) == bool(_fast_bear_event)', 9145):
+            return _audit_fail('FAST_LTF_CONTEXT_R_STRUCTURE', 'FAST: one fresh 15m BOS/CHoCH direction', locals(), 'bool(_fast_bull_event) == bool(_fast_bear_event)', 9145)
+        direction = "BULLISH" if _fast_bull_event else "BEARISH"
 
-        # ── 2. 4h+1h consensus (мягкий — один из двух достаточно) ──
+        # Balanced replay winner: at least one pair HTF supports the 15m thesis.
         direction_4h = smc_on_tf(symbol, "4h")
         direction_1h = smc_on_tf(symbol, "1h")
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9148', (not direction_4h and not direction_1h), '2. 4h+1h consensus (мягкий — один из двух достаточно)', 'not direction_4h and not direction_1h', 9148):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9149', '2. 4h+1h consensus (мягкий — один из двух достаточно)', locals(), 'not direction_4h and not direction_1h', 9149)
-        # Берём направление: приоритет 4h, fallback 1h
-        direction_1d = direction_4h or direction_1h
-        # Для редкого скальпа не берём конфликтующие 4h/1h направления.
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9153', (direction_4h and direction_1h and direction_4h != direction_1h), 'Для редкого скальпа не берём конфликтующие 4h/1h направления.', 'direction_4h and direction_1h and direction_4h != direction_1h', 9153):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9154', 'Для редкого скальпа не берём конфликтующие 4h/1h направления.', locals(), 'direction_4h and direction_1h and direction_4h != direction_1h', 9154)
+        _fast_htf_support = direction_1h == direction or direction_4h == direction
+        if _audit_test('FAST_HTF_SUPPORT', (not _fast_htf_support), 'FAST: 1h or 4h supports 15m direction', 'not _fast_htf_support', 9150):
+            return _audit_fail('FAST_HTF_R_SUPPORT', 'FAST: 1h or 4h supports 15m direction', locals(), 'not _fast_htf_support', 9150)
 
-        # BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя
+        # BTC is a macro veto only when both BTC 1h and 4h agree against the trade.
+        btc_direction_1h = smc_on_tf("BTCUSDT", "1h")
+        btc_direction_4h = smc_on_tf("BTCUSDT", "4h")
+        btc_trend = btc_direction_1h or btc_direction_4h or "NEUTRAL"
         if symbol != 'BTCUSDT':
-            if _audit_test('FAST_DETECT_FAST_DEAL_G9158', (direction_1d == "BULLISH" and btc_trend == "BEARISH"), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'direction_1d == "BULLISH" and btc_trend == "BEARISH"', 9158):
-                return _audit_fail('FAST_DETECT_FAST_DEAL_R9159', 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', locals(), 'direction_1d == "BULLISH" and btc_trend == "BEARISH"', 9159)
-            if direction_1d == 'BEARISH' and btc_trend == 'BULLISH':
-                try:
-                    btc_change = (btc_candles_1h[-1]["close"] - btc_candles_1h[-4]["close"]) / btc_candles_1h[-4]["close"] * 100
-                    if _audit_test('FAST_DETECT_FAST_DEAL_G9163', (btc_change > 1.0), 'BTC фильтр: только для альткоинов — BTCUSDT не фильтруем через себя', 'btc_change > 1.0', 9163):
-                        return _audit_fail('FAST_DETECT_FAST_DEAL_R9164', 'btc_change > 1.0', locals(), 'btc_change > 1.0', 9164)  # BTC растёт >1% — шорт альт опасен
-                except Exception:
-                    pass
+            _fast_btc_hard_conflict = (
+                btc_direction_1h is not None and btc_direction_4h is not None
+                and btc_direction_1h == btc_direction_4h and btc_direction_1h != direction
+            )
+            if _audit_test('FAST_BTC_HARD_CONFLICT', _fast_btc_hard_conflict, 'FAST: BTC 1h+4h both oppose 15m thesis', '_fast_btc_hard_conflict', 9158):
+                return _audit_fail('FAST_BTC_R_HARD_CONFLICT', 'FAST: BTC 1h+4h both oppose 15m thesis', locals(), '_fast_btc_hard_conflict', 9158)
 
-        direction = direction_1d
+        direction_1d = direction_1h or direction_4h or direction
 
         try:
             _skip_symbol, _skip_reason = _learn_should_skip(symbol, direction)
@@ -9400,8 +9402,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 in_zone = True
                 zone_desc = f"4h FVG ${zone_bottom:.4f}–${zone_top:.4f}"
 
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9224', (not in_zone), 'not in_zone', 'not in_zone', 9224):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9225', 'not in_zone', locals(), 'not in_zone', 9225)
+        _fast_4h_zone_context = bool(in_zone)
 
         # Не скальпим из середины диапазона: LONG только из discount,
         # SHORT только из premium.
@@ -9413,8 +9414,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         _in_discount = price_now < _range_mid - _range_size * 0.1
         _no_middle_ok = (direction == "BULLISH" and _in_discount) or \
                         (direction == "BEARISH" and _in_premium)
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9237', (not _no_middle_ok), 'not _no_middle_ok', 'not _no_middle_ok', 9237):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9238', 'not _no_middle_ok', locals(), 'not _no_middle_ok', 9238)
+        _fast_pd_context = bool(_no_middle_ok)
 
         # ── 4. 15m импульсная свеча (подтверждение на младшем ТФ) ──
         candles_15m_imp = get_confirmed_candles(get_candles(symbol, "15m", 21))
@@ -9434,6 +9434,26 @@ def detect_fast_deal(symbol: str) -> dict | None:
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9255', '5. 15m Engulfing + Displacement + Volume Spike', locals(), 'not candles_15m or len(candles_15m) < 10', 9255)
 
         atr_15m = sum(c["high"] - c["low"] for c in candles_15m[-14:]) / 14
+
+        # LTF location is mandatory: recent retest of a real 15m OB/FVG.
+        _fast_ob_15m = find_ob(candles_15m, direction)
+        _fast_fvg_15m = find_fvg(candles_15m, direction)
+        _fast_zone_15m = _fast_ob_15m or _fast_fvg_15m
+        if _audit_test('FAST_LTF_ZONE', (not _fast_zone_15m), 'FAST: 15m OB/FVG zone exists', 'not _fast_zone_15m', 9260):
+            return _audit_fail('FAST_LTF_R_ZONE', 'FAST: 15m OB/FVG zone exists', locals(), 'not _fast_zone_15m', 9260)
+        _fast_zone_bottom = float(_fast_zone_15m["bottom"])
+        _fast_zone_top = float(_fast_zone_15m["top"])
+        _fast_zone_tol = atr_15m * 0.20
+        _fast_ltf_retest = any(
+            float(c["low"]) <= _fast_zone_top + _fast_zone_tol
+            and float(c["high"]) >= _fast_zone_bottom - _fast_zone_tol
+            for c in candles_15m[-8:]
+        )
+        if _audit_test('FAST_LTF_RETEST', (not _fast_ltf_retest), 'FAST: recent 15m OB/FVG retest', 'not _fast_ltf_retest', 9261):
+            return _audit_fail('FAST_LTF_R_RETEST', 'FAST: recent 15m OB/FVG retest', locals(), 'not _fast_ltf_retest', 9261)
+        _fast_ltf_zone_type = "OB" if _fast_ob_15m else "FVG"
+        zone_desc = f"15m {_fast_ltf_zone_type} ${_fast_zone_bottom:.4f}–${_fast_zone_top:.4f}"
+
         engulfing_found = False
         entry = None
         sl = None
@@ -9482,23 +9502,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_DETECT_FAST_DEAL_G9303', (not engulfing_found or entry is None), 'not engulfing_found or entry is None', 'not engulfing_found or entry is None', 9303):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9304', 'not engulfing_found or entry is None', locals(), 'not engulfing_found or entry is None', 9304)
 
-        # ── Acceptance — проверяем на свече engulfing (не текущей) ──
+        # The 4h zone is context only. Execution acceptance is the confirmed
+        # 15m OB/FVG retest plus the displacement/engulfing trigger above.
         _eng_idx = _sweep_candles_ago if '_sweep_candles_ago' in dir() else 1
         _eng_candle = candles_15m[-_eng_idx] if _eng_idx < len(candles_15m) else candles_15m[-1]
-        if ob_4h and direction == "BULLISH":
-            _acceptance = _eng_candle["close"] > ob_4h["top"]
-        elif ob_4h and direction == "BEARISH":
-            _acceptance = _eng_candle["close"] < ob_4h["bottom"]
-        elif fvg_4h and direction == "BULLISH":
-            _acceptance = _eng_candle["close"] > fvg_4h["top"]
-        elif fvg_4h and direction == "BEARISH":
-            _acceptance = _eng_candle["close"] < fvg_4h["bottom"]
-        else:
-            _acceptance = False
-
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9320', (not _acceptance), 'not _acceptance', 'not _acceptance', 9320):
-            logging.debug(f"[FAST] {symbol}: нет acceptance — цена не закрылась за зоной")
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9322', 'not _acceptance', locals(), 'not _acceptance', 9322)
+        _acceptance = bool(_fast_ltf_retest and engulfing_found)
 
         # FAST still needs a real, recent close-confirmed structural break.
         # Engulfing/volume alone cannot substitute for BOS/CHoCH.
@@ -9532,8 +9540,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_DETECT_FAST_DEAL_G9353', (risk == 0), 'RR проверка', 'risk == 0', 9353):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9354', 'RR проверка', locals(), 'risk == 0', 9354)
         rr = round(reward / risk, 2)
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9356', (not 2.0 <= rr <= 4.0), 'not 2.0 <= rr <= 4.0', 'not 2.0 <= rr <= 4.0', 9356):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9357', 'not 2.0 <= rr <= 4.0', locals(), 'not 2.0 <= rr <= 4.0', 9357)
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9356', (rr < 2.0), 'rr < 2.0', 'rr < 2.0', 9356):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9357', 'rr < 2.0', locals(), 'rr < 2.0', 9357)
 
         sl_pct = round(abs(entry - sl) / entry * 100, 2)
         tp_pct = round(abs(tp1 - entry) / entry * 100, 2)
@@ -9577,26 +9585,26 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 'Отвечай СТРОГО JSON: {"logic": "макс 10 слов", "valid": true/false}\n\n'
                 "КАК ДУМАТЬ:\n"
                 "1. 15m engulfing + displacement — тело > 65% range, поглощение предыдущей свечи\n"
-                "2. 4h OB или FVG подтверждает зону — институционалы там входили\n"
-                "3. Volume spike 2.0x — реальный интерес на engulfing свече\n"
-                "4. Acceptance — цена закрылась за зоной OB/FVG\n"
+                "2. 15m OB/FVG retest задаёт реальную LTF зону входа\n"
+                "3. Volume spike 1.6x+ — реальный интерес на trigger-свече\n"
+                "4. 4h/1h используются как контекст; хотя бы один HTF поддерживает 15m\n"
                 "5. Закрытая 15m свеча подтверждает настоящий BOS/CHoCH\n"
-                "6. BTC и 1d тренд совпадают — не иди против рынка\n\n"
+                "6. 1h/4h подтверждают контекст; BTC блокирует только при согласованном 1h+4h конфликте\n\n"
                 "БЛОКИРУЙ если:\n"
-                f"- RR={rr} < 1.5\n"
+                f"- RR={rr} < 2.0\n"
                 f"- Стоп {_fast_sl_pct}% > 1.5% от входа (скальп = узкий стоп)\n"
-                "- Нет OB и нет FVG на 4h — вход без подтверждения зоны\n"
+                "- Нет свежего 15m OB/FVG retest — вход без LTF локации\n"
                 "- Нет свежего подтверждённого BOS/CHoCH на закрытой 15m свече\n"
-                "- 1d тренд ПРОТИВ направления\n"
-                "- BTC тренд ПРОТИВ направления\n"
+                "- Ни 1h, ни 4h не поддерживает 15m направление\n"
+                "- BTC 1h и 4h одновременно направлены против сделки\n"
                 "- Вне переданной приложением London/NY Kill Zone\n"
                 "- SL выставлен математически (entry ± X%), а не за структуру\n\n"
                 "ПОДТВЕРЖДАЙ если:\n"
-                "- Engulfing чёткий с объёмом 2.0x+\n"
+                "- Engulfing/displacement чёткий с объёмом 1.6x+\n"
                 "- Есть свежий BOS/CHoCH в направлении сделки\n"
-                "- 4h OB или FVG подтверждает зону входа\n"
+                "- Есть свежий 15m OB/FVG retest\n"
                 f"- RR={rr} >= 2.0\n"
-                "- 1d тренд и BTC в том же направлении\n"
+                "- 1h или 4h поддерживает 15m, без двойного BTC-конфликта\n"
                 "- Сейчас Kill Zone\n\n"
                 "ПРАВИЛА ВЫСТАВЛЕНИЯ УРОВНЕЙ:\n"
                 "- SL ТОЛЬКО за структурный уровень (OB edge, FVG edge, engulfing low/high)\n"
@@ -9655,8 +9663,14 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "zone":      zone_desc,
             "direction_1d": direction_1d,
             "funding_warning": _fast_funding_warning,
-            "ob":        ob_4h,
-            "fvg":       fvg_4h,
+            "ob":        _fast_ob_15m,
+            "fvg":       _fast_fvg_15m,
+            "htf_ob":    ob_4h,
+            "htf_fvg":   fvg_4h,
+            "htf_1h":    direction_1h,
+            "htf_4h":    direction_4h,
+            "btc_1h":    btc_direction_1h,
+            "btc_4h":    btc_direction_4h,
             "fast_score": 0,
             "scan_type": "fast",
             "structure_event": _fast_structure_event,

@@ -20,7 +20,7 @@ class SwingLtfEntryRefinementTests(unittest.TestCase):
         self.assertIn('last_vol >= avg_vol * 1.20', self.s)
         self.assertIn('distance <= atr1h * 0.75', self.s)
         self.assertIn('abs(entry - sl) / max(abs(entry), 1e-12) > _sl_max_pct', self.s)
-        self.assertIn('rr_check < 2.0 or rr_check > 4.0', self.s)
+        self.assertIn('rr_check < 2.0', self.s)
 
     def test_provisional_4h_levels_are_not_executable(self):
         self.assertIn('entry = sl = None  # do not count provisional 4h levels as a near/executable deal', self.s)
