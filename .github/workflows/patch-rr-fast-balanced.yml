@@ -31,12 +31,14 @@ jobs:
         run: python .github/scripts/fix_rr_fast_test_assertions.py
       - name: Compile
         run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
-      - name: Focused regression tests
-        run: |
-          python -m unittest tests.test_rr_floor_fast_balanced -v
-          python -m unittest tests.test_signal_integrity -v
-          python -m unittest tests.test_setup_evidence -v
-          python -m unittest tests.test_strategy_tuning_trade_stats -v
+      - name: RR FAST regression
+        run: python -m unittest tests.test_rr_floor_fast_balanced -v
+      - name: Signal integrity regression
+        run: python -m unittest tests.test_signal_integrity -v
+      - name: Setup evidence regression
+        run: python -m unittest tests.test_setup_evidence -v
+      - name: Strategy tuning regression
+        run: python -m unittest tests.test_strategy_tuning_trade_stats -v
       - name: Full tests
         run: python -m unittest discover -s tests -v
       - name: Restore tracked DB and verify scope
