@@ -29,14 +29,14 @@ class SignalQualityGateTests(unittest.TestCase):
         parsed = _extract_json('```json\n{"decision":"REJECT","confidence":0.8}\n```')
         self.assertEqual(parsed["decision"], "REJECT")
 
-    def test_invalid_response_preserves_existing_decision(self):
+    def test_invalid_response_waits_for_final_confirmation(self):
         review = _normalize_review(None, "not json")
-        self.assertEqual(review["decision"], "APPROVE")
+        self.assertEqual(review["decision"], "WAIT")
         self.assertTrue(review["degraded"])
 
-    def test_unknown_decision_preserves_existing_decision(self):
+    def test_unknown_decision_waits(self):
         review = _normalize_review({"decision": "BLOCK", "confidence": 1}, "{}")
-        self.assertEqual(review["decision"], "APPROVE")
+        self.assertEqual(review["decision"], "WAIT")
 
     def test_candidate_view_does_not_mutate_trade_levels(self):
         source = {"symbol": "ETHUSDT", "entry": 100, "sl": 95, "tp1": 110, "text": "secret"}
@@ -58,7 +58,7 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
              patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
              patch("core.signal_quality_gate._persist_review"):
             review = await review_signal_candidate(candidate, lambda *_: None)
-        self.assertEqual(review["decision"], "APPROVE")
+        self.assertEqual(review["decision"], "WAIT")
         self.assertTrue(review["degraded"])
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"]), (100, 95, 110))
 

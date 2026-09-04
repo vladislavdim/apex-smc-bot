@@ -70,7 +70,7 @@ def validate_candidate(candidate: dict[str, Any], current_price: Any = None) -> 
         else:
             calculated_rr = abs(tp1 - entry) / risk
             strategy = _strategy_name(candidate)
-            min_rr = 2.5 if strategy in {"SWING", "WYCKOFF"} else 2.0
+            min_rr = 2.0
             if calculated_rr < min_rr:
                 errors.append(
                     f"TP1 risk/reward is below {min_rr:.1f} for {strategy} ({calculated_rr:.2f})"

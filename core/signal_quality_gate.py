@@ -79,16 +79,16 @@ def _extract_json(raw: str | None) -> dict[str, Any] | None:
 def _normalize_review(data: dict[str, Any] | None, raw: str | None) -> dict[str, Any]:
     if not data:
         return {
-            "decision": "APPROVE",
+            "decision": "WAIT",
             "confidence": 0.0,
-            "reasons": ["Groq review unavailable; existing APEX decision preserved"],
+            "reasons": ["Groq review unavailable; final confirmation required"],
             "risks": [],
             "degraded": True,
             "raw": raw or "",
         }
-    decision = str(data.get("decision", "APPROVE")).upper()
+    decision = str(data.get("decision", "WAIT")).upper()
     if decision not in _VALID_DECISIONS:
-        decision = "APPROVE"
+        decision = "WAIT"
     try:
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
     except (TypeError, ValueError):

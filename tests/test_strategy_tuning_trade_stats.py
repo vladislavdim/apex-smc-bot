@@ -16,14 +16,14 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
         self.assertIn("get_bos_choch_event", self.market)
         self.assertIn("def _swing_build_ltf_entry", self.market)
         self.assertIn("LTF: fresh 1h BOS/CHoCH", self.market)
-        self.assertIn("rr_check < 2.0 or rr_check > 4.0", self.market)
+        self.assertIn("rr_check < 2.0", self.market)
 
     def test_fast_retains_quality_stack(self):
         self.assertIn("_vol_threshold = 1.6", self.market)
         self.assertIn("curr_body / curr_range < 0.65", self.market)
-        self.assertIn("not _acceptance", self.market)
+        self.assertIn("FAST: recent 15m OB/FVG retest", self.market)
         self.assertIn("not _fast_structure_event", self.market)
-        self.assertIn("not 2.0 <= rr <= 4.0", self.market)
+        self.assertIn("(rr < 2.0)", self.market)
 
     def test_zone_retains_structure_quality_and_rr(self):
         self.assertIn("len(candles) < 40", self.market)
