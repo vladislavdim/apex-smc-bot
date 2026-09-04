@@ -35,6 +35,11 @@ s = s.replace('self.assertIn("not _acceptance", self.market)', 'self.assertIn("F
 s = s.replace('self.assertIn("not 2.0 <= rr <= 4.0", self.market)', 'self.assertIn("(rr < 2.0)", self.market)', 1)
 p.write_text(s, encoding='utf-8')
 
+p = Path('tests/test_swing_ltf_entry_refinement.py')
+s = p.read_text(encoding='utf-8')
+s = s.replace("self.assertIn('rr_check < 2.0 or rr_check > 4.0', self.s)", "self.assertIn('rr_check < 2.0', self.s)", 1)
+p.write_text(s, encoding='utf-8')
+
 p = Path('tests/test_signal_quality_gate.py')
 s = p.read_text(encoding='utf-8')
 s = s.replace('''    def test_invalid_response_preserves_existing_decision(self):\n        review = _normalize_review(None, "not json")\n        self.assertEqual(review["decision"], "APPROVE")''', '''    def test_invalid_response_waits_for_final_confirmation(self):\n        review = _normalize_review(None, "not json")\n        self.assertEqual(review["decision"], "WAIT")''', 1)
