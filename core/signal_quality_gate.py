@@ -288,8 +288,57 @@ Return JSON only:
         logging.warning("[SignalQualityGate] Groq unavailable: %s", exc)
         raw = None
 
-    review = _normalize_review(_extract_json(raw), raw)
     parsed = _extract_json(raw)
+    if raw is not None and parsed is None:
+        # The provider answered but the final text was not valid JSON. Retry once
+        # with a compact immutable candidate/assessment contract. This retry is
+        # format recovery only; it cannot alter APEX-calculated trade levels.
+        compact_view = {
+            key: view.get(key) for key in (
+                "symbol", "strategy", "direction", "timeframe", "entry", "sl",
+                "tp1", "tp2", "tp3", "rr", "confluence_score", "regime",
+            )
+        }
+        compact_assessment = {
+            key: setup_assessment.get(key) for key in (
+                "state", "class", "fatal_reasons", "missing", "warnings",
+                "trigger_ready", "geometry_ready", "causal_domains",
+            ) if setup_assessment.get(key) is not None
+        }
+        compact_prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
+Do NOT recalculate or replace entry, SL, TP or RR.
+The deterministic SETUP EVIDENCE assessment is authoritative: INVALID cannot be approved; DEVELOPING cannot be approved.
+
+CANDIDATE:
+{json.dumps(compact_view, ensure_ascii=False, default=str)}
+
+SETUP EVIDENCE:
+{json.dumps(compact_assessment, ensure_ascii=False, default=str)}
+
+Return JSON only, with no markdown or commentary:
+{{
+  \"valid\": true,
+  \"decision\": \"APPROVE|WAIT|REJECT\",
+  \"confidence\": 0.0,
+  \"reasons\": [\"specific evidence\"],
+  \"risks\": [\"specific risk\"]
+}}"""
+        try:
+            retry_raw = await asyncio.wait_for(
+                asyncio.to_thread(ask_groq, compact_prompt, 350),
+                timeout=35,
+            )
+            retry_parsed = _extract_json(retry_raw)
+            if retry_parsed is not None:
+                raw = retry_raw
+                parsed = retry_parsed
+                logging.info("[SignalQualityGate] recovered malformed Groq review with compact JSON retry")
+            else:
+                logging.warning("[SignalQualityGate] Groq parse error after compact retry")
+        except Exception as exc:
+            logging.warning("[SignalQualityGate] compact Groq retry unavailable: %s", exc)
+
+    review = _normalize_review(parsed, raw)
     if parsed and parsed.get("valid") is False and review["decision"] == "APPROVE":
         review["decision"] = "REJECT"
     try:

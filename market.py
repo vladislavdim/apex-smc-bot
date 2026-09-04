@@ -5818,15 +5818,30 @@ def ask_groq(prompt, max_tokens=800):
             tried_request = True
             try:
                 client = Groq(api_key=active_keys[key_index])
-                r = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                    timeout=30,
-                )
+                _request_kwargs = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "timeout": 30,
+                }
+                if str(model).startswith("openai/gpt-oss-"):
+                    # GPT-OSS can spend a small completion budget on hidden reasoning
+                    # and leave message.content empty. Keep reasoning low and request
+                    # only final content for APEX's machine-readable quality gates.
+                    _request_kwargs.update({
+                        "max_completion_tokens": max_tokens,
+                        "reasoning_effort": "low",
+                        "include_reasoning": False,
+                    })
+                else:
+                    _request_kwargs["max_tokens"] = max_tokens
+                r = client.chat.completions.create(**_request_kwargs)
                 _track_tokens(len(prompt) // 4 + max_tokens)
+                content = r.choices[0].message.content or ""
+                if not content.strip():
+                    logging.warning("Groq model %s returned empty final content; trying fallback", model)
+                    continue
                 _groq_key_index = (key_index + 1) % len(active_keys)
-                return r.choices[0].message.content
+                return content
             except Exception as e:
                 err_str = str(e).lower()
                 if is_model_unavailable_error(e):

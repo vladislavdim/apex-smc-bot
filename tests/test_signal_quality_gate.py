@@ -96,6 +96,44 @@ class SignalQualityGateAsyncTests(unittest.IsolatedAsyncioTestCase):
             await review_signal_candidate(candidate, ask)
         self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["tp2"], candidate["tp3"], candidate["rr"]), (100, 95, 110, 120, 130, 2))
 
+    async def test_malformed_first_response_recovers_with_compact_json_retry(self):
+        candidate = {"symbol": "KAITOUSDT", "direction": "BEARISH", "grade": "MTF", "entry": 0.303, "sl": 0.30656, "tp1": 0.2945, "rr": 2.39}
+        calls = []
+        def ask(prompt, tokens):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return "The setup looks acceptable but this is not JSON."
+            return '{"valid":true,"decision":"APPROVE","confidence":0.82,"reasons":["structure and RR valid"],"risks":[]}'
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("KAITOUSDT"))), \
+             patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news("KAITOUSDT"))), \
+             patch("core.signal_quality_gate.build_zone_context", return_value=EMPTY_ZONES), \
+             patch("core.signal_quality_gate.build_learning_context", return_value=EMPTY_LEARNING), \
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate._persist_review"):
+            review = await review_signal_candidate(candidate, ask)
+        self.assertEqual(len(calls), 2)
+        self.assertLess(len(calls[1]), 6000)
+        self.assertEqual(review["decision"], "APPROVE")
+        self.assertFalse(review["degraded"])
+        self.assertEqual((candidate["entry"], candidate["sl"], candidate["tp1"], candidate["rr"]), (0.303, 0.30656, 0.2945, 2.39))
+
+    async def test_two_malformed_responses_stay_degraded(self):
+        candidate = {"symbol": "KAITOUSDT", "direction": "BEARISH", "grade": "MTF", "entry": 0.303, "sl": 0.30656, "tp1": 0.2945, "rr": 2.39}
+        calls = []
+        def ask(prompt, tokens):
+            calls.append(prompt)
+            return "not json"
+        with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("KAITOUSDT"))), \
+             patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=empty_news("KAITOUSDT"))), \
+             patch("core.signal_quality_gate.build_zone_context", return_value=EMPTY_ZONES), \
+             patch("core.signal_quality_gate.build_learning_context", return_value=EMPTY_LEARNING), \
+             patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate._persist_review"):
+            review = await review_signal_candidate(candidate, ask)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(review["degraded"])
+        self.assertEqual(review["confidence"], 0.0)
+
     async def test_low_confidence_approval_waits(self):
         candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "MTF", "entry": 100, "sl": 95, "tp1": 110, "rr": 2}
         with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
