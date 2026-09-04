@@ -94,7 +94,7 @@ jobs:
         run: |
           git config user.name "APEX Strategy Fix"
           git config user.email "actions@users.noreply.github.com"
-          git add market.py core/signal_integrity.py core/setup_evidence.py core/signal_quality_gate.py tests/test_rr_floor_fast_balanced.py tests/test_strategy_tuning_trade_stats.py tests/test_signal_quality_gate.py
+          git add market.py core/signal_integrity.py core/setup_evidence.py core/signal_quality_gate.py tests/test_rr_floor_fast_balanced.py tests/test_strategy_tuning_trade_stats.py tests/test_signal_quality_gate.py tests/test_swing_ltf_entry_refinement.py
           git diff --cached --check
           git commit -m "Align strategy gates and Groq final confirmation"
           git push origin HEAD:fix/strategy-groq-consistency
