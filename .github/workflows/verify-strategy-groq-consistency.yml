@@ -1,0 +1,72 @@
+name: Verify Strategy and Groq Consistency
+
+on:
+  push:
+    branches: [fix/strategy-groq-consistency]
+    paths:
+      - '.github/scripts/fix_strategy_groq_consistency.py'
+      - '.github/workflows/verify-strategy-groq-consistency.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/strategy-groq-consistency
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply real strategy patch
+        run: python .github/scripts/fix_strategy_groq_consistency.py
+      - name: Compile
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+      - name: RR and FAST
+        run: python -m unittest tests.test_rr_floor_fast_balanced -v
+      - name: Strategy tuning
+        run: python -m unittest tests.test_strategy_tuning_trade_stats -v
+      - name: Setup evidence
+        run: python -m unittest tests.test_setup_evidence -v
+      - name: Signal quality gate
+        run: python -m unittest tests.test_signal_quality_gate -v
+      - name: Signal integrity
+        run: python -m unittest tests.test_signal_integrity -v
+      - name: Execution isolation
+        run: python -m unittest tests.test_execution_only_binance -v
+      - name: Full tests
+        run: python -m unittest discover -s tests -v
+      - name: Verify invariants
+        run: |
+          git restore --source=HEAD -- brain.db || true
+          git diff --check
+          python - <<'PY'
+          from pathlib import Path
+          m=Path('market.py').read_text(encoding='utf-8')
+          e=Path('core/setup_evidence.py').read_text(encoding='utf-8')
+          q=Path('core/signal_quality_gate.py').read_text(encoding='utf-8')
+          assert 'rr_check < 2.0 or rr_check > 4.0' not in m
+          assert 'not 2.0 <= rr <= 4.0' not in m
+          assert 'not 2.5 <= rr <= 4.0' not in m
+          assert 'max_rr=4.0' not in m
+          assert 'FAST: recent 15m OB/FVG retest' in m
+          assert 'FAST: 1h or 4h supports 15m direction' in m
+          assert 'RR is below the universal 2.0 minimum' in e
+          assert 'session-qualified 15m OB/FVG retest' in e
+          assert '"decision": "WAIT"' in q
+          print('strategy/Groq invariants OK')
+          PY
+      - name: Commit verified real files
+        run: |
+          git config user.name "APEX Strategy Fix"
+          git config user.email "actions@users.noreply.github.com"
+          git add market.py core/signal_integrity.py core/setup_evidence.py core/signal_quality_gate.py tests/test_rr_floor_fast_balanced.py tests/test_strategy_tuning_trade_stats.py tests/test_signal_quality_gate.py
+          git diff --cached --check
+          git commit -m "Align strategy gates and Groq final confirmation"
+          git push origin HEAD:fix/strategy-groq-consistency
