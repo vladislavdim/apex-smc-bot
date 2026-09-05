@@ -1,0 +1,41 @@
+name: Apply BOS/WYCKOFF observability telemetry
+
+on:
+  push:
+    branches:
+      - telemetry/bos-wyckoff-observability
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.event.head_commit.message == 'Run telemetry observability patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply telemetry-only patch
+        run: python .github/scripts/apply_bos_wyckoff_observability.py
+      - name: Remove temporary patch machinery
+        run: rm .github/scripts/apply_bos_wyckoff_observability.py .github/workflows/apply-bos-wyckoff-observability.yml
+      - name: Compile changed runtime files
+        run: python -m py_compile market.py stats_server.py core/setup_audit.py
+      - name: Run focused telemetry regression tests
+        run: python -m unittest tests.test_observability_telemetry_only -v
+      - name: Run invariant suites
+        run: |
+          python -m unittest tests.test_swing_ltf_entry_refinement -v
+          python -m unittest tests.test_strategy_funnel_cleanup -v
+      - name: Commit verified patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Add BOS and Wyckoff observability telemetry'
+          git push origin HEAD:telemetry/bos-wyckoff-observability
