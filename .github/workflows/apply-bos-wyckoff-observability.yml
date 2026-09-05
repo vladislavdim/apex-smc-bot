@@ -21,8 +21,10 @@ jobs:
           python-version: '3.11'
       - name: Apply telemetry-only patch
         run: python .github/scripts/apply_bos_wyckoff_observability.py
+      - name: Apply telemetry regression fix
+        run: python .github/scripts/fix_bos_wyckoff_observability_tests.py
       - name: Remove temporary patch machinery
-        run: rm .github/scripts/apply_bos_wyckoff_observability.py .github/workflows/apply-bos-wyckoff-observability.yml
+        run: rm .github/scripts/apply_bos_wyckoff_observability.py .github/scripts/fix_bos_wyckoff_observability_tests.py .github/workflows/apply-bos-wyckoff-observability.yml
       - name: Compile changed runtime files
         run: python -m py_compile market.py stats_server.py core/setup_audit.py
       - name: Run focused telemetry regression tests
