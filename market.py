@@ -7558,18 +7558,24 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         except Exception:
             pass
 
-        # ── BOS/CHoCH after the sweep, confirmed by candle close ──
-        # The canonical engine distinguishes continuation (BOS) from a real
-        # change of character (CHoCH) using the prior paired swing structure.
+        # ── 4h BOS/CHoCH is thesis-quality context, not a second hard trigger. ──
+        # Direction already comes from a 4h sweep/EQH-EQL/OB reaction. Execution
+        # still requires a fresh 1h BOS/CHoCH and the 15m entry trigger below.
         _swing_structure_event = get_bos_choch_event(
             candles,
             direction,
             lookback=30,
             max_break_age=max(1, trigger_lookback),
         )
-        if _audit_test('SWING_DETECT_SWING_SETUP_G7403', (not _swing_structure_event), 'not _swing_structure_event', 'not _swing_structure_event', 7403):
-            logging.info(f"[SWING] {symbol}: нет подтверждённого BOS/CHoCH после триггера")
-            return _audit_fail('SWING_DETECT_SWING_SETUP_R7405', 'not _swing_structure_event', locals(), 'not _swing_structure_event', 7405)
+        _audit_test(
+            'SWING_4H_STRUCTURE_CONTEXT',
+            (not _swing_structure_event),
+            '4h BOS/CHoCH context after trigger (non-blocking)',
+            'not _swing_structure_event',
+            7403,
+        )
+        if not _swing_structure_event:
+            logging.info(f"[SWING] {symbol}: 4h BOS/CHoCH не подтверждён — context weak; обязательный 1h trigger остаётся")
 
         # ── Reaction speed: sweep recovery within 1-2 candles ──
         try:
@@ -8892,14 +8898,21 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         dist_low  = min(c["low"]  for c in distribution_candles)
         dist_range_pct = (dist_high - dist_low) / dist_low * 100 if dist_low > 0 else 0
 
+        _dist_range_too_wide = dist_range_pct >= 25
+        if _audit_test(
+            'WYCKOFF_DIST_RANGE',
+            _dist_range_too_wide,
+            'WYCKOFF Distribution: 30d range < 25%',
+            'dist_range_pct >= 25',
+            8720,
+        ):
+            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8725', 'WYCKOFF Distribution: 30d range < 25%', locals(), 'dist_range_pct >= 25', 8725)
         if dist_range_pct < 15:
             score += 20
             signals.append(f"✅ Боковик {dist_range_pct:.1f}% у вершины")
-        elif dist_range_pct < 25:
+        else:
             score += 10
             signals.append(f"⚡️ Диапазон {dist_range_pct:.1f}% у вершины")
-        else:
-            return _audit_fail('WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_R8725', 'dist_range_pct < 25', locals(), 'dist_range_pct < 25', 8725)
 
         # ── 3. ФАЗЫ WYCKOFF DISTRIBUTION ──
         phases = _find_wyckoff_phases_distribution(candles_1d, candles_4h)
@@ -9423,10 +9436,19 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
         last_15m = candles_15m_imp[-1]
 
-        # Volume check на 15m impulse — должен быть выше среднего
+        # Preliminary impulse volume is context only. The executable trigger below
+        # still requires the mandatory 1.6x volume spike on the actual trigger candle.
         _avg_vol_15m_imp = sum(c.get("volume", 0) for c in candles_15m_imp[:-1]) / max(len(candles_15m_imp) - 1, 1)
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9249', (_avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1), 'Volume check на 15m impulse — должен быть выше среднего', '_avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1', 9249):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9250', 'Volume check на 15m impulse — должен быть выше среднего', locals(), '_avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1', 9250)  # Импульс без объёма — ненадёжный
+        _fast_impulse_volume_context_weak = bool(
+            _avg_vol_15m_imp > 0 and last_15m.get("volume", 0) < _avg_vol_15m_imp * 1.1
+        )
+        _audit_test(
+            'FAST_IMPULSE_VOLUME_CONTEXT',
+            _fast_impulse_volume_context_weak,
+            '15m preliminary impulse volume >= 1.1x average (non-blocking)',
+            '_fast_impulse_volume_context_weak',
+            9249,
+        )
 
         # ── 5. 15m Engulfing + Displacement + Volume Spike ──
         candles_15m = get_confirmed_candles(get_candles(symbol, "15m", 31))
