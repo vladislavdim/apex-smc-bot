@@ -281,7 +281,7 @@ def _new_attempt(strategy: str, subtype: str, fn_name: str, args: tuple[Any, ...
     return {"attempt_key": str(uuid.uuid4()), "strategy": str(strategy).upper(), "subtype": str(subtype or "").upper(),
             "function": fn_name, "symbol": symbol, "timeframe": timeframe, "run_id": runtime.get("run_id"),
             "scanner": runtime.get("scanner"), "started_at": _utc_now(), "started_monotonic": time.monotonic(),
-            "checks": [], "finished": False, "stop": None}
+            "checks": [], "telemetry": {}, "finished": False, "stop": None}
 
 
 def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[str, Any] | None = None, error: str = "") -> None:
@@ -293,8 +293,34 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
                "run_id": context.get("run_id"), "scanner": context.get("scanner"), "started_at": context.get("started_at"),
                "finished_at": _utc_now(), "duration_ms": round((time.monotonic() - float(context.get("started_monotonic") or time.monotonic())) * 1000, 1),
                "outcome": outcome, "stop": context.get("stop"), "checks": context.get("checks", []),
+               "telemetry": _safe_value(context.get("telemetry") or {}) or {},
                "candidate": _candidate_snapshot(candidate or {}), "error": str(error)[:2000] if error else ""}
     emit_event("attempt", context["strategy"], context.get("symbol", ""), payload, event_key=context["attempt_key"])
+
+
+def audit_observe(key: str, value: Any, *, append: bool = False) -> None:
+    """Attach fail-open, decision-neutral telemetry to the current strategy attempt."""
+    context = _current()
+    if context is None:
+        return
+    try:
+        safe = _safe_value(value)
+        if safe is None:
+            return
+        telemetry = context.setdefault("telemetry", {})
+        name = str(key or "")[:100]
+        if not name:
+            return
+        if append:
+            bucket = telemetry.setdefault(name, [])
+            if isinstance(bucket, list):
+                bucket.append(safe)
+        elif isinstance(telemetry.get(name), dict) and isinstance(safe, dict):
+            telemetry[name].update(safe)
+        else:
+            telemetry[name] = safe
+    except Exception:
+        pass
 
 
 def _compact_label(label: str, condition: str = "") -> str:

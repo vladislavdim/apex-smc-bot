@@ -1,5 +1,5 @@
 # APEX_STRATEGY_STATS_V1
-from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, emit_event as _emit_stats_event
+from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe, emit_event as _emit_stats_event
 import asyncio
 import logging
 import os
@@ -7199,6 +7199,12 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         event = get_bos_choch_event(c1h, direction, lookback=8, max_break_age=2)
         if not event:
             return out
+        _swing_bos_age = max(1, len(c1h) - int(event.get("candle_index", len(c1h) - 1)))
+        _audit_observe("bos_event", {
+            "role": "SWING_ENTRY_STRUCTURE", "timeframe": "1h", "age_bars": _swing_bos_age,
+            "event_type": event.get("type"), "direction": event.get("direction"),
+        })
+        _audit_observe("bos_progress", {"structure_confirmed": True})
         out["structure_event"] = event
         out["structure_ok"] = True
 
@@ -7221,6 +7227,7 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         if not zones:
             return out
         out["zone_ok"] = True
+        _audit_observe("bos_progress", {"zone_reached": True, "zone_confirmed": True})
 
         latest = c15[-1]
         current = float(latest["close"])
@@ -7240,6 +7247,7 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         touched.sort(key=lambda x: x[0])
         distance, zone_type, bottom, top = touched[0]
         out["retest_ok"] = True
+        _audit_observe("bos_progress", {"retest_reached": True, "retest_confirmed": True})
         out["zone_type"] = zone_type
         out["zone"] = {"bottom": bottom, "top": top}
 
@@ -7259,6 +7267,10 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         out["volume_ok"] = bool(avg_vol > 0 and last_vol >= avg_vol * 1.20)
 
         out["chase_ok"] = bool(distance <= atr1h * 0.75)
+        _audit_observe("bos_progress", {
+            "displacement_reached": True, "displacement_confirmed": bool(out["displacement_ok"]),
+            "volume_reached": True, "volume_confirmed": bool(out["volume_ok"]),
+        })
         if not out["displacement_ok"] or not out["volume_ok"] or not out["chase_ok"]:
             return out
 
@@ -7287,6 +7299,7 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         out["entry"] = smart_round(entry)
         out["sl"] = smart_round(sl)
         out["ready"] = True
+        _audit_observe("bos_progress", {"ltf_ready": True})
         return out
     except Exception as exc:
         logging.debug("[SWING LTF] %s refinement failed: %s", symbol, exc)
@@ -7688,6 +7701,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         if _audit_test('SWING_DETECT_SWING_SETUP_G7508', (risk == 0), 'Фильтр RR', 'risk == 0', 7508):
             return _audit_fail('SWING_DETECT_SWING_SETUP_R7509', 'Фильтр RR', locals(), 'risk == 0', 7509)
         rr_check = reward / risk
+        _audit_observe("bos_progress", {"rr_reached": True, "rr_passed": bool(rr_check >= 2.0)})
         if _audit_test('SWING_DETECT_SWING_SETUP_G7511', (rr_check < 2.0), 'rr_check < 2.0', 'rr_check < 2.0', 7511):
             return _audit_fail('SWING_DETECT_SWING_SETUP_R7512', 'rr_check < 2.0', locals(), 'rr_check < 2.0', 7512)
 
@@ -8897,6 +8911,28 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         dist_high = max(c["high"] for c in distribution_candles)
         dist_low  = min(c["low"]  for c in distribution_candles)
         dist_range_pct = (dist_high - dist_low) / dist_low * 100 if dist_low > 0 else 0
+        _audit_observe("wyckoff_distribution", {"dist_range_pct": round(dist_range_pct, 6)})
+        try:
+            _telemetry_phases = _find_wyckoff_phases_distribution(candles_1d, candles_4h)
+            _telemetry_points = []
+            for _telemetry_name in ("BC", "AR", "ST"):
+                _telemetry_phase = _telemetry_phases.get(_telemetry_name) if isinstance(_telemetry_phases, dict) else None
+                if isinstance(_telemetry_phase, dict) and _telemetry_phase.get("price") is not None:
+                    _telemetry_points.append((_telemetry_name, float(_telemetry_phase["price"])))
+            if len(_telemetry_points) >= 2:
+                _telemetry_prices = [p for _, p in _telemetry_points]
+                _telemetry_box_low = min(_telemetry_prices)
+                _telemetry_box_high = max(_telemetry_prices)
+                _telemetry_box_width_pct = (
+                    (_telemetry_box_high - _telemetry_box_low) / _telemetry_box_low * 100
+                    if _telemetry_box_low > 0 else None
+                )
+                _audit_observe("wyckoff_distribution", {
+                    "distribution_box_width_pct": round(_telemetry_box_width_pct, 6) if _telemetry_box_width_pct is not None else None,
+                    "structure_points": {name: price for name, price in _telemetry_points},
+                })
+        except Exception:
+            pass
 
         _dist_range_too_wide = dist_range_pct >= 25
         if _audit_test(
@@ -9339,6 +9375,13 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_LTF_CONTEXT_STRUCTURE', (bool(_fast_bull_event) == bool(_fast_bear_event)), 'FAST: one fresh 15m BOS/CHoCH direction', 'bool(_fast_bull_event) == bool(_fast_bear_event)', 9145):
             return _audit_fail('FAST_LTF_CONTEXT_R_STRUCTURE', 'FAST: one fresh 15m BOS/CHoCH direction', locals(), 'bool(_fast_bull_event) == bool(_fast_bear_event)', 9145)
         direction = "BULLISH" if _fast_bull_event else "BEARISH"
+        _fast_thesis_event = _fast_bull_event or _fast_bear_event
+        _fast_bos_age = max(1, len(_fast_context_15m) - int(_fast_thesis_event.get("candle_index", len(_fast_context_15m) - 1)))
+        _audit_observe("bos_event", {
+            "role": "FAST_THESIS", "timeframe": "15m", "age_bars": _fast_bos_age,
+            "event_type": _fast_thesis_event.get("type"), "direction": _fast_thesis_event.get("direction"),
+        })
+        _audit_observe("bos_progress", {"structure_confirmed": True})
 
         # Balanced replay winner: at least one pair HTF supports the 15m thesis.
         direction_4h = smc_on_tf(symbol, "4h")
@@ -9471,6 +9514,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             and float(c["high"]) >= _fast_zone_bottom - _fast_zone_tol
             for c in candles_15m[-8:]
         )
+        _audit_observe("bos_progress", {"retest_reached": True, "retest_confirmed": bool(_fast_ltf_retest)})
         if _audit_test('FAST_LTF_RETEST', (not _fast_ltf_retest), 'FAST: recent 15m OB/FVG retest', 'not _fast_ltf_retest', 9261):
             return _audit_fail('FAST_LTF_R_RETEST', 'FAST: recent 15m OB/FVG retest', locals(), 'not _fast_ltf_retest', 9261)
         _fast_ltf_zone_type = "OB" if _fast_ob_15m else "FVG"
@@ -9479,6 +9523,9 @@ def detect_fast_deal(symbol: str) -> dict | None:
         engulfing_found = False
         entry = None
         sl = None
+        _fast_telem_displacement_seen = False
+        _fast_telem_engulfing_seen = False
+        _fast_telem_volume_confirmed = False
 
         for i in range(1, 11):  # смотрим 10 свечей назад
             if i >= len(candles_15m): break
@@ -9492,6 +9539,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
             # Подтверждённый displacement для точного входа.
             if curr_range > 0 and curr_body / curr_range < 0.65:
                 continue
+            _fast_telem_displacement_seen = True
 
             # Engulfing паттерн
             if direction == "BULLISH":
@@ -9511,16 +9559,22 @@ def detect_fast_deal(symbol: str) -> dict | None:
                 entry = smart_round(curr["close"])
                 sl = smart_round(curr["high"] + atr_15m * 0.5)
 
+            _fast_telem_engulfing_seen = True
             # Для FAST нужен заметный институциональный объём.
             _vol_threshold = 1.6
             avg_vol_15m = sum(c["volume"] for c in candles_15m[-20:-1]) / 19
             if avg_vol_15m > 0 and curr["volume"] < avg_vol_15m * _vol_threshold:
                 continue
 
+            _fast_telem_volume_confirmed = True
             engulfing_found = True
             _sweep_candles_ago = i
             break
 
+        _audit_observe("bos_progress", {
+            "displacement_reached": True, "displacement_confirmed": bool(_fast_telem_displacement_seen),
+            "volume_reached": bool(_fast_telem_engulfing_seen), "volume_confirmed": bool(_fast_telem_volume_confirmed),
+        })
         if _audit_test('FAST_DETECT_FAST_DEAL_G9303', (not engulfing_found or entry is None), 'not engulfing_found or entry is None', 'not engulfing_found or entry is None', 9303):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9304', 'not engulfing_found or entry is None', locals(), 'not engulfing_found or entry is None', 9304)
 
@@ -9541,6 +9595,11 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_DETECT_FAST_DEAL_G9332', (not _fast_structure_event), 'not _fast_structure_event', 'not _fast_structure_event', 9332):
             logging.debug(f"[FAST] {symbol}: нет свежего 15m BOS/CHoCH")
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9334', 'not _fast_structure_event', locals(), 'not _fast_structure_event', 9334)
+        _fast_exec_bos_age = max(1, len(candles_15m) - int(_fast_structure_event.get("candle_index", len(candles_15m) - 1)))
+        _audit_observe("bos_execution_event", {
+            "role": "FAST_EXECUTION", "timeframe": "15m", "age_bars": _fast_exec_bos_age,
+            "event_type": _fast_structure_event.get("type"), "direction": _fast_structure_event.get("direction"),
+        })
 
         # ── TP = confirmed 15m swing liquidity ──
         _fast_highs, _fast_lows = find_swings(candles_15m, lookback=3)
@@ -9562,6 +9621,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_DETECT_FAST_DEAL_G9353', (risk == 0), 'RR проверка', 'risk == 0', 9353):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9354', 'RR проверка', locals(), 'risk == 0', 9354)
         rr = round(reward / risk, 2)
+        _audit_observe("bos_progress", {"rr_reached": True, "rr_passed": bool(rr >= 2.0)})
         if _audit_test('FAST_DETECT_FAST_DEAL_G9356', (rr < 2.0), 'rr < 2.0', 'rr < 2.0', 9356):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9357', 'rr < 2.0', locals(), 'rr < 2.0', 9357)
 
