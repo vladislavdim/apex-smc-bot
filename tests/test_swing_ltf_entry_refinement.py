@@ -30,9 +30,12 @@ class SwingLtfEntryRefinementTests(unittest.TestCase):
         self.assertNotIn("return _audit_fail('SWING_DETECT_SWING_SETUP_R7378'", self.s)
         self.assertNotIn("return _audit_fail('SWING_DETECT_SWING_SETUP_R7389'", self.s)
 
-    def test_four_hour_thesis_structure_stays_mandatory(self):
-        self.assertIn("return _audit_fail('SWING_DETECT_SWING_SETUP_R7405'", self.s)
-        self.assertIn('not _swing_structure_event', self.s)
+    def test_four_hour_structure_is_context_and_fresh_1h_stays_mandatory(self):
+        self.assertIn("'SWING_4H_STRUCTURE_CONTEXT'", self.s)
+        self.assertIn('4h BOS/CHoCH context after trigger (non-blocking)', self.s)
+        self.assertNotIn("return _audit_fail('SWING_DETECT_SWING_SETUP_R7405'", self.s)
+        self.assertIn('get_bos_choch_event(c1h, direction, lookback=8, max_break_age=2)', self.s)
+        self.assertIn("LTF: fresh 1h BOS/CHoCH", self.s)
 
     def test_no_cooldown_added(self):
         helper = self.s[self.s.index('def _swing_build_ltf_entry'):self.s.index('@_audit_strategy("SWING")')]

@@ -18,7 +18,7 @@ STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
     "FAST": {
         "title": "FAST",
         "timeframes": "4H context → 15m setup/structure → optional 5m control",
-        "rr": "Detector 2.0–4.0; Signal Integrity min 2.0",
+        "rr": "Minimum 2.0; no upper RR ceiling; structural targets only",
         "criteria": [
             _c("fast_session", "Timing", "London/NY session is active", detail="DST-aware session clock; outside the configured FAST session the setup stops."),
             _c("fast_btc_1h", "Market context", "BTC 1H direction is available"),
@@ -31,7 +31,7 @@ STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
             _c("fast_4h_zone", "Location", "Price is at a 4H OB or FVG within ATR tolerance"),
             _c("fast_pd", "Location", "LONG in discount / SHORT in premium, not middle of range"),
             _c("fast_15m_data", "Data", "Enough confirmed 15m candles"),
-            _c("fast_15m_impulse_volume", "Trigger", "Latest confirmed 15m impulse volume ≥ 1.1× average"),
+            _c("fast_15m_impulse_volume", "Context", "Preliminary 15m impulse volume ≥ 1.1× average", required=False, detail="Telemetry/context only; executable trigger still requires 1.6× volume."),
             _c("fast_displacement", "Trigger", "Recent 15m displacement body/range ≥ 0.65"),
             _c("fast_engulfing", "Trigger", "15m engulfing in trade direction; body > previous body ×1.1"),
             _c("fast_engulfing_volume", "Trigger", "Engulfing volume ≥ 2.0× 15m average"),
@@ -70,8 +70,8 @@ STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
     },
     "SWING": {
         "title": "SWING",
-        "timeframes": "4H thesis/trigger + mandatory fresh 1H structure; 1D/1W context",
-        "rr": "Detector accepts 2.0–4.0; final Signal Integrity min 2.5",
+        "timeframes": "4H thesis/context → mandatory fresh 1H structure → 15m execution",
+        "rr": "Minimum 2.0; no upper RR ceiling; structural targets only",
         "criteria": [
             _c("swing_data", "Data", "Enough confirmed 4H candles and swing points"),
             _c("swing_trigger", "Trigger", "Structural sweep/EQH-EQL sweep or valid OB reaction is found"),
@@ -80,7 +80,7 @@ STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
             _c("swing_btc", "Market context", "BTC filter allows direction"),
             _c("swing_volume", "Trigger", "Sweep/reaction volume meets adaptive threshold"),
             _c("swing_displacement", "Trigger", "Displacement body/range ≥ 0.50 and direction matches"),
-            _c("swing_4h_structure", "Structure", "Confirmed BOS/CHoCH after trigger"),
+            _c("swing_4h_structure", "Context", "4H BOS/CHoCH after trigger strengthens thesis", required=False),
             _c("swing_1h_structure", "Structure", "Fresh 1H BOS/CHoCH is present"),
             _c("swing_pd", "Confirmation", "Premium/Discount supports direction", required=False),
             _c("swing_fvg", "Confirmation", "FVG lies between entry and target", required=False),
@@ -93,7 +93,7 @@ STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
             _c("swing_htf", "HTF", "4H and 1D are not both against the trade"),
             _c("swing_quality", "Confirmation", "At least 2/5 independent quality confirmations"),
             _c("swing_funding", "Risk context", "Extreme funding is warning only", required=False),
-            _c("swing_setup_evidence", "Final deterministic gate", "SWING causal matrix remains complete"),
+            _c("swing_setup_evidence", "Final deterministic gate", "SWING causal matrix requires 4H thesis/location plus fresh 1H structure and 15m execution"),
             _c("swing_integrity", "Final deterministic gate", "Signal Integrity enforces min RR 2.5"),
             _c("swing_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
         ],

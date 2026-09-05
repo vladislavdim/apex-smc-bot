@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 DB_PATH = os.environ.get("APEX_SETUP_AUDIT_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "setup_audit.db"))
+RELEASE_SHA = (os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "").strip()
 _MAX_PAYLOAD_CHARS = 60000
 _EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=10000)
 _WORKER_LOCK = threading.Lock()
@@ -260,9 +261,12 @@ def _ensure_worker() -> None:
 
 def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *, event_key: str | None = None) -> str:
     key = event_key or str(uuid.uuid4())
+    payload_data = dict(payload) if isinstance(payload, dict) else {}
+    if RELEASE_SHA:
+        payload_data.setdefault("release_sha", RELEASE_SHA)
     event = {"event_key": key, "kind": str(kind), "strategy": str(strategy or "").upper(),
              "symbol": str(symbol or "").upper(), "occurred_at": _utc_now(),
-             "payload": payload if isinstance(payload, dict) else {}}
+             "payload": payload_data}
     try:
         _ensure_worker(); _EVENT_QUEUE.put_nowait(event)
     except Exception:

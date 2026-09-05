@@ -20,7 +20,7 @@ SUPPORTED_STRATEGIES = {"MTF", "SWING", "ZONE", "FAST", "WYCKOFF"}
 STATE_ORDER = {"INVALID": 0, "DEVELOPING": 1, "VALID": 2, "STRONG": 3, "EXCEPTIONAL": 4}
 STRATEGY_CAUSAL_MATRIX = {
     "MTF": {"core": "1h+4h direction and structural OB/FVG location", "trigger": "fresh closed 15m BOS/CHoCH"},
-    "SWING": {"core": "HTF thesis and major liquidity/OB/FVG reaction", "trigger": "4h plus fresh closed 1h BOS/CHoCH"},
+    "SWING": {"core": "4h liquidity/OB/FVG thesis; 4h BOS/CHoCH is quality context", "trigger": "fresh closed 1h BOS/CHoCH plus 15m execution trigger"},
     "ZONE": {"core": "qualified Discount/Premium extreme", "trigger": "fresh closed 1h BOS/CHoCH from the zone"},
     "FAST": {"core": "session-qualified 15m OB/FVG retest with supportive HTF context", "trigger": "15m displacement and fresh BOS/CHoCH"},
     "WYCKOFF": {"core": "qualified accumulation/distribution range", "trigger": "Spring→SOS, UTAD→SOW or re-accumulation release"},
@@ -171,8 +171,12 @@ def _technical_backbone(strategy: str, evidence: dict[str, Any], direction: str)
         else:
             missing.append("major liquidity reaction at structural location")
             core_complete = False
-        if structure_4h and structure_1h: trigger.append("4h and fresh 1h structure confirm realization")
-        else: missing.append("4h plus fresh 1h BOS/CHoCH trigger")
+        if structure_1h:
+            trigger.append("fresh 1h structure confirms realization")
+            if structure_4h:
+                trigger.append("4h BOS/CHoCH strengthens the thesis")
+        else:
+            missing.append("fresh 1h BOS/CHoCH trigger")
     elif strategy == "ZONE":
         expected = "discount" if direction == "BULLISH" else "premium"
         zone_ok = expected in str(evidence.get("zone") or "").lower()
