@@ -17,5 +17,7 @@ try:
     _install_runtime_observability()
     from .runtime_observability_overrides import apply as _apply_runtime_observability_overrides
     _apply_runtime_observability_overrides()
+    from .runtime_observability_fixups import apply as _apply_runtime_observability_fixups
+    _apply_runtime_observability_fixups()
 except Exception:
     pass
