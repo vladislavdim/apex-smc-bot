@@ -5067,6 +5067,18 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
 
         # Для MTF-сетапов нужны минимум 2 из 4 подтверждений,
         # включая реальную структуру (BOS/CHoCH), а не только сессию.
+        # Passive-watch may return PENDING_LTF before the hard score gate below.
+        # Record that terminal state explicitly so Strategy Lab cannot make RR
+        # look like the last reached gate when the candidate is actually waiting
+        # for a fresh closed 15m BOS/CHoCH.
+        if passive_watch:
+            _audit_test(
+                'MTF_PASSIVE_LTF_BOS',
+                (not _mtf_score_bos),
+                'MTF passive watch: closed 15m BOS/CHoCH before candidate',
+                'passive_watch and not _mtf_score_bos',
+                5050,
+            )
         if passive_watch and not _mtf_score_bos:
             return {
                 "_pending_ltf": True,

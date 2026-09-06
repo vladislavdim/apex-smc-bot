@@ -7268,8 +7268,14 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
 
         out["chase_ok"] = bool(distance <= atr1h * 0.75)
         _audit_observe("swing_numeric", {
+            # Raw candle body/range is useful diagnostics but is not identical
+            # to the gate because the gate also requires the candle direction.
             "displacement_body_ratio": round(candle_body / candle_range, 6) if candle_range > 0 else None,
             "direction_ok": bool(direction_ok),
+            "directional_displacement_ratio": (
+                round(candle_body / candle_range, 6) if candle_range > 0 and direction_ok else 0.0
+            ),
+            "displacement_gate_pass": bool(out["displacement_ok"]),
             "volume_ratio": round(last_vol / avg_vol, 6) if avg_vol > 0 else None,
             "retest_distance_atr": round(distance / atr1h, 6) if atr1h > 0 else None,
         })
