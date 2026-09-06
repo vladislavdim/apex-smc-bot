@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/apply-strategy-lab-terminal-truth.yml
       - .github/scripts/fix_terminal_helper_match.py
+      - .github/scripts/apply_terminal_truth_label.py
 
 permissions:
   contents: write
@@ -28,10 +29,12 @@ jobs:
         run: |
           python .github/scripts/fix_terminal_helper_match.py
           python .github/scripts/apply_strategy_lab_terminal_truth.py
+          python .github/scripts/apply_terminal_truth_label.py
       - name: Remove temporary helper and workflow
         run: |
           rm .github/scripts/apply_strategy_lab_terminal_truth.py
           rm .github/scripts/fix_terminal_helper_match.py
+          rm .github/scripts/apply_terminal_truth_label.py
           rm .github/workflows/apply-strategy-lab-terminal-truth.yml
       - name: Compile
         run: python -m compileall -q bot.py market.py stats_server.py core tests
