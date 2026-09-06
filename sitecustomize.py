@@ -6,5 +6,7 @@ fail-open and only augments telemetry / Strategy Lab cohort presentation.
 try:
     from core.runtime_observability import install
     install()
+    from core.runtime_observability_overrides import apply
+    apply()
 except Exception:
     pass
