@@ -3,7 +3,7 @@ bot.py — Telegram хендлеры, команды, scheduler, запуск AP
 Вся рыночная логика — в market.py
 """
 # APEX_STRATEGY_STATS_V1
-from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail
+from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
 import asyncio
 import logging
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
@@ -3702,7 +3702,7 @@ async def _auto_scan_1h_impl():
     logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
     batch = await asyncio.to_thread(
-        _take_strategy_round_batch, "MTF", universe, (len(universe) + 1) // 2, DB_PATH
+        _take_strategy_round_batch, "MTF", universe, (len(universe) + 2) // 3, DB_PATH
     )
     pairs = batch["pairs"]
     await _control_scan_round(batch["round_id"])
@@ -4682,6 +4682,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 _pd_low = min(c["low"] for c in _pd_candles[-20:])
                 _pd_mid = (_pd_high + _pd_low) / 2
                 _pd_price = _pd_raw[-1]["close"]
+                _pd_span = _pd_high - _pd_low
+                _audit_observe("mtf_numeric", {
+                    "pd_position_pct": round((_pd_price - _pd_low) / _pd_span * 100, 6) if _pd_span > 0 else None,
+                    "pd_mid_distance_pct": round((_pd_price - _pd_mid) / _pd_span * 100, 6) if _pd_span > 0 else None,
+                    "pd_price": _pd_price, "pd_low": _pd_low, "pd_mid": _pd_mid, "pd_high": _pd_high,
+                })
 
                 if _audit_test('MTF_FULL_SCAN_RAW_G4672', (direction == "BULLISH" and _pd_price > _pd_mid), 'direction == "BULLISH" and _pd_price > _pd_mid', 'direction == "BULLISH" and _pd_price > _pd_mid', 4672):
                     logging.debug(f"[MTF] {symbol}: цена в Premium зоне — LONG заблокирован")
@@ -4778,6 +4784,10 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         # сетапов нужны реальные положительные confluence.
         _positive_confluence = [c for c in confluence if c.lstrip().startswith(("✅", "🎯", "🔥", "🚀"))]
         min_conf = {"1h": 3, "4h": 4, "1d": 4, "1w": 3}
+        _audit_observe("mtf_numeric", {
+            "positive_confluence_count": len(_positive_confluence),
+            "positive_confluence_required": min_conf.get(timeframe, 4),
+        })
         if _audit_test('MTF_FULL_SCAN_RAW_G4767', (len(_positive_confluence) < min_conf.get(timeframe, 4)), 'сетапов нужны реальные положительные confluence.', 'len(_positive_confluence) < min_conf.get(timeframe, 4)', 4767):
             logging.debug(f"[full_scan_raw] {symbol} {timeframe}: отфильтрован (positive confluence {len(_positive_confluence)} < {min_conf.get(timeframe,4)})")
             return _audit_fail('MTF_FULL_SCAN_RAW_R4769', 'сетапов нужны реальные положительные confluence.', locals(), 'len(_positive_confluence) < min_conf.get(timeframe, 4)', 4769)
@@ -4792,6 +4802,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
 
         _tf_match = sum([_dir_15m == direction, _dir_1h == direction, _dir_4h == direction])
         _core_tf_match = sum([_dir_1h == direction, _dir_4h == direction])
+        _audit_observe("mtf_numeric", {"tf_match": _tf_match, "core_tf_match": _core_tf_match})
         # Hierarchical MTF: 4h defines structure, 1h defines the setup and
         # 15m confirms that the pullback has ended.  Requiring 15m to remain
         # trend-aligned throughout the pullback rejects the very entries the
@@ -4826,11 +4837,12 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         tp1   = levels["tp1"]
         tp2   = levels["tp2"]
         tp3   = levels["tp3"]
-        # RR — контекст для Groq
+        # Universal RR contract: floor 2.0, no upper ceiling.
         _rr_val = levels.get("rr", 0)
-        if _audit_test('MTF_FULL_SCAN_RAW_G4817', (not 2.0 <= _rr_val <= 4.0), 'RR — контекст для Groq', 'not 2.0 <= _rr_val <= 4.0', 4817):
-            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} вне диапазона 2.0–4.0 — пропускаем")
-            return _audit_fail('MTF_FULL_SCAN_RAW_R4819', 'RR — контекст для Groq', locals(), 'not 2.0 <= _rr_val <= 4.0', 4819)
+        _audit_observe("mtf_numeric", {"rr_value": _rr_val})
+        if _audit_test('MTF_FULL_SCAN_RAW_G4817', (_rr_val < 2.0), 'RR >= 2.0, no upper ceiling', '_rr_val < 2.0', 4817):
+            logging.debug(f"[full_scan_raw] {symbol} {timeframe}: RR {_rr_val:.2f} < 2.0 — пропускаем")
+            return _audit_fail('MTF_FULL_SCAN_RAW_R4819', 'RR >= 2.0, no upper ceiling', locals(), '_rr_val < 2.0', 4819)
 
         # OTE/структурный entry обязан быть рядом с текущей ценой. Не
         # отправляем отложенный сетап как будто это вход прямо сейчас.
