@@ -9641,16 +9641,53 @@ def detect_fast_deal(symbol: str) -> dict | None:
             )
         if _audit_test('FAST_DETECT_FAST_DEAL_G9344', (not _fast_targets), 'not _fast_targets', 'not _fast_targets', 9344):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9345', 'not _fast_targets', locals(), 'not _fast_targets', 9345)
-        tp1 = smart_round(_fast_targets[0])
-        tp2 = smart_round(_fast_targets[1]) if len(_fast_targets) > 1 else tp1
-        tp = tp2  # основной TP для RR расчёта
-
-        # ── RR проверка ──
-        risk   = abs(entry - sl)
-        reward = abs(tp1 - entry)
+        # RR is defined from TP1 by the central integrity/evidence pipeline.
+        # Therefore FAST must make TP1 the nearest *real structural* swing target
+        # that itself satisfies the universal RR >= 2.0 floor.  We never invent
+        # or stretch a target: every eligible target comes from _fast_targets.
+        # Closer confirmed swings below 2R remain observable intermediate
+        # liquidity, but they are not mislabeled as the trade's TP1.
+        risk = abs(entry - sl)
         if _audit_test('FAST_DETECT_FAST_DEAL_G9353', (risk == 0), 'RR проверка', 'risk == 0', 9353):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9354', 'RR проверка', locals(), 'risk == 0', 9354)
+
+        _fast_target_prices = []
+        for _fast_target_raw in _fast_targets:
+            _fast_target_price = smart_round(_fast_target_raw)
+            if _fast_target_price not in _fast_target_prices:
+                _fast_target_prices.append(_fast_target_price)
+        _fast_target_geometry = [
+            {"price": target, "rr": round(abs(target - entry) / risk, 4)}
+            for target in _fast_target_prices
+        ]
+        _fast_qualifying_targets = [
+            item for item in _fast_target_geometry if item["rr"] >= 2.0
+        ]
+        _fast_intermediate_targets = [
+            item for item in _fast_target_geometry if item["rr"] < 2.0
+        ]
+
+        # Preserve the existing rr<2 blocker when there is no qualifying
+        # structural target.  This keeps NEAR-like 1.06R setups rejected rather
+        # than manufacturing a synthetic 2R take-profit after the fact.
+        _fast_selected_targets = _fast_qualifying_targets or _fast_target_geometry[:1]
+        tp1 = _fast_selected_targets[0]["price"]
+        tp2 = _fast_qualifying_targets[1]["price"] if len(_fast_qualifying_targets) > 1 else tp1
+        tp = tp1
+
+        reward = abs(tp1 - entry)
         rr = round(reward / risk, 2)
+        _audit_observe("fast_rr_geometry", {
+            "target_count": len(_fast_target_geometry),
+            "nearest_structural_target": _fast_target_geometry[0]["price"] if _fast_target_geometry else None,
+            "nearest_structural_rr": _fast_target_geometry[0]["rr"] if _fast_target_geometry else None,
+            "best_structural_rr": max((item["rr"] for item in _fast_target_geometry), default=None),
+            "qualifying_target_count": len(_fast_qualifying_targets),
+            "intermediate_target_count": len(_fast_intermediate_targets),
+            "selected_tp1": tp1,
+            "selected_tp1_rr": rr,
+            "targets": _fast_target_geometry[:8],
+        })
         _audit_observe("bos_progress", {"rr_reached": True, "rr_passed": bool(rr >= 2.0)})
         if _audit_test('FAST_DETECT_FAST_DEAL_G9356', (rr < 2.0), 'rr < 2.0', 'rr < 2.0', 9356):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9357', 'rr < 2.0', locals(), 'rr < 2.0', 9357)
