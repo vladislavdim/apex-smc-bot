@@ -7267,6 +7267,12 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         out["volume_ok"] = bool(avg_vol > 0 and last_vol >= avg_vol * 1.20)
 
         out["chase_ok"] = bool(distance <= atr1h * 0.75)
+        _audit_observe("swing_numeric", {
+            "displacement_body_ratio": round(candle_body / candle_range, 6) if candle_range > 0 else None,
+            "direction_ok": bool(direction_ok),
+            "volume_ratio": round(last_vol / avg_vol, 6) if avg_vol > 0 else None,
+            "retest_distance_atr": round(distance / atr1h, 6) if atr1h > 0 else None,
+        })
         _audit_observe("bos_progress", {
             "displacement_reached": True, "displacement_confirmed": bool(out["displacement_ok"]),
             "volume_reached": True, "volume_confirmed": bool(out["volume_ok"]),
@@ -8009,6 +8015,10 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         # Require a real range extreme and leave the middle 40% neutral.
         in_discount = price <= range_low + range_size * 0.30
         in_premium = price >= range_high - range_size * 0.30
+        _audit_observe("zone_numeric", {
+            "range_position_pct": round((price - range_low) / range_size * 100, 6) if range_size > 0 else None,
+            "range_atr": round(range_size / atr, 6) if atr > 0 else None,
+        })
 
         if _audit_test('ZONE_DETECT_ZONE_SETUP_G7818', (not in_discount and not in_premium), 'Require a real range extreme and leave the middle 40% neutral.', 'not in_discount and not in_premium', 7818):
             return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7819', 'Require a real range extreme and leave the middle 40% neutral.', locals(), 'not in_discount and not in_premium', 7819)
@@ -8046,6 +8056,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
 
         if _audit_test('ZONE_DETECT_ZONE_SETUP_G7852', (not zone_level), 'not zone_level', 'not zone_level', 7852):
             return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7853', 'not zone_level', locals(), 'not zone_level', 7853)  # Нет зоны интереса рядом с ценой
+        _audit_observe("zone_numeric", {
+            "zone_distance_atr": round(abs(price - zone_level) / atr, 6) if atr > 0 else None,
+        })
 
         # ── 2.5. Проверка свежести зоны (unmitigated + strong move away) ──
         if zone_level and zone_type:
@@ -8058,16 +8071,24 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                     if _zone_bot <= c["low"] <= _zone_top or _zone_bot <= c["high"] <= _zone_top:
                         _test_count += 1
 
+                _audit_observe("zone_numeric", {"test_count": _test_count})
                 if _audit_test('ZONE_DETECT_ZONE_SETUP_G7866', (_test_count > 2), '_test_count > 2', '_test_count > 2', 7866):
                     logging.debug(f"[ZONE] {symbol}: зона протестирована {_test_count} раз — mitigated")
                     return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7868', '_test_count > 2', locals(), '_test_count > 2', 7868)
 
                 # Strong move away: displacement ≥0.5 + body > ATR×1.0
                 _strong_move = False
+                _zone_best_displacement = 0.0
+                _zone_best_body_atr = 0.0
                 for i in range(max(-len(candles), -35), -3):
                     c = candles[i]
                     c_body = abs(c["close"] - c["open"])
                     c_range = c["high"] - c["low"]
+                    _zone_directional = (direction == "BULLISH" and c["close"] > c["open"]) or (direction == "BEARISH" and c["close"] < c["open"])
+                    if _zone_directional and c_range > 0:
+                        _zone_best_displacement = max(_zone_best_displacement, c_body / c_range)
+                        if atr > 0:
+                            _zone_best_body_atr = max(_zone_best_body_atr, c_body / atr)
                     if c_range > 0 and c_body / c_range >= 0.5 and c_body > atr * _vf_zone * 0.8:
                         if direction == "BULLISH" and c["close"] > c["open"]:
                             _strong_move = True
@@ -8076,6 +8097,10 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                             _strong_move = True
                             break
 
+                _audit_observe("zone_numeric", {
+                    "best_directional_displacement_ratio": round(_zone_best_displacement, 6),
+                    "best_directional_body_atr": round(_zone_best_body_atr, 6),
+                })
                 if _audit_test('ZONE_DETECT_ZONE_SETUP_G7884', (not _strong_move), 'not _strong_move', 'not _strong_move', 7884):
                     logging.debug(f"[ZONE] {symbol}: нет сильного импульса (displacement < 0.5)")
                     return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7886', 'not _strong_move', locals(), 'not _strong_move', 7886)
@@ -8242,6 +8267,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         _zone_ap = get_adaptive_params(symbol, candles)
         _zone_vf = _zone_ap.get("volatility_factor", 1.0) if _zone_ap else 1.0
         _q_min = 3
+        _audit_observe("zone_numeric", {"quality_score": q_score, "quality_required": _q_min})
         if _audit_test('ZONE_DETECT_ZONE_SETUP_G8050', (q_score < _q_min), 'wick/RSI/FVG/BTC/funding/rejection-volume, without double-counting.', 'q_score < _q_min', 8050):
             return _audit_fail('ZONE_DETECT_ZONE_SETUP_R8051', 'wick/RSI/FVG/BTC/funding/rejection-volume, without double-counting.', locals(), 'q_score < _q_min', 8051)  # Недостаточно независимых подтверждений
 
@@ -8911,7 +8937,10 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
         dist_high = max(c["high"] for c in distribution_candles)
         dist_low  = min(c["low"]  for c in distribution_candles)
         dist_range_pct = (dist_high - dist_low) / dist_low * 100 if dist_low > 0 else 0
-        _audit_observe("wyckoff_distribution", {"dist_range_pct": round(dist_range_pct, 6)})
+        _audit_observe("wyckoff_distribution", {
+            "dist_range_pct": round(dist_range_pct, 6),
+            "old_range_under_25": bool(dist_range_pct < 25),
+        })
         try:
             _telemetry_phases = _find_wyckoff_phases_distribution(candles_1d, candles_4h)
             _telemetry_points = []
@@ -8929,6 +8958,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 )
                 _audit_observe("wyckoff_distribution", {
                     "distribution_box_width_pct": round(_telemetry_box_width_pct, 6) if _telemetry_box_width_pct is not None else None,
+                    "structural_box_under_25": bool(_telemetry_box_width_pct < 25) if _telemetry_box_width_pct is not None else None,
                     "structure_points": {name: price for name, price in _telemetry_points},
                 })
         except Exception:
