@@ -22,10 +22,13 @@ jobs:
         with:
           python-version: '3.11'
       - name: Apply patch
-        run: python .github/scripts/apply_fast_structural_rr_fix.py
+        run: |
+          python .github/scripts/apply_fast_structural_rr_fix.py
+          python .github/scripts/fix_fast_structural_test.py
       - name: Remove temporary helper and workflow
         run: |
           rm .github/scripts/apply_fast_structural_rr_fix.py
+          rm .github/scripts/fix_fast_structural_test.py
           rm .github/workflows/apply-fast-structural-rr-fix.yml
       - name: Compile
         run: python -m compileall -q market.py bot.py core tests
