@@ -1,0 +1,50 @@
+name: Apply FAST structural RR fix
+
+on:
+  push:
+    branches:
+      - fix/fast-structural-target-rr
+    paths:
+      - .github/workflows/apply-fast-structural-rr-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/fast-structural-target-rr
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply patch
+        run: python .github/scripts/apply_fast_structural_rr_fix.py
+      - name: Remove temporary helper and workflow
+        run: |
+          rm .github/scripts/apply_fast_structural_rr_fix.py
+          rm .github/workflows/apply-fast-structural-rr-fix.yml
+      - name: Compile
+        run: python -m compileall -q market.py bot.py core tests
+      - name: Focused regression tests
+        run: |
+          python -m unittest -v tests.test_fast_structural_target_rr
+          python -m unittest -v tests.test_rr_floor_fast_balanced
+      - name: Full test suite
+        run: python -m unittest discover -s tests -v
+      - name: Restore mutable DB artifacts
+        if: always()
+        run: |
+          git checkout -- brain.db 2>/dev/null || true
+          rm -f setup_audit.db setup_audit.db-shm setup_audit.db-wal
+      - name: Commit verified result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          test -z "$(git status --porcelain)" && exit 1
+          git commit -m "Fix FAST structural TP selection for RR"
+          git push origin HEAD:fix/fast-structural-target-rr
