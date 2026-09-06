@@ -1,0 +1,53 @@
+name: Apply Strategy Lab terminal truth fix
+
+on:
+  push:
+    branches:
+      - fix/strategy-lab-terminal-truth
+    paths:
+      - .github/workflows/apply-strategy-lab-terminal-truth.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/strategy-lab-terminal-truth
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply patch
+        run: python .github/scripts/apply_strategy_lab_terminal_truth.py
+      - name: Remove temporary helper and workflow
+        run: |
+          rm .github/scripts/apply_strategy_lab_terminal_truth.py
+          rm .github/workflows/apply-strategy-lab-terminal-truth.yml
+      - name: Compile
+        run: python -m compileall -q bot.py market.py stats_server.py core tests
+      - name: Focused regression tests
+        run: |
+          python -m unittest -v tests.test_strategy_lab_terminal_truth
+          python -m unittest -v tests.test_numeric_diagnostics_and_mtf_throughput
+          python -m unittest -v tests.test_observability_telemetry_only
+      - name: Full test suite
+        run: python -m unittest discover -s tests -v
+      - name: Restore mutable DB artifacts
+        if: always()
+        run: |
+          git checkout -- brain.db 2>/dev/null || true
+          rm -f setup_audit.db setup_audit.db-shm setup_audit.db-wal
+      - name: Commit verified result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          test -z "$(git status --porcelain)" && exit 1
+          git commit -m "Expose terminal MTF and SWING telemetry truth"
+          git push origin HEAD:fix/strategy-lab-terminal-truth
