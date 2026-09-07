@@ -4502,7 +4502,19 @@ def check_pending_signals():
                     "result": result,
                     "hours": round(hours_elapsed, 1),
                     "grade": grade,
-                    "is_win": is_win
+                    "is_win": is_win,
+                    "direction": direction,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp3": tp3,
+                    "exit_price": (
+                        _active_sl if result == "sl" else
+                        tp1 if result == "tp1" else
+                        tp2 if result == "tp2" else
+                        tp3 if result == "tp3" else current
+                    ),
                 })
 
         return closed

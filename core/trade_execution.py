@@ -44,6 +44,8 @@ _binance_blocked_until = 0.0
 _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
 _account_cache_lock = threading.Lock()
+_binance_metrics_lock = threading.Lock()
+_binance_request_metrics = {"total": 0, "rate_limited": 0, "last_status": None, "last_request_epoch": None}
 _DEFAULT_BALANCE_CACHE_TTL_SECONDS = 900
 _LIVE_RECONCILE_STATUSES = (
     "ENTRY_PENDING",
@@ -339,6 +341,12 @@ class BinanceFuturesClient:
                     method, f"{self.config.base_url}{path}", params=payload,
                     headers=headers, timeout=self.config.timeout_seconds,
                 )
+                with _binance_metrics_lock:
+                    _binance_request_metrics["total"] += 1
+                    _binance_request_metrics["last_status"] = int(response.status_code)
+                    _binance_request_metrics["last_request_epoch"] = time.time()
+                    if response.status_code in {418, 429}:
+                        _binance_request_metrics["rate_limited"] += 1
                 if response.status_code >= 400:
                     try:
                         details = response.json()
@@ -632,8 +640,185 @@ def ensure_execution_schema(db_path: str = DB_PATH) -> None:
         last_error TEXT,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS manager_execution_actions (
+        action_key TEXT PRIMARY KEY,
+        signal_id INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL,
+        requested_level REAL,
+        exchange_order_id TEXT,
+        error TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    try:
+        conn.execute("ALTER TABLE trade_executions ADD COLUMN active_stop_price REAL")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
+
+
+def cached_execution_snapshot(signal_id: int, db_path: str = DB_PATH) -> dict[str, Any]:
+    """Return manager context from SQLite without touching Binance."""
+    ensure_execution_schema(db_path)
+    conn = _connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """SELECT signal_id,mode,symbol,direction,status,entry,sl,active_stop_price,tp1,tp2,quantity,
+                  entry_order_id,stop_order_id,tp1_order_id,tp2_order_id,last_error,updated_at
+           FROM trade_executions WHERE signal_id=?""",
+        (int(signal_id),),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else {"signal_id": int(signal_id), "status": "NOT_EXECUTED"}
+
+
+def _claim_manager_action(
+    db_path: str, action_key: str, signal_id: int, action: str, requested_level: float | None,
+) -> bool:
+    conn = _connect(db_path)
+    cursor = conn.execute(
+        """INSERT INTO manager_execution_actions
+           (action_key,signal_id,action,status,requested_level)
+           VALUES (?,?,?,'PROCESSING',?)
+           ON CONFLICT(action_key) DO UPDATE SET status='PROCESSING',error=NULL,
+             updated_at=CURRENT_TIMESTAMP
+           WHERE manager_execution_actions.status='ERROR'
+             AND manager_execution_actions.updated_at <= datetime('now','-1 minute')""",
+        (str(action_key), int(signal_id), str(action), requested_level),
+    )
+    conn.commit()
+    claimed = cursor.rowcount == 1
+    conn.close()
+    return claimed
+
+
+def _finish_manager_action(
+    db_path: str, action_key: str, status: str, *, order_id: str = "", error: str = "",
+) -> None:
+    conn = _connect(db_path)
+    conn.execute(
+        """UPDATE manager_execution_actions SET status=?,exchange_order_id=?,error=?,
+                  updated_at=CURRENT_TIMESTAMP WHERE action_key=?""",
+        (str(status), str(order_id or ""), str(error or "")[:1000], str(action_key)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def execute_manager_review(
+    update: Mapping[str, Any], *, db_path: str = DB_PATH,
+    config: ExecutionConfig | None = None, client: BinanceFuturesClient | None = None,
+) -> dict[str, Any]:
+    """Execute one validated post-entry Groq decision, idempotently and fail-closed."""
+    config = config or ExecutionConfig.from_env()
+    signal_id = int(update.get("signal_id") or 0)
+    review = update.get("review") if isinstance(update.get("review"), Mapping) else {}
+    action = str(review.get("action") or "HOLD").upper()
+    if action not in {"PROTECT", "PARTIAL_EXIT", "EXIT"}:
+        return {"signal_id": signal_id, "status": "NO_EXECUTION", "action": action}
+    if not config.live_armed or config.kill_switch:
+        return {"signal_id": signal_id, "status": "LIVE_NOT_ARMED", "action": action}
+    if signal_id <= 0:
+        return {"signal_id": signal_id, "status": "INVALID_MANAGER_ACTION", "action": action}
+    try:
+        confidence = float(review.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < 0.70:
+        return {"signal_id": signal_id, "status": "BLOCKED_LOW_CONFIDENCE", "action": action}
+
+    snapshot = cached_execution_snapshot(signal_id, db_path)
+    if snapshot.get("mode") != "live" or snapshot.get("status") not in {"PROTECTED", "PROTECTED_NO_TP"}:
+        return {"signal_id": signal_id, "status": "NO_LIVE_POSITION", "action": action}
+    facts = update.get("facts") if isinstance(update.get("facts"), Mapping) else {}
+    if action == "PARTIAL_EXIT" and snapshot.get("tp1_order_id"):
+        # The exchange-native reduce-only TP1 is the fastest and safest
+        # partial exit. Do not add a second market reduction after Gate sees
+        # the same barrier on a closed candle.
+        return {
+            "signal_id": signal_id, "status": "BRACKET_MANAGED", "action": action,
+            "reason": "exchange TP1 reduce-only order already owns partial exit",
+        }
+    candle_id = str(facts.get("management_candle_id") or "event")
+    requested_level = review.get("protect_level") if action == "PROTECT" else None
+    raw_key = f"{signal_id}:{action}:{candle_id}:{requested_level or ''}"
+    action_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:32]
+    if not _claim_manager_action(db_path, action_key, signal_id, action, requested_level):
+        return {"signal_id": signal_id, "status": "DUPLICATE_SKIPPED", "action": action}
+
+    try:
+        client = client or BinanceFuturesClient(config)
+        symbol = str(snapshot["symbol"])
+        direction = str(snapshot["direction"])
+        close_side = "SELL" if direction == "BULLISH" else "BUY"
+        rules = client.symbol_rules(symbol)
+        if action == "PROTECT":
+            level = _decimal(requested_level)
+            entry = _decimal(snapshot["entry"])
+            current_stop = _decimal(snapshot.get("active_stop_price") or snapshot["sl"])
+            geometry_ok = current_stop < level and level >= entry if direction == "BULLISH" else current_stop > level and level <= entry
+            if not geometry_ok:
+                raise ValueError("protect level does not improve risk toward breakeven")
+            rounded = _nearest_step(level, rules.tick_size)
+            new_stop = client.place_close_all_trigger(
+                symbol, close_side, "STOP_MARKET", _plain_decimal(rounded),
+                f"apex_mp_{signal_id}_{action_key[:8]}",
+            )
+            new_stop_id = _required_remote_order_id(new_stop, "manager protective stop")
+            old_stop_id = str(snapshot.get("stop_order_id") or "")
+            if old_stop_id and old_stop_id != new_stop_id:
+                client.cancel_algo_order(old_stop_id)
+            _update_execution(
+                db_path, int(_execution_id(db_path, signal_id)), str(snapshot["status"]),
+                stop_order_id=new_stop_id, active_stop_price=float(rounded),
+            )
+            _finish_manager_action(db_path, action_key, "EXECUTED", order_id=new_stop_id)
+            return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": new_stop_id}
+
+        positions = [row for row in client.open_positions() if str(row.get("symbol")) == symbol]
+        amount = abs(_decimal(positions[0].get("positionAmt", "0"))) if positions else Decimal("0")
+        quantity = _floor_step(amount, rules.step_size)
+        if quantity < rules.min_qty:
+            raise RuntimeError("no executable Binance position quantity")
+        if action == "PARTIAL_EXIT":
+            quantity = _floor_step(quantity * _decimal(config.tp1_fraction), rules.step_size)
+            if quantity < rules.min_qty:
+                raise RuntimeError("partial quantity below exchange minimum")
+        order = client.emergency_close(
+            symbol, direction, _plain_decimal(quantity), f"apex_mx_{signal_id}_{action_key[:8]}",
+        )
+        order_id = str(order.get("orderId") or "")
+        if action == "EXIT":
+            _update_execution(db_path, int(_execution_id(db_path, signal_id)), "CLEANUP_PENDING")
+            conn = _connect(db_path)
+            try:
+                conn.execute(
+                    """UPDATE signals SET result='manager_exit',closed_at=CURRENT_TIMESTAMP
+                       WHERE id=? AND result='pending'""",
+                    (signal_id,),
+                )
+                conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        _finish_manager_action(db_path, action_key, "EXECUTED", order_id=order_id)
+        return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": order_id}
+    except Exception as exc:
+        _finish_manager_action(db_path, action_key, "ERROR", error=str(exc))
+        logging.error("[AutoTrading] manager action signal=%s action=%s failed safely: %s", signal_id, action, exc)
+        return {"signal_id": signal_id, "status": "ERROR", "action": action, "error": str(exc)}
+
+
+def _execution_id(db_path: str, signal_id: int) -> int:
+    conn = _connect(db_path)
+    row = conn.execute("SELECT id FROM trade_executions WHERE signal_id=?", (int(signal_id),)).fetchone()
+    conn.close()
+    if not row:
+        raise RuntimeError("execution row disappeared")
+    return int(row[0])
 
 
 def _live_reconcile_rows(db_path: str) -> list[sqlite3.Row]:
@@ -846,7 +1031,7 @@ def execute_approved_candidate(
 
 
 def _update_execution(db_path: str, execution_id: int, status: str, **fields: Any) -> None:
-    allowed = {"stop_order_id", "tp1_order_id", "tp2_order_id", "last_error", "quantity"}
+    allowed = {"stop_order_id", "tp1_order_id", "tp2_order_id", "last_error", "quantity", "active_stop_price"}
     updates = ["status=?", "updated_at=CURRENT_TIMESTAMP"]
     values: list[Any] = [status]
     for key, value in fields.items():
@@ -941,6 +1126,7 @@ def _install_brackets(
     _update_execution(
         db_path, execution_id, status, stop_order_id=stop_id, tp1_order_id=tp1_id,
         tp2_order_id=tp2_id, last_error="; ".join(errors), quantity=float(quantity),
+        active_stop_price=float(row["sl"]),
     )
     return {"status": status, "signal_id": signal_id}
 
@@ -1330,7 +1516,11 @@ def execution_status(
         "live_active_count": 0,
         "live_reconcile_pending": 0,
         "account": {"available": False},
+        "request_metrics": {},
     }
+    with _binance_metrics_lock:
+        summary["request_metrics"] = dict(_binance_request_metrics)
+    summary["request_metrics"]["circuit_remaining_seconds"] = int(_binance_circuit_remaining())
     try:
         ensure_execution_schema(db_path)
         conn = _connect(db_path)

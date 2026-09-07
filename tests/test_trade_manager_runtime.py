@@ -2,11 +2,15 @@ import json
 import sqlite3
 
 from core.trade_manager import (
+    finalize_manager_trade,
     format_telegram_update,
+    load_manager_message,
     load_state,
     manager_cycle,
     register_pending_signals,
+    store_manager_message,
 )
+from core.trade_manager_telegram import fetch_manager_trades, format_final_trade_card
 
 
 def _db(tmp_path, status="active"):
@@ -190,3 +194,27 @@ def test_manager_alerts_once_after_three_missing_tf_cycles_and_recovers(tmp_path
     state = load_state(1, db_path)
     assert state["data_failure_count"] == 0
     assert state["data_failure_notified"] == 0
+
+
+def test_compact_message_mapping_is_per_destination_and_restart_safe(tmp_path):
+    db_path = _db(tmp_path)
+    register_pending_signals(db_path)
+    store_manager_message(1, -1001, 41, "first", db_path=db_path)
+    store_manager_message(1, -1002, 52, "second", thread_id=262, db_path=db_path)
+    store_manager_message(1, -1001, 41, "edited", db_path=db_path)
+    assert load_manager_message(1, -1001, db_path=db_path)["message_id"] == 41
+    assert load_manager_message(1, -1002, 262, db_path)["message_id"] == 52
+
+
+def test_closed_trade_remains_in_manager_and_has_final_accounting(tmp_path):
+    db_path = _db(tmp_path)
+    register_pending_signals(db_path)
+    state = finalize_manager_trade(1, "tp1", 110, db_path=db_path)
+    assert state["status"] == "CLOSED"
+    assert state["realized_pct"] == 10
+    assert state["realized_r"] == 2
+    rows = fetch_manager_trades(db_path)
+    assert rows[0]["close_result"] == "tp1"
+    card = format_final_trade_card(state)
+    assert "СДЕЛКА ЗАКРЫТА" in card
+    assert "+10.00%" in card

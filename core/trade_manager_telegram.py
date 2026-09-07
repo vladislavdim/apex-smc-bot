@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import sqlite3
+from datetime import datetime
 from typing import Any
 
 from core.trade_manager import ensure_trade_manager_schema
@@ -38,6 +39,16 @@ def _direction_label(value: Any) -> str:
     return html.escape(direction or "—")
 
 
+def _duration(created_at: Any, closed_at: Any) -> str:
+    try:
+        start = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+        hours = max(0.0, (end - start).total_seconds() / 3600.0)
+        return f"{hours:.1f}ч"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
     ensure_trade_manager_schema(db_path)
     conn = _connect(db_path)
@@ -48,12 +59,13 @@ def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
                    m.initial_entry, m.initial_sl, m.initial_tp1, m.initial_tp2, m.initial_tp3,
                    m.initial_rr, m.last_price, m.current_r, m.tp1_seen, m.tp2_seen,
                    m.manager_target, m.manager_protect_level, m.last_event, m.last_action,
-                   m.last_confidence, m.updated_at,
+                   m.last_confidence, m.updated_at, m.status, m.close_result, m.exit_price,
+                   m.realized_pct, m.realized_r, m.closed_at,
                    COALESCE(s.result, 'pending') AS signal_result
               FROM trade_manager_state m
               LEFT JOIN signals s ON s.id = m.signal_id
-             WHERE COALESCE(s.result, 'pending') = 'pending'
-             ORDER BY m.updated_at DESC, m.signal_id DESC
+             ORDER BY CASE WHEN COALESCE(m.status,'ACTIVE')='ACTIVE' THEN 0 ELSE 1 END,
+                      COALESCE(m.closed_at,m.updated_at) DESC, m.signal_id DESC
              LIMIT ?
             """,
             (max(1, int(limit)),),
@@ -99,7 +111,8 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
         ]
         return "\n".join(lines)
 
-    lines.append(f"Активно сопровождается: <b>{len(items)}</b>\n")
+    active_count = sum(1 for item in items if str(item.get("status") or "ACTIVE").upper() == "ACTIVE")
+    lines.append(f"Активно: <b>{active_count}</b> · показано сделок: <b>{len(items)}</b>\n")
     for item in items:
         action = html.escape(str(item.get("last_action") or "HOLD"))
         event = html.escape(str(item.get("last_event") or "—"))
@@ -112,9 +125,11 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
             tp_state += " · TP2 ⏳"
         if item.get("tp3_seen"):
             tp_state += " · TP3 ✅"
+        closed = str(item.get("status") or "ACTIVE").upper() == "CLOSED"
+        status_text = f" · ✅ {html.escape(str(item.get('close_result') or 'CLOSED').upper())}" if closed else ""
         lines += [
             f"<b>#{item['signal_id']} {html.escape(str(item.get('symbol') or ''))}</b> · "
-            f"{html.escape(str(item.get('strategy') or 'MTF'))} · {_direction_label(item.get('direction'))}",
+            f"{html.escape(str(item.get('strategy') or 'MTF'))} · {_direction_label(item.get('direction'))}{status_text}",
             f"Entry <code>{_fmt_price(item.get('initial_entry'))}</code> · "
             f"Цена <code>{_fmt_price(item.get('last_price'))}</code> · "
             f"R <b>{float(item.get('current_r') or 0):+.2f}</b>",
@@ -131,7 +146,8 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
 def manager_trade_buttons(items: list[dict[str, Any]]) -> list[tuple[str, str]]:
     buttons: list[tuple[str, str]] = []
     for item in items:
-        label = f"{str(item.get('symbol') or '').replace('USDT', '')} · {item.get('strategy') or 'MTF'} · {float(item.get('current_r') or 0):+.1f}R"
+        status = "✅" if str(item.get("status") or "ACTIVE").upper() == "CLOSED" else "🟢"
+        label = f"{status} {str(item.get('symbol') or '').replace('USDT', '')} · {item.get('strategy') or 'MTF'} · {float(item.get('current_r') or 0):+.1f}R"
         buttons.append((label[:48], f"manager_trade_{int(item['signal_id'])}"))
     return buttons
 
@@ -161,6 +177,13 @@ def format_manager_trade_detail(payload: dict[str, Any]) -> str:
         "",
         "<b>Последние события:</b>",
     ]
+    if str(state.get("status") or "ACTIVE").upper() == "CLOSED":
+        lines[2:2] = [
+            f"✅ <b>ЗАКРЫТА · {html.escape(str(state.get('close_result') or 'CLOSED').upper())}</b>",
+            f"Exit: <code>{_fmt_price(state.get('exit_price'))}</code> · "
+            f"<b>{float(state.get('realized_pct') or 0):+.2f}%</b> · "
+            f"<b>{float(state.get('realized_r') or 0):+.2f}R</b>",
+        ]
     if not events:
         lines.append("Пока нет записанных событий.")
     else:
@@ -177,3 +200,23 @@ def format_manager_trade_detail(payload: dict[str, Any]) -> str:
                 lines.append(f"  {reason}")
     lines += ["", "<i>История read-only: исходные Entry/SL/TP/RR не переписываются.</i>"]
     return "\n".join(lines)[:4000]
+
+
+def format_final_trade_card(state: dict[str, Any]) -> str:
+    result = html.escape(str(state.get("close_result") or "closed").upper())
+    tp_hits = [name for name, key in (("TP1", "tp1_seen"), ("TP2", "tp2_seen"), ("TP3", "tp3_seen")) if state.get(key)]
+    reached = ", ".join(tp_hits) if tp_hits else "—"
+    return "\n".join([
+        f"🏁 <b>APEX · СДЕЛКА ЗАКРЫТА — {html.escape(str(state.get('symbol') or '—'))}</b>",
+        f"{html.escape(str(state.get('strategy') or 'MTF'))} · {_direction_label(state.get('direction'))} · <b>{result}</b>",
+        "━━━━━━━━━━━━━━━━",
+        f"Вход: <code>{_fmt_price(state.get('initial_entry'))}</code>",
+        f"Выход: <code>{_fmt_price(state.get('exit_price'))}</code>",
+        f"Результат: <b>{float(state.get('realized_pct') or 0):+.2f}%</b> · <b>{float(state.get('realized_r') or 0):+.2f}R</b>",
+        f"SL: <code>{_fmt_price(state.get('initial_sl'))}</code>",
+        f"TP1/TP2/TP3: <code>{_fmt_price(state.get('initial_tp1'))}</code> / <code>{_fmt_price(state.get('initial_tp2'))}</code> / <code>{_fmt_price(state.get('initial_tp3'))}</code>",
+        f"Достигнуты: <b>{reached}</b>",
+        f"Длительность: <b>{_duration(state.get('created_at'), state.get('closed_at'))}</b>",
+        f"Последнее решение: <b>{html.escape(str(state.get('last_action') or 'EXIT'))}</b>",
+        f"Закрыто: <code>{html.escape(str(state.get('closed_at') or '—'))}</code>",
+    ])[:4000]
