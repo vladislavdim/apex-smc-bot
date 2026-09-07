@@ -11,6 +11,7 @@ replaces the original targets.
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import sqlite3
@@ -133,6 +134,16 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_trade_manager_events_signal
           ON trade_manager_events(signal_id, created_at);
+        CREATE TABLE IF NOT EXISTS trade_manager_messages (
+            signal_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            message_id INTEGER NOT NULL,
+            content_hash TEXT NOT NULL DEFAULT '',
+            is_final INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(signal_id, chat_id, thread_id)
+        );
         """
     )
     # Safe additive migration for databases created by the first manager build.
@@ -145,6 +156,12 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
         ("trade_manager_state", "data_failure_count", "INTEGER NOT NULL DEFAULT 0"),
         ("trade_manager_state", "data_failure_notified", "INTEGER NOT NULL DEFAULT 0"),
         ("trade_manager_state", "last_data_error", "TEXT"),
+        ("trade_manager_state", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+        ("trade_manager_state", "close_result", "TEXT"),
+        ("trade_manager_state", "exit_price", "REAL"),
+        ("trade_manager_state", "realized_pct", "REAL"),
+        ("trade_manager_state", "realized_r", "REAL"),
+        ("trade_manager_state", "closed_at", "TEXT"),
     ):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
@@ -152,6 +169,83 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
             pass
     conn.commit()
     conn.close()
+
+
+def telegram_content_hash(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+def load_manager_message(
+    signal_id: int, chat_id: int, thread_id: int = 0, db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    ensure_trade_manager_schema(db_path)
+    conn = _connect(db_path)
+    row = conn.execute(
+        """SELECT * FROM trade_manager_messages
+           WHERE signal_id=? AND chat_id=? AND thread_id=?""",
+        (int(signal_id), int(chat_id), int(thread_id or 0)),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def store_manager_message(
+    signal_id: int, chat_id: int, message_id: int, text: str, *,
+    thread_id: int = 0, is_final: bool = False, db_path: str = DB_PATH,
+) -> None:
+    ensure_trade_manager_schema(db_path)
+    conn = _connect(db_path)
+    conn.execute(
+        """INSERT INTO trade_manager_messages
+           (signal_id,chat_id,thread_id,message_id,content_hash,is_final,updated_at)
+           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(signal_id,chat_id,thread_id) DO UPDATE SET
+             message_id=excluded.message_id,content_hash=excluded.content_hash,
+             is_final=MAX(trade_manager_messages.is_final,excluded.is_final),
+             updated_at=CURRENT_TIMESTAMP""",
+        (int(signal_id), int(chat_id), int(thread_id or 0), int(message_id),
+         telegram_content_hash(text), int(bool(is_final))),
+    )
+    conn.commit()
+    conn.close()
+
+
+def finalize_manager_trade(
+    signal_id: int, result: str, exit_price: float, *, closed_at: str | None = None,
+    db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    """Close manager state once and retain immutable final accounting."""
+    state = load_state(signal_id, db_path)
+    if not state:
+        return None
+    if str(state.get("status") or "ACTIVE").upper() == "CLOSED":
+        return load_state(signal_id, db_path)
+    entry = float(state["initial_entry"])
+    sl = float(state["initial_sl"])
+    exit_value = float(exit_price or state.get("last_price") or entry)
+    direction = str(state.get("direction") or "").upper()
+    signed_pct = ((exit_value - entry) / entry * 100.0) if direction == "BULLISH" else ((entry - exit_value) / entry * 100.0)
+    realized_r = r_multiple(direction, entry, sl, exit_value)
+    conn = _connect(db_path)
+    conn.execute(
+        """UPDATE trade_manager_state SET status='CLOSED',close_result=?,exit_price=?,
+                  realized_pct=?,realized_r=?,closed_at=COALESCE(?,CURRENT_TIMESTAMP),
+                  last_price=?,current_r=?,last_event='TRADE_CLOSED',last_action='EXIT',
+                  updated_at=CURRENT_TIMESTAMP WHERE signal_id=? AND COALESCE(status,'ACTIVE')!='CLOSED'""",
+        (str(result or "closed").lower(), exit_value, round(signed_pct, 4), realized_r,
+         closed_at, exit_value, realized_r, int(signal_id)),
+    )
+    conn.execute(
+        """INSERT INTO trade_manager_events
+           (signal_id,event_type,action,confidence,price,r_multiple,facts_json,reason)
+           VALUES (?,'TRADE_CLOSED','EXIT',1.0,?,?,?,?)""",
+        (int(signal_id), exit_value, realized_r,
+         json.dumps({"result": str(result or "closed").lower()}, ensure_ascii=False),
+         f"Trade closed: {str(result or 'closed').upper()}"),
+    )
+    conn.commit()
+    conn.close()
+    return load_state(signal_id, db_path)
 
 
 def normalize_strategy(value: Any) -> str:
@@ -351,6 +445,7 @@ def _prompt(state: dict[str, Any], events: list[str], facts: dict[str, Any]) -> 
 Initial entry, initial SL, TP1/TP2/TP3 and initial RR are immutable historical facts. Never rewrite them.
 Use the supplied original CORE, TRIGGER, setup class and conflicts as the immutable thesis context. Do not silently replace that thesis.
 Use only supplied facts; never invent candles, structure, volume, OI, funding, news, levels or probabilities.
+facts.execution is the cached Binance execution snapshot. Treat exchange protective orders as authoritative: if a reduce-only TP1 order exists, do not request a second partial exit for the same TP1 event. After TP1, prefer PROTECT with the supplied confirmed level or LET_RUN when continuation remains valid.
 Choose exactly one action: HOLD, PROTECT, PARTIAL_EXIT, LET_RUN, EXIT, WAIT_CONFIRMATION.
 A management_target is NOT a replacement for the original TP. It may be returned only when facts.structural_target is present, lies beyond the current continuation direction, and continuation is structurally confirmed. Otherwise return null.
 A protect_level may be returned only from facts.confirmed_protection_level. Never invent or numerically adjust a level.
@@ -751,6 +846,7 @@ def manager_cycle(
     ask_groq: Callable[..., Any],
     *,
     external_context: Callable[..., dict[str, Any]] | None = None,
+    execution_context: Callable[[int], dict[str, Any]] | None = None,
     db_path: str = DB_PATH,
 ) -> list[dict[str, Any]]:
     """Run one non-blocking-by-design management pass over active analytics trades.
@@ -800,6 +896,11 @@ def manager_cycle(
             continue
         facts["current_price"] = price
         facts["management_matrix"] = management_matrix(state.get("strategy"))
+        if execution_context is not None:
+            try:
+                facts["execution"] = execution_context(int(state["signal_id"])) or {}
+            except Exception:
+                facts["execution"] = {"status": "UNAVAILABLE"}
         if external_context is not None:
             try:
                 try:
@@ -823,6 +924,7 @@ def manager_cycle(
             "symbol": symbol,
             "events": events,
             "review": review,
+            "facts": facts,
             "notify": notify,
             "telegram": format_telegram_update(state, price, events, review),
         })

@@ -108,6 +108,7 @@ from core.trade_manager_telegram import (
     fetch_manager_trade as _fetch_manager_trade,
     format_manager_dashboard as _format_manager_dashboard,
     format_manager_trade_detail as _format_manager_trade_detail,
+    format_final_trade_card as _format_final_trade_card,
     manager_trade_buttons as _manager_trade_buttons,
 )
 from core.trade_manager import (
@@ -115,6 +116,10 @@ from core.trade_manager import (
     register_pending_signals as _register_pending_manager_signals,
     manager_cycle as _trade_manager_cycle,
     load_active_states as _load_active_manager_states,
+    finalize_manager_trade as _finalize_manager_trade,
+    load_manager_message as _load_manager_message,
+    store_manager_message as _store_manager_message,
+    telegram_content_hash as _telegram_content_hash,
 )
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 from core.setup_evidence import (
@@ -169,6 +174,8 @@ try:
         execute_approved_candidate as _execute_approved_candidate,
         execution_status as _execution_status,
         reconcile_live_executions as _reconcile_live_executions,
+        cached_execution_snapshot as _cached_execution_snapshot,
+        execute_manager_review as _execute_manager_review,
     )
     _TRADE_EXECUTION_OK = True
 except Exception as _trade_execution_import_error:
@@ -3092,6 +3099,53 @@ async def _send_with_retry(chat_id, text, parse_mode="HTML", retries=3, **kwargs
     return False
 
 
+def _manager_destinations():
+    destinations = [(int(admin_id), 0) for admin_id in ADMIN_IDS]
+    destinations += [(int(SIGNAL_CHANNEL_MAIN), 0), (int(SIGNAL_CHANNEL_SWING), int(SWING_THREAD_ID))]
+    return list(dict.fromkeys(destinations))
+
+
+async def _upsert_manager_card(signal_id, text, *, is_final=False):
+    """Keep exactly one durable Telegram card per trade and destination."""
+    for chat_id, thread_id in _manager_destinations():
+        existing = await asyncio.to_thread(
+            _load_manager_message, signal_id, chat_id, thread_id, DB_PATH,
+        )
+        content_hash = _telegram_content_hash(text)
+        if existing and (existing.get("content_hash") == content_hash or existing.get("is_final")):
+            continue
+        if existing:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=int(existing["message_id"]), text=text,
+                    parse_mode="HTML",
+                )
+                await asyncio.to_thread(
+                    _store_manager_message, signal_id, chat_id, int(existing["message_id"]), text,
+                    thread_id=thread_id, is_final=is_final, db_path=DB_PATH,
+                )
+                continue
+            except Exception as exc:
+                if "message is not modified" in str(exc).lower():
+                    continue
+                logging.warning(
+                    "[TradeManager] card edit failed signal=%s chat=%s: %s",
+                    signal_id, chat_id, exc,
+                )
+        kwargs = {"message_thread_id": thread_id} if thread_id else {}
+        try:
+            message = await bot.send_message(chat_id, text, parse_mode="HTML", **kwargs)
+            await asyncio.to_thread(
+                _store_manager_message, signal_id, chat_id, int(message.message_id), text,
+                thread_id=thread_id, is_final=is_final, db_path=DB_PATH,
+            )
+        except Exception as exc:
+            logging.error(
+                "[TradeManager] card send failed signal=%s chat=%s: %s",
+                signal_id, chat_id, exc,
+            )
+
+
 def _signal_type_from_candidate(sd: dict) -> str:
     scan_type = str(sd.get("scan_type") or "").upper()
     grade = str(sd.get("grade") or sd.get("signal_type") or "MTF").upper()
@@ -3485,32 +3539,20 @@ async def auto_scan_job():
         await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
     for c in closed:
         if c["result"] == "tp1_hit":
-            # TP1 достигнут — уведомляем о переходе в trailing mode
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(
-                        admin_id,
-                        f"✅ <b>TP1 достигнут!</b> {c['symbol']} {c.get('direction','')}\n"
-                        f"🔄 Стоп перенесён в безубыток: <code>{smart_price_fmt(c.get('entry', 0))}</code>\n"
-                        f"🎯 Trailing SL: <code>{smart_price_fmt(c.get('trailing_sl', 0))}</code>\n"
-                        f"🎯 Ждём TP2: <code>{smart_price_fmt(c.get('tp2', 0))}</code>",
-                        parse_mode="HTML"
-                    )
-                except:
-                    pass
-        elif c["is_win"]:
-            tp_icons = {"tp1": "🎯", "tp2": "🎯🎯", "tp3": "🎯🎯🎯"}
-            icon = tp_icons.get(c["result"], "✅")
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(
-                        admin_id,
-                        f"{icon} <b>{c['symbol']}</b> — {c['result'].upper()}!\n"
-                        f"⏱ Закрыто за {c['hours']}ч | {c.get('grade', '-')}",
-                        parse_mode="HTML"
-                    )
-                except:
-                    pass
+            # Trade Manager will fold TP1 into the existing compact card on
+            # its next Gate-backed pass. Avoid a separate Telegram message.
+            logging.info("[TradeManager] TP1 queued for compact card signal=%s", c.get("signal_id"))
+            continue
+        state = await asyncio.to_thread(
+            _finalize_manager_trade,
+            int(c.get("signal_id") or 0), str(c.get("result") or "closed"),
+            float(c.get("exit_price") or c.get("entry") or 0),
+            db_path=DB_PATH,
+        )
+        if state:
+            await _upsert_manager_card(
+                int(c["signal_id"]), _format_final_trade_card(state), is_final=True,
+            )
 
     # 5m и 15m убраны — используем только 1h, 4h, 1d, 1w
     pass
@@ -3522,6 +3564,14 @@ _market_scan_lock = asyncio.Lock()
 _active_market_scan = None
 _active_market_scan_started = 0.0
 _active_scan_run_id = None
+
+
+def _auto_trade_reconcile_seconds():
+    try:
+        value = int(os.environ.get("AUTO_TRADING_RECONCILE_SECONDS", "30"))
+    except (TypeError, ValueError):
+        value = 30
+    return max(15, min(value, 300))
 
 
 def _scanner_strategy(name):
@@ -3652,6 +3702,10 @@ async def _run_trade_manager_once():
             external_context=lambda symbol, direction: external_by_trade.get(
                 (str(symbol).upper(), str(direction).upper()), {}
             ),
+            execution_context=(
+                (lambda signal_id: _cached_execution_snapshot(signal_id, DB_PATH))
+                if _TRADE_EXECUTION_OK else None
+            ),
             db_path=DB_PATH,
         )
         durable_events = False
@@ -3662,14 +3716,34 @@ async def _run_trade_manager_once():
                 update.get("review", {}).get("action"), update.get("notify"),
             )
             durable_events = durable_events or bool(update.get("events"))
+            if _TRADE_EXECUTION_OK and not update.get("degraded"):
+                execution = await asyncio.to_thread(
+                    _execute_manager_review, update, db_path=DB_PATH,
+                )
+                logging.info(
+                    "[TradeManager] execution signal=%s action=%s status=%s",
+                    update.get("signal_id"), execution.get("action"), execution.get("status"),
+                )
+                if execution.get("status") not in {"NO_EXECUTION", "LIVE_NOT_ARMED"}:
+                    update["telegram"] = (
+                        f"{update.get('telegram', '')}\n\n"
+                        f"⚙️ Binance: <b>{execution.get('status')}</b>"
+                    )[:4000]
+                if execution.get("status") == "EXECUTED" and execution.get("action") == "EXIT":
+                    exit_price = float((update.get("facts") or {}).get("current_price") or 0)
+                    final_state = await asyncio.to_thread(
+                        _finalize_manager_trade, int(update.get("signal_id") or 0),
+                        "manager_exit", exit_price, db_path=DB_PATH,
+                    )
+                    if final_state:
+                        await _upsert_manager_card(
+                            int(update["signal_id"]), _format_final_trade_card(final_state), is_final=True,
+                        )
             if not update.get("notify"):
                 continue
-            for admin_id in ADMIN_IDS:
-                await _send_with_retry(
-                    admin_id,
-                    update.get("telegram", ""),
-                    parse_mode="HTML",
-                )
+            await _upsert_manager_card(
+                int(update.get("signal_id") or 0), update.get("telegram", ""),
+            )
         if durable_events:
             await backup_db_to_github("trade_manager_event")
     except asyncio.CancelledError:
@@ -5828,7 +5902,10 @@ async def on_startup(app):
 
     # Основные сигналы
     webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(
+        auto_trade_reconcile_job, "interval", seconds=_auto_trade_reconcile_seconds(),
+        max_instances=1, coalesce=True,
+    )
     _schedule_market_scans(webhook_scheduler)
     _schedule_trade_manager(webhook_scheduler)
     # Pump/accumulation detector notifications are intentionally not scheduled.
@@ -6160,7 +6237,10 @@ def main():
             await asyncio.sleep(12)  # ждём завершения старого инстанса
             scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1})
             scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
-            scheduler.add_job(auto_trade_reconcile_job, "interval", seconds=10, max_instances=1, coalesce=True)
+            scheduler.add_job(
+                auto_trade_reconcile_job, "interval", seconds=_auto_trade_reconcile_seconds(),
+                max_instances=1, coalesce=True,
+            )
             _schedule_market_scans(scheduler)
             _schedule_trade_manager(scheduler)
             # 1d и 1w — только контекст, сигналы не генерируем

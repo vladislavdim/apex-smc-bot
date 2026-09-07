@@ -12,6 +12,7 @@ from core.trade_execution import (
     SymbolRules,
     build_order_plan,
     execute_approved_candidate,
+    execute_manager_review,
     execution_status,
     reconcile_live_executions,
 )
@@ -516,6 +517,82 @@ class TradeExecutionTests(unittest.TestCase):
                 "SELECT status,stop_order_id,tp1_order_id,tp2_order_id FROM trade_executions WHERE signal_id=7"
             ).fetchone()
         self.assertEqual(row, ("PROTECTED", "stop-1", "tp1-1", "tp2-1"))
+
+    def test_manager_protect_is_validated_and_idempotent(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (70,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        self.assertEqual(
+            execute_approved_candidate(
+                CANDIDATE, 70, db_path=self.db_path, config=live_config(), client=client,
+            )["status"],
+            "PROTECTED",
+        )
+        update = {
+            "signal_id": 70,
+            "review": {"action": "PROTECT", "confidence": 0.9, "protect_level": 100},
+            "facts": {"management_candle_id": "2026-09-07T12:00:00Z"},
+        }
+        first = execute_manager_review(
+            update, db_path=self.db_path, config=live_config(), client=client,
+        )
+        second = execute_manager_review(
+            update, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(first["status"], "EXECUTED")
+        self.assertEqual(second["status"], "DUPLICATE_SKIPPED")
+        manager_stops = [
+            call for call in client.calls
+            if isinstance(call, tuple) and call[0] == "close_trigger" and "apex_mp_" in call[-1]
+        ]
+        self.assertEqual(len(manager_stops), 1)
+
+    def test_manager_hold_never_touches_binance(self):
+        client = FakeClient()
+        result = execute_manager_review(
+            {"signal_id": 1, "review": {"action": "HOLD", "confidence": 1}},
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "NO_EXECUTION")
+        self.assertEqual(client.calls, [])
+
+    def test_manager_partial_does_not_duplicate_exchange_tp1(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (71,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        execute_approved_candidate(
+            CANDIDATE, 71, db_path=self.db_path, config=live_config(), client=client,
+        )
+        before = len(client.calls)
+        result = execute_manager_review(
+            {"signal_id": 71, "review": {"action": "PARTIAL_EXIT", "confidence": .9}},
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BRACKET_MANAGED")
+        self.assertEqual(len(client.calls), before)
+
+    def test_manager_exit_uses_actual_position_and_closes_signal(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT, closed_at TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (72,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        execute_approved_candidate(
+            CANDIDATE, 72, db_path=self.db_path, config=live_config(), client=client,
+        )
+        client.open_positions = lambda: [{"symbol": "BTCUSDT", "positionAmt": "0.49"}]
+        result = execute_manager_review(
+            {
+                "signal_id": 72,
+                "review": {"action": "EXIT", "confidence": .9},
+                "facts": {"management_candle_id": "2026-09-07T12:05:00Z"},
+            },
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "EXECUTED")
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT result FROM signals WHERE id=72").fetchone()[0], "manager_exit")
 
     def test_expired_signal_filled_at_exchange_is_closed_not_protected(self):
         with sqlite3.connect(self.db_path) as conn:
