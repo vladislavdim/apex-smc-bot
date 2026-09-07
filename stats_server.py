@@ -102,7 +102,9 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
     else:
         where.append("occurred_at >= GREATEST(NOW() - (%s * INTERVAL '1 day'), %s::timestamptz)"); params.extend([days, STATS_BASELINE_UTC])
     if to_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", to_date): where.append("occurred_at < (%s::date + INTERVAL '1 day')"); params.append(to_date)
-    if strategy: where.append("strategy=%s"); params.append(strategy.upper())
+    # Market-data health is operational telemetry and must remain visible while
+    # Strategy Lab is filtered to a concrete strategy.
+    if strategy: where.append("(strategy=%s OR kind='market_data')"); params.append(strategy.upper())
     if symbol: where.append("symbol=%s"); params.append(symbol.upper())
     conn = _connect()
     try:
@@ -197,7 +199,7 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
     active_release = available_releases[0] if release == "latest" and available_releases else str(release or "").strip()
     if active_release:
         events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
-    attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]
+    attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]; market_data_events=[]; ltf_watch_events=[]
     for e in events:
         p=e["payload"]; key=str(p.get("attempt_key") or "")
         if e["kind"]=="attempt":
@@ -206,6 +208,8 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         elif e["kind"]=="decision" and key: decisions[key].append({**p,"occurred_at":e["occurred_at"]})
         elif e["kind"]=="scan_event": scan_events.append({**p,"occurred_at":e["occurred_at"]})
         elif e["kind"]=="trade_event": trade_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
+        elif e["kind"]=="market_data": market_data_events.append({**p,"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
+        elif e["kind"]=="ltf_watch": ltf_watch_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
     joined=[]
     for a in attempts:
         key=str(a.get("attempt_key") or ""); c=a.get("candidate") if isinstance(a.get("candidate"),dict) else {}; stop=a.get("stop") if isinstance(a.get("stop"),dict) else {}; snap=stop.get("snapshot") if isinstance(stop.get("snapshot"),dict) else {}
@@ -343,7 +347,10 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         "ZONE": ("zone_numeric", ("range_position_pct", "range_atr", "zone_distance_atr", "test_count", "best_directional_displacement_ratio", "best_directional_body_atr", "quality_score")),
     }
     numeric_values = {strategy: {metric: [] for metric in metrics} for strategy, (_, metrics) in numeric_specs.items()}
-    wy_shadow = {"observed": 0, "old_pass": 0, "structural_pass": 0, "both_pass": 0, "structural_only": 0, "old_only": 0}
+    wy_shadow = {"observed": 0, "old_pass": 0, "structural_pass": 0, "both_pass": 0, "structural_only": 0, "old_only": 0, "phase_ready": 0}
+    wy_acc_shadow = {"observed": 0, "old_pass": 0, "structural_pass": 0, "both_pass": 0, "structural_only": 0, "old_only": 0, "phase_ready": 0}
+    swing_volume_shadow = {"observed": 0, "pass_1_2": 0, "pass_1_1": 0, "shadow_only": 0}
+    fast_target_reasons = Counter()
     for r in joined:
         strategy_name = str(r.get("strategy") or "").upper()
         telemetry = r.get("telemetry") if isinstance(r.get("telemetry"), dict) else {}
@@ -354,6 +361,19 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
                 value = _num(payload.get(metric))
                 if value is not None:
                     numeric_values[strategy_name][metric].append(value)
+        if strategy_name == "SWING":
+            payload = telemetry.get("swing_numeric") if isinstance(telemetry.get("swing_numeric"), dict) else {}
+            current = payload.get("volume_pass_1_2")
+            shadow = payload.get("volume_pass_1_1_shadow")
+            if isinstance(current, bool) and isinstance(shadow, bool):
+                swing_volume_shadow["observed"] += 1
+                swing_volume_shadow["pass_1_2"] += int(current)
+                swing_volume_shadow["pass_1_1"] += int(shadow)
+                swing_volume_shadow["shadow_only"] += int(shadow and not current)
+        if strategy_name == "FAST":
+            payload = telemetry.get("fast_target_geometry") if isinstance(telemetry.get("fast_target_geometry"), dict) else {}
+            if payload.get("reason"):
+                fast_target_reasons[str(payload.get("reason"))] += 1
         if strategy_name == "WYCKOFF" and str(r.get("subtype") or "").upper() == "DISTRIBUTION":
             payload = telemetry.get("wyckoff_distribution") if isinstance(telemetry.get("wyckoff_distribution"), dict) else {}
             old_pass = payload.get("old_range_under_25")
@@ -365,17 +385,69 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
                 wy_shadow["both_pass"] += int(old_pass and structural_pass)
                 wy_shadow["structural_only"] += int(structural_pass and not old_pass)
                 wy_shadow["old_only"] += int(old_pass and not structural_pass)
+                wy_shadow["phase_ready"] += int(bool(payload.get("shadow_phase_ready")))
+        if strategy_name == "WYCKOFF" and str(r.get("subtype") or "").upper() == "SPRING":
+            payload = telemetry.get("wyckoff_accumulation") if isinstance(telemetry.get("wyckoff_accumulation"), dict) else {}
+            old_pass = payload.get("old_range_under_25")
+            structural_pass = payload.get("structural_box_under_25")
+            if isinstance(old_pass, bool) and isinstance(structural_pass, bool):
+                wy_acc_shadow["observed"] += 1
+                wy_acc_shadow["old_pass"] += int(old_pass)
+                wy_acc_shadow["structural_pass"] += int(structural_pass)
+                wy_acc_shadow["both_pass"] += int(old_pass and structural_pass)
+                wy_acc_shadow["structural_only"] += int(structural_pass and not old_pass)
+                wy_acc_shadow["old_only"] += int(old_pass and not structural_pass)
+                wy_acc_shadow["phase_ready"] += int(bool(payload.get("shadow_phase_ready")))
     numeric_telemetry = {
         strategy_name: {metric: _metric_summary(values) for metric, values in metrics.items()}
         for strategy_name, metrics in numeric_values.items()
     }
+
+    latest_market_data = {}
+    last_market_success = {}
+    for item in sorted(market_data_events, key=lambda x: x.get("occurred_at", ""), reverse=True):
+        key = (str(item.get("symbol") or ""), str(item.get("timeframe") or ""))
+        if key not in latest_market_data:
+            latest_market_data[key] = item
+        if str(item.get("status") or "").upper() == "OK" and key not in last_market_success:
+            last_market_success[key] = item.get("last_success_at") or item.get("occurred_at")
+    market_rows = []
+    for key, item in latest_market_data.items():
+        status = str(item.get("status") or "UNKNOWN").upper()
+        market_rows.append({
+            "symbol": key[0], "timeframe": key[1], "status": status,
+            "source": item.get("source") or item.get("provider") or "Gate",
+            "reason": item.get("reason") or "", "candle_count": item.get("candle_count") or 0,
+            "last_success_at": item.get("last_success_at") or last_market_success.get(key),
+            "last_update_at": item.get("last_update_at") or item.get("occurred_at"),
+        })
+    market_rows.sort(key=lambda x: (x["status"] == "OK", x["symbol"], x["timeframe"]))
+    market_data = {
+        "ok": sum(row["status"] == "OK" for row in market_rows),
+        "failed": sum(row["status"] != "OK" for row in market_rows),
+        "total": len(market_rows),
+        "last_update": max((row.get("last_update_at") or "" for row in market_rows), default=""),
+        "rows": market_rows[:100],
+    }
+
+    latest_ltf = {}
+    for item in sorted(ltf_watch_events, key=lambda x: x.get("occurred_at", ""), reverse=True):
+        key = (str(item.get("strategy") or ""), str(item.get("symbol") or ""))
+        latest_ltf.setdefault(key, item)
+    ltf_rows = sorted(
+        (item for item in latest_ltf.values() if str(item.get("state") or "").upper() == "WAITING"),
+        key=lambda x: (str(x.get("strategy") or ""), str(x.get("symbol") or "")),
+    )
+    ltf_watch = {"waiting": len(ltf_rows), "rows": ltf_rows[:100]}
 
     total=len(joined); page_size=max(20,min(int(page_size),200)); page=max(1,int(page)); start=(page-1)*page_size
     reviews_n=sum(groq_counts.values()); delivered=sum(1 for r in joined if any(str(d.get("stage") or "").lower()=="delivered" or str(d.get("outcome") or "").upper()=="ACCEPT" for d in r.get("decisions",[])))
     return {"period_days":days,"baseline":"post97","baseline_utc":STATS_BASELINE_UTC.isoformat(),"generated_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),
       "release_filter":release,"release_sha":active_release,"available_releases":available_releases[:12],"funnels":funnels,
       "bos_choch_age":bos_age_stats,"wyckoff_dist_range":wy_dist_range,"wyckoff_box_width":wy_box_range,
-      "numeric_telemetry":numeric_telemetry,"wyckoff_shadow":wy_shadow,
+      "numeric_telemetry":numeric_telemetry,"wyckoff_shadow":wy_shadow,"wyckoff_accumulation_shadow":wy_acc_shadow,
+      "swing_volume_shadow":swing_volume_shadow,"fast_target_diagnostics":dict(fast_target_reasons),
+      "market_data":market_data,"ltf_watch":ltf_watch,
       "summary":{"attempts":total,"candidates":sum(r.get("outcome")=="CANDIDATE" for r in joined),"pending_ltf":sum(r.get("outcome")=="PENDING_LTF" for r in joined),"near_setups":sum(bool(r.get("near_setup")) for r in joined),"groq_total":reviews_n,"groq_approve":groq_counts.get("APPROVE",0),"groq_wait":groq_counts.get("WAIT",0),"groq_reject":groq_counts.get("REJECT",0),"delivered":delivered,"scan_events":len(scan_events)},
       "strategy_counts":dict(Counter(str(r.get("strategy") or "UNKNOWN") for r in joined)),
       "failures":[{"label":k,"count":v} for k,v in failures.most_common(30)],
@@ -390,6 +462,7 @@ HTML=r'''<!doctype html><html lang=ru><head><meta charset=utf-8><meta name=viewp
 </style></head><body><main><div class=top><div><div class=title>📊 APEX · Strategy Lab</div><div class=muted>Актуальная статистика после #97 · с 14:54:22 UTC 03.09.2026</div></div><div id=updated class=muted></div></div>
 <div class=tabs id=periods><button class="btn active" data-days=1>24 часа</button><button class=btn data-days=7>7 дней</button><button class=btn data-days=30>30 дней</button><button class=btn id=latestRelease>После последнего deploy</button></div><div class=tabs id=strategies><button class="btn active" data-strategy="">Все</button><button class=btn data-strategy=FAST>FAST</button><button class=btn data-strategy=MTF>MTF</button><button class=btn data-strategy=SWING>SWING</button><button class=btn data-strategy=ZONE>ZONE</button><button class=btn data-strategy=WYCKOFF>WYCKOFF</button></div>
 <div class=controls><input id=symbol placeholder="Пара, напр. BTCUSDT"><input id=fromdate type=date title="Дата от"><input id=todate type=date title="Дата до"><select id=outcome><option value="">Все исходы</option><option>FILTERED</option><option>CANDIDATE</option><option>PENDING_LTF</option><option>ERROR</option></select><select id=groq><option value="">Любой Groq</option><option>APPROVE</option><option>WAIT</option><option>REJECT</option></select><input id=minrr type=number step=.1 placeholder="RR от"><input id=maxrr type=number step=.1 placeholder="RR до"><button class=btn id=apply>Применить</button><button class=btn id=refresh>↻</button></div><div class=grid id=summary></div>
+<div class="cols section"><div class=card><h2>Market Data / Gate</h2><div id=marketData></div></div><div class=card><h2>PENDING LTF lifecycle</h2><div id=ltfWatch></div></div></div>
 <div class="section card"><h2>Сквозная воронка по стратегиям</h2><div id=funnels></div><div id=wyRange class=muted style="margin-top:10px"></div></div><div class="cols section"><div class=card><h2>BOS/CHoCH age telemetry</h2><div id=bosAge></div></div><div class=card><h2>WYCKOFF Distribution width telemetry</h2><div id=wyCompare></div></div></div><div class="section card"><h2>Numeric funnel diagnostics</h2><div id=numericDiag></div></div><div class="cols section"><div class=card><h2>Где чаще всего останавливаются</h2><div id=failures></div></div><div class=card><h2>Groq: причины WAIT/REJECT</h2><div id=groqReasons></div></div></div><div class="section card"><h2>Проходимость критериев</h2><div id=criteriaStats></div></div><div class="section card"><h2>Статистика сделок</h2><div id=tradeStats></div></div><div class=section><h2>Все проверки / потенциальные сделки</h2><div class=tablewrap><table><thead><tr><th>Дата</th><th>Стратегия</th><th>Пара</th><th>Напр.</th><th>Статус</th><th>Где остановилась</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>RR</th><th>Groq</th><th></th></tr></thead><tbody id=rows></tbody></table></div><div class=controls><button class=btn id=prev>←</button><span id=pageinfo class=muted></span><button class=btn id=next>→</button></div></div><div class=footer>Dashboard только читает статистику. Он не меняет Entry / SL / TP / RR, стратегии, Groq или Binance.</div></main><script>
 const TOKEN=new URLSearchParams(location.search).get('key')||'';let DAYS=1,STRATEGY='',PAGE=1,LAST=null,RELEASE='';const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const num=v=>v===null||v===undefined||v===''?'—':Number(v).toLocaleString('ru-RU',{maximumFractionDigits:8});function params(){const p=new URLSearchParams({key:TOKEN,days:DAYS,strategy:STRATEGY,page:PAGE,page_size:100});if(RELEASE)p.set('release',RELEASE);for(const id of ['symbol','outcome','groq','fromdate','todate']){const v=document.getElementById(id).value.trim();if(v)p.set(id,v)}const a=minrr.value,b=maxrr.value;if(a)p.set('min_rr',a);if(b)p.set('max_rr',b);return p}async function load(){const r=await fetch('/api/dashboard?'+params());if(!r.ok){document.body.innerHTML='<main><h2>Статистика недоступна</h2><p>'+r.status+'</p></main>';return}LAST=await r.json();render()}function cards(s){const t=LAST.trade_stats||{};const wr=t.win_rate===null||t.win_rate===undefined?'—':t.win_rate+'%';const pnl=(Number(t.pnl_pct||0)>=0?'+':'')+Number(t.pnl_pct||0).toFixed(2)+'%';const ar=t.avg_r===null||t.avg_r===undefined?'—':Number(t.avg_r).toFixed(2)+'R';return [['Проверок',s.attempts],['Кандидатов',s.candidates],['Ждут LTF',s.pending_ltf||0],['Почти сделок',s.near_setups],['До Groq',s.groq_total],['Groq APPROVE',s.groq_approve],['WAIT / REJECT',s.groq_wait+' / '+s.groq_reject],['Отправлено',s.delivered],['Открыто',t.opened||0],['Закрыто',t.closed||0],['Win rate',wr],['P&L',pnl],['Средний R',ar]].map(x=>`<div class=card><div class=muted>${x[0]}</div><div class=num>${x[1]}</div></div>`).join('')}function bars(items,id){const el=document.getElementById(id),max=Math.max(1,...items.map(x=>x.count));el.innerHTML=items.slice(0,15).map(x=>`<div class=barrow><div title="${esc(x.label)}">${esc(x.label).slice(0,90)}</div><div class=bar><i style="width:${100*x.count/max}%"></i></div><b>${x.count}</b></div>`).join('')||'<span class=muted>Нет данных</span>'}function renderChecks(){const a=LAST.criterion_stats.filter(x=>!STRATEGY||x.strategy===STRATEGY);criteriaStats.innerHTML=a.slice(0,80).map(x=>{const p=x.total?Math.round(x.pass/x.total*100):0;return `<div class=barrow><div><b>${esc(x.strategy)}</b> · ${esc(x.label).slice(0,90)}<div class=muted>✅ ${x.pass} · ❌ ${x.fail} · всего ${x.total}</div></div><div class=bar><i style="width:${p}%"></i></div><b>${p}%</b></div>`}).join('')||'<span class=muted>Нет данных</span>'}function renderTradeStats(){const t=LAST.trade_stats||{},rows=t.by_strategy||[];const head=`<div class=muted style="margin-bottom:10px">Открыто: <b>${t.opened||0}</b> · Закрыто: <b>${t.closed||0}</b> · TP: <b class=good>${t.wins||0}</b> · SL: <b class=bad>${t.losses||0}</b> · Win rate: <b>${t.win_rate==null?'—':t.win_rate+'%'}</b> · P&L: <b class="${Number(t.pnl_pct||0)>=0?'good':'bad'}">${Number(t.pnl_pct||0)>=0?'+':''}${Number(t.pnl_pct||0).toFixed(3)}%</b> · Avg R: <b>${t.avg_r==null?'—':Number(t.avg_r).toFixed(3)+'R'}</b></div>`;const body=rows.length?`<div class=tablewrap><table style="min-width:760px"><thead><tr><th>Стратегия</th><th>Открыто</th><th>Закрыто</th><th>TP</th><th>SL</th><th>Win rate</th><th>P&L %</th><th>Avg R</th></tr></thead><tbody>${rows.map(r=>`<tr><td><b>${esc(r.strategy)}</b></td><td>${r.opened}</td><td>${r.closed}</td><td class=good>${r.wins}</td><td class=bad>${r.losses}</td><td>${r.win_rate==null?'—':r.win_rate+'%'}</td><td class="${Number(r.pnl_pct||0)>=0?'good':'bad'}">${Number(r.pnl_pct||0)>=0?'+':''}${Number(r.pnl_pct||0).toFixed(3)}%</td><td>${r.avg_r==null?'—':Number(r.avg_r).toFixed(3)+'R'}</td></tr>`).join('')}</tbody></table></div>`:'<span class=muted>Закрытых сделок пока нет</span>';tradeStats.innerHTML=head+body}function renderCatalog(){const names=STRATEGY?[STRATEGY]:['FAST','MTF','SWING','ZONE','WYCKOFF'];catalogTitle.textContent=STRATEGY?'Критерии '+STRATEGY:'Полный ромб критериев всех стратегий';catalog.innerHTML=names.map(n=>{const c=LAST.catalog[n];return `<div class=crit style="grid-column:1/-1"><b>${n}</b> · ${esc(c.timeframes)} · RR: ${esc(c.rr)}</div>`+c.criteria.map(q=>`<div class=crit><b>${q.required?'●':'○'} ${esc(q.label)}</b><div class=muted>${esc(q.category)}${q.required?' · обязательный':' · контекст/бонус'}</div>${q.detail?`<div>${esc(q.detail)}</div>`:''}</div>`).join('')}).join('')}function levels(r){const c=r.candidate||{},s=(r.stop||{}).snapshot||{};return {entry:c.entry??s.entry,sl:c.sl??s.sl,tp1:c.tp1??c.tp??s.tp1??s.tp,tp2:c.tp2??s.tp2,tp3:c.tp3??s.tp3,rr:r.rr_value}}
 function normText(v){return String(v||'').toLowerCase().replace(/[_/.-]+/g,' ').replace(/[^a-zа-я0-9 ]/gi,' ').replace(/\s+/g,' ').trim()}

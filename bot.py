@@ -4336,23 +4336,41 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     pairs = batch["pairs"]
     await _control_scan_round(batch["round_id"])
     await _control_scan_scope(pairs, batch["target"])
-    for symbol in pairs:
-        await _control_scan_pair(symbol)
-        try:
-            _liq_fast = await asyncio.to_thread(check_session_liquidity, symbol)
-            if not _liq_fast["ok"]:
-                await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
-                logging.debug(f"[FAST] {symbol}: низкая ликвидность ({_liq_fast['ratio']}x) — пропускаем")
-                continue
-            r = await asyncio.to_thread(detect_fast_deal, symbol)
-            if r:
-                found.append(r)
-            else:
-                await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
-            await asyncio.sleep(0)  # отдаём управление event loop
-        except Exception as e:
-            await _control_scan_outcome(symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(e)[:300]})
-            logging.warning(f"[auto_fast_deal_scan] {symbol}: {e}")
+    try:
+        _fast_concurrency = max(1, min(8, int(os.environ.get("APEX_FAST_CONCURRENCY", "6"))))
+    except (TypeError, ValueError):
+        _fast_concurrency = 6
+    _fast_slots = asyncio.Semaphore(_fast_concurrency)
+
+    async def _scan_fast_pair(symbol):
+        async with _fast_slots:
+            await _control_scan_pair(symbol)
+            try:
+                _liq_fast = await asyncio.to_thread(check_session_liquidity, symbol)
+                if not _liq_fast["ok"]:
+                    await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
+                    logging.debug(
+                        "[FAST] %s: низкая ликвидность (%sx) — пропускаем",
+                        symbol, _liq_fast.get("ratio"),
+                    )
+                    return None
+                result = await asyncio.to_thread(detect_fast_deal, symbol)
+                if not result:
+                    await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await _control_scan_outcome(
+                    symbol, "DATA_FAILED", "SCAN_ERROR", {"error": str(exc)[:300]}
+                )
+                logging.warning("[auto_fast_deal_scan] %s: %s", symbol, exc)
+                return None
+
+    # Gate reads are bounded, not unrestrained. Strategy predicates, candle
+    # closure rules and candidate ordering remain unchanged.
+    _fast_results = await asyncio.gather(*(_scan_fast_pair(symbol) for symbol in pairs))
+    found.extend(result for result in _fast_results if result)
 
     if not found:
         return
