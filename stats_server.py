@@ -403,10 +403,24 @@ function renderNumericDiag(){const data=LAST.numeric_telemetry||{};const labels=
 
 class Handler(BaseHTTPRequestHandler):
     server_version="APEXStats/1.0"
+    def _write(self,body,content_type,status=200):
+        try:
+            self.send_response(status); self.send_header("Content-Type",content_type); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.end_headers(); self.wfile.write(body)
+            return True
+        except (BrokenPipeError,ConnectionResetError):
+            # A browser closed or refreshed the tab while a large dashboard
+            # response was being written. The request is over; do not attempt
+            # a second error response to the already closed socket.
+            return False
     def _json(self,data,status=200):
-        body=json.dumps(data,ensure_ascii=False,default=str).encode(); self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.end_headers(); self.wfile.write(body)
+        body=json.dumps(data,ensure_ascii=False,default=str).encode(); return self._write(body,"application/json; charset=utf-8",status)
     def _html(self,text,status=200):
-        body=text.encode(); self.send_response(status); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("X-Frame-Options","DENY"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Content-Security-Policy","default-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"); self.end_headers(); self.wfile.write(body)
+        body=text.encode()
+        try:
+            self.send_response(status); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("X-Frame-Options","DENY"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Content-Security-Policy","default-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"); self.end_headers(); self.wfile.write(body)
+            return True
+        except (BrokenPipeError,ConnectionResetError):
+            return False
     def _auth(self,q):
         supplied=(q.get("key") or [""])[0]; return bool(DASHBOARD_TOKEN and hmac.compare_digest(supplied,DASHBOARD_TOKEN))
     def do_HEAD(self): self.send_response(200); self.end_headers()

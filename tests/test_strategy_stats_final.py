@@ -16,4 +16,14 @@ class StrategyStatsFinalTests(unittest.TestCase):
     def test_stats_server_does_not_import_trading(self):
         src=inspect.getsource(stats_server)
         self.assertNotIn("import bot",src); self.assertNotIn("import market",src); self.assertNotIn("trade_execution",src)
+    def test_disconnected_dashboard_client_is_not_replied_to_twice(self):
+        class ClosedSocket:
+            def write(self, _body):
+                raise BrokenPipeError("client closed")
+        handler = object.__new__(stats_server.Handler)
+        handler.wfile = ClosedSocket()
+        handler.send_response = lambda _status: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+        self.assertFalse(handler._json({"ok": True}))
 if __name__=="__main__": unittest.main()
