@@ -1,5 +1,7 @@
 import os
 import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core import runtime_observability as ro
@@ -33,7 +35,7 @@ class ReleaseCohortObservabilityTests(unittest.TestCase):
             ),
         )
 
-    def test_dashboard_defaults_to_current_release_and_keeps_history_tabs(self):
+    def test_dashboard_exposes_only_current_release(self):
         source = (
             '<div class=tabs id=periods><button class="btn active" data-days=1>24 часа</button>'
             '<button class=btn data-days=7>7 дней</button><button class=btn data-days=30>30 дней</button>'
@@ -43,9 +45,12 @@ class ReleaseCohortObservabilityTests(unittest.TestCase):
         )
         rendered = ro._patch_stats_html(source)
         self.assertIn("id=currentRelease", rendered)
-        self.assertIn("id=previousRelease", rendered)
-        self.assertIn("id=last24", rendered)
-        self.assertIn("id=allHistory", rendered)
+        self.assertIn("Current release only", rendered)
+        self.assertNotIn("id=previousRelease", rendered)
+        self.assertNotIn("id=last24", rendered)
+        self.assertNotIn("id=allHistory", rendered)
+        self.assertNotIn("Previous release:", rendered)
+        self.assertNotIn("mixed releases", rendered)
         self.assertIn("RELEASE='current'", rendered)
         self.assertNotIn("latestRelease.onclick", rendered)
 
@@ -55,6 +60,34 @@ class ReleaseCohortObservabilityTests(unittest.TestCase):
         self.assertNotIn("RR >=", source)
         self.assertNotIn("_vol_threshold =", source)
         self.assertNotIn("max_break_age=", source)
+
+    def test_api_cannot_select_previous_or_mixed_history(self):
+        calls = []
+
+        def original(*args):
+            calls.append(args)
+            return {}
+
+        module = SimpleNamespace(
+            build_dashboard=original,
+            HTML="",
+            STATS_BASELINE_UTC=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            _connect=lambda: (_ for _ in ()).throw(RuntimeError("test")),
+            _metric_summary=lambda values: {"count": len(values)},
+            _num=lambda value: value if isinstance(value, (int, float)) else None,
+        )
+        releases = [{"sha": "latest-sha", "first_seen": "2026-09-07T12:00:00Z", "last_seen": "2026-09-07T13:00:00Z"}]
+        with patch.object(ro, "_release_rows", return_value=releases), \
+             patch.object(ro, "_release_sha", return_value="latest-sha"), \
+             patch.object(ro, "_fast_timing_summary_db", return_value={}):
+            ro._patch_stats_module(module)
+            result = module.build_dashboard(days=1, release="all")
+
+        assert calls[0][0] == 30
+        assert calls[0][11] == "latest-sha"
+        assert result["cohort_mode"] == "current"
+        assert result["available_releases"] == ["latest-sha"]
+        assert result["previous_release_sha"] == ""
 
 
 if __name__ == "__main__":

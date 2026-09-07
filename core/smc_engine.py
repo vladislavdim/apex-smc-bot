@@ -303,6 +303,10 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
     sources = _ordered_sources_for_interval(symbol, interval)
     attempts = 0
     all_errors = []
+    # A few lightweight callers intentionally request only 3 candles. Treat a
+    # complete short response as healthy; larger analytical reads still need
+    # at least 15 candles before this adapter can report success.
+    required_candles = min(15, max(3, int(limit or 1)))
 
     for src in sources:
         fn = _FETCHERS.get(src)
@@ -310,7 +314,7 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
         attempts += 1
         try:
             candles = fn(symbol, interval, limit)
-            if candles and len(candles) >= 15:
+            if candles and len(candles) >= required_candles:
                 _record(src, symbol, interval, True, len(candles))
                 is_synth = src == "synthetic" or any(c.get("_synthetic") for c in candles[:1])
                 quality = ("high" if src == "gate_io" else
@@ -324,7 +328,8 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
                     logging.info(f"[SMC] ✅ {symbol} {interval} → {src} ({attempts} попыток)")
                 return res
             else:
-                err = f"{src}:{len(candles) if candles else 0}св"
+                received = len(candles) if candles else 0
+                err = f"{src}:received {received}/{required_candles} candles"
                 _record(src, symbol, interval, False, 0, err); all_errors.append(err)
         except Exception as e:
             err = f"{src}:{str(e)[:60]}"

@@ -179,33 +179,14 @@ def _patch_stats_globals() -> None:
         def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",
                             min_rr: float | None = None, max_rr: float | None = None, from_date: str = "", to_date: str = "",
                             page: int = 1, page_size: int = 100, release: str = "current") -> dict[str, Any]:
-            mode = str(release or "current").strip().lower()
+            # The public dashboard is deliberately pinned to the newest
+            # deploy. Even a handcrafted release query cannot mix versions.
+            mode = "current"
             releases = release_rows(mod)
             current = ro._release_sha() or (releases[0]["sha"] if releases else "")
-            ordered = [row["sha"] for row in releases]
-            previous = ""
-            if current in ordered:
-                idx = ordered.index(current)
-                if idx + 1 < len(ordered):
-                    previous = ordered[idx + 1]
-            elif ordered:
-                previous = ordered[0]
-
-            selected = ""
-            effective_days = days
+            selected = current
+            effective_days = 30
             effective_from = from_date
-            if mode in {"current", "latest"}:
-                selected = current
-            elif mode == "previous":
-                selected = previous
-            elif mode == "24h":
-                effective_days = 1
-            elif mode == "all":
-                if not effective_from:
-                    effective_from = mod.STATS_BASELINE_UTC.date().isoformat()
-            else:
-                selected = str(release or "")
-                mode = "release"
 
             selected_row = next((row for row in releases if row["sha"] == selected), None)
             if selected and not effective_from:
@@ -224,8 +205,8 @@ def _patch_stats_globals() -> None:
             )
             result["cohort_mode"] = mode
             result["current_release_sha"] = current
-            result["previous_release_sha"] = previous
-            result["available_releases"] = ordered[:20]
+            result["previous_release_sha"] = ""
+            result["available_releases"] = [current] if current else []
             result["release_sha"] = selected
             if selected_row and selected_row.get("first_seen"):
                 try:
