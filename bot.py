@@ -179,6 +179,17 @@ except Exception as _trade_execution_import_error:
 import os as _os_bot
 DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
 
+# Render filesystem is ephemeral.  The dedicated backup branch is the durable
+# source of truth; main must never provide a competing, stale brain.db.
+from core.brain_persistence import BrainPersistence as _BrainPersistence
+_BRAIN_PERSISTENCE = _BrainPersistence(
+    DB_PATH,
+    os.environ.get("GITHUB_REPO", ""),
+    os.environ.get("GITHUB_TOKEN", ""),
+    os.environ.get("BRAIN_BACKUP_BRANCH", "brain-backups"),
+)
+_brain_backup_async_lock = None
+
 # ── Trailing stop columns migration ──
 try:
     _mig_conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -1618,6 +1629,20 @@ async def handle_callback(callback: CallbackQuery):
         else:
             execution_block = "\n⚙️ Автоторговля: <b>модуль недоступен</b>\n"
 
+        _memory_state = _BRAIN_PERSISTENCE.status()
+        if _memory_state.get("ready"):
+            _memory_label = (
+                f"восстановлена · g{_memory_state.get('generation', 0)} · "
+                f"SHA {str(_memory_state.get('remote_blob_sha', ''))[:8]}"
+            )
+            if _memory_state.get("last_backup_at"):
+                _memory_label += f" · backup {_memory_state['last_backup_at'][:16].replace('T', ' ')} UTC"
+        elif not _memory_state.get("configured"):
+            _memory_label = "локальный режим"
+        else:
+            _memory_label = "защищена от записи · восстановление недоступно"
+        persistence_block = f"\n💾 Память: <b>{_memory_label}</b>\n"
+
         await callback.message.edit_text(
             f"📚 <b>Знания APEX</b>\n"
             f"{'━'*24}\n\n"
@@ -1635,7 +1660,8 @@ async def handle_callback(callback: CallbackQuery):
             f"🪙 Пар с закрытой историей: <b>{coin_count}</b>\n"
             f"🕐 Последний WebLearner: <b>{last_web or '—'}</b>\n"
             f"🎓 Последнее обучение по сделке: <b>{last_trade_learning or '—'}</b>\n"
-            f"{execution_block}",
+            f"{execution_block}"
+            f"{persistence_block}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🏅 Качество сигналов", callback_data="brain_grade_accuracy"),
@@ -3628,12 +3654,14 @@ async def _run_trade_manager_once():
             ),
             db_path=DB_PATH,
         )
+        durable_events = False
         for update in updates:
             logging.info(
                 "[TradeManager] signal=%s symbol=%s events=%s action=%s notify=%s",
                 update.get("signal_id"), update.get("symbol"), update.get("events"),
                 update.get("review", {}).get("action"), update.get("notify"),
             )
+            durable_events = durable_events or bool(update.get("events"))
             if not update.get("notify"):
                 continue
             for admin_id in ADMIN_IDS:
@@ -3642,6 +3670,8 @@ async def _run_trade_manager_once():
                     update.get("telegram", ""),
                     parse_mode="HTML",
                 )
+        if durable_events:
+            await backup_db_to_github("trade_manager_event")
     except asyncio.CancelledError:
         logging.info("[TradeManager] cycle stopped during process shutdown")
     except Exception as exc:
@@ -3891,7 +3921,7 @@ async def _auto_scan_swing_impl():
             delivered = await _send_signal(sd)
             if delivered:
                 logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
-                await backup_db_to_github()
+                await backup_db_to_github("signal_swing")
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -4257,7 +4287,7 @@ async def _auto_wyckoff_scan_impl():
             delivered = await _send_signal(sd)
             if delivered:
                 logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
-                await backup_db_to_github()
+                await backup_db_to_github("signal_wyckoff")
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -4413,7 +4443,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
             delivered = await _send_signal(_fast_sd)
             if delivered:
                 logging.info(f"[FastDeal] {symbol} {direction} RR={r['rr']} → отправлен")
-                await backup_db_to_github()
+                await backup_db_to_github("signal_fast")
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -5442,155 +5472,89 @@ def setup_error_capture():
 # ===== MAIN =====
 
 async def restore_db_from_github():
-    """При старте скачиваем brain.db из GitHub только если GitHub версия больше локальной"""
+    """Restore the latest verified branch snapshot, regardless of local size."""
+    result = {}
+    for attempt, delay in enumerate((0, 2, 5), start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        result = await asyncio.to_thread(_BRAIN_PERSISTENCE.restore)
+        if result.get("ready") or result.get("status") == "not_configured":
+            break
+        logging.warning(
+            "[BrainPersistence] restore attempt %s/3 failed: %s",
+            attempt, result.get("error") or result.get("status"),
+        )
+    if result.get("ready"):
+        counts = result.get("counts", {})
+        recovery = (
+            f" recovered_from={str(result.get('recovered_from'))[:12]}"
+            if result.get("recovered_from") else ""
+        )
+        logging.warning(
+            "[BrainPersistence] restored g%s sha=%s knowledge=%s rules=%s size=%sKB%s",
+            result.get("generation", 0), str(result.get("blob_sha", ""))[:12],
+            counts.get("knowledge", 0), counts.get("self_rules", 0),
+            int(result.get("size", 0)) // 1024, recovery,
+        )
+    else:
+        logging.error(
+            "[BrainPersistence] restore blocked: %s",
+            result.get("error") or result.get("status"),
+        )
+    return result
+
+
+async def backup_db_to_github(reason="scheduled"):
+    """Snapshot once per process at a time and never overwrite a newer remote."""
+    global _brain_backup_async_lock
+    if _brain_backup_async_lock is None:
+        _brain_backup_async_lock = asyncio.Lock()
+    async with _brain_backup_async_lock:
+        result = await asyncio.to_thread(_BRAIN_PERSISTENCE.backup, reason)
+    status = result.get("status")
+    if result.get("saved"):
+        counts = result.get("counts", {})
+        logging.warning(
+            "[BrainPersistence] saved g%s sha=%s knowledge=%s rules=%s size=%sKB reason=%s",
+            result.get("generation", 0), str(result.get("blob_sha", ""))[:12],
+            counts.get("knowledge", 0), counts.get("self_rules", 0),
+            int(result.get("size", 0)) // 1024, reason,
+        )
+    elif status not in ("unchanged", "not_configured"):
+        logging.warning(
+            "[BrainPersistence] backup %s: %s",
+            status, result.get("error") or "write safely skipped",
+        )
+    return result
+
+
+async def _brain_rollout_settle():
+    """Let the old Render instance finish its SIGTERM snapshot before restore."""
+    default_seconds = 65 if (
+        os.environ.get("RENDER") or os.environ.get("RENDER_INSTANCE_ID")
+    ) else 0
     try:
-        gh_token = os.environ.get("GITHUB_TOKEN", "")
-        gh_repo = os.environ.get("GITHUB_REPO", "")
-        backup_branch = os.environ.get("BRAIN_BACKUP_BRANCH", "brain-backups").strip() or "brain-backups"
-        if not gh_token or not gh_repo:
-            logging.info("GH_TOKEN/GH_REPO не заданы — пропускаем восстановление DB")
-            return
-        import base64, sqlite3 as _sq
-        loop = asyncio.get_event_loop()
-        headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
-        r = await loop.run_in_executor(None, lambda: requests.get(
-            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            params={"ref": backup_branch}, headers=headers, timeout=10,
-        ))
-        # One-time read-only compatibility with historical backups on main.
-        if r.status_code == 404:
-            r = await loop.run_in_executor(None, lambda: requests.get(
-                f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-                params={"ref": "main"}, headers=headers, timeout=10,
-            ))
-        if r.status_code != 200:
-            logging.info("brain.db в GitHub не найден — начинаем с чистой базы")
-            return
-
-        github_size = r.json().get("size", 0)
-
-        # Проверяем локальную БД
-        local_size = 0
-        local_knowledge = 0
-        if os.path.exists("brain.db"):
-            local_size = os.path.getsize("brain.db")
-            try:
-                _conn = _sq.connect("brain.db", timeout=5)
-                local_knowledge = (_conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
-                _conn.close()
-            except Exception:
-                local_knowledge = 0
-
-        # Восстанавливаем из GitHub только если локальная БД пустая
-        # или GitHub БД значительно больше
-        should_restore = (
-            local_knowledge == 0 and local_size < 100_000
-        ) or (
-            github_size > local_size * 2 and github_size > 500_000
+        seconds = max(0, min(120, int(os.environ.get(
+            "BRAIN_ROLLOUT_SETTLE_SECONDS", default_seconds
+        ))))
+    except (TypeError, ValueError):
+        seconds = default_seconds
+    if seconds:
+        logging.warning(
+            "[BrainPersistence] waiting %ss for previous instance final snapshot",
+            seconds,
         )
-
-        if should_restore:
-            content = base64.b64decode(r.json()["content"])
-            if len(content) < 100_000:
-                logging.warning(f"GitHub brain.db слишком маленькая ({len(content)//1024}KB) — пропускаем")
-                return
-            import tempfile
-            restore_dir = os.path.dirname(os.path.abspath(DB_PATH))
-            with tempfile.NamedTemporaryFile(dir=restore_dir, suffix=".restore", delete=False) as temp_db:
-                temp_db.write(content)
-                temp_path = temp_db.name
-            try:
-                check = sqlite3.connect(temp_path, timeout=10)
-                integrity = check.execute("PRAGMA integrity_check").fetchone()
-                check.close()
-                if not integrity or str(integrity[0]).lower() != "ok":
-                    raise RuntimeError(f"backup integrity failed: {integrity}")
-                os.replace(temp_path, DB_PATH)
-            finally:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            logging.info(f"brain.db восстановлен из GitHub ({len(content)//1024}KB)")
-        else:
-            logging.info(f"brain.db локальная актуальна (local={local_size//1024}KB знаний={local_knowledge}) — пропускаем")
-    except Exception as e:
-        logging.warning(f"restore_db_from_github: {e}")
+        await asyncio.sleep(seconds)
 
 
-async def backup_db_to_github():
-    """Save brain.db to a dedicated branch, never to application main."""
-    try:
-        gh_token = os.environ.get("GITHUB_TOKEN", "")
-        gh_repo = os.environ.get("GITHUB_REPO", "")
-        backup_branch = os.environ.get("BRAIN_BACKUP_BRANCH", "brain-backups").strip() or "brain-backups"
-        if not gh_token or not gh_repo:
-            return
-        import base64
-        headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
-        branch_response = requests.get(
-            f"https://api.github.com/repos/{gh_repo}/git/ref/heads/{backup_branch}",
-            headers=headers, timeout=10,
+async def _brain_startup_checkpoint():
+    """Persist migrations and restart if the remote advanced during rollout."""
+    result = await backup_db_to_github("startup_verified")
+    if result.get("status") == "stale_remote":
+        raise RuntimeError(
+            "brain.db advanced during rollout; restarting to restore the newer generation"
         )
-        if branch_response.status_code == 404:
-            base_ref = requests.get(
-                f"https://api.github.com/repos/{gh_repo}/git/ref/heads/main",
-                headers=headers, timeout=10,
-            )
-            if base_ref.status_code != 200:
-                raise RuntimeError(f"cannot read main ref: HTTP {base_ref.status_code}")
-            base_sha = base_ref.json().get("object", {}).get("sha")
-            created = requests.post(
-                f"https://api.github.com/repos/{gh_repo}/git/refs",
-                headers=headers,
-                json={"ref": f"refs/heads/{backup_branch}", "sha": base_sha},
-                timeout=10,
-            )
-            if created.status_code not in (200, 201, 422):
-                raise RuntimeError(f"cannot create backup branch: HTTP {created.status_code}")
-        elif branch_response.status_code != 200:
-            raise RuntimeError(f"cannot verify backup branch: HTTP {branch_response.status_code}")
-        # Copy through SQLite's backup API so committed WAL pages are included
-        # and GitHub never receives a torn live database file.
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".db") as snapshot:
-            source = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-            target = sqlite3.connect(snapshot.name)
-            try:
-                source.backup(target)
-                integrity = target.execute("PRAGMA integrity_check").fetchone()
-                if not integrity or str(integrity[0]).lower() != "ok":
-                    raise RuntimeError(f"SQLite snapshot integrity failed: {integrity}")
-            finally:
-                target.close()
-                source.close()
-            snapshot.seek(0)
-            content = snapshot.read()
-        encoded = base64.b64encode(content).decode()
-        # Получаем SHA для обновления
-        r = requests.get(
-            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            params={"ref": backup_branch}, headers=headers,
-            timeout=10
-        )
-        sha = r.json().get("sha", "") if r.status_code == 200 else ""
-        payload = {
-            "message": f"brain.db backup {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]",
-            "content": encoded,
-            "branch": backup_branch
-        }
-        if sha:
-            payload["sha"] = sha
-        r2 = requests.put(
-            f"https://api.github.com/repos/{gh_repo}/contents/brain.db",
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-        if r2.status_code in (200, 201):
-            logging.info(f"brain.db сохранён в GitHub ({len(content)//1024}KB)")
-        else:
-            logging.warning(f"backup_db_to_github: {r2.status_code}")
-    except Exception as e:
-        logging.warning(f"backup_db_to_github: {e}")
+    return result
 
 
 async def _apply_trade_learning_baseline_reset():
@@ -5613,7 +5577,9 @@ async def _apply_trade_learning_baseline_reset():
             # Persist both the clean baseline and its migration marker. A
             # later deploy can then never restore the legacy statistics.
             try:
-                await asyncio.wait_for(backup_db_to_github(), timeout=30)
+                await asyncio.wait_for(
+                    backup_db_to_github("trade_baseline_reset"), timeout=30
+                )
             except asyncio.TimeoutError:
                 logging.warning("Trade baseline DB backup timed out; local reset remains active")
         return result
@@ -5676,7 +5642,7 @@ async def run_brain_builder_async():
         if stats:
             logging.info(f"🧠 Brain Builder (быстрый): знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)}")
         # Бэкап БД в GitHub после обучения
-        await backup_db_to_github()
+        await backup_db_to_github("brain_builder")
     except Exception as e:
         logging.error(f"run_brain_builder_async: {e}")
 
@@ -5692,7 +5658,7 @@ async def run_brain_builder_full_async():
                 f"знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)} "
                 f"паттернов={stats.get('patterns',0)} монет={stats.get('coins',0)}"
             )
-        await backup_db_to_github()
+        await backup_db_to_github("brain_builder_full")
     except Exception as e:
         logging.error(f"run_brain_builder_full_async: {e}")
 
@@ -5738,6 +5704,8 @@ async def shadow_experience_job():
     async def refresh():
         result = await asyncio.to_thread(_refresh_shadow_positions, get_candles, DB_PATH)
         logging.info("[ExperienceMemory] shadow refresh: %s", result)
+        if any(result.get(key, 0) for key in ("activated", "closed", "expired")):
+            await backup_db_to_github("experience_transition")
     try:
         await _run_market_scan_exclusive("experience_shadow", refresh, 60)
     except asyncio.TimeoutError:
@@ -5791,7 +5759,10 @@ async def on_startup(app):
     logging.info(f"TOKEN exists = {bool(os.environ.get('TELEGRAM_TOKEN'))}")
     logging.info(f"ADMIN_ID = {os.environ.get('ADMIN_ID')}")
 
-    await restore_db_from_github()  # сначала восстанавливаем БД из GitHub
+    await _brain_rollout_settle()
+    _restore_result = await restore_db_from_github()
+    if _BRAIN_PERSISTENCE.configured and not _restore_result.get("ready"):
+        raise RuntimeError("verified brain.db restore is required before APEX startup")
     init_db()                        # потом применяем миграции к восстановленной БД
     _ensure_control_schema(DB_PATH)
     _ensure_experience_schema(DB_PATH)
@@ -5822,6 +5793,7 @@ async def on_startup(app):
     await _apply_trade_learning_baseline_reset()
     if _WEB_LEARNER_OK:
         _web_init_db()
+    await _brain_startup_checkpoint()
     asyncio.create_task(_start_market_intelligence_background())
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
@@ -5920,7 +5892,7 @@ async def on_startup(app):
             results = await loop.run_in_executor(None, _web_learn_cycle)
             if results:
                 logging.info(f"[WebLearner] Изучено тем: {len(results)}")
-            await backup_db_to_github()
+            await backup_db_to_github("web_learner")
     webhook_scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
     webhook_scheduler.add_job(_run_web_learner, "date",
         run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
@@ -5945,8 +5917,11 @@ async def on_startup(app):
             await loop.run_in_executor(None, _autopilot_deep)
     webhook_scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600, max_instances=1, coalesce=True)
 
-    # Backup БД в GitHub — раз в час
-    webhook_scheduler.add_job(backup_db_to_github, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
+    # Safety snapshot. It creates a commit only when the verified DB changed.
+    webhook_scheduler.add_job(
+        backup_db_to_github, "interval", minutes=10, jitter=60,
+        kwargs={"reason": "safety_10m"}, max_instances=1, coalesce=True,
+    )
 
     webhook_scheduler.start()
     setup_error_capture()
@@ -6040,6 +6015,14 @@ async def on_startup_diagnose(app):
     logging.info("[SelfGrow] Стартовая диагностика завершена")
 
 async def on_shutdown(app):
+    try:
+        await asyncio.wait_for(
+            backup_db_to_github("render_sigterm"), timeout=30
+        )
+    except asyncio.TimeoutError:
+        logging.warning("[BrainPersistence] final SIGTERM snapshot timed out safely")
+    except Exception as exc:
+        logging.warning("[BrainPersistence] final SIGTERM snapshot failed safely: %s", exc)
     if _MARKET_INTELLIGENCE_OK:
         try:await _stop_market_intelligence()
         except Exception:pass
@@ -6112,13 +6095,20 @@ def main():
                     await asyncio.sleep(2)
 
         async def polling_main():
+            await _brain_rollout_settle()
             # Восстанавливаем БД из GitHub с таймаутом 30 сек чтобы не блокировать деплой
             try:
-                await asyncio.wait_for(restore_db_from_github(), timeout=30)
+                _restore_result = await asyncio.wait_for(restore_db_from_github(), timeout=180)
+                if _BRAIN_PERSISTENCE.configured and not _restore_result.get("ready"):
+                    raise RuntimeError("verified brain.db restore is required before APEX startup")
             except asyncio.TimeoutError:
-                logging.warning("restore_db_from_github: таймаут 30с — продолжаем без восстановления")
+                logging.error("restore_db_from_github: таймаут 180с — backup writes remain blocked")
+                if _BRAIN_PERSISTENCE.configured:
+                    raise
             except Exception as _re:
-                logging.warning(f"restore_db_from_github: {_re}")
+                logging.error(f"restore_db_from_github: {_re}")
+                if _BRAIN_PERSISTENCE.configured:
+                    raise
             init_db()
             _ensure_control_schema(DB_PATH)
             _ensure_experience_schema(DB_PATH)
@@ -6144,6 +6134,7 @@ def main():
                 except Exception as _ile:
                     logging.warning(f"init_learning: {_ile}")
             await _apply_trade_learning_baseline_reset()
+            await _brain_startup_checkpoint()
             # Health сервер — держит бота живым для UptimeRobot
             threading.Thread(target=run_server, daemon=True).start()
             asyncio.create_task(_start_market_intelligence_background())
@@ -6162,8 +6153,11 @@ def main():
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
-            # backup_db_to_github убран из heartbeat-цикла — вызывает disk I/O ошибки
-            # Бэкап всё ещё происходит после отправки сигналов и после brain_builder
+            # One bounded safety pass every 10m; unchanged DBs create no commit.
+            scheduler.add_job(
+                backup_db_to_github, "interval", minutes=10, jitter=60,
+                kwargs={"reason": "safety_10m"}, max_instances=1, coalesce=True,
+            )
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             if BRAIN_BUILDER_AVAILABLE:
                 scheduler.add_job(run_brain_builder_async, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
@@ -6173,7 +6167,7 @@ def main():
                     try:
                         results = await asyncio.to_thread(_web_learn_cycle)
                         logging.info("[WebLearner] polling cycle complete: %s topic(s)", len(results or []))
-                        await backup_db_to_github()
+                        await backup_db_to_github("web_learner")
                     except Exception as exc:
                         logging.warning("[WebLearner] polling cycle failed safely: %s", exc)
                 scheduler.add_job(_polling_web_learner, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
@@ -6186,8 +6180,6 @@ def main():
             # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
             # timing_queue отключена — MTF отправляет напрямую
             # scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
-            # backup_db_to_github убран из scheduler — вызывает disk I/O ошибки
-            # Бэкап происходит только после отправки сигналов
             scheduler.start()
 
             # Прогрев кеша при старте — загружаем топ пары асинхронно
@@ -6207,11 +6199,22 @@ def main():
             asyncio.create_task(_warmup_cache())
             asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
             logging.info("APEX запущен в polling режиме")
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types()
-            )
-            if _MARKET_INTELLIGENCE_OK:await _stop_market_intelligence()
+            try:
+                await dp.start_polling(
+                    bot,
+                    allowed_updates=dp.resolve_used_update_types()
+                )
+            finally:
+                try:
+                    await asyncio.wait_for(
+                        backup_db_to_github("render_sigterm"), timeout=30
+                    )
+                except asyncio.TimeoutError:
+                    logging.warning("[BrainPersistence] final polling snapshot timed out safely")
+                except Exception as exc:
+                    logging.warning("[BrainPersistence] final polling snapshot failed safely: %s", exc)
+                if _MARKET_INTELLIGENCE_OK:
+                    await _stop_market_intelligence()
 
         # Watchdog — перезапускаем polling если упал
         max_restarts = 10
