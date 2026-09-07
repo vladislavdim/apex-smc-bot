@@ -1,0 +1,94 @@
+import os
+from unittest.mock import patch
+
+os.environ.setdefault("TELEGRAM_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
+
+with patch("groq.Groq", return_value=object()):
+    import market
+import stats_server
+from core import market_data_health
+
+
+def test_market_data_events_are_transition_throttled():
+    captured = []
+    market_data_health.reset_market_data_state_for_tests()
+    with patch.object(market_data_health, "emit_event", side_effect=lambda *args, **kwargs: captured.append((args, kwargs))):
+        market_data_health.record_market_data("AAVEUSDT", "15m", False, reason="Gate HTTP 500")
+        market_data_health.record_market_data("AAVEUSDT", "15m", False, reason="Gate HTTP 500")
+        market_data_health.record_market_data("AAVEUSDT", "15m", True, candle_count=120)
+    assert len(captured) == 2
+    assert captured[0][0][3]["status"] == "FAILED"
+    assert captured[1][0][3]["status"] == "OK"
+
+
+def test_dashboard_aggregates_gate_and_ltf_lifecycle():
+    events = [
+        {"event_key": "m1", "kind": "market_data", "strategy": "SYSTEM", "symbol": "AAVEUSDT",
+         "occurred_at": "2026-09-07T10:00:00+00:00", "payload": {"timeframe": "15m", "status": "OK", "source": "Gate", "last_success_at": "2026-09-07T10:00:00+00:00"}},
+        {"event_key": "m2", "kind": "market_data", "strategy": "SYSTEM", "symbol": "AAVEUSDT",
+         "occurred_at": "2026-09-07T10:05:00+00:00", "payload": {"timeframe": "15m", "status": "FAILED", "source": "Gate", "reason": "Gate HTTP 500"}},
+        {"event_key": "l1", "kind": "ltf_watch", "strategy": "MTF", "symbol": "ETHUSDT",
+         "occurred_at": "2026-09-07T10:06:00+00:00", "payload": {"state": "WAITING", "required_timeframe": "15m", "reason": "waiting BOS", "attempts": 2}},
+    ]
+    with patch.object(stats_server, "_fetch", return_value=events):
+        data = stats_server.build_dashboard(days=1)
+    assert data["market_data"]["total"] == 1
+    assert data["market_data"]["failed"] == 1
+    assert data["market_data"]["rows"][0]["last_success_at"] == "2026-09-07T10:00:00+00:00"
+    assert data["ltf_watch"]["waiting"] == 1
+    assert data["ltf_watch"]["rows"][0]["required_timeframe"] == "15m"
+
+
+def test_rendered_dashboard_contains_operational_blocks():
+    from core import runtime_observability
+
+    rendered = runtime_observability._patch_stats_html(stats_server.HTML)
+    assert "Market Data / Gate" in rendered
+    assert "PENDING LTF lifecycle" in rendered
+    assert "Gate candles OK" in rendered
+    assert "SWING volume shadow" in rendered
+
+
+def test_gate_adapter_error_is_exposed_to_health_telemetry():
+    captured = []
+    with patch.dict(market.candle_cache, {}, clear=True), \
+         patch.object(market, "get_global_candles", return_value=[]), \
+         patch.object(market, "_ROUTER_OK", False), \
+         patch.object(market, "_SMC_ENGINE_OK", True), \
+         patch.object(market, "get_candles_smart", return_value={"candles": [], "error": "gate_io:Gate HTTP 503"}), \
+         patch.object(market, "_record_market_data", side_effect=lambda *args, **kwargs: captured.append((args, kwargs))):
+        assert market.get_candles("AAVEUSDT", "15m", 120) == []
+
+    assert captured[-1][1]["reason"] == "SMC adapter: gate_io:Gate HTTP 503"
+
+
+def test_operational_telemetry_survives_strategy_filter():
+    executed = {}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            executed["query"] = query
+            executed["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    with patch.object(stats_server, "_connect", return_value=Connection()):
+        stats_server._fetch(1, "FAST", "")
+
+    assert "(strategy=%s OR kind='market_data')" in executed["query"]
+    assert "FAST" in executed["params"]

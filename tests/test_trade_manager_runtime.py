@@ -155,3 +155,38 @@ def test_manager_notification_escapes_groq_text():
     )
     assert "price &lt; risk" in text
     assert "close &gt; level" in text
+
+
+def test_manager_alerts_once_after_three_missing_tf_cycles_and_recovers(tmp_path):
+    db_path = _db(tmp_path)
+    for _ in range(2):
+        assert manager_cycle(
+            lambda: {"BTCUSDT": {"price": 102}},
+            lambda *_args: [],
+            lambda *_args, **_kwargs: "{}",
+            db_path=db_path,
+        ) == []
+    third = manager_cycle(
+        lambda: {"BTCUSDT": {"price": 102}},
+        lambda *_args: [],
+        lambda *_args, **_kwargs: "{}",
+        db_path=db_path,
+    )
+    assert len(third) == 1
+    assert third[0]["degraded"] is True
+    assert "15m data unavailable 3 cycles" in third[0]["telegram"]
+    assert manager_cycle(
+        lambda: {"BTCUSDT": {"price": 102}},
+        lambda *_args: [],
+        lambda *_args, **_kwargs: "{}",
+        db_path=db_path,
+    ) == []
+    manager_cycle(
+        lambda: {"BTCUSDT": {"price": 102}},
+        lambda *_args: _candles(),
+        lambda *_args, **_kwargs: '{"action":"HOLD","confidence":0.8}',
+        db_path=db_path,
+    )
+    state = load_state(1, db_path)
+    assert state["data_failure_count"] == 0
+    assert state["data_failure_notified"] == 0

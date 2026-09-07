@@ -11,7 +11,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from typing import Any
-from core.setup_audit import emit_scan_event as _emit_setup_audit_scan
+from core.setup_audit import emit_event as _emit_stats_event, emit_scan_event as _emit_setup_audit_scan
 
 
 DB_PATH = os.environ.get(
@@ -488,6 +488,14 @@ def upsert_ltf_watch(
         (_strategy_name(strategy), symbol, direction, required_timeframe, reason, f"+{int(ttl_hours)} hours"),
     )
     conn.commit(); conn.close()
+    try:
+        _emit_stats_event("ltf_watch", _strategy_name(strategy), symbol, {
+            "state": "WAITING", "direction": direction,
+            "required_timeframe": required_timeframe, "reason": reason,
+            "ttl_hours": int(ttl_hours),
+        })
+    except Exception:
+        pass
 
 
 def due_ltf_watches(limit: int = 12, db_path: str = DB_PATH) -> list[dict[str, Any]]:
@@ -527,7 +535,17 @@ def touch_ltf_watch(
                WHERE strategy=? AND symbol=?""",
             (result, _strategy_name(strategy), symbol),
         )
+    row = conn.execute(
+        "SELECT direction,required_timeframe,state,attempts,misses,reason,created_at,last_checked_at,resolved_at,expires_at FROM ltf_watchlist WHERE strategy=? AND symbol=?",
+        (_strategy_name(strategy), symbol),
+    ).fetchone()
     conn.commit(); conn.close()
+    try:
+        payload = dict(row) if row else {}
+        payload.update({"state": "RESOLVED" if resolved else "WAITING", "reason": result})
+        _emit_stats_event("ltf_watch", _strategy_name(strategy), symbol, payload)
+    except Exception:
+        pass
 
 
 def _strategy_name(value: Any) -> str:

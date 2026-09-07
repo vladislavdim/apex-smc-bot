@@ -110,6 +110,9 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
             last_action TEXT,
             last_confidence REAL,
             last_reviewed_candle TEXT,
+            data_failure_count INTEGER NOT NULL DEFAULT 0,
+            data_failure_notified INTEGER NOT NULL DEFAULT 0,
+            last_data_error TEXT,
             thesis_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -139,6 +142,9 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
         ("trade_manager_events", "manager_target", "REAL"),
         ("trade_manager_events", "manager_protect_level", "REAL"),
         ("trade_manager_state", "tp3_seen", "INTEGER NOT NULL DEFAULT 0"),
+        ("trade_manager_state", "data_failure_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("trade_manager_state", "data_failure_notified", "INTEGER NOT NULL DEFAULT 0"),
+        ("trade_manager_state", "last_data_error", "TEXT"),
     ):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
@@ -693,6 +699,52 @@ def format_telegram_update(
     )
 
 
+def _record_data_availability(
+    state: dict[str, Any], available: bool, error: str, db_path: str
+) -> tuple[int, bool]:
+    """Persist consecutive manager-TF failures and return (count, alert_now)."""
+    conn = _connect(db_path)
+    try:
+        if available:
+            conn.execute(
+                """UPDATE trade_manager_state SET data_failure_count=0,
+                          data_failure_notified=0,last_data_error=NULL,
+                          updated_at=CURRENT_TIMESTAMP WHERE signal_id=?""",
+                (int(state["signal_id"]),),
+            )
+            conn.commit()
+            return 0, False
+        row = conn.execute(
+            "SELECT data_failure_count,data_failure_notified FROM trade_manager_state WHERE signal_id=?",
+            (int(state["signal_id"]),),
+        ).fetchone()
+        count = int((row[0] if row else 0) or 0) + 1
+        already_notified = bool(int((row[1] if row else 0) or 0))
+        alert_now = count >= 3 and not already_notified
+        conn.execute(
+            """UPDATE trade_manager_state SET data_failure_count=?,
+                      data_failure_notified=?,last_data_error=?,updated_at=CURRENT_TIMESTAMP
+               WHERE signal_id=?""",
+            (count, int(already_notified or alert_now), str(error or "")[:500], int(state["signal_id"])),
+        )
+        conn.commit()
+        return count, alert_now
+    finally:
+        conn.close()
+
+
+def format_data_degraded_update(state: dict[str, Any], cycles: int, error: str = "") -> str:
+    symbol = html.escape(str(state.get("symbol") or "—"))
+    strategy = html.escape(str(state.get("strategy") or "—"))
+    timeframe = html.escape(str(state.get("management_tf") or "—"))
+    detail = html.escape(str(error or "Gate candles unavailable")[:240])
+    return (
+        f"⚠️ <b>{symbol} {strategy}</b>: {timeframe} data unavailable "
+        f"{int(cycles)} cycles — management degraded\n"
+        f"Источник: Gate · {detail}"
+    )
+
+
 def manager_cycle(
     get_prices: Callable[[], dict[str, Any]],
     get_candles: Callable[[str, str, int], list[Any]],
@@ -724,9 +776,28 @@ def manager_cycle(
             continue
         try:
             candles = get_candles(symbol, state["management_tf"], 120) or []
-        except Exception:
+            candle_error = ""
+        except Exception as exc:
             candles = []
+            candle_error = f"{type(exc).__name__}: {exc}"
         facts = build_structure_facts(candles, state["direction"], state.get("last_reviewed_candle"))
+        data_available = bool(facts.get("closed_candle"))
+        failure_reason = candle_error or (
+            f"expected >=16 candles, received {len(candles)}" if not data_available else ""
+        )
+        failure_count, alert_now = _record_data_availability(
+            state, data_available, failure_reason, db_path
+        )
+        if not data_available:
+            if alert_now:
+                output.append({
+                    "signal_id": state["signal_id"], "symbol": symbol,
+                    "events": ["MARKET_DATA_DEGRADED"],
+                    "review": {"action": "WAIT_CONFIRMATION", "confidence": 0.0},
+                    "notify": True, "degraded": True,
+                    "telegram": format_data_degraded_update(state, failure_count, failure_reason),
+                })
+            continue
         facts["current_price"] = price
         facts["management_matrix"] = management_matrix(state.get("strategy"))
         if external_context is not None:

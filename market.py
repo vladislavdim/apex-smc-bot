@@ -1,5 +1,6 @@
 # APEX_STRATEGY_STATS_V1
 from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe, emit_event as _emit_stats_event
+from core.market_data_health import record_market_data as _record_market_data
 import asyncio
 import logging
 import os
@@ -1951,18 +1952,21 @@ def get_candles(symbol, interval="1h", limit=200):
     global candle_cache
     requested_limit = max(1, int(limit or 1))
     cache_key = f"{symbol}_{interval}"
+    _gate_errors = []
 
     cache_ttl = 60 if interval in ("1m", "3m", "5m") else 180 if interval in ("15m", "30m") else 300 if interval in ("1h", "2h") else 600
     if cache_key in candle_cache:
         cached, ts = candle_cache[cache_key]
         # Never satisfy a larger history request with a shorter cached sample.
         if time.time() - ts < cache_ttl and len(cached) >= requested_limit:
+            _record_market_data(symbol, interval, True, source="Gate cache", candle_count=len(cached), cached=True)
             return cached[-requested_limit:]
 
     # Проверяем global candles storage. Same rule: it must satisfy this request.
     _gc = get_global_candles(symbol, interval)
     if _gc and len(_gc) >= requested_limit:
         candle_cache[cache_key] = (_gc, time.time())
+        _record_market_data(symbol, interval, True, source="Gate shared cache", candle_count=len(_gc), cached=True)
         return _gc[-requested_limit:]
 
     # 1. Brain Router — Gate USD-M in the default production policy.
@@ -1972,8 +1976,10 @@ def get_candles(symbol, interval="1h", limit=200):
             if rc and len(rc) >= 3:
                 candle_cache[cache_key] = (rc, time.time())
                 update_global_candles(symbol, interval, rc)
+                _record_market_data(symbol, interval, True, source="Gate BrainRouter", candle_count=len(rc))
                 return rc[-requested_limit:]
         except Exception as e:
+            _gate_errors.append(f"BrainRouter: {type(e).__name__}: {e}")
             logging.debug(f"BrainRouter candles {symbol} {interval}: {e}")
 
     # 2. Core SMC Gate adapter — independent fallback, same venue.
@@ -1984,10 +1990,16 @@ def get_candles(symbol, interval="1h", limit=200):
             if candles and len(candles) >= 3:
                 candle_cache[cache_key] = (candles, time.time())
                 update_global_candles(symbol, interval, candles)
+                _record_market_data(symbol, interval, True, source="Gate SMC adapter", candle_count=len(candles))
                 return candles[-requested_limit:]
+            if isinstance(result, dict) and result.get("error"):
+                _gate_errors.append(f"SMC adapter: {result['error']}")
         except Exception as e:
+            _gate_errors.append(f"SMC adapter: {type(e).__name__}: {e}")
             logging.debug("SMC Gate candles %s %s: %s", symbol, interval, e)
 
+    _gate_reason = " | ".join(_gate_errors[-2:]) or "Gate returned no usable candles"
+    _record_market_data(symbol, interval, False, source="Gate", reason=_gate_reason, candle_count=0)
     logging.debug("Нет Gate Futures свечей для %s %s", symbol, interval)
     return []
 
@@ -7277,6 +7289,8 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
             ),
             "displacement_gate_pass": bool(out["displacement_ok"]),
             "volume_ratio": round(last_vol / avg_vol, 6) if avg_vol > 0 else None,
+            "volume_pass_1_2": bool(avg_vol > 0 and last_vol >= avg_vol * 1.20),
+            "volume_pass_1_1_shadow": bool(avg_vol > 0 and last_vol >= avg_vol * 1.10),
             "retest_distance_atr": round(distance / atr1h, 6) if atr1h > 0 else None,
         })
         _audit_observe("bos_progress", {
@@ -8015,8 +8029,8 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         range_mid  = (range_high + range_low) / 2
         range_size = range_high - range_low
 
-        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7811', (range_size < atr * 2), 'range_size < atr * 2', 'range_size < atr * 2', 7811):
-            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7812', 'range_size < atr * 2', locals(), 'range_size < atr * 2', 7812)  # Диапазон слишком мал
+        if _audit_test('ZONE_DETECT_ZONE_SETUP_G7811', (range_size < atr * 2), 'ZONE: range size >= 2 ATR', 'range_size < atr * 2', 7811):
+            return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7812', 'ZONE: range size >= 2 ATR', locals(), 'range_size < atr * 2', 7812)  # Диапазон слишком мал
 
         # Require a real range extreme and leave the middle 40% neutral.
         in_discount = price <= range_low + range_size * 0.30
@@ -8078,9 +8092,9 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                         _test_count += 1
 
                 _audit_observe("zone_numeric", {"test_count": _test_count})
-                if _audit_test('ZONE_DETECT_ZONE_SETUP_G7866', (_test_count > 2), '_test_count > 2', '_test_count > 2', 7866):
+                if _audit_test('ZONE_DETECT_ZONE_SETUP_G7866', (_test_count > 2), 'ZONE: fresh zone has at most 2 prior tests', '_test_count > 2', 7866):
                     logging.debug(f"[ZONE] {symbol}: зона протестирована {_test_count} раз — mitigated")
-                    return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7868', '_test_count > 2', locals(), '_test_count > 2', 7868)
+                    return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7868', 'ZONE: fresh zone has at most 2 prior tests', locals(), '_test_count > 2', 7868)
 
                 # Strong move away: displacement ≥0.5 + body > ATR×1.0
                 _strong_move = False
@@ -8637,6 +8651,42 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         acc_low  = min(c["low"]  for c in accumulation_candles)
         acc_range_pct = (acc_high - acc_low) / acc_low * 100 if acc_low > 0 else 0
 
+        # Shadow-only structural box comparison. Production keeps using the
+        # established 30d range until the downstream Spring+SOS sample proves
+        # that the structural alternative is selective enough.
+        _audit_observe("wyckoff_accumulation", {
+            "acc_range_pct": round(acc_range_pct, 6),
+            "old_range_under_25": bool(acc_range_pct < 25),
+        })
+        try:
+            _telemetry_phases_acc = _find_wyckoff_phases_accumulation(candles_1d, candles_4h)
+            _telemetry_points_acc = []
+            for _telemetry_name_acc in ("SC", "AR", "ST"):
+                _telemetry_phase_acc = _telemetry_phases_acc.get(_telemetry_name_acc) if isinstance(_telemetry_phases_acc, dict) else None
+                if isinstance(_telemetry_phase_acc, dict) and _telemetry_phase_acc.get("price") is not None:
+                    _telemetry_points_acc.append((_telemetry_name_acc, float(_telemetry_phase_acc["price"])))
+            if len(_telemetry_points_acc) >= 2:
+                _telemetry_prices_acc = [p for _, p in _telemetry_points_acc]
+                _telemetry_box_low_acc = min(_telemetry_prices_acc)
+                _telemetry_box_high_acc = max(_telemetry_prices_acc)
+                _telemetry_box_width_acc = (
+                    (_telemetry_box_high_acc - _telemetry_box_low_acc) / _telemetry_box_low_acc * 100
+                    if _telemetry_box_low_acc > 0 else None
+                )
+                _telemetry_structural_acc = bool(_telemetry_box_width_acc is not None and _telemetry_box_width_acc < 25)
+                _telemetry_spring_acc = bool((_telemetry_phases_acc.get("Spring") or {}).get("found"))
+                _telemetry_sos_acc = bool((_telemetry_phases_acc.get("SOS") or {}).get("found"))
+                _audit_observe("wyckoff_accumulation", {
+                    "structural_box_width_pct": round(_telemetry_box_width_acc, 6) if _telemetry_box_width_acc is not None else None,
+                    "structural_box_under_25": _telemetry_structural_acc,
+                    "shadow_phase_ready": bool(_telemetry_structural_acc and _telemetry_spring_acc and _telemetry_sos_acc),
+                    "spring_found": _telemetry_spring_acc,
+                    "sos_found": _telemetry_sos_acc,
+                    "structure_points": {name: price for name, price in _telemetry_points_acc},
+                })
+        except Exception:
+            pass
+
         if acc_range_pct < 15:
             score += 20
             signals.append(f"✅ Боковик {acc_range_pct:.1f}% за 20 дней")
@@ -8965,6 +9015,13 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
                 _audit_observe("wyckoff_distribution", {
                     "distribution_box_width_pct": round(_telemetry_box_width_pct, 6) if _telemetry_box_width_pct is not None else None,
                     "structural_box_under_25": bool(_telemetry_box_width_pct < 25) if _telemetry_box_width_pct is not None else None,
+                    "shadow_phase_ready": bool(
+                        _telemetry_box_width_pct is not None and _telemetry_box_width_pct < 25
+                        and bool((_telemetry_phases.get("UTAD") or {}).get("found"))
+                        and bool((_telemetry_phases.get("SOW") or {}).get("found"))
+                    ),
+                    "utad_found": bool((_telemetry_phases.get("UTAD") or {}).get("found")),
+                    "sow_found": bool((_telemetry_phases.get("SOW") or {}).get("found")),
                     "structure_points": {name: price for name, price in _telemetry_points},
                 })
         except Exception:
@@ -9531,8 +9588,8 @@ def detect_fast_deal(symbol: str) -> dict | None:
 
         # ── 5. 15m Engulfing + Displacement + Volume Spike ──
         candles_15m = get_confirmed_candles(get_candles(symbol, "15m", 31))
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9254', (not candles_15m or len(candles_15m) < 10), '5. 15m Engulfing + Displacement + Volume Spike', 'not candles_15m or len(candles_15m) < 10', 9254):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9255', '5. 15m Engulfing + Displacement + Volume Spike', locals(), 'not candles_15m or len(candles_15m) < 10', 9255)
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9254', (not candles_15m or len(candles_15m) < 10), 'FAST: enough closed 15m trigger candles', 'not candles_15m or len(candles_15m) < 10', 9254):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9255', 'FAST: enough closed 15m trigger candles', locals(), 'not candles_15m or len(candles_15m) < 10', 9255)
 
         atr_15m = sum(c["high"] - c["low"] for c in candles_15m[-14:]) / 14
 
@@ -9611,8 +9668,13 @@ def detect_fast_deal(symbol: str) -> dict | None:
             "displacement_reached": True, "displacement_confirmed": bool(_fast_telem_displacement_seen),
             "volume_reached": bool(_fast_telem_engulfing_seen), "volume_confirmed": bool(_fast_telem_volume_confirmed),
         })
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9303', (not engulfing_found or entry is None), 'not engulfing_found or entry is None', 'not engulfing_found or entry is None', 9303):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9304', 'not engulfing_found or entry is None', locals(), 'not engulfing_found or entry is None', 9304)
+        _audit_observe("fast_trigger", {
+            "displacement_seen": bool(_fast_telem_displacement_seen),
+            "engulfing_seen": bool(_fast_telem_engulfing_seen),
+            "volume_1_6_confirmed": bool(_fast_telem_volume_confirmed),
+        })
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9303', (not engulfing_found or entry is None), 'FAST: displacement + engulfing + volume >= 1.6x', 'not engulfing_found or entry is None', 9303):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9304', 'FAST: displacement + engulfing + volume >= 1.6x', locals(), 'not engulfing_found or entry is None', 9304)
 
         # The 4h zone is context only. Execution acceptance is the confirmed
         # 15m OB/FVG retest plus the displacement/engulfing trigger above.
@@ -9645,8 +9707,16 @@ def detect_fast_deal(symbol: str) -> dict | None:
             _fast_targets = sorted(
                 {level for _, level in _fast_lows if level < entry * 0.999}, reverse=True
             )
-        if _audit_test('FAST_DETECT_FAST_DEAL_G9344', (not _fast_targets), 'not _fast_targets', 'not _fast_targets', 9344):
-            return _audit_fail('FAST_DETECT_FAST_DEAL_R9345', 'not _fast_targets', locals(), 'not _fast_targets', 9345)
+        _audit_observe("fast_target_geometry", {
+            "swing_high_count": len(_fast_highs),
+            "swing_low_count": len(_fast_lows),
+            "targets_ahead_count": len(_fast_targets),
+            "entry": entry,
+            "direction": direction,
+            "reason": "confirmed_15m_swing_ahead" if _fast_targets else "no_confirmed_15m_swing_ahead",
+        })
+        if _audit_test('FAST_DETECT_FAST_DEAL_G9344', (not _fast_targets), 'FAST: confirmed 15m swing target ahead of entry', 'not _fast_targets', 9344):
+            return _audit_fail('FAST_DETECT_FAST_DEAL_R9345', 'FAST: confirmed 15m swing target ahead of entry', locals(), 'not _fast_targets', 9345)
         # RR is defined from TP1 by the central integrity/evidence pipeline.
         # Therefore FAST must make TP1 the nearest *real structural* swing target
         # that itself satisfies the universal RR >= 2.0 floor.  We never invent
