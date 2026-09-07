@@ -292,7 +292,7 @@ def _fast_timing_summary_db(mod: Any, mode: str, release_sha: str, symbol: str =
 
 def _patch_stats_html(html: str) -> str:
     old_tabs = '<div class=tabs id=periods><button class="btn active" data-days=1>24 часа</button><button class=btn data-days=7>7 дней</button><button class=btn data-days=30>30 дней</button><button class=btn id=latestRelease>После последнего deploy</button></div>'
-    new_tabs = '<div class=tabs id=periods><button class="btn active" id=currentRelease>Current release</button><button class=btn id=previousRelease>Previous</button><button class=btn id=last24>24h</button><button class=btn id=allHistory>All history</button></div>'
+    new_tabs = '<div class=tabs id=periods><button class="btn active" id=currentRelease disabled>Current release only</button></div>'
     html = html.replace(old_tabs, new_tabs)
     html = html.replace('Актуальная статистика после #97 · с 14:54:22 UTC 03.09.2026', '<span id=cohortLabel>Current release</span>')
     html = html.replace("let DAYS=1,STRATEGY='',PAGE=1,LAST=null,RELEASE=''", "let DAYS=1,STRATEGY='',PAGE=1,LAST=null,RELEASE='current'")
@@ -315,10 +315,10 @@ def _patch_stats_html(html: str) -> str:
     html = html.replace('det={stop:r.stop,checks:r.checks,candidate:r.candidate,groq_review:r.groq_review,decisions:r.decisions,subtype:r.subtype,function:r.function,run_id:r.run_id,duration_ms:r.duration_ms}',
                         'det={telemetry:r.telemetry,release_sha:r.release_sha,service_instance:r.service_instance,deploy_id:r.deploy_id,started_at:r.started_at,stop:r.stop,checks:r.checks,candidate:r.candidate,groq_review:r.groq_review,decisions:r.decisions,subtype:r.subtype,function:r.function,run_id:r.run_id,duration_ms:r.duration_ms}')
     render_marker = "function render(){updated.textContent='Обновлено '+LAST.generated_at.replace('T',' ').slice(0,19)+' UTC'+(LAST.release_sha?' · '+LAST.release_sha.slice(0,8):'');summary.innerHTML=cards(LAST.summary);renderFunnels();renderBosAge();renderWyCompare();renderNumericDiag();"
-    render_repl = "function renderFastTiming(){const ft=LAST.fast_stage_timing||{},m=ft.metrics||{},labels={liquidity_ms:'Liquidity',context_15m_ms:'15m context',htf_ms:'HTF 1h/4h',btc_ms:'BTC context',zone_4h_ms:'4h zone/context',trigger_ms:'15m trigger',total_pair_ms:'Total pair'};fastTiming.innerHTML=Object.entries(labels).map(([k,l])=>{const x=m[k]||{};return `<div class=crit><b>${l}</b><div class=muted>n=${x.count||0}</div><div>P50 ${num(x.median)} ms · P75 ${num(x.p75)} · P90 ${num(x.p90)}</div></div>`}).join('')||'<span class=muted>Нет данных</span>'}function render(){const mode=LAST.cohort_mode||'current',sha=(LAST.release_sha||LAST.current_release_sha||'').slice(0,8),since=(LAST.release_started_at||'').replace('T',' ').slice(0,19);cohortLabel.textContent=mode==='current'?`Current release: ${sha||'—'}${since?' · since '+since+' UTC':''}`:mode==='previous'?`Previous release: ${sha||'—'}`:mode==='24h'?'24h · mixed releases':'All history · mixed releases';updated.textContent='Обновлено '+LAST.generated_at.replace('T',' ').slice(0,19)+' UTC';summary.innerHTML=cards(LAST.summary);renderFunnels();renderBosAge();renderWyCompare();renderFastTiming();renderNumericDiag();"
+    render_repl = "function renderFastTiming(){const ft=LAST.fast_stage_timing||{},m=ft.metrics||{},labels={liquidity_ms:'Liquidity',context_15m_ms:'15m context',htf_ms:'HTF 1h/4h',btc_ms:'BTC context',zone_4h_ms:'4h zone/context',trigger_ms:'15m trigger',total_pair_ms:'Total pair'};fastTiming.innerHTML=Object.entries(labels).map(([k,l])=>{const x=m[k]||{};return `<div class=crit><b>${l}</b><div class=muted>n=${x.count||0}</div><div>P50 ${num(x.median)} ms · P75 ${num(x.p75)} · P90 ${num(x.p90)}</div></div>`}).join('')||'<span class=muted>Нет данных</span>'}function render(){const sha=(LAST.release_sha||LAST.current_release_sha||'').slice(0,8),since=(LAST.release_started_at||'').replace('T',' ').slice(0,19);cohortLabel.textContent=`Current release: ${sha||'—'}${since?' · since '+since+' UTC':''}`;updated.textContent='Обновлено '+LAST.generated_at.replace('T',' ').slice(0,19)+' UTC';summary.innerHTML=cards(LAST.summary);renderFunnels();renderBosAge();renderWyCompare();renderFastTiming();renderNumericDiag();"
     html = html.replace(render_marker, render_repl)
     old_handlers = "document.querySelectorAll('#periods .btn').forEach(b=>b.onclick=()=>{document.querySelectorAll('#periods .btn').forEach(x=>x.classList.remove('active'));b.classList.add('active');DAYS=Number(b.dataset.days);PAGE=1;load()});"
-    new_handlers = "function setCohort(mode,b){document.querySelectorAll('#periods .btn').forEach(x=>x.classList.remove('active'));b.classList.add('active');RELEASE=mode;DAYS=mode==='24h'?1:30;PAGE=1;load()}currentRelease.onclick=()=>setCohort('current',currentRelease);previousRelease.onclick=()=>setCohort('previous',previousRelease);last24.onclick=()=>setCohort('24h',last24);allHistory.onclick=()=>setCohort('all',allHistory);"
+    new_handlers = ""
     html = html.replace(old_handlers, new_handlers)
     html = html.replace("latestRelease.onclick=()=>{RELEASE=RELEASE?'':'latest';latestRelease.classList.toggle('active',!!RELEASE);PAGE=1;load()};", "")
     return html
@@ -332,40 +332,22 @@ def _patch_stats_module(mod: Any) -> None:
     def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",
                         min_rr: float | None = None, max_rr: float | None = None, from_date: str = "", to_date: str = "",
                         page: int = 1, page_size: int = 100, release: str = "current") -> dict[str, Any]:
-        mode = str(release or "current").strip().lower()
+        # Strategy Lab intentionally exposes exactly one cohort: the latest
+        # deployed release. Query-string values cannot opt into mixed history.
+        mode = "current"
         releases = _release_rows(mod)
         current = _release_sha() or (releases[0]["sha"] if releases else "")
         ordered = [r["sha"] for r in releases]
-        previous = ""
-        if current in ordered:
-            idx = ordered.index(current)
-            if idx + 1 < len(ordered):
-                previous = ordered[idx + 1]
-        elif ordered:
-            previous = ordered[0]
-
-        effective_release = ""
-        effective_days = days
+        effective_release = current
+        effective_days = 30
         effective_from = from_date
-        if mode in {"current", "latest"}:
-            effective_release = current
-        elif mode == "previous":
-            effective_release = previous
-        elif mode == "24h":
-            effective_days = 1
-        elif mode == "all":
-            if not effective_from:
-                effective_from = mod.STATS_BASELINE_UTC.date().isoformat()
-        else:
-            effective_release = str(release or "")
-            mode = "release"
 
         result = original(effective_days, strategy, symbol, outcome, groq, min_rr, max_rr,
                           effective_from, to_date, page, page_size, effective_release)
         result["cohort_mode"] = mode
         result["current_release_sha"] = current
-        result["previous_release_sha"] = previous
-        result["available_releases"] = ordered[:20]
+        result["previous_release_sha"] = ""
+        result["available_releases"] = [current] if current else []
         selected = effective_release
         result["release_sha"] = selected
         selected_row = next((r for r in releases if r["sha"] == selected), None)

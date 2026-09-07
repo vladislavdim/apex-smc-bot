@@ -8,6 +8,7 @@ with patch("groq.Groq", return_value=object()):
     import market
 import stats_server
 from core import market_data_health
+from core import smc_engine
 
 
 def test_market_data_events_are_transition_throttled():
@@ -92,3 +93,16 @@ def test_operational_telemetry_survives_strategy_filter():
 
     assert "(strategy=%s OR kind='market_data')" in executed["query"]
     assert "FAST" in executed["params"]
+
+
+def test_smc_short_candle_request_is_not_a_false_failure():
+    candles = [{"close": 1.0}] * 3
+    smc_engine._candle_cache.clear()
+    with patch.object(smc_engine, "_ordered_sources_for_interval", return_value=["gate_io"]), \
+         patch.dict(smc_engine._FETCHERS, {"gate_io": lambda *_args: candles}, clear=True), \
+         patch.object(smc_engine, "_record"), \
+         patch.object(smc_engine, "_learn_fact"):
+        result = smc_engine.get_candles_smart("AAVEUSDT", "5m", 3)
+    assert result["source"] == "gate_io"
+    assert result["candles"] == candles
+    assert result["error"] == ""

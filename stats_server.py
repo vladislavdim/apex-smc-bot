@@ -196,6 +196,15 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         sha = str((e.get("payload") or {}).get("release_sha") or "").strip()
         if sha and sha not in available_releases:
             available_releases.append(sha)
+    market_success_history = {}
+    for e in events:
+        payload = e.get("payload") or {}
+        if e.get("kind") != "market_data" or str(payload.get("status") or "").upper() != "OK":
+            continue
+        key = (str(e.get("symbol") or ""), str(payload.get("timeframe") or ""))
+        timestamp = payload.get("last_success_at") or e.get("occurred_at")
+        if timestamp and (key not in market_success_history or str(timestamp) > str(market_success_history[key])):
+            market_success_history[key] = timestamp
     active_release = available_releases[0] if release == "latest" and available_releases else str(release or "").strip()
     if active_release:
         events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
@@ -418,7 +427,7 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
             "symbol": key[0], "timeframe": key[1], "status": status,
             "source": item.get("source") or item.get("provider") or "Gate",
             "reason": item.get("reason") or "", "candle_count": item.get("candle_count") or 0,
-            "last_success_at": item.get("last_success_at") or last_market_success.get(key),
+            "last_success_at": item.get("last_success_at") or last_market_success.get(key) or market_success_history.get(key),
             "last_update_at": item.get("last_update_at") or item.get("occurred_at"),
         })
     market_rows.sort(key=lambda x: (x["status"] == "OK", x["symbol"], x["timeframe"]))
