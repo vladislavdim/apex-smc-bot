@@ -61,6 +61,7 @@ def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
                    m.manager_target, m.manager_protect_level, m.last_event, m.last_action,
                    m.last_confidence, m.updated_at, m.status, m.close_result, m.exit_price,
                    m.realized_pct, m.realized_r, m.closed_at,
+                   m.manager_version, m.manager_state, m.no_progress_bars,
                    COALESCE(s.result, 'pending') AS signal_result
               FROM trade_manager_state m
               LEFT JOIN signals s ON s.id = m.signal_id
@@ -96,7 +97,14 @@ def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> 
             """,
             (int(signal_id), max(1, int(event_limit))),
         ).fetchall()
-        return {"state": dict(state), "events": [dict(row) for row in events]}
+        tracks = conn.execute(
+            """SELECT track,gross_r,net_r,mfe_r,mae_r,giveback_r,fees_slippage_r,
+                      exit_reason,targets_reached,closed_at
+                 FROM trade_manager_replay_tracks WHERE signal_id=? ORDER BY track""",
+            (int(signal_id),),
+        ).fetchall()
+        return {"state": dict(state), "events": [dict(row) for row in events],
+                "replay_tracks": [dict(row) for row in tracks]}
     finally:
         conn.close()
 
@@ -130,6 +138,7 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
         lines += [
             f"<b>#{item['signal_id']} {html.escape(str(item.get('symbol') or ''))}</b> · "
             f"{html.escape(str(item.get('strategy') or 'MTF'))} · {_direction_label(item.get('direction'))}{status_text}",
+            f"V{int(item.get('manager_version') or 2)} · state <b>{html.escape(str(item.get('manager_state') or 'PROTECTED'))}</b>",
             f"Entry <code>{_fmt_price(item.get('initial_entry'))}</code> · "
             f"Цена <code>{_fmt_price(item.get('last_price'))}</code> · "
             f"R <b>{float(item.get('current_r') or 0):+.2f}</b>",
@@ -155,6 +164,7 @@ def manager_trade_buttons(items: list[dict[str, Any]]) -> list[tuple[str, str]]:
 def format_manager_trade_detail(payload: dict[str, Any]) -> str:
     state = payload["state"]
     events = payload.get("events") or []
+    tracks = payload.get("replay_tracks") or []
     confidence = state.get("last_confidence")
     confidence_text = f"{float(confidence) * 100:.0f}%" if confidence is not None else "—"
     lines = [
@@ -162,6 +172,7 @@ def format_manager_trade_detail(payload: dict[str, Any]) -> str:
         "━━━━━━━━━━━━━━━━",
         f"<b>{html.escape(str(state.get('symbol') or ''))}</b> · {html.escape(str(state.get('strategy') or 'MTF'))} · {_direction_label(state.get('direction'))}",
         f"Management TF: <b>{html.escape(str(state.get('management_tf') or '—'))}</b>",
+        f"Manager V{int(state.get('manager_version') or 2)}: <b>{html.escape(str(state.get('manager_state') or 'PROTECTED'))}</b> · NO_PROGRESS {int(state.get('no_progress_bars') or 0)}",
         "",
         f"Entry: <code>{_fmt_price(state.get('initial_entry'))}</code>",
         f"Initial SL: <code>{_fmt_price(state.get('initial_sl'))}</code>",
@@ -198,6 +209,19 @@ def format_manager_trade_detail(payload: dict[str, Any]) -> str:
             lines.append(f"• <code>{ts}</code> {event_type} → <b>{action}</b> · {r_value:+.2f}R · {conf_text}")
             if reason:
                 lines.append(f"  {reason}")
+    if tracks:
+        by_name = {str(row.get("track")): row for row in tracks}
+        lines += ["", "<b>Независимый replay:</b>"]
+        for name in ("ACTUAL", "NO_MANAGER", "PLAYBOOK_ONLY"):
+            row = by_name.get(name) or {}
+            value = row.get("net_r")
+            value_text = f"{float(value):+.2f}R" if value is not None else "в процессе"
+            lines.append(f"• {name}: <b>{value_text}</b> · MFE {float(row.get('mfe_r') or 0):+.2f}R · MAE {float(row.get('mae_r') or 0):+.2f}R")
+        if all((by_name.get(name) or {}).get("net_r") is not None for name in ("ACTUAL", "NO_MANAGER", "PLAYBOOK_ONLY")):
+            actual = float(by_name["ACTUAL"]["net_r"])
+            no_manager = float(by_name["NO_MANAGER"]["net_r"])
+            playbook = float(by_name["PLAYBOOK_ONLY"]["net_r"])
+            lines.append(f"Groq edge: <b>{actual-no_manager:+.2f}R</b> · vs rules {actual-playbook:+.2f}R · Playbook edge {playbook-no_manager:+.2f}R")
     lines += ["", "<i>История read-only: исходные Entry/SL/TP/RR не переписываются.</i>"]
     return "\n".join(lines)[:4000]
 
