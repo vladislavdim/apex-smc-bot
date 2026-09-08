@@ -836,6 +836,13 @@ def register_active_trade(
     signal_id = int(signal.get("signal_id") or signal.get("id") or 0)
     if signal_id <= 0:
         return
+    # APEX V2 freezes the complete original thesis once.  The manager still
+    # owns the same trade row; no second decision engine is introduced.
+    try:
+        from core.apex_v2 import freeze_trade_thesis
+        frozen_thesis = freeze_trade_thesis(signal_id, signal, thesis, db_path)
+    except Exception:
+        frozen_thesis = thesis or {}
     conn = _connect(db_path)
     conn.execute(
         """INSERT OR IGNORE INTO trade_manager_state
@@ -848,7 +855,7 @@ def register_active_trade(
             float(signal.get("tp2") or tp1),
             float(signal.get("tp3") or signal.get("tp2") or tp1),
             float(signal.get("rr") or 0),
-            json.dumps(thesis or {}, ensure_ascii=False, default=str)[:20000],
+            json.dumps(frozen_thesis, ensure_ascii=False, default=str)[:20000],
         ),
     )
     snapshot = {
@@ -1133,6 +1140,27 @@ def persist_review(
     )
     conn.commit()
     conn.close()
+    try:
+        from core.apex_v2 import record_decision
+        action_id = hashlib.sha256(
+            f"manager-v2:{int(state['signal_id'])}:{candle_id}:{review.get('action')}:{','.join(events)}".encode()
+        ).hexdigest()
+        record_decision(
+            action_id=action_id,
+            signal_id=int(state["signal_id"]),
+            strategy=str(state.get("strategy") or ""),
+            symbol=str(state.get("symbol") or ""),
+            decision_source="GROQ_MANAGER" if review.get("groq_called") else "MANAGER_FALLBACK",
+            action=str(review.get("action") or "HOLD"),
+            confidence=review.get("confidence"),
+            manager_state=current_state,
+            outcome="PROPOSED",
+            context=facts,
+            payload={"events": events, "reason": review.get("reason"), "next_state": review.get("next_state")},
+            db_path=db_path,
+        )
+    except Exception:
+        pass
     replay_closed_candle(state, facts, review, db_path)
     try:
         from core.experience_memory import record_management_review
@@ -1330,6 +1358,8 @@ def manager_cycle(
             if alert_now:
                 output.append({
                     "signal_id": state["signal_id"], "symbol": symbol,
+                    "strategy": normalize_strategy(state.get("strategy")),
+                    "manager_state": "DEGRADED",
                     "events": ["MARKET_DATA_DEGRADED"],
                     "review": {"action": "HOLD", "confidence": 0.0},
                     "notify": True, "degraded": True,
@@ -1354,6 +1384,11 @@ def manager_cycle(
         facts["current_price"] = price
         facts["manager_state_before"] = str(state.get("manager_state") or "PROTECTED")
         facts["management_matrix"] = management_matrix(state.get("strategy"))
+        try:
+            from core.apex_v2 import similar_scenarios
+            facts["similar_scenarios"] = similar_scenarios(state, limit=5, db_path=db_path)
+        except Exception:
+            facts["similar_scenarios"] = []
         if str(state.get("status") or "ACTIVE").upper() == "CLOSED":
             replay_closed_candle(
                 state, facts,
@@ -1400,6 +1435,8 @@ def manager_cycle(
         output.append({
             "signal_id": state["signal_id"],
             "symbol": symbol,
+            "strategy": strategy,
+            "manager_state": str(state.get("manager_state") or "PROTECTED"),
             "events": events,
             "review": review,
             "facts": facts,

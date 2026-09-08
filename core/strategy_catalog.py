@@ -39,7 +39,7 @@ STRATEGY_CATALOG: dict[str, dict[str, Any]] = {
             _c("fast_structure", "Structure", "Fresh close-confirmed 15m BOS/CHoCH in direction"),
             _c("fast_target", "Geometry", "Real confirmed 15m swing-liquidity target exists"),
             _c("fast_sl", "Geometry", "SL is structural around the engulfing candle + ATR buffer"),
-            _c("fast_rr", "Geometry", "TP1 RR is between 2.0 and 4.0"),
+            _c("fast_rr", "Geometry", "TP1 RR is at least 2.0"),
             _c("fast_setup_evidence", "Final deterministic gate", "FAST causal matrix is not INVALID/DEVELOPING"),
             _c("fast_integrity", "Final deterministic gate", "Signal Integrity validates level ordering, freshness and min RR 2.0"),
             _c("fast_groq", "AI quality gate", "Central Groq quality review: APPROVE/WAIT/REJECT"),
