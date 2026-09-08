@@ -50,6 +50,12 @@ def test_no_progress_is_strategy_specific_and_event_only():
     assert MANAGEMENT_TF == {"FAST": "5m", "MTF": "15m", "ZONE": "15m", "SWING": "1h", "WYCKOFF": "1h"}
     assert PROGRESS_TF == {"FAST": "15m", "MTF": "15m", "SWING": "1h", "ZONE": "1h", "WYCKOFF": "4h"}
 
+    # A stale ticker can be favorable while the closed working-TF candle has
+    # not improved MFE; the event must use the latter when it is available.
+    row = state(strategy="FAST", no_progress_bars=3, progress_anchor_r=0.0)
+    assert no_progress_event_due(row, 1.0, {"new_progress_candle": True, "progress_mfe_r": 0.1})
+    assert not no_progress_event_due(row, 1.0, {"new_progress_candle": True, "progress_mfe_r": 0.3})
+
 
 def test_cutover_is_atomic_idempotent_and_fences_live(tmp_path):
     db = str(tmp_path / "brain.db")

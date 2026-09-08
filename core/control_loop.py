@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 from core.setup_audit import emit_event as _emit_stats_event, emit_scan_event as _emit_setup_audit_scan
@@ -168,6 +169,14 @@ def ensure_control_schema(db_path: str = DB_PATH) -> None:
         );
         """
     )
+    watch_columns = {row[1] for row in conn.execute("PRAGMA table_info(ltf_watchlist)")}
+    if "setup_id" not in watch_columns:
+        conn.execute("ALTER TABLE ltf_watchlist ADD COLUMN setup_id TEXT")
+    conn.execute("UPDATE ltf_watchlist SET setup_id=lower(hex(randomblob(16))) WHERE setup_id IS NULL")
+    conn.execute("""CREATE TABLE IF NOT EXISTS ltf_setup_history (
+        setup_id TEXT PRIMARY KEY, strategy TEXT, symbol TEXT, direction TEXT,
+        required_timeframe TEXT, state TEXT, reason TEXT, attempts INTEGER,
+        created_at TEXT, expires_at TEXT, resolved_at TEXT)""")
     for strategy in _STRATEGIES:
         conn.execute(
             "INSERT OR IGNORE INTO strategy_risk_state(strategy) VALUES (?)",
@@ -477,23 +486,38 @@ def upsert_ltf_watch(
 ) -> None:
     ensure_control_schema(db_path)
     conn = _connect(db_path)
-    conn.execute(
-        """INSERT INTO ltf_watchlist
-           (strategy,symbol,direction,required_timeframe,state,reason,expires_at)
-           VALUES (?,?,?,?, 'WAITING', ?, datetime('now', ?))
-           ON CONFLICT(strategy,symbol) DO UPDATE SET
-             direction=excluded.direction,required_timeframe=excluded.required_timeframe,
-             state='WAITING',reason=excluded.reason,expires_at=excluded.expires_at,
-             resolved_at=NULL""",
-        (_strategy_name(strategy), symbol, direction, required_timeframe, reason, f"+{int(ttl_hours)} hours"),
-    )
+    conn.execute("BEGIN IMMEDIATE")
+    old = conn.execute("SELECT * FROM ltf_watchlist WHERE strategy=? AND symbol=?",
+                       (_strategy_name(strategy), symbol)).fetchone()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    same = bool(old and old["state"] == "WAITING" and old["expires_at"] > now
+                and old["direction"] == direction and old["required_timeframe"] == required_timeframe)
+    if same:
+        # Re-observation is not a new setup and cannot extend its original TTL.
+        conn.execute("UPDATE ltf_watchlist SET reason=? WHERE strategy=? AND symbol=?",
+                     (reason, _strategy_name(strategy), symbol))
+    else:
+        if old:
+            conn.execute("""INSERT OR REPLACE INTO ltf_setup_history VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                         (old["setup_id"], old["strategy"], old["symbol"], old["direction"],
+                          old["required_timeframe"], old["state"] if old["state"] != "WAITING" else "EXPIRED" if old["expires_at"] <= now else "SUPERSEDED",
+                          old["reason"], old["attempts"], old["created_at"], old["expires_at"], old["resolved_at"] or now))
+        conn.execute("""INSERT INTO ltf_watchlist
+            (strategy,symbol,direction,required_timeframe,state,reason,expires_at,setup_id)
+            VALUES (?,?,?,?, 'WAITING', ?, datetime('now', ?),?)
+            ON CONFLICT(strategy,symbol) DO UPDATE SET
+            direction=excluded.direction,required_timeframe=excluded.required_timeframe,
+            state='WAITING',reason=excluded.reason,expires_at=excluded.expires_at,
+            setup_id=excluded.setup_id,created_at=CURRENT_TIMESTAMP,
+            attempts=0,misses=0,last_checked_at=NULL,resolved_at=NULL""",
+            (_strategy_name(strategy),symbol,direction,required_timeframe,reason,
+             f"+{int(ttl_hours)} hours",uuid.uuid4().hex))
+    row = dict(conn.execute("SELECT * FROM ltf_watchlist WHERE strategy=? AND symbol=?",
+                            (_strategy_name(strategy),symbol)).fetchone())
     conn.commit(); conn.close()
     try:
-        _emit_stats_event("ltf_watch", _strategy_name(strategy), symbol, {
-            "state": "WAITING", "direction": direction,
-            "required_timeframe": required_timeframe, "reason": reason,
-            "ttl_hours": int(ttl_hours),
-        })
+        _emit_stats_event("ltf_watch", _strategy_name(strategy), symbol,
+                          {**row, "identity_scope": "strategy_symbol_direction_tf_watch", "reobserved": same})
     except Exception:
         pass
 
@@ -525,24 +549,24 @@ def touch_ltf_watch(
         conn.execute(
             """UPDATE ltf_watchlist SET state='RESOLVED',attempts=attempts+1,
                       reason=?,last_checked_at=CURRENT_TIMESTAMP,resolved_at=CURRENT_TIMESTAMP
-               WHERE strategy=? AND symbol=?""",
+               WHERE strategy=? AND symbol=? AND state='WAITING' AND expires_at>CURRENT_TIMESTAMP""",
             (result, _strategy_name(strategy), symbol),
         )
     else:
         conn.execute(
             """UPDATE ltf_watchlist SET attempts=attempts+1,misses=misses+1,
                       reason=?,last_checked_at=CURRENT_TIMESTAMP
-               WHERE strategy=? AND symbol=?""",
+               WHERE strategy=? AND symbol=? AND state='WAITING' AND expires_at>CURRENT_TIMESTAMP""",
             (result, _strategy_name(strategy), symbol),
         )
     row = conn.execute(
-        "SELECT direction,required_timeframe,state,attempts,misses,reason,created_at,last_checked_at,resolved_at,expires_at FROM ltf_watchlist WHERE strategy=? AND symbol=?",
+        "SELECT setup_id,direction,required_timeframe,state,attempts,misses,reason,created_at,last_checked_at,resolved_at,expires_at FROM ltf_watchlist WHERE strategy=? AND symbol=?",
         (_strategy_name(strategy), symbol),
     ).fetchone()
     conn.commit(); conn.close()
     try:
         payload = dict(row) if row else {}
-        payload.update({"state": "RESOLVED" if resolved else "WAITING", "reason": result})
+        payload.update({"reason": result})
         _emit_stats_event("ltf_watch", _strategy_name(strategy), symbol, payload)
     except Exception:
         pass

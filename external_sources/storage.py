@@ -33,3 +33,37 @@ def persist_context(context: dict[str, Any], strategy: str | None, used_in_groq:
         conn.commit(); conn.close()
     except Exception as exc:
         logging.warning("[ExternalSources] persistence failed: %s", exc)
+
+
+def persist_shadow_source(result: dict[str, Any]) -> None:
+    """Separate shadow store: its values are never returned to live Groq callers."""
+    from contextlib import closing
+    path = os.getenv('APEX_DB_PATH') or os.getenv('APEX_BRAIN_DB_PATH') or DB_PATH
+    with closing(sqlite3.connect(path, timeout=2)) as conn, conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS external_shadow_snapshots (
+            source TEXT NOT NULL, symbol TEXT NOT NULL, payload_json TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(source,symbol))''')
+        conn.execute('''INSERT INTO external_shadow_snapshots(source,symbol,payload_json)
+            VALUES(?,?,?) ON CONFLICT(source,symbol) DO UPDATE SET
+            payload_json=excluded.payload_json,updated_at=CURRENT_TIMESTAMP''',
+            (result.get('source','unknown'),result.get('symbol',''),json.dumps(result,default=str)))
+
+
+def persist_gate_microstructure(symbol: str, features: dict[str, Any], db_path: str | None = None) -> None:
+    """Persist bounded Gate WS features for read-only diagnostics.
+
+    The table is intentionally separate from normalized external context so a
+    WS imbalance can never become an entry gate or a Manager command by itself.
+    """
+    path = db_path or os.getenv('APEX_DB_PATH') or os.getenv('APEX_BRAIN_DB_PATH') or DB_PATH
+    import hashlib
+    import time
+    payload = json.dumps(features or {}, ensure_ascii=False, sort_keys=True, default=str)
+    update_id = str((features or {}).get('update_id') or int(time.time()))
+    key = hashlib.sha256(f"{str(symbol).upper()}:{update_id}".encode()).hexdigest()
+    with sqlite3.connect(path, timeout=2) as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS gate_microstructure_shadow (
+            event_key TEXT PRIMARY KEY, symbol TEXT NOT NULL, update_id TEXT,
+            payload_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''INSERT OR IGNORE INTO gate_microstructure_shadow(event_key,symbol,update_id,payload_json)
+                        VALUES(?,?,?,?)''', (key, str(symbol).upper(), update_id, payload))

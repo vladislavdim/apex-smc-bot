@@ -10,6 +10,7 @@ import sqlite3
 import time
 from typing import Any
 from core.data_policy import configured_market_data_providers
+from .budget import budget, request_scope
 from .models import number
 from .pair_registry import get_pair
 
@@ -170,11 +171,20 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
     backoff = 1
     while _stop_event and not _stop_event.is_set():
         try:
+            source, units = request_scope(url)
+            await asyncio.to_thread(budget.reserve, source, units)
+        except Exception as exc:
+            # A websocket reconnect is still external traffic.  If the local
+            # ledger/circuit is unavailable, fail closed instead of spinning.
+            logging.warning("[LiveTape] %s websocket budget denied: %s", provider, type(exc).__name__)
+            return
+        try:
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=8, sock_read=70)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.ws_connect(url, heartbeat=25, autoping=True) as ws:
                     for subscription in subscriptions: await ws.send_json(subscription)
                     backoff = 1
+                    await asyncio.to_thread(budget.outcome, source)
                     async for message in ws:
                         if _stop_event and _stop_event.is_set(): break
                         if message.type == aiohttp.WSMsgType.TEXT:
@@ -183,6 +193,7 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
                         elif message.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}: break
         except asyncio.CancelledError: raise
         except Exception as exc:
+            await asyncio.to_thread(budget.outcome, source, failed=True)
             logging.warning("[LiveTape] %s websocket retry url=%s error=%s", provider, url.split("?", 1)[0], type(exc).__name__)
         if _stop_event and not _stop_event.is_set(): await asyncio.sleep(min(backoff, 30)); backoff = min(backoff * 2, 30)
 

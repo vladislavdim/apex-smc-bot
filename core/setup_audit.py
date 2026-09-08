@@ -295,6 +295,18 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
                "outcome": outcome, "stop": context.get("stop"), "checks": context.get("checks", []),
                "telemetry": _safe_value(context.get("telemetry") or {}) or {},
                "candidate": _candidate_snapshot(candidate or {}), "error": str(error)[:2000] if error else ""}
+    # Only an explicit terminal audit_fail establishes a blocking STOP.
+    # A predicate's FAIL label alone is not evidence that it stopped execution.
+    stop = payload.get("stop") or {}
+    for check in payload["checks"]:
+        line = check.get("line")
+        stop_line = stop.get("line")
+        blocking = bool(stop and ((check.get("condition") and check.get("condition") == stop.get("condition"))
+                        or (line and stop_line and stop_line == line + 1)))
+        label = str(check.get("label", "")).lower()
+        check["blocking_stop"] = blocking
+        check["role"] = "HARD_GATE" if blocking else "SOFT_CONTEXT" if "non-blocking" in label or "warning only" in label else "OBSERVED_CHECK"
+    payload["telemetry_schema_version"] = 2
     emit_event("attempt", context["strategy"], context.get("symbol", ""), payload, event_key=context["attempt_key"])
 
 

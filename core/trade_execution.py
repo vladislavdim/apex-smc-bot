@@ -552,6 +552,11 @@ class BinanceFuturesClient:
     def query_order(self, symbol: str, order_id: str):
         return self._request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, signed=True)
 
+    def account_order_trades(self, symbol: str, order_id: str):
+        return self._request("GET", "/fapi/v1/userTrades",
+                             {"symbol": symbol, "orderId": order_id, "limit": 1000},
+                             signed=True, attempts=1)
+
     def query_order_by_client_id(self, symbol: str, client_id: str):
         return self._request(
             "GET", "/fapi/v1/order",
@@ -582,7 +587,7 @@ class BinanceFuturesClient:
 
     def query_algo_order(self, algo_id: str = "", client_algo_id: str = ""):
         params = {"algoId": algo_id} if algo_id else {"clientAlgoId": client_algo_id}
-        return self._request("GET", "/fapi/v1/algoOrder", params, signed=True)
+        return self._request("GET", "/fapi/v1/algoOrder", params, signed=True, attempts=1)
 
     def cancel_algo_order(self, algo_id: str):
         return self._request(
@@ -1304,9 +1309,18 @@ def reconcile_live_executions(
         logging.debug("[AutoTrading] reconciliation already in progress; tick skipped")
         return []
     try:
-        return _reconcile_live_executions_unlocked(
+        outcomes = _reconcile_live_executions_unlocked(
             db_path=db_path, config=config, client=client,
         )
+        active_config = config or ExecutionConfig.from_env()
+        if active_config.live_armed:
+            try:
+                from core.execution_ledger import register_execution_orders, reconcile_one
+                register_execution_orders(db_path)
+                reconcile_one(db_path, lambda: client or BinanceFuturesClient(active_config))
+            except Exception as exc:
+                logging.warning("[ExecutionLedger] accounting unavailable: %s", type(exc).__name__)
+        return outcomes
     finally:
         _reconcile_process_lock.release()
 

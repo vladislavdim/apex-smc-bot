@@ -366,6 +366,25 @@ Return JSON only, with no markdown or commentary:
     await asyncio.to_thread(persist_news_context, news, strategy, review.get("decision"))
     await asyncio.to_thread(_persist_review, candidate, context, news, memory, zones, learning, review)
     await asyncio.to_thread(_emit_setup_audit_groq, candidate, review)
+    try:
+        from core.groq_calibration import record_prediction
+        candidate_hash = hashlib.sha256(
+            json.dumps(view, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        ).hexdigest()
+        context_hash = hashlib.sha256(
+            json.dumps({"context": context, "news": news}, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        ).hexdigest()
+        await asyncio.to_thread(
+            record_prediction,
+            f"entry-groq:{candidate_hash}", review.get("decision") or "WAIT", review.get("confidence"),
+            signal_id=int(candidate.get("signal_id")) if candidate.get("signal_id") is not None else None,
+            strategy=strategy, symbol=str(view.get("symbol") or ""), context_hash=context_hash,
+            payload={"setup_state": setup_assessment.get("state"), "degraded": review.get("degraded")},
+            db_path=DB_PATH,
+        )
+    except Exception:
+        # Calibration is optional telemetry and cannot affect the quality gate.
+        pass
     if matrix_ready:
         await asyncio.to_thread(persist_assessment, candidate, setup_assessment, "FINAL", DB_PATH)
     return review
