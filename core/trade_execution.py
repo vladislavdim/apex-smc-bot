@@ -716,8 +716,31 @@ def execute_manager_review(
     signal_id = int(update.get("signal_id") or 0)
     review = update.get("review") if isinstance(update.get("review"), Mapping) else {}
     action = str(review.get("action") or "HOLD").upper()
-    if action not in {"PROTECT", "PARTIAL_EXIT", "EXIT"}:
+    action = {"EXIT": "CLOSE", "WAIT_CONFIRMATION": "HOLD"}.get(action, action)
+    if action not in {"PROTECT", "MOVE_STOP_TO_BREAKEVEN", "PARTIAL_EXIT", "CLOSE"}:
         return {"signal_id": signal_id, "status": "NO_EXECUTION", "action": action}
+    # Formal V2 transition validation always precedes risk/exchange checks.
+    try:
+        from core.trade_manager import validate_transition
+        conn = _connect(db_path)
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_manager_state'"
+        ).fetchone()
+        manager_row = conn.execute(
+            "SELECT manager_state,partial_exit_done,initial_entry FROM trade_manager_state WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone() if table_exists else None
+        conn.close()
+        facts = update.get("facts") if isinstance(update.get("facts"), Mapping) else {}
+        if manager_row:
+            manager_state = str(facts.get("manager_state_before") or manager_row[0] or "PROTECTED")
+            valid_transition, _ = validate_transition(manager_state, action)
+            if not valid_transition:
+                return {"signal_id": signal_id, "status": "INVALID_STATE_TRANSITION", "action": action}
+            if action == "PARTIAL_EXIT" and int(manager_row[1] or 0):
+                return {"signal_id": signal_id, "status": "DUPLICATE_SKIPPED", "action": action}
+    except sqlite3.Error:
+        manager_row = None
     if not config.live_armed or config.kill_switch:
         return {"signal_id": signal_id, "status": "LIVE_NOT_ARMED", "action": action}
     if signal_id <= 0:
@@ -743,6 +766,8 @@ def execute_manager_review(
         }
     candle_id = str(facts.get("management_candle_id") or "event")
     requested_level = review.get("protect_level") if action == "PROTECT" else None
+    if action == "MOVE_STOP_TO_BREAKEVEN":
+        requested_level = float(manager_row[2]) if manager_row else None
     raw_key = f"{signal_id}:{action}:{candle_id}:{requested_level or ''}"
     action_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:32]
     if not _claim_manager_action(db_path, action_key, signal_id, action, requested_level):
@@ -754,7 +779,7 @@ def execute_manager_review(
         direction = str(snapshot["direction"])
         close_side = "SELL" if direction == "BULLISH" else "BUY"
         rules = client.symbol_rules(symbol)
-        if action == "PROTECT":
+        if action in {"PROTECT", "MOVE_STOP_TO_BREAKEVEN"}:
             level = _decimal(requested_level)
             entry = _decimal(snapshot["entry"])
             current_stop = _decimal(snapshot.get("active_stop_price") or snapshot["sl"])
@@ -775,6 +800,11 @@ def execute_manager_review(
                 stop_order_id=new_stop_id, active_stop_price=float(rounded),
             )
             _finish_manager_action(db_path, action_key, "EXECUTED", order_id=new_stop_id)
+            try:
+                from core.trade_manager import confirm_manager_action
+                confirm_manager_action(signal_id, action, "EXECUTED", db_path)
+            except Exception:
+                pass
             return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": new_stop_id}
 
         positions = [row for row in client.open_positions() if str(row.get("symbol")) == symbol]
@@ -790,7 +820,7 @@ def execute_manager_review(
             symbol, direction, _plain_decimal(quantity), f"apex_mx_{signal_id}_{action_key[:8]}",
         )
         order_id = str(order.get("orderId") or "")
-        if action == "EXIT":
+        if action == "CLOSE":
             _update_execution(db_path, int(_execution_id(db_path, signal_id)), "CLEANUP_PENDING")
             conn = _connect(db_path)
             try:
@@ -805,7 +835,13 @@ def execute_manager_review(
             finally:
                 conn.close()
         _finish_manager_action(db_path, action_key, "EXECUTED", order_id=order_id)
-        return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": order_id}
+        try:
+            from core.trade_manager import confirm_manager_action
+            confirm_manager_action(signal_id, action, "EXECUTED", db_path)
+        except Exception:
+            pass
+        outward_action = "EXIT" if action == "CLOSE" else action
+        return {"signal_id": signal_id, "status": "EXECUTED", "action": outward_action, "order_id": order_id}
     except Exception as exc:
         _finish_manager_action(db_path, action_key, "ERROR", error=str(exc))
         logging.error("[AutoTrading] manager action signal=%s action=%s failed safely: %s", signal_id, action, exc)
@@ -901,6 +937,18 @@ def execute_approved_candidate(
     config = config or ExecutionConfig.from_env()
     if not config.enabled:
         return {"status": "DISABLED", "signal_id": signal_id}
+    # Manager V2 cutover fence: no new execution can bypass the sole-manager
+    # runtime switch. Missing legacy table remains backward compatible in paper.
+    try:
+        conn = _connect(db_path)
+        row = conn.execute(
+            "SELECT value FROM trade_manager_runtime WHERE key='opens_enabled'"
+        ).fetchone()
+        conn.close()
+        if row and str(row[0]) != "1":
+            return {"status": "BLOCKED_MANAGER_CUTOVER", "signal_id": signal_id}
+    except sqlite3.Error:
+        pass
 
     risk_state = candidate.get("_strategy_risk_state") or {}
     if str(risk_state.get("mode", "NORMAL")).upper() == "PAUSED":
@@ -982,7 +1030,15 @@ def execute_approved_candidate(
         # immutable strategy levels against the exchange mark price immediately
         # before sizing/submission so a setup that already hit SL/TP cannot be
         # turned into a late live entry.
-        current_price = client.mark_price(symbol)
+        # Market-data integrity is evaluated from the Gate snapshot carried by
+        # the approved candidate. Binance is execution/account state only.
+        gate_price = candidate.get("_gate_price") or candidate.get("current_price") or candidate.get("market_price")
+        current_price = float(gate_price or client.mark_price(symbol))
+        if current_price <= 0:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "SKIPPED_STALE_GATE_DATA",
+                error="fresh Gate price is required before live submission",
+            )
         current_integrity = validate_candidate(candidate, current_price)
         if not current_integrity.get("valid"):
             return _store_execution(
@@ -1317,6 +1373,14 @@ def _reconcile_live_executions_unlocked(
             )
             _update_execution(db_path, int(row["id"]), retry_status, last_error=str(exc))
             outcomes.append({"status": "RECONCILE_ERROR", "signal_id": row["signal_id"]})
+    for outcome in outcomes:
+        try:
+            from core.trade_manager import confirm_v2_reconciliation
+            confirm_v2_reconciliation(
+                int(outcome.get("signal_id") or 0), str(outcome.get("status") or ""), db_path
+            )
+        except Exception:
+            pass
     return outcomes
 
 
