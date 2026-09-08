@@ -885,6 +885,16 @@ def _live_reconcile_rows(db_path: str) -> list[sqlite3.Row]:
                 WHERE te.mode='live' AND te.status IN ({placeholders})""",
             _LIVE_RECONCILE_STATUSES,
         ).fetchall()
+    cutover_ids: set[int] = set()
+    has_manager = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_manager_state'"
+    ).fetchone()
+    if has_manager:
+        cutover_ids = {
+            int(item[0]) for item in conn.execute(
+                "SELECT signal_id FROM trade_manager_state WHERE manager_state='RECONCILIATION_REQUIRED'"
+            ).fetchall()
+        }
     conn.close()
 
     actionable: list[sqlite3.Row] = []
@@ -893,7 +903,7 @@ def _live_reconcile_rows(db_path: str) -> list[sqlite3.Row]:
         signal_pending = str(row["signal_result"]) == "pending"
         if status in {"ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING"}:
             actionable.append(row)
-        elif status == "PROTECTED" and not signal_pending:
+        elif status == "PROTECTED" and (not signal_pending or int(row["signal_id"]) in cutover_ids):
             actionable.append(row)
     return actionable
 
@@ -1314,6 +1324,30 @@ def _reconcile_live_executions_unlocked(
         return []
     client = client or BinanceFuturesClient(config)
     outcomes = []
+    protected_cutover_ids: set[int] = set()
+    conn = _connect(db_path)
+    try:
+        protected_cutover_ids = {
+            int(item[0]) for item in conn.execute(
+                "SELECT signal_id FROM trade_manager_state WHERE manager_state='RECONCILIATION_REQUIRED'"
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        protected_cutover_ids = set()
+    finally:
+        conn.close()
+    # One bounded, batched position snapshot confirms every already-protected
+    # cutover row. Existing protective orders are deliberately not queried,
+    # cancelled or recreated here.
+    open_position_symbols: set[str] = set()
+    if any(int(row["signal_id"]) in protected_cutover_ids and row["status"] == "PROTECTED" for row in rows):
+        try:
+            open_position_symbols = {
+                str(item.get("symbol") or "").upper() for item in client.open_positions()
+                if abs(float(item.get("positionAmt") or 0)) > 0
+            }
+        except Exception as exc:
+            logging.warning("[AutoTrading] bounded V2 cutover snapshot unavailable: %s", exc)
     for row in rows:
         try:
             signal_pending = str(row["signal_result"]) == "pending"
@@ -1323,6 +1357,13 @@ def _reconcile_live_executions_unlocked(
                 outcomes.append(_cleanup_protective_orders(row, client, db_path))
                 continue
             if row["status"] == "PROTECTED":
+                if int(row["signal_id"]) in protected_cutover_ids:
+                    protected = bool(str(row["stop_order_id"] or ""))
+                    position_exists = str(row["symbol"]).upper() in open_position_symbols
+                    outcomes.append({
+                        "status": "PROTECTED" if protected and position_exists else "RECONCILE_ERROR",
+                        "signal_id": row["signal_id"],
+                    })
                 continue
             if row["status"] == "PROTECTED_NO_TP":
                 outcomes.append(_retry_missing_take_profits(row, client, config, db_path))

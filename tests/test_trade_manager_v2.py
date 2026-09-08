@@ -1,6 +1,7 @@
 import sqlite3
 
 from core.manager_playbooks import promotion_assessment, shadow_features
+from core.trade_execution import ExecutionConfig, LIVE_CONFIRMATION, ensure_execution_schema, reconcile_live_executions
 from core.trade_manager import (
     MANAGEMENT_TF, NO_PROGRESS_BARS, PROGRESS_TF, TRANSITION_MATRIX, activate_v2_once,
     confirm_manager_action, ensure_trade_manager_schema, load_state, no_progress_event_due,
@@ -91,6 +92,38 @@ def test_exchange_transition_commits_only_after_confirmation(tmp_path):
     assert load_state(1, db)["manager_state"] == "PROTECTED"
     assert confirm_manager_action(1, "PROTECT", "EXECUTED", db)
     assert load_state(1, db)["manager_state"] == "MANAGING"
+
+
+def test_cutover_reconciliation_uses_one_position_snapshot_and_keeps_protection(tmp_path):
+    db = str(tmp_path / "brain.db")
+    ensure_trade_manager_schema(db)
+    ensure_execution_schema(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE signals(id INTEGER PRIMARY KEY,result TEXT)")
+        conn.execute("INSERT INTO signals VALUES(1,'pending')")
+    register_active_trade({"id": 1, "symbol": "AAVEUSDT", "grade": "MTF", "direction": "BULLISH", "entry": 100, "sl": 95, "tp1": 105}, db_path=db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE trade_manager_state SET manager_state='RECONCILIATION_REQUIRED'")
+        conn.execute("UPDATE trade_manager_runtime SET value='0' WHERE key='opens_enabled'")
+        conn.execute("DELETE FROM trade_manager_runtime WHERE key='v2_cutover_complete'")
+        conn.execute("""INSERT INTO trade_executions(signal_id,mode,symbol,direction,status,entry,sl,tp1,tp2,quantity,stop_order_id)
+                        VALUES(1,'live','AAVEUSDT','BULLISH','PROTECTED',100,95,105,110,1,'existing-stop')""")
+
+    class SnapshotClient:
+        def __init__(self): self.calls = []
+        def open_positions(self):
+            self.calls.append("open_positions")
+            return [{"symbol": "AAVEUSDT", "positionAmt": "1"}]
+
+    client = SnapshotClient()
+    config = ExecutionConfig(enabled=True, mode="live", api_key="k", api_secret="s", live_confirmation=LIVE_CONFIRMATION)
+    outcomes = reconcile_live_executions(db_path=db, config=config, client=client)
+    assert outcomes == [{"status": "PROTECTED", "signal_id": 1}]
+    assert client.calls == ["open_positions"]
+    assert load_state(1, db)["manager_state"] == "PROTECTED"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stop_order_id FROM trade_executions WHERE signal_id=1").fetchone()[0] == "existing-stop"
+        assert conn.execute("SELECT value FROM trade_manager_runtime WHERE key='opens_enabled'").fetchone()[0] == "1"
 
 
 def test_book_rules_are_gate_relative_shadow_and_never_auto_activate():
