@@ -43,7 +43,24 @@ class SetupAuditTests(unittest.TestCase):
         self.assertEqual(payload["outcome"], "FILTERED")
         self.assertEqual(payload["stop"]["code"], "FAST_R")
         self.assertEqual(payload["checks"][0]["state"], "FAIL")
+        self.assertTrue(payload["checks"][0]["blocking_stop"])
+        self.assertEqual(payload["stop"]["blocking_check_code"], "FAST_X")
         self.assertEqual(payload["stop"]["snapshot"]["symbol"], "BTCUSDT")
+
+    def test_passed_or_adjacent_check_never_owns_stop(self):
+        @setup_audit.audit_strategy("SWING")
+        def sample(symbol):
+            setup_audit.audit_test("LTF_DATA", False, "LTF data available", "not candles", 10)
+            setup_audit.audit_test("FRESH_BOS", True, "Fresh BOS", "not fresh_bos", 20)
+            setup_audit.audit_test("ZONE", False, "Zone available", "not zone", 21)
+            return setup_audit.audit_fail("SWING_STOP", "Fresh BOS", locals(), "not fresh_bos", 22)
+
+        self.assertIsNone(sample("ETHUSDT"))
+        payload = json.loads(self._rows()[0][1])
+        owners = [check for check in payload["checks"] if check["blocking_stop"]]
+        self.assertEqual([item["code"] for item in owners], ["FRESH_BOS"])
+        self.assertFalse(payload["checks"][0]["blocking_stop"])
+        self.assertFalse(payload["checks"][2]["blocking_stop"])
 
     def test_candidate_gets_private_correlation_key_and_pass_gate(self):
         @setup_audit.audit_strategy("ZONE")

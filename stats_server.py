@@ -95,6 +95,34 @@ def _reason(text: str) -> str:
     return text[:260] or "без причины"
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _timeframe_seconds(value: Any) -> int | None:
+    match = re.fullmatch(r"(\d+)\s*([mhdwMHDW])", str(value or "").strip())
+    if not match:
+        return None
+    unit = match.group(2).lower()
+    return int(match.group(1)) * {"m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+
+
+def _market_freshness(last_success: Any, timeframe: Any, now: datetime) -> dict[str, Any]:
+    timestamp = _parse_utc(last_success)
+    period = _timeframe_seconds(timeframe)
+    if timestamp is None or period is None:
+        return {"freshness_status": "UNKNOWN", "age_seconds": None, "freshness_sla_seconds": period * 3 if period else None}
+    age = max(0, int((now.astimezone(timezone.utc) - timestamp).total_seconds()))
+    # Three working candles is deliberately diagnostic-only. It never changes
+    # a strategy decision and avoids calling an old successful request fresh.
+    sla = max(300, period * 3)
+    return {"freshness_status": "FRESH" if age <= sla else "STALE", "age_seconds": age, "freshness_sla_seconds": sla}
+
+
 def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: str = "") -> list[dict[str, Any]]:
     days = max(1, min(int(days), 30)); where: list[str] = []; params: list[Any] = []
     if from_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", from_date):
@@ -425,19 +453,25 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         if str(item.get("status") or "").upper() == "OK" and key not in last_market_success:
             last_market_success[key] = item.get("last_success_at") or item.get("occurred_at")
     market_rows = []
+    now_utc = datetime.now(timezone.utc)
     for key, item in latest_market_data.items():
         status = str(item.get("status") or "UNKNOWN").upper()
+        success_at = item.get("last_success_at") or last_market_success.get(key) or market_success_history.get(key)
         market_rows.append({
             "symbol": key[0], "timeframe": key[1], "status": status,
             "source": item.get("source") or item.get("provider") or "Gate",
             "reason": item.get("reason") or "", "candle_count": item.get("candle_count") or 0,
-            "last_success_at": item.get("last_success_at") or last_market_success.get(key) or market_success_history.get(key),
+            "last_success_at": success_at,
             "last_update_at": item.get("last_update_at") or item.get("occurred_at"),
+            **_market_freshness(success_at, key[1], now_utc),
         })
-    market_rows.sort(key=lambda x: (x["status"] == "OK", x["symbol"], x["timeframe"]))
+    market_rows.sort(key=lambda x: (x["status"] == "OK" and x["freshness_status"] == "FRESH", x["symbol"], x["timeframe"]))
     market_data = {
         "ok": sum(row["status"] == "OK" for row in market_rows),
         "failed": sum(row["status"] != "OK" for row in market_rows),
+        "stale": sum(row["freshness_status"] == "STALE" for row in market_rows),
+        "fresh": sum(row["freshness_status"] == "FRESH" for row in market_rows),
+        "freshness_unknown": sum(row["freshness_status"] == "UNKNOWN" for row in market_rows),
         "total": len(market_rows),
         "last_update": max((row.get("last_update_at") or "" for row in market_rows), default=""),
         "rows": market_rows[:100],
@@ -445,9 +479,11 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
 
     latest_ltf = {}
     for item in sorted(ltf_watch_events, key=lambda x: x.get("occurred_at", ""), reverse=True):
-        key = (str(item.get("strategy") or ""), str(item.get("symbol") or ""))
+        key = str(item.get("setup_id") or "").strip() or (
+            str(item.get("strategy") or ""), str(item.get("symbol") or ""),
+            str(item.get("direction") or ""), str(item.get("required_timeframe") or ""),
+        )
         latest_ltf.setdefault(key, item)
-    now_utc = datetime.now(timezone.utc)
     def _not_expired(item: dict[str, Any]) -> bool:
         value = str(item.get("expires_at") or "").strip()
         if not value:
@@ -464,7 +500,7 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
          if str(item.get("state") or "").upper() == "WAITING" and _not_expired(item)),
         key=lambda x: (str(x.get("strategy") or ""), str(x.get("symbol") or "")),
     )
-    ltf_watch = {"waiting": len(ltf_rows), "rows": ltf_rows[:100]}
+    ltf_watch = {"waiting": len(ltf_rows), "unique_setups": len(ltf_rows), "rows": ltf_rows[:100]}
     for funnel in funnels:
         funnel["pending_ltf_attempts"] = funnel.get("pending_ltf", 0)
         funnel["pending_ltf"] = sum(str(x.get("strategy", "")).upper() == funnel["strategy"] for x in ltf_rows)
@@ -545,6 +581,12 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
     learning_v2 = latest_v2.get("learning") if isinstance(latest_v2.get("learning"), dict) else {}
     incidents = latest_v2.get("open_incidents") if isinstance(latest_v2.get("open_incidents"), list) else []
     versions = latest_v2.get("versions") if isinstance(latest_v2.get("versions"), dict) else {}
+    budget_plan = latest_v2.get("api_budget_plan") if isinstance(latest_v2.get("api_budget_plan"), dict) else {}
+    observability_reasons = []
+    if str(budget_plan.get("status") or "").upper() in {"", "UNCONFIGURED", "UNAVAILABLE", "INVALID_PLAN"}:
+        observability_reasons.append("API_BUDGET_PLAN_INCOMPLETE")
+    if market_data["freshness_unknown"]:
+        observability_reasons.append("MARKET_DATA_FRESHNESS_UNKNOWN")
     system_state = "CRITICAL" if any(str(x.get("severity") or "").upper() == "CRITICAL" for x in incidents) else (
         "DEGRADED" if market_data["failed"] or manager_failures or incidents else "HEALTHY"
     )
@@ -554,11 +596,13 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         "manager_cycles": len(manager_events), "groq_entry_reviews": sum(groq_counts.values()),
         "incidents": len(incidents), "execution_mode": execution_mode,
         "api_budget": latest_v2.get("api_budget", []),
-        "api_budget_plan": latest_v2.get("api_budget_plan", {}),
+        "api_budget_plan": budget_plan,
         "api_budget_error": latest_v2.get("api_budget_error"),
         "source_registry": latest_v2.get("source_registry", []),
         "gate_microstructure": latest_v2.get("gate_microstructure", []),
         "versions": versions, "snapshot_at": latest_v2.get("generated_at") or latest_v2.get("occurred_at"),
+        "observability_state": "INCOMPLETE" if observability_reasons else "COMPLETE",
+        "observability_reasons": observability_reasons,
     }
 
     total=len(joined); page_size=max(20,min(int(page_size),200)); page=max(1,int(page)); start=(page-1)*page_size

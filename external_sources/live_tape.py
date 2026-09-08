@@ -13,6 +13,7 @@ from core.data_policy import configured_market_data_providers
 from .budget import budget, request_scope
 from .models import number
 from .pair_registry import get_pair
+from .gate_microstructure import OrderBookReducer
 
 try:
     import aiohttp
@@ -36,6 +37,12 @@ _stop_event: asyncio.Event | None = None
 _last_persist: dict[str, float] = {}
 _configured_symbols: list[str] = []
 _provider_to_apex: dict[tuple[str, str], str] = {}
+_gate_books: dict[str, OrderBookReducer] = {}
+_gate_depth_last_persist: dict[str, float] = {}
+
+
+class GateDepthResync(RuntimeError):
+    """Force a reconnect/resubscribe so futures.obu sends a new full snapshot."""
 
 def _apex_from_provider(provider: str, provider_symbol: str) -> str | None:
     normalized = provider_symbol.upper().replace("-", "_")
@@ -74,7 +81,10 @@ def ingest_gate(message: dict[str, Any]) -> None:
     rows, now = (result if isinstance(result, list) else [result]), time.time()
     for row in rows:
         if not isinstance(row, dict): continue
-        symbol = _apex_from_provider("gate", str(row.get("contract") or row.get("s") or ""))
+        raw_symbol = str(row.get("contract") or row.get("s") or "")
+        if channel == "futures.obu":
+            raw_symbol = raw_symbol.replace("ob.", "").rsplit(".", 1)[0]
+        symbol = _apex_from_provider("gate", raw_symbol)
         if not symbol: continue
         multiplier = number(get_pair(symbol).get("gate_multiplier")) or 1.0
         timestamp = (number(row.get("create_time_ms")) or now * 1000) / 1000
@@ -88,6 +98,21 @@ def ingest_gate(message: dict[str, Any]) -> None:
             mark, units = number(row.get("mark_price")), number(row.get("total_size"))
             _latest[("gate", symbol)] = {**_latest.get(("gate", symbol), {}), "funding": number(row.get("funding_rate")),
                 "oi": abs(units) * multiplier * mark if units is not None and mark is not None else None, "updated_at": now}
+        elif channel == "futures.obu":
+            reducer = _gate_books.get(symbol)
+            if reducer is None:
+                reducer = OrderBookReducer(symbol, depth=50, contract_multiplier=multiplier)
+                _gate_books[symbol] = reducer
+            applied = reducer.apply_message(row)
+            if not applied and reducer.status == "RESYNC_REQUIRED":
+                raise GateDepthResync(f"gate_depth_sequence_gap:{symbol}")
+            if applied and now - _gate_depth_last_persist.get(symbol, 0.0) >= 5.0:
+                _gate_depth_last_persist[symbol] = now
+                try:
+                    from .storage import persist_gate_microstructure
+                    persist_gate_microstructure(symbol, reducer.features(now=now), _DB_PATH)
+                except Exception:
+                    pass
 
 def ingest_binance(message: dict[str, Any]) -> None:
     row = message.get("data", message)
@@ -164,6 +189,28 @@ async def collect(symbol: str) -> dict:
     if not data["sources"]: return {"source": SOURCE, "status": "warming_up", "symbol": symbol}
     if time.time() - _last_persist.get(symbol, 0) >= 60:
         _last_persist[symbol] = time.time(); await asyncio.to_thread(_persist_snapshot, data)
+        gate = (data.get("sources") or {}).get("gate")
+        if isinstance(gate, dict):
+            # The currently connected channel provides trades and BBO only.
+            # Persist it as such; never label this as a sequence-verified depth
+            # book. Full depth remains unavailable until REST snapshot + WS
+            # delta bootstrap is active and verified.
+            bid, ask = number(gate.get("bid")), number(gate.get("ask"))
+            mid = (bid + ask) / 2 if bid and ask else None
+            feature = {
+                "source": "gate_ws", "status": "BBO_TRADE_ONLY",
+                "sequence_status": "DEPTH_NOT_SUBSCRIBED", "update_id": int(time.time()),
+                "bid": bid, "ask": ask,
+                "spread_bps": ((ask - bid) / mid * 10000) if mid and ask >= bid else None,
+                "buy_usd_60s": gate.get("buy_usd_60s"), "sell_usd_60s": gate.get("sell_usd_60s"),
+                "age_seconds": gate.get("age_seconds"), "venue_normalized": True,
+                "scope": "SHADOW_CONTEXT", "institutional_intent": False,
+            }
+            try:
+                from .storage import persist_gate_microstructure
+                await asyncio.to_thread(persist_gate_microstructure, symbol, feature, _DB_PATH)
+            except Exception:
+                pass
     return {"source": SOURCE, "status": "fresh", "age_seconds": data["age_seconds"], "normalized": data}
 
 async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]], parser) -> None:
@@ -189,6 +236,8 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
                         if _stop_event and _stop_event.is_set(): break
                         if message.type == aiohttp.WSMsgType.TEXT:
                             try: parser(json.loads(message.data))
+                            except GateDepthResync:
+                                raise
                             except Exception as exc: logging.debug("[LiveTape] parse: %s", exc)
                         elif message.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}: break
         except asyncio.CancelledError: raise
@@ -198,7 +247,7 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
         if _stop_event and not _stop_event.is_set(): await asyncio.sleep(min(backoff, 30)); backoff = min(backoff * 2, 30)
 
 async def start(symbols: list[str]) -> dict[str, Any]:
-    global _configured_symbols, _stop_event, _tasks, _provider_to_apex
+    global _configured_symbols, _stop_event, _tasks, _provider_to_apex, _gate_books
     normalized_symbols = [s.upper().replace("/", "") for s in symbols]
     _tasks = [task for task in _tasks if not task.done()]
     if _tasks and normalized_symbols == _configured_symbols:
@@ -212,11 +261,23 @@ async def start(symbols: list[str]) -> dict[str, Any]:
             provider_symbol = pair.get(f"{provider}_symbol")
             if provider_symbol: _provider_to_apex[(provider, str(provider_symbol).upper())] = symbol
     _stop_event = asyncio.Event()
+    _gate_books = {}
     enabled = set(configured_market_data_providers())
     gate = [get_pair(s)["gate_symbol"] for s in _configured_symbols if get_pair(s).get("gate_supported")]
     bybit = [get_pair(s)["bybit_symbol"] for s in _configured_symbols if get_pair(s).get("bybit_supported")]
     if gate and "gate" in enabled:
         subs = [{"time": int(time.time()), "channel": channel, "event": "subscribe", "payload": gate} for channel in ("futures.trades", "futures.book_ticker", "futures.tickers")]
+        requested_depth = {
+            item.strip().upper().replace("/", "")
+            for item in os.environ.get("APEX_GATE_DEPTH_SYMBOLS", "").split(",") if item.strip()
+        }
+        depth_gate = [get_pair(s)["gate_symbol"] for s in _configured_symbols if s in requested_depth and get_pair(s).get("gate_supported")][:3]
+        if depth_gate:
+            # futures.obu sends a full snapshot first and strict deltas after
+            # it. Cap at three explicitly selected near-ready/active symbols
+            # to bound bandwidth and local writes.
+            subs.append({"time": int(time.time()), "channel": "futures.obu", "event": "subscribe",
+                         "payload": [f"ob.{symbol}.50" for symbol in depth_gate]})
         _tasks.append(asyncio.create_task(_consume("gate", "wss://fx-ws.gateio.ws/v4/ws/usdt", subs, ingest_gate)))
     if bybit and "bybit" in enabled:
         args = [topic for symbol in bybit for topic in (f"publicTrade.{symbol}", f"allLiquidation.{symbol}", f"tickers.{symbol}")]

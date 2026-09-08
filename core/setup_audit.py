@@ -295,14 +295,31 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
                "outcome": outcome, "stop": context.get("stop"), "checks": context.get("checks", []),
                "telemetry": _safe_value(context.get("telemetry") or {}) or {},
                "candidate": _candidate_snapshot(candidate or {}), "error": str(error)[:2000] if error else ""}
-    # Only an explicit terminal audit_fail establishes a blocking STOP.
-    # A predicate's FAIL label alone is not evidence that it stopped execution.
+    # Only an explicit terminal audit_fail establishes a blocking STOP.  Map it
+    # to exactly one failed predicate: a passed check can never own a STOP and
+    # line adjacency alone is not sufficient evidence (instrumented source can
+    # insert several observations between a predicate and its return).
     stop = payload.get("stop") or {}
-    for check in payload["checks"]:
-        line = check.get("line")
+    failed = [(index, check) for index, check in enumerate(payload["checks"])
+              if str(check.get("state") or "").upper() == "FAIL"]
+    owner_index = None
+    if stop and failed:
+        condition = str(stop.get("condition") or "").strip()
+        label = str(stop.get("label") or "").strip()
+        exact = [(index, check) for index, check in failed
+                 if condition and str(check.get("condition") or "").strip() == condition]
+        if not exact:
+            exact = [(index, check) for index, check in failed
+                     if label and str(check.get("label") or "").strip() == label]
+        candidates = exact or failed
         stop_line = stop.get("line")
-        blocking = bool(stop and ((check.get("condition") and check.get("condition") == stop.get("condition"))
-                        or (line and stop_line and stop_line == line + 1)))
+        preceding = [(index, check) for index, check in candidates
+                     if stop_line and check.get("line") and int(check["line"]) <= int(stop_line)]
+        owner_index = (preceding or candidates)[-1][0]
+        stop["blocking_check_index"] = owner_index
+        stop["blocking_check_code"] = payload["checks"][owner_index].get("code")
+    for index, check in enumerate(payload["checks"]):
+        blocking = owner_index == index
         label = str(check.get("label", "")).lower()
         check["blocking_stop"] = blocking
         check["role"] = "HARD_GATE" if blocking else "SOFT_CONTEXT" if "non-blocking" in label or "warning only" in label else "OBSERVED_CHECK"

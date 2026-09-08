@@ -7,13 +7,16 @@ import unittest
 from core.backup_restore import backup_sqlite, verify_sqlite_backup
 from core.apex_v2 import dashboard_snapshot
 from core.execution_simulator import ExecutionModel, simulate_fill, validate_protection_replace
-from core.groq_calibration import calibration_summary, record_outcome, record_prediction
+from core.groq_calibration import calibration_summary, record_outcome, record_prediction, resolve_signal
 from core.portfolio_dependency import build_dependency_graph, latest_dependency_snapshot, persist_dependency_snapshot
 from core.release_guard import evaluate_release_gate, restart_invariants
-from core.replay_lab import FrozenEntry, persist_replay_bundle, replay_dashboard_summary, replay_three_tracks
+from core.replay_lab import (FrozenEntry, ReplayCandle, load_replay_inputs,
+                             persist_replay_bundle, persist_replay_candle,
+                             replay_dashboard_summary, replay_three_tracks)
 from core.shadow_evidence import evaluate_shadow_rule, load_shadow_evaluations, persist_shadow_evaluation
 from core.source_registry import SourcePolicyError, registry_snapshot, source_contract, validate_source_usage
 from core.strategy_diagnostics import compare_release_funnels, funnel_snapshot
+from core.trade_manager import ensure_trade_manager_schema, replay_closed_candle
 from external_sources.gate_microstructure import OrderBookReducer, TradeFlow, summarize_order_book
 
 
@@ -33,12 +36,14 @@ class SourceAndMicrostructureTests(unittest.TestCase):
         reducer = OrderBookReducer("BTCUSDT")
         self.assertTrue(reducer.apply_snapshot([[100, 2]], [[101, 3]], 10))
         self.assertTrue(reducer.apply_delta([[100, 3]], [], 11, 11))
-        self.assertFalse(reducer.apply_delta([], [], 13, 13))
+        self.assertTrue(reducer.apply_delta([[100, 4]], [], 12, 12))
+        self.assertFalse(reducer.apply_delta([], [], 14, 14))
         self.assertEqual(reducer.status, "RESYNC_REQUIRED")
         self.assertFalse(reducer.apply_delta([], [], 14, 14))
         features = reducer.features()
         self.assertEqual(features["scope"], "SHADOW_CONTEXT")
         self.assertFalse(features["institutional_intent"])
+        self.assertTrue(features["venue_normalized"])
 
     def test_flow_and_empty_book_are_bounded(self):
         flow = TradeFlow()
@@ -94,6 +99,34 @@ class ReplayTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM apex_v2_replay_track_results").fetchone()[0], 3)
             self.assertEqual(len(replay_dashboard_summary(db)), 1)
 
+    def test_delayed_candles_replay_in_exchange_time_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "brain.db")
+            persist_replay_candle(7, ReplayCandle("late", 100, 102, 99, 101, "2026-09-08T10:15:00+00:00"), db)
+            persist_replay_candle(7, ReplayCandle("early", 100, 101, 99, 100, "2026-09-08T10:00:00+00:00"), db)
+            rows = load_replay_inputs(7, db)["candles"]
+            self.assertEqual([row["candle_id"] for row in rows], ["early", "late"])
+
+    def test_counterfactual_bundle_continues_after_actual_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "brain.db")
+            ensure_trade_manager_schema(db)
+            state = {
+                "signal_id": 7, "symbol": "AAVEUSDT", "strategy": "MTF",
+                "direction": "BULLISH", "initial_entry": 100, "initial_sl": 95,
+                "initial_tp1": 105, "initial_tp2": 110, "initial_tp3": 115,
+                "status": "CLOSED",
+            }
+            for candle_id, closed_at in (("c1", "2026-09-08T10:00:00+00:00"), ("c2", "2026-09-08T10:15:00+00:00")):
+                replay_closed_candle(state, {
+                    "management_candle_id": candle_id, "new_management_candle": True,
+                    "latest_closed_open": 100, "latest_closed_high": 103,
+                    "latest_closed_low": 99, "latest_close": 102, "closed_at": closed_at,
+                }, {"action": "HOLD"}, db)
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM apex_v2_replay_candles WHERE signal_id=7").fetchone()[0], 2)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM apex_v2_replay_runs WHERE signal_id=7").fetchone()[0], 2)
+
 
 class EvidenceAndDiagnosticsTests(unittest.TestCase):
     def test_shadow_gate_reports_full_ab_and_never_activates(self):
@@ -115,8 +148,29 @@ class EvidenceAndDiagnosticsTests(unittest.TestCase):
             self.assertEqual(calibration_summary(db)["resolved"], 1)
             graph = build_dependency_graph({"BTCUSDT": list(range(25)), "ETHUSDT": list(range(25)), "AAVEUSDT": list(reversed(range(25)))}, min_samples=2)
             self.assertEqual(graph["source"], "Gate_closed_returns")
+            self.assertEqual(graph["alignment"], "closed_candle_event_time_intersection")
             persist_dependency_snapshot(graph, db)
             self.assertEqual(latest_dependency_snapshot(db)["source"], "Gate_closed_returns")
+
+    def test_manager_action_is_not_labelled_with_whole_trade_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "brain.db")
+            record_prediction(
+                "manager-action", "PROTECT", 0.8, signal_id=9,
+                prediction_target="ACTION_INCREMENTAL_R_VS_HOLD", db_path=db,
+            )
+            self.assertEqual(resolve_signal(9, outcome_label=True, reward_r=2.0, db_path=db), 0)
+            summary = calibration_summary(db)
+            self.assertEqual(summary["resolved"], 0)
+
+    def test_dependency_graph_aligns_closed_gate_candles_by_timestamp(self):
+        graph = build_dependency_graph({
+            "BTCUSDT": {"10:00": 1, "10:15": 2, "10:30": 3},
+            "ETHUSDT": {"10:15": 4, "10:30": 6, "10:45": -99},
+        }, min_samples=2)
+        edge = graph["edges"][0]
+        self.assertEqual(edge["samples"], 2)
+        self.assertEqual(edge["correlation"], 1.0)
 
     def test_release_guard_and_backup(self):
         self.assertEqual(evaluate_release_gate({"tests_green": True, "manager_version": 2, "gate_coverage": 1.0})["decision"], "PROCEED")
@@ -129,6 +183,12 @@ class EvidenceAndDiagnosticsTests(unittest.TestCase):
             report = backup_sqlite(src, dst)
             self.assertTrue(report["ok"])
             self.assertTrue(verify_sqlite_backup(dst, ["test"])["ok"])
+            with self.assertRaises(FileNotFoundError):
+                backup_sqlite(os.path.join(tmp, "missing.db"), dst)
+            # A failed source lookup must not create a database or clobber the
+            # last verified generation.
+            self.assertTrue(verify_sqlite_backup(dst, ["test"])["ok"])
+            self.assertFalse(verify_sqlite_backup(os.path.join(tmp, "absent.db"))["ok"])
 
     def test_dashboard_exposes_new_diagnostics_without_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
