@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping
 
 
 APEX_VERSION = "2.0"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STRATEGIES = ("FAST", "MTF", "SWING", "ZONE", "WYCKOFF")
 MATERIAL_MANAGER_EVENTS = {
     "TP1_HIT", "TP2_HIT", "TP3_HIT", "INVALIDATION_HIT", "BOS", "CHOCH",
@@ -170,7 +170,12 @@ def ensure_apex_v2_schema(db_path: str = DB_PATH) -> None:
           ON apex_v2_incidents(status,severity,started_at DESC);
         """
     )
+    conn.execute("""CREATE TABLE IF NOT EXISTS apex_release_manifests (
+        release_sha TEXT PRIMARY KEY, manifest_json TEXT NOT NULL,
+        first_seen TEXT DEFAULT CURRENT_TIMESTAMP)""")
     manifest = version_manifest()
+    conn.execute("INSERT OR IGNORE INTO apex_release_manifests(release_sha,manifest_json) VALUES(?,?)",
+                 (manifest["release_sha"], _canonical(manifest)))
     conn.execute(
         """INSERT INTO apex_v2_runtime(key,value_json) VALUES('version_manifest',?)
            ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP""",
@@ -547,6 +552,29 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     ensure_apex_v2_schema(db_path)
     conn = _connect(db_path)
     result: dict[str, Any] = {"versions": version_manifest(), "generated_at": _utc_now()}
+    # Source registry is declarative and secret-free.  It makes the Gate-only
+    # market-data boundary visible beside the rolling request ledger.
+    try:
+        from core.source_registry import registry_snapshot
+        result["source_registry"] = registry_snapshot()
+    except Exception:
+        result["source_registry"] = []
+    try:
+        from external_sources.budget import SourceBudget
+        result["api_budget"] = SourceBudget(db_path).snapshot()
+        raw_plan = os.environ.get("APEX_EXTERNAL_SOURCE_PLAN_JSON")
+        if raw_plan:
+            try:
+                from external_sources.budget import plan_daily_load
+                result["api_budget_plan"] = plan_daily_load(json.loads(raw_plan))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result["api_budget_plan"] = {"status": "invalid_plan"}
+        else:
+            result["api_budget_plan"] = {}
+    except Exception:
+        result["api_budget"] = []
+        result["api_budget_error"] = "ledger_unavailable"
+        result["api_budget_plan"] = {}
     for key, table, order in (
         ("market_state", "apex_v2_market_states", "observed_at"),
         ("portfolio", "apex_v2_portfolio_snapshots", "observed_at"),
@@ -573,6 +601,12 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     table_names = {str(row[0]) for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
+    result["shadow_sources"] = [dict(row) for row in conn.execute(
+        "SELECT source,symbol,payload_json,updated_at FROM external_shadow_snapshots ORDER BY updated_at DESC LIMIT 20"
+    ).fetchall()] if "external_shadow_snapshots" in table_names else []
+    result["gate_microstructure"] = [dict(row) for row in conn.execute(
+        "SELECT symbol,update_id,payload_json,created_at FROM gate_microstructure_shadow ORDER BY created_at DESC LIMIT 20"
+    ).fetchall()] if "gate_microstructure_shadow" in table_names else []
     if "trade_manager_state" in table_names:
         result["manager_db"] = {
             "states": {str(row[0]): int(row[1]) for row in conn.execute(
@@ -614,6 +648,33 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
             "SELECT * FROM trade_manager_shadow_stats ORDER BY strategy,rule_id"
         ).fetchall()]
     result["learning"] = {"replay": replay_rows[:100], "shadow_rules": shadow_rows}
+    # New learning/diagnostic stores are additive.  A missing or corrupt
+    # optional table must never make the dashboard or manager unavailable.
+    try:
+        from core.replay_lab import replay_dashboard_summary
+        result["replay_v2"] = replay_dashboard_summary(db_path, limit=100)
+    except Exception:
+        result["replay_v2"] = []
+    try:
+        from core.groq_calibration import calibration_summary
+        result["groq_calibration"] = calibration_summary(db_path)
+    except Exception:
+        result["groq_calibration"] = {"calls": 0, "resolved": 0, "scope": "SHADOW_DIAGNOSTICS"}
+    try:
+        from core.portfolio_dependency import latest_dependency_snapshot
+        result["portfolio_dependency"] = latest_dependency_snapshot(db_path)
+    except Exception:
+        result["portfolio_dependency"] = {}
+    try:
+        from core.shadow_evidence import load_shadow_evaluations
+        result["shadow_evaluations"] = load_shadow_evaluations(db_path)
+    except Exception:
+        result["shadow_evaluations"] = []
+    result["learning"].update({
+        "replay_v2": result.get("replay_v2", []),
+        "groq_calibration": result.get("groq_calibration", {}),
+        "shadow_evaluations": result.get("shadow_evaluations", []),
+    })
     if "trade_executions" in table_names:
         execution_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
         active_stop_expr = "active_stop_price" if "active_stop_price" in execution_columns else "sl AS active_stop_price"

@@ -7,7 +7,7 @@ from typing import Any
 
 from . import (btc_mempool, coinmetrics, crypto_monitor, defillama,
                deribit_options, dex_liquidity, exchange_fallback, hyperliquid,
-               live_tape, oli, smart_money, whale_tracker)
+               live_tape, oli, smart_money, whale_tracker, coinalyze)
 from .models import empty_context, number
 from .pair_registry import get_pair, refresh_pair_registry
 from core.data_policy import provider_enabled
@@ -292,6 +292,31 @@ def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
     # The oldest used source is the conservative summary age; exact ages remain
     # available both per field and per source.
     quality["age_seconds"] = max(usable_ages) if usable_ages else None
+    # Provenance/freshness is a diagnostic score, never a replacement for a
+    # strategy gate.  Gate remains the only primary market-data source; all
+    # other providers receive a lower context weight and may be omitted.
+    try:
+        from core.source_registry import get_source
+        freshness, weighted, weight_total = [], 0.0, 0.0
+        for source in quality["available_sources"]:
+            try:
+                spec = get_source(str(source).split(":", 1)[0])
+            except Exception:
+                spec = None
+            age = quality["source_ages"].get(source)
+            if not spec:
+                continue
+            limit = spec.freshness_seconds
+            score = 1.0 if age is None or limit is None else max(0.0, 1.0 - float(age) / max(1, limit))
+            weight = 1.0 if spec.mode == "PRIMARY" else 0.5
+            weighted += score * weight
+            weight_total += weight
+            freshness.append(score)
+        quality["freshness_score"] = round(min(freshness) if freshness else 0.0, 4)
+        quality["provenance_score"] = round(weighted / weight_total if weight_total else 0.0, 4)
+    except Exception:
+        quality["freshness_score"] = 0.0
+        quality["provenance_score"] = 0.0
 
     # One directional vote per independent source. Exchange flow and whale
     # activity from the same tracker must not be double-counted.
@@ -424,6 +449,14 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
         elif source == dex_liquidity.SOURCE:
             _apply_nondirectional_context(context, result, "dex_liquidity")
 
+    # New sources stay outside normalized live fields and the Groq prompt.
+    shadow = await _bounded_collect(coinalyze.SOURCE, coinalyze.collect(symbol))
+    if shadow.get("status") != "not_configured":
+        try:
+            from .storage import persist_shadow_source
+            await asyncio.to_thread(persist_shadow_source, {**shadow, "symbol": symbol})
+        except Exception:
+            pass
     context["_source_results"] = normalized_results
     return _finish(context, direction)
 

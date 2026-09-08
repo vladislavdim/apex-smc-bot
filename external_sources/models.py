@@ -22,6 +22,9 @@ def empty_context(symbol: str) -> dict[str, Any]:
     return {
         "symbol": symbol.upper(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        # Declarative provenance is attached to context, but optional source
+        # values remain isolated from normalized technical fields.
+        "source_registry_version": 1,
         "open_interest": {"value": None, "change_1h_pct": None, "change_4h_pct": None, "trend": "unknown", **meta, "source_values": {}},
         "funding": {"rate": None, "extreme": False, "bias": "neutral", **meta, "source_values": {}},
         "liquidations": {"long_usd": 0, "short_usd": 0, "dominance": "unknown", **meta, "source_values": {}},
@@ -76,4 +79,8 @@ def empty_context(symbol: str) -> dict[str, Any]:
         "conflicts": [],
         "external_bias": "unknown",
         "external_confidence": 0,
+        "microstructure": {
+            "source": "gate_ws", "status": "disabled", "scope": "SHADOW_CONTEXT",
+            "institutional_intent": False,
+        },
     }

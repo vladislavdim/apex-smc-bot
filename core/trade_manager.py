@@ -487,6 +487,31 @@ def finalize_manager_trade(
     )
     conn.commit()
     conn.close()
+    try:
+        from core.replay_lab import replay_persisted_trade
+        replay_persisted_trade({
+            "signal_id": int(signal_id), "symbol": state.get("symbol"),
+            "strategy": state.get("strategy"), "direction": state.get("direction"),
+            "entry": state.get("initial_entry"), "initial_sl": state.get("initial_sl"),
+            "tp1": state.get("initial_tp1"), "tp2": state.get("initial_tp2"),
+            "terminal_tp": state.get("initial_tp3") or state.get("initial_tp2") or state.get("initial_tp1"),
+            # Counterfactuals always start with the frozen full quantity;
+            # current position_fraction belongs only to ACTUAL state.
+            "quantity": 1.0,
+        }, db_path=db_path)
+    except Exception:
+        # Replay is a learning sidecar; a missing/partial Gate stream cannot
+        # block finalization or alter the exchange/accounting path.
+        pass
+    try:
+        from core.groq_calibration import resolve_signal
+        resolve_signal(
+            int(signal_id), reward_r=realized_r,
+            outcome_label=1.0 if realized_r > 0 else 0.0,
+            reason=str(result or "closed").upper(), db_path=db_path,
+        )
+    except Exception:
+        pass
     return load_state(signal_id, db_path)
 
 
@@ -578,6 +603,8 @@ def build_structure_facts(
         "structure_against_trade": against_trade,
         "confirmed_protection_level": protection,
         "structural_target": structural_target,
+        "latest_closed_open": float(closed[-1]["open"]),
+        "latest_closed_volume": float(closed[-1].get("volume") or 0.0),
         "latest_close": float(closed[-1]["close"]),
         "latest_closed_high": float(closed[-1]["high"]),
         "latest_closed_low": float(closed[-1]["low"]),
@@ -648,6 +675,8 @@ def compact_external_context(context: dict[str, Any], direction: str) -> dict[st
         result["data_quality"] = {
             "available_sources": quality.get("available_sources") or [],
             "failed_sources": quality.get("failed_sources") or [],
+            "freshness_score": quality.get("freshness_score"),
+            "provenance_score": quality.get("provenance_score"),
         }
     expected = "bullish" if str(direction).upper() == "BULLISH" else "bearish"
     bias = str(context.get("external_bias") or "unknown").lower()
@@ -1002,7 +1031,15 @@ def no_progress_event_due(state: dict[str, Any], current_r: float, facts: dict[s
         return False
     strategy = normalize_strategy(state.get("strategy"))
     anchor = float(state.get("progress_anchor_r") or 0)
-    projected = 0 if current_r >= anchor + 0.25 else int(state.get("no_progress_bars") or 0) + 1
+    # NO_PROGRESS is measured on the closed working-TF candle's favorable
+    # excursion (MFE), not on a transient ticker price.  Callers may provide
+    # ``progress_mfe_r``; the fallback keeps legacy/manual tests deterministic.
+    observed_mfe = facts.get("progress_mfe_r")
+    try:
+        observed_mfe = float(observed_mfe) if observed_mfe is not None else float(current_r)
+    except (TypeError, ValueError):
+        observed_mfe = float(current_r)
+    projected = 0 if observed_mfe >= anchor + 0.25 else int(state.get("no_progress_bars") or 0) + 1
     return projected >= NO_PROGRESS_BARS[strategy]
 
 
@@ -1014,6 +1051,22 @@ def replay_closed_candle(
     if candle_id is None or not facts.get("new_management_candle"):
         return
     signal_id = int(state["signal_id"])
+    try:
+        from core.replay_lab import ReplayCandle, persist_replay_action, persist_replay_candle
+        persist_replay_candle(signal_id, ReplayCandle(
+            candle_id=str(candle_id),
+            open=float(facts.get("latest_closed_open") or facts.get("latest_close") or state["initial_entry"]),
+            high=float(facts.get("latest_closed_high") or facts.get("latest_close") or state["initial_entry"]),
+            low=float(facts.get("latest_closed_low") or facts.get("latest_close") or state["initial_entry"]),
+            close=float(facts.get("latest_close") or state["initial_entry"]),
+            closed_at=str(facts.get("closed_at") or candle_id),
+            volume=float(facts.get("latest_closed_volume") or 0.0),
+        ), db_path)
+        # Reviews are proposals, not exchange-confirmed fills. They remain in
+        # manager history; never label them as ACTUAL executions here.
+    except Exception:
+        # Replay capture is diagnostic and must never block the live manager.
+        pass
     entry, sl = float(state["initial_entry"]), float(state["initial_sl"])
     terminal_tp = float(state.get("initial_tp3") or state.get("initial_tp2") or state["initial_tp1"])
     direction = str(state.get("direction") or "").upper()
@@ -1107,8 +1160,13 @@ def persist_review(
     anchor = float(state.get("progress_anchor_r") or 0)
     no_progress = int(state.get("no_progress_bars") or 0)
     if candle_is_new:
-        if current_r >= anchor + 0.25:
-            anchor, no_progress = current_r, 0
+        progress_mfe = facts.get("progress_mfe_r")
+        try:
+            progress_mfe = float(progress_mfe) if progress_mfe is not None else current_r
+        except (TypeError, ValueError):
+            progress_mfe = current_r
+        if progress_mfe >= anchor + 0.25:
+            anchor, no_progress = progress_mfe, 0
         else:
             no_progress += 1
     conn = _connect(db_path)
@@ -1159,6 +1217,17 @@ def persist_review(
             payload={"events": events, "reason": review.get("reason"), "next_state": review.get("next_state")},
             db_path=db_path,
         )
+        try:
+            from core.groq_calibration import record_prediction
+            record_prediction(
+                action_id, str(review.get("action") or "HOLD"), review.get("confidence"),
+                signal_id=int(state["signal_id"]), strategy=str(state.get("strategy") or ""),
+                symbol=str(state.get("symbol") or ""),
+                payload={"events": events, "reason": review.get("reason"), "next_state": review.get("next_state")},
+                db_path=db_path,
+            )
+        except Exception:
+            pass
     except Exception:
         pass
     replay_closed_candle(state, facts, review, db_path)
@@ -1381,6 +1450,14 @@ def manager_cycle(
         facts["progress_tf"] = progress_tf
         facts["new_progress_candle"] = bool(progress_facts.get("new_management_candle"))
         facts["progress_candle_id"] = progress_facts.get("management_candle_id")
+        if facts["new_progress_candle"]:
+            try:
+                favorable = progress_facts.get("latest_closed_high") if state["direction"] == "BULLISH" else progress_facts.get("latest_closed_low")
+                facts["progress_mfe_r"] = r_multiple(
+                    state["direction"], float(state["initial_entry"]), float(state["initial_sl"]), float(favorable)
+                ) if favorable is not None else None
+            except (TypeError, ValueError):
+                facts["progress_mfe_r"] = None
         facts["current_price"] = price
         facts["manager_state_before"] = str(state.get("manager_state") or "PROTECTED")
         facts["management_matrix"] = management_matrix(state.get("strategy"))
@@ -1420,6 +1497,9 @@ def manager_cycle(
         if no_progress_event_due(state, current_r, facts):
             events.append("NO_PROGRESS")
         if not events:
+            # Keep the immutable closed Gate stream complete for the offline
+            # replay worker even when this candle carries no Groq-worthy event.
+            replay_closed_candle(state, facts, {"action": None}, db_path)
             continue
         decision_state = dict(state)
         if "TP1_HIT" in events and str(state.get("manager_state") or "PROTECTED") in {"PROTECTED", "MANAGING"}:

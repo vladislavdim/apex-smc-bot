@@ -32,6 +32,18 @@ not remove existing protective orders.
 - `apex_v2_incidents`: open and resolved operational incidents.
 - Existing `trade_manager_replay_tracks`: isolated ACTUAL, NO_MANAGER and
   PLAYBOOK_ONLY results.
+- `apex_v2_replay_*`: immutable Gate-candle/action capture and idempotent
+  replay bundles with gross/net R, MFE/MAE, giveback, fees/slippage, duration,
+  exit reason and the three counterfactual edges.
+- `apex_v2_groq_calibration`: confidence/outcome calibration memory. It is
+  diagnostic and cannot authorize a Manager action.
+- `apex_v2_dependency_snapshots`: Gate closed-return correlation/BTC-beta
+  clusters for portfolio diagnostics; existing risk limits remain unchanged.
+- `apex_v2_shadow_evaluations`: old/new rule A/B statistics and a manual-only
+  promotion proposal under the 30-trade evidence gate.
+- `gate_microstructure_shadow`: sequence-checked Gate WS depth/taker-flow
+  features. Sequence gaps require a resync; no feature claims to reveal a
+  particular market maker or stop hunt.
 
 All migrations are additive and restart-safe. No table in this control plane
 is allowed to rewrite a strategy's initial levels.
@@ -50,10 +62,36 @@ Dashboard V2 is read-only and defaults to the current release cohort. It shows:
 - execution mode without secrets;
 - ACTUAL/NO_MANAGER/PLAYBOOK_ONLY edge and shadow-rule evidence;
 - operational incidents.
+- source ownership/provenance, rolling API budget and optional daily load plan;
+- Gate-only microstructure observations, Groq calibration, dependency clusters
+  and replay bundles in the Learning diagnostics block.
 
 Old release data remains stored but is never mixed into the default production
 view. Book-derived rules remain shadow-only and can only become eligible for
 manual review after their evidence gate; they are never auto-activated.
+
+## Source and API budget contract
+
+`core/source_registry.py` is the adapter contract. Gate is the only source
+accepted for candles, indicators, MTF, structure and scanner rows. Coinalyze,
+Hyperliquid, Coin Metrics, DefiLlama, Deribit, on-chain, DEX and news feeds are
+context/shadow and are omitted on stale or failed reads. Binance has an
+execution-only contract and is rejected by the market-data request guard.
+
+Every optional HTTP attempt, including a retry, is admitted by the persistent
+rolling minute/hour/day ledger. Rate-limit responses open a circuit with
+`Retry-After`; cached/stale context is never promoted into a live gate. Set
+`APEX_EXTERNAL_SOURCE_PLAN_JSON` to display a secret-free whole-day load
+projection before enabling a new adapter.
+
+## Replay and deployment safety
+
+Closed Gate candles are captured once per trade and can be replayed offline
+through three isolated states. Intrabar SL/TP ambiguity uses an explicit
+conservative policy. The execution simulator is marked `REPLAY_ONLY` and is
+never imported by the live Binance executor. `release_guard` and
+`backup_restore` provide read-only canary/restart checks; they do not deploy,
+rollback or enable live trading automatically.
 
 ## Later evidence-gated extensions
 
