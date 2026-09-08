@@ -12,6 +12,7 @@ import os
 import sqlite3
 import time
 import json
+import hashlib
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -121,6 +122,14 @@ from core.trade_manager import (
     store_manager_message as _store_manager_message,
     telegram_content_hash as _telegram_content_hash,
 )
+from core.apex_v2 import (
+    ensure_apex_v2_schema as _ensure_apex_v2_schema,
+    emit_dashboard_snapshot as _emit_apex_v2_dashboard_snapshot,
+    portfolio_risk_snapshot as _apex_portfolio_risk_snapshot,
+    store_portfolio_snapshot as _store_apex_portfolio_snapshot,
+    store_market_state as _store_apex_market_state,
+)
+from core.setup_audit import emit_event as _emit_stats_event
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 from core.setup_evidence import (
     assess_candidate as _assess_setup_candidate,
@@ -3682,6 +3691,26 @@ async def _run_trade_manager_once():
     try:
         await asyncio.to_thread(_register_pending_manager_signals, DB_PATH)
         manager_states = await asyncio.to_thread(_load_active_manager_states, DB_PATH)
+        configured_trade_risk = float(os.environ.get("AUTO_TRADING_RISK_PCT", "0.5") or 0.5)
+        actual_active_states = [
+            state for state in manager_states
+            if str(state.get("status") or "ACTIVE").upper() == "ACTIVE"
+            and str(state.get("manager_state") or "").upper() != "CLOSED"
+        ]
+        portfolio_snapshot = _apex_portfolio_risk_snapshot(
+            ({
+                "signal_id": state.get("signal_id"), "symbol": state.get("symbol"),
+                "strategy": state.get("strategy"), "direction": state.get("direction"),
+                "risk_pct": configured_trade_risk,
+                "protected": str(state.get("manager_state") or "").upper()
+                    not in {"OPENING", "RECONCILIATION_REQUIRED"},
+            } for state in actual_active_states),
+            max_positions=int(os.environ.get("AUTO_TRADING_MAX_OPEN_POSITIONS", "3") or 3),
+            max_total_risk_pct=float(os.environ.get("APEX_MAX_TOTAL_RISK_PCT", "3.0") or 3.0),
+            max_same_side_risk_pct=float(os.environ.get("APEX_MAX_SAME_SIDE_RISK_PCT", "2.0") or 2.0),
+            max_daily_loss_pct=float(os.environ.get("AUTO_TRADING_MAX_DAILY_LOSS_PCT", "2.0") or 2.0),
+        )
+        await asyncio.to_thread(_store_apex_portfolio_snapshot, portfolio_snapshot, DB_PATH)
         pairs = sorted({
             (str(state.get("symbol") or "").upper(), str(state.get("direction") or "").upper())
             for state in manager_states if state.get("symbol")
@@ -3739,6 +3768,23 @@ async def _run_trade_manager_once():
                         await _upsert_manager_card(
                             int(update["signal_id"]), _format_final_trade_card(final_state), is_final=True,
                         )
+            try:
+                event_payload = {
+                    "signal_id": update.get("signal_id"),
+                    "events": update.get("events") or [],
+                    "review": update.get("review") or {},
+                    "facts": update.get("facts") or {},
+                    "execution": execution if _TRADE_EXECUTION_OK and not update.get("degraded") else {},
+                    "manager_version": 2,
+                }
+                event_seed = json.dumps(event_payload, sort_keys=True, default=str)
+                event_key = "manager-v2:" + hashlib.sha256(event_seed.encode()).hexdigest()
+                _emit_stats_event(
+                    "manager_event", str(update.get("strategy") or ""),
+                    str(update.get("symbol") or ""), event_payload, event_key=event_key,
+                )
+            except Exception:
+                pass
             if not update.get("notify"):
                 continue
             await _upsert_manager_card(
@@ -3778,7 +3824,7 @@ def pick_best_signal(signals: list) -> dict | None:
         "FAST":    1,
     }
 
-    valid = [s for s in signals if s and s.get("rr", 0) >= 1.5]
+    valid = [s for s in signals if s and s.get("rr", 0) >= 2.0]
     if not valid:
         return None
 
@@ -5773,7 +5819,22 @@ async def market_intelligence_job():
     if not _MARKET_INTELLIGENCE_OK:return
     async def refresh():
         pairs = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
-        await _refresh_market_intelligence(pairs, get_candles)
+        intelligence = await _refresh_market_intelligence(pairs, get_candles)
+        btc_regime = await asyncio.to_thread(get_market_regime, "BTCUSDT")
+        btc_regime = btc_regime if isinstance(btc_regime, dict) else {}
+        await asyncio.to_thread(
+            _store_apex_market_state,
+            {
+                "snapshot_key": f"market-intelligence:{datetime.utcnow().strftime('%Y%m%d%H')}",
+                "regime": btc_regime.get("mode") or "UNKNOWN",
+                "btc_direction": btc_regime.get("direction") or "UNKNOWN",
+                "volatility": btc_regime.get("mode") or "UNKNOWN",
+                "data_quality": {"state": "FRESH", "source": "Gate"},
+                "coverage": intelligence.get("coverage") if isinstance(intelligence, dict) else {},
+            },
+            DB_PATH,
+        )
+        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
     try:
         await _run_market_scan_exclusive("market_intelligence", refresh, 180)
     except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
@@ -5860,6 +5921,7 @@ async def on_startup(app):
     _ensure_experience_schema(DB_PATH)
     _ensure_setup_evidence_schema(DB_PATH)
     _ensure_trade_manager_schema(DB_PATH)
+    _ensure_apex_v2_schema(DB_PATH)
     _register_pending_manager_signals(DB_PATH)
     _rebuild_strategy_risk_states(DB_PATH)
     if _TRADE_EXECUTION_OK:
@@ -5867,6 +5929,7 @@ async def on_startup(app):
             _ensure_execution_schema(DB_PATH)
         except Exception as _execution_schema_error:
             logging.error("trade execution schema: %s", _execution_schema_error)
+    _emit_apex_v2_dashboard_snapshot(DB_PATH)
     start_db_writer()
     if BRAIN_BUILDER_AVAILABLE:
         try:
@@ -5910,6 +5973,10 @@ async def on_startup(app):
     _schedule_trade_manager(webhook_scheduler)
     # Pump/accumulation detector notifications are intentionally not scheduled.
     webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
+    webhook_scheduler.add_job(
+        _emit_apex_v2_dashboard_snapshot, "interval", minutes=10,
+        kwargs={"db_path": DB_PATH}, max_instances=1, coalesce=True,
+    )
     # timing_queue отключена — MTF отправляет сигналы напрямую по скору
     # webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
     webhook_scheduler.add_job(check_alerts,         "interval", minutes=5,  max_instances=1, coalesce=True)
@@ -6209,6 +6276,7 @@ def main():
             _ensure_experience_schema(DB_PATH)
             _ensure_setup_evidence_schema(DB_PATH)
             _ensure_trade_manager_schema(DB_PATH)
+            _ensure_apex_v2_schema(DB_PATH)
             _register_pending_manager_signals(DB_PATH)
             _rebuild_strategy_risk_states(DB_PATH)
             if _TRADE_EXECUTION_OK:
@@ -6216,6 +6284,7 @@ def main():
                     _ensure_execution_schema(DB_PATH)
                 except Exception as _execution_schema_error:
                     logging.error("trade execution schema: %s", _execution_schema_error)
+            _emit_apex_v2_dashboard_snapshot(DB_PATH)
             start_db_writer()
             if BRAIN_BUILDER_AVAILABLE:
                 try:
@@ -6247,6 +6316,10 @@ def main():
             # scheduler.add_job(auto_scan_1d, ...)
             # scheduler.add_job(auto_scan_1w, ...)
             scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
+            scheduler.add_job(
+                _emit_apex_v2_dashboard_snapshot, "interval", minutes=10,
+                kwargs={"db_path": DB_PATH}, max_instances=1, coalesce=True,
+            )
             # Pump/accumulation detector notifications are intentionally not scheduled.
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
