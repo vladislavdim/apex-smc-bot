@@ -38,6 +38,35 @@ def _corr(left: list[float], right: list[float]) -> float | None:
     return cov / sqrt(vx * vy)
 
 
+def _normalized_series(values: Any) -> dict[str, float]:
+    """Return event-time keyed returns; positional input remains compatible.
+
+    Production callers should pass ``{closed_candle_time: return}`` or
+    ``[(closed_candle_time, return), ...]``. Synthetic positional keys exist
+    only for legacy/tests and are labelled in the result metadata.
+    """
+    if isinstance(values, Mapping):
+        return {str(key): float(value) for key, value in values.items()}
+    output: dict[str, float] = {}
+    for index, item in enumerate(values):
+        if isinstance(item, Mapping):
+            timestamp = item.get("closed_at") or item.get("close_time") or item.get("timestamp")
+            value = item.get("return") if item.get("return") is not None else item.get("value")
+            if timestamp is None or value is None:
+                continue
+            output[str(timestamp)] = float(value)
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            output[str(item[0])] = float(item[1])
+        else:
+            output[f"legacy:{index:08d}"] = float(item)
+    return output
+
+
+def _aligned(left: Mapping[str, float], right: Mapping[str, float]) -> tuple[list[float], list[float]]:
+    keys = sorted(set(left).intersection(right))
+    return [left[key] for key in keys], [right[key] for key in keys]
+
+
 def _beta(values: list[float], benchmark: list[float]) -> float | None:
     n = min(len(values), len(benchmark))
     if n < 2:
@@ -56,7 +85,7 @@ def build_dependency_graph(
     benchmark: str = "BTCUSDT", min_samples: int = 20,
 ) -> dict[str, Any]:
     """Build a deterministic graph from normalized closed Gate returns."""
-    series = {str(symbol).upper(): [float(x) for x in values] for symbol, values in returns_by_symbol.items()}
+    series = {str(symbol).upper(): _normalized_series(values) for symbol, values in returns_by_symbol.items()}
     symbols = sorted(series)
     edges: list[dict[str, Any]] = []
     parent = {symbol: symbol for symbol in symbols}
@@ -74,10 +103,11 @@ def build_dependency_graph(
 
     for index, left in enumerate(symbols):
         for right in symbols[index + 1:]:
-            value = _corr(series[left], series[right])
+            aligned_left, aligned_right = _aligned(series[left], series[right])
+            value = _corr(aligned_left, aligned_right)
             if value is None:
                 continue
-            edge = {"from": left, "to": right, "correlation": round(value, 6), "samples": min(len(series[left]), len(series[right]))}
+            edge = {"from": left, "to": right, "correlation": round(value, 6), "samples": len(aligned_left)}
             edges.append(edge)
             if abs(value) >= max(0.0, float(threshold)) and edge["samples"] >= max(2, int(min_samples)):
                 union(left, right)
@@ -85,9 +115,18 @@ def build_dependency_graph(
     for symbol in symbols:
         clusters.setdefault(find(symbol), []).append(symbol)
     btc = series.get(str(benchmark).upper())
-    betas = {symbol: (_beta(values, btc) if btc is not None and symbol != str(benchmark).upper() else (1.0 if symbol == str(benchmark).upper() else None)) for symbol, values in series.items()}
+    betas = {}
+    for symbol, values in series.items():
+        if symbol == str(benchmark).upper():
+            betas[symbol] = 1.0
+        elif btc is None:
+            betas[symbol] = None
+        else:
+            aligned_values, aligned_btc = _aligned(values, btc)
+            betas[symbol] = _beta(aligned_values, aligned_btc)
     return {
         "source": "Gate_closed_returns", "scope": "OBSERVATION_ONLY", "threshold": float(threshold),
+        "alignment": "closed_candle_event_time_intersection",
         "benchmark": str(benchmark).upper(), "symbols": symbols,
         "edges": sorted(edges, key=lambda x: abs(x["correlation"]), reverse=True),
         "clusters": sorted((sorted(value) for value in clusters.values()), key=lambda x: (len(x), x), reverse=True),

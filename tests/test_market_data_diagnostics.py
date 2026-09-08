@@ -41,13 +41,35 @@ def test_dashboard_aggregates_gate_and_ltf_lifecycle():
     assert data["ltf_watch"]["rows"][0]["required_timeframe"] == "15m"
 
 
+def test_market_freshness_is_separate_from_request_success():
+    from datetime import datetime, timezone
+    now = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+    fresh = stats_server._market_freshness("2026-09-07T11:30:00+00:00", "15m", now)
+    stale = stats_server._market_freshness("2026-09-07T10:00:00+00:00", "15m", now)
+    assert fresh["freshness_status"] == "FRESH"
+    assert stale["freshness_status"] == "STALE"
+
+
+def test_ltf_dashboard_deduplicates_by_setup_id_not_cycles():
+    base = {"kind": "ltf_watch", "strategy": "ZONE", "symbol": "APTUSDT"}
+    events = [
+        {**base, "event_key": "l1", "occurred_at": "2026-09-07T10:00:00+00:00", "payload": {"setup_id": "same", "state": "WAITING", "required_timeframe": "1h", "attempts": 1}},
+        {**base, "event_key": "l2", "occurred_at": "2026-09-07T10:05:00+00:00", "payload": {"setup_id": "same", "state": "WAITING", "required_timeframe": "1h", "attempts": 2}},
+    ]
+    with patch.object(stats_server, "_fetch", return_value=events):
+        data = stats_server.build_dashboard(days=1)
+    assert data["ltf_watch"]["waiting"] == 1
+    assert data["ltf_watch"]["rows"][0]["attempts"] == 2
+
+
 def test_rendered_dashboard_contains_operational_blocks():
     from core import runtime_observability
 
     rendered = runtime_observability._patch_stats_html(stats_server.HTML)
     assert "Market Data / Gate" in rendered
     assert "PENDING LTF lifecycle" in rendered
-    assert "Gate candles OK" in rendered
+    assert "Gate requests OK" in rendered
+    assert "Stale TF" in rendered
     assert "SWING volume shadow" in rendered
 
 

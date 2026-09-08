@@ -379,6 +379,7 @@ Return JSON only, with no markdown or commentary:
             f"entry-groq:{candidate_hash}", review.get("decision") or "WAIT", review.get("confidence"),
             signal_id=int(candidate.get("signal_id")) if candidate.get("signal_id") is not None else None,
             strategy=strategy, symbol=str(view.get("symbol") or ""), context_hash=context_hash,
+            prediction_target="ORIGINAL_TP_BEFORE_ORIGINAL_SL", context_version="entry-quality-v2",
             payload={"setup_state": setup_assessment.get("state"), "degraded": review.get("degraded")},
             db_path=DB_PATH,
         )

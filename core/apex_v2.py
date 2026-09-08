@@ -570,11 +570,17 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
             except (TypeError, ValueError, json.JSONDecodeError):
                 result["api_budget_plan"] = {"status": "invalid_plan"}
         else:
-            result["api_budget_plan"] = {}
+            result["api_budget_plan"] = {
+                "status": "UNCONFIGURED",
+                "accounting_scope": "external_context_adapters_only",
+                "scanner_gate_rest_covered": False,
+                "binance_execution_reserved_separately": True,
+                "reason": "APEX_EXTERNAL_SOURCE_PLAN_JSON is not configured",
+            }
     except Exception:
         result["api_budget"] = []
         result["api_budget_error"] = "ledger_unavailable"
-        result["api_budget_plan"] = {}
+        result["api_budget_plan"] = {"status": "UNAVAILABLE", "reason": "budget_ledger_unavailable"}
     for key, table, order in (
         ("market_state", "apex_v2_market_states", "observed_at"),
         ("portfolio", "apex_v2_portfolio_snapshots", "observed_at"),

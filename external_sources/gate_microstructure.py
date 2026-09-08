@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite
+import time
 from typing import Any, Iterable, Mapping
 
 SOURCE = "gate_ws"
@@ -49,11 +50,13 @@ class OrderBookReducer:
 
     symbol: str
     depth: int = 20
+    contract_multiplier: float = 1.0
     last_update_id: int | None = None
     status: str = "EMPTY"
     bids: dict[float, float] = field(default_factory=dict)
     asks: dict[float, float] = field(default_factory=dict)
     resync_count: int = 0
+    observed_at: float | None = None
 
     def apply_snapshot(self, bids: Any, asks: Any, update_id: Any = None) -> bool:
         parsed_id = _number(update_id)
@@ -61,6 +64,7 @@ class OrderBookReducer:
         self.asks = {price: size for price, size in _levels(asks) if size > 0}
         self.last_update_id = int(parsed_id) if parsed_id is not None else None
         self.status = "FRESH" if self.bids and self.asks else "EMPTY"
+        self.observed_at = time.time()
         return self.status == "FRESH"
 
     def apply_delta(self, bids: Any, asks: Any, first_id: Any, final_id: Any) -> bool:
@@ -72,7 +76,9 @@ class OrderBookReducer:
             self.resync_count += 1
             return False
         start_id, end_id = int(start), int(end)
-        if self.last_update_id is not None and start_id != self.last_update_id + 1:
+        if end_id <= self.last_update_id:
+            return True  # replayed/overlapping delta already incorporated
+        if start_id != self.last_update_id + 1:
             self.status = "RESYNC_REQUIRED"
             self.resync_count += 1
             return False
@@ -88,6 +94,7 @@ class OrderBookReducer:
                 self.asks[price] = size
         self.last_update_id = end_id
         self.status = "FRESH" if self.bids and self.asks else "EMPTY"
+        self.observed_at = time.time()
         return self.status == "FRESH"
 
     def apply_message(self, message: Mapping[str, Any]) -> bool:
@@ -96,19 +103,31 @@ class OrderBookReducer:
         result = message.get("result")
         if isinstance(result, Mapping):
             payload = result
-        bids, asks = payload.get("bids"), payload.get("asks")
-        if payload.get("type") == "snapshot" or payload.get("snapshot"):
+        bids = payload.get("bids", payload.get("b"))
+        asks = payload.get("asks", payload.get("a"))
+        if payload.get("type") == "snapshot" or payload.get("snapshot") or payload.get("full") is True:
             return self.apply_snapshot(bids, asks, payload.get("lastUpdateId", payload.get("u")))
         first_id = payload.get("U", payload.get("firstUpdateId"))
         final_id = payload.get("u", payload.get("lastUpdateId"))
         return self.apply_delta(bids, asks, first_id, final_id)
 
-    def features(self, levels: int | None = None) -> dict[str, Any]:
-        return summarize_order_book(self.bids, self.asks, levels or self.depth, self.status, self.last_update_id)
+    def features(self, levels: int | None = None, *, now: float | None = None, freshness_seconds: int = 5) -> dict[str, Any]:
+        result = summarize_order_book(
+            self.bids, self.asks, levels or self.depth, self.status,
+            self.last_update_id, contract_multiplier=self.contract_multiplier,
+        )
+        age = None if self.observed_at is None else max(0.0, (now or time.time()) - self.observed_at)
+        result.update({
+            "age_seconds": round(age, 3) if age is not None else None,
+            "freshness_status": "UNKNOWN" if age is None else "FRESH" if age <= freshness_seconds else "STALE",
+            "resync_count": self.resync_count,
+        })
+        return result
 
 
 def summarize_order_book(
     bids: Any, asks: Any, depth: int = 20, status: str = "FRESH", update_id: int | None = None,
+    *, contract_multiplier: float = 1.0,
 ) -> dict[str, Any]:
     """Create bounded, normalized Gate-only depth features."""
     bid_rows = sorted(_levels(bids), key=lambda x: x[0], reverse=True)[:max(1, int(depth))]
@@ -118,12 +137,17 @@ def summarize_order_book(
             "source": SOURCE, "status": status, "update_id": update_id,
             "spread_bps": None, "mid_price": None, "microprice": None,
             "bid_depth": 0.0, "ask_depth": 0.0, "depth_imbalance": None,
+            "bid_depth_usd": 0.0, "ask_depth_usd": 0.0,
             "levels": 0, "scope": "SHADOW_CONTEXT", "institutional_intent": False,
         }
     bid, ask = bid_rows[0][0], ask_rows[0][0]
     bid_depth = sum(size for _, size in bid_rows)
     ask_depth = sum(size for _, size in ask_rows)
     total = bid_depth + ask_depth
+    multiplier = max(0.0, _number(contract_multiplier) or 0.0)
+    bid_depth_usd = sum(price * size * multiplier for price, size in bid_rows)
+    ask_depth_usd = sum(price * size * multiplier for price, size in ask_rows)
+    total_usd = bid_depth_usd + ask_depth_usd
     mid = (bid + ask) / 2
     micro = ((ask * bid_depth) + (bid * ask_depth)) / total if total else mid
     return {
@@ -131,9 +155,10 @@ def summarize_order_book(
         "spread_bps": round((ask - bid) / mid * 10000, 6) if mid else None,
         "mid_price": mid, "microprice": micro,
         "bid_depth": bid_depth, "ask_depth": ask_depth,
-        "depth_imbalance": (bid_depth - ask_depth) / total if total else None,
+        "bid_depth_usd": bid_depth_usd, "ask_depth_usd": ask_depth_usd,
+        "depth_imbalance": (bid_depth_usd - ask_depth_usd) / total_usd if total_usd else ((bid_depth - ask_depth) / total if total else None),
         "levels": min(len(bid_rows), len(ask_rows)), "scope": "SHADOW_CONTEXT",
-        "institutional_intent": False,
+        "institutional_intent": False, "venue_normalized": True,
     }
 
 

@@ -69,9 +69,9 @@ def _time(value: Any) -> float | None:
         raw = float(value)
         return raw / 1000 if raw > 10_000_000_000 else raw
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(
-            tzinfo=timezone.utc
-        ).timestamp()
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        return parsed.timestamp()
     except (TypeError, ValueError):
         return None
 
@@ -159,6 +159,7 @@ class _TrackState:
     first_candle_at: str | None = None
     last_candle_at: str | None = None
     closed_index: int | None = None
+    excursion_uncertain: bool = False
 
     def __post_init__(self) -> None:
         self.remaining_quantity = self.snapshot.quantity
@@ -283,6 +284,10 @@ def _terminal_touch(state: _TrackState, candle: ReplayCandle, index: int, policy
     hit_tp = _touch(direction, state.snapshot.terminal_tp, candle, favorable=True)
     if not hit_sl and not hit_tp:
         return False
+    # OHLC cannot reveal whether the other extreme happened before or after
+    # the terminal fill. Preserve MFE/MAE but expose that uncertainty instead
+    # of presenting the terminal candle excursion as exact.
+    state.excursion_uncertain = True
     if hit_sl and hit_tp:
         choice = str(policy or "SL_FIRST").upper()
         if choice == "TP_FIRST":
@@ -332,6 +337,7 @@ def _result(state: _TrackState, candles: list[ReplayCandle], fee_r: float, slipp
         "duration_bars": duration_bars, "duration_seconds": duration_seconds,
         "targets_reached": list(state.targets_reached), "last_candle_id": state.last_candle_id,
         "exit_candle_id": state.exit_candle_id, "events": list(state.events),
+        "terminal_candle_excursion_uncertain": state.excursion_uncertain,
         "ambiguous_policy": "SL_FIRST",
     }
 
@@ -531,7 +537,7 @@ def load_replay_inputs(signal_id: int, db_path: str = DB_PATH) -> dict[str, Any]
     ensure_replay_schema(db_path)
     conn = _connect(db_path)
     candles = [dict(row) for row in conn.execute(
-        "SELECT candle_id,open,high,low,close,closed_at,volume FROM apex_v2_replay_candles WHERE signal_id=? ORDER BY rowid",
+        "SELECT candle_id,open,high,low,close,closed_at,volume FROM apex_v2_replay_candles WHERE signal_id=?",
         (int(signal_id),)
     ).fetchall()]
     actions = []
@@ -546,6 +552,14 @@ def load_replay_inputs(signal_id: int, db_path: str = DB_PATH) -> dict[str, Any]
         action["candle_id"] = row[0]
         actions.append(action)
     conn.close()
+    # Delayed ingestion/restarts can insert an older candle later. Replay must
+    # follow exchange event time, never SQLite insertion order.
+    candles = [item for _, item in sorted(
+        enumerate(candles), key=lambda pair: (
+            _time(pair[1].get("closed_at")) if _time(pair[1].get("closed_at")) is not None else float("inf"),
+            pair[0],
+        )
+    )]
     return {"signal_id": int(signal_id), "candles": candles, "actions": actions}
 
 
@@ -557,7 +571,7 @@ def persist_replay_bundle(
     """Persist a replay exactly once per immutable snapshot/stream/config hash."""
     frozen = snapshot if isinstance(snapshot, FrozenEntry) else FrozenEntry.from_mapping(snapshot)
     candle_rows = [asdict(c) if isinstance(c, ReplayCandle) else dict(c) for c in candles]
-    payload = {"snapshot": asdict(frozen), "candles": candle_rows, "config": dict(config or {}), "results": dict(results), "engine_version": 2}
+    payload = {"snapshot": asdict(frozen), "candles": candle_rows, "config": dict(config or {}), "results": dict(results), "engine_version": 3}
     encoded = _canonical(payload)
     run_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     stream_hash = hashlib.sha256(_canonical(candle_rows).encode("utf-8")).hexdigest()

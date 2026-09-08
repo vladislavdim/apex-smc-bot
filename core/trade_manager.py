@@ -1127,6 +1127,23 @@ def replay_closed_candle(
     conn.commit()
     conn.close()
 
+    # ACTUAL may already be closed while the two counterfactual tracks keep
+    # receiving Gate candles. Persist a new immutable bundle after every such
+    # candle so Dashboard never remains stuck at the premature close snapshot.
+    if str(state.get("status") or "ACTIVE").upper() == "CLOSED":
+        try:
+            from core.replay_lab import replay_persisted_trade
+            replay_persisted_trade({
+                "signal_id": signal_id, "symbol": state.get("symbol"),
+                "strategy": state.get("strategy"), "direction": state.get("direction"),
+                "entry": state.get("initial_entry"), "initial_sl": state.get("initial_sl"),
+                "tp1": state.get("initial_tp1"), "tp2": state.get("initial_tp2"),
+                "terminal_tp": state.get("initial_tp3") or state.get("initial_tp2") or state.get("initial_tp1"),
+                "quantity": 1.0,
+            }, db_path=db_path)
+        except Exception:
+            pass
+
 
 def persist_review(
     state: dict[str, Any],
@@ -1223,6 +1240,7 @@ def persist_review(
                 action_id, str(review.get("action") or "HOLD"), review.get("confidence"),
                 signal_id=int(state["signal_id"]), strategy=str(state.get("strategy") or ""),
                 symbol=str(state.get("symbol") or ""),
+                prediction_target="ACTION_INCREMENTAL_R_VS_HOLD", context_version="manager-v2",
                 payload={"events": events, "reason": review.get("reason"), "next_state": review.get("next_state")},
                 db_path=db_path,
             )

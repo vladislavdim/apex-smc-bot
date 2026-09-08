@@ -165,6 +165,30 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["long_liq_usd_300s"], 300.0)
         self.assertEqual(data["short_liq_usd_300s"], 0.0)
 
+    async def test_gate_obu_full_snapshot_delta_and_gap_resync(self):
+        pair = {"gate_symbol": "BTC_USDT", "gate_multiplier": 0.001}
+        live_tape._provider_to_apex = {("gate", "BTC_USDT"): "BTCUSDT"}
+        live_tape._gate_books.clear(); live_tape._gate_depth_last_persist.clear()
+        full = {"event": "update", "channel": "futures.obu", "result": {
+            "full": True, "s": "ob.BTC_USDT.50", "u": 10,
+            "b": [["100", "2"]], "a": [["101", "3"]],
+        }}
+        delta = {"event": "update", "channel": "futures.obu", "result": {
+            "s": "ob.BTC_USDT.50", "U": 11, "u": 11,
+            "b": [["100", "4"]], "a": [],
+        }}
+        gap = {"event": "update", "channel": "futures.obu", "result": {
+            "s": "ob.BTC_USDT.50", "U": 13, "u": 13, "b": [], "a": [],
+        }}
+        with patch("external_sources.live_tape.get_pair", return_value=pair), \
+             patch("external_sources.storage.persist_gate_microstructure"):
+            live_tape.ingest_gate(full)
+            live_tape.ingest_gate(delta)
+            self.assertEqual(live_tape._gate_books["BTCUSDT"].last_update_id, 11)
+            with self.assertRaises(live_tape.GateDepthResync):
+                live_tape.ingest_gate(gap)
+        self.assertEqual(live_tape._gate_books["BTCUSDT"].status, "RESYNC_REQUIRED")
+
     async def test_historical_zone_refresh_is_idempotent_for_same_candle(self):
         candles = []
         for index in range(80):
