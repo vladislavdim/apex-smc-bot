@@ -40,6 +40,16 @@ class FakeClient:
 
 
 class ControlledRenderReleaseTests(unittest.TestCase):
+    def test_disable_only_never_triggers_a_deploy(self):
+        client = FakeClient()
+        result = release.disable_auto_deploy(client)
+        self.assertEqual(result, {"web": "no", "worker": "no"})
+        self.assertFalse(any(event[0] == "trigger" for event in client.events))
+        self.assertEqual(
+            [event[1] for event in client.events if event[0] == "auto"],
+            [release.EXPECTED_SERVICES["web"][0], release.EXPECTED_SERVICES["worker"][0]],
+        )
+
     def test_preflight_rejects_wrong_service(self):
         with self.assertRaises(release.ReleaseError):
             release.verify_service(

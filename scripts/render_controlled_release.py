@@ -121,19 +121,7 @@ def controlled_release(client: RenderReleaseClient, *, commit_sha: str, health_u
     if len(commit_sha) != 40 or any(ch not in "0123456789abcdef" for ch in commit_sha.lower()):
         raise ReleaseError("release SHA must be a full 40-character hexadecimal commit")
 
-    services: dict[str, dict[str, Any]] = {}
-    for role, (service_id, expected_name) in EXPECTED_SERVICES.items():
-        service = client.service(service_id)
-        verify_service(service, service_id=service_id, expected_name=expected_name)
-        services[role] = service
-
-    # Only after every read-only preflight passes do we replace commit-triggered
-    # deployment with the controlled path.
-    for role in ("web", "worker"):
-        service_id = EXPECTED_SERVICES[role][0]
-        updated = client.set_auto_deploy(service_id, False)
-        if str(updated.get("autoDeploy") or "no") != "no":
-            raise ReleaseError(f"failed to disable auto deploy for {role}")
+    disable_auto_deploy(client)
 
     web_id = EXPECTED_SERVICES["web"][0]
     web_deploy = client.trigger(web_id, commit_sha)
@@ -152,16 +140,40 @@ def controlled_release(client: RenderReleaseClient, *, commit_sha: str, health_u
     }
 
 
+def disable_auto_deploy(client: RenderReleaseClient) -> dict[str, str]:
+    """Disable commit deploys only after both production identities pass preflight."""
+    services: dict[str, dict[str, Any]] = {}
+    for role, (service_id, expected_name) in EXPECTED_SERVICES.items():
+        service = client.service(service_id)
+        verify_service(service, service_id=service_id, expected_name=expected_name)
+        services[role] = service
+
+    # Only after every read-only preflight passes do we replace commit-triggered
+    # deployment with the controlled path.
+    for role in ("web", "worker"):
+        service_id = EXPECTED_SERVICES[role][0]
+        updated = client.set_auto_deploy(service_id, False)
+        if str(updated.get("autoDeploy") or "no") != "no":
+            raise ReleaseError(f"failed to disable auto deploy for {role}")
+    return {role: "no" for role in services}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sha", required=True)
     parser.add_argument("--health-url", default="https://apex-strategy-stats-web.onrender.com/health")
     parser.add_argument("--confirmation", default=os.environ.get("APEX_RELEASE_CONFIRMATION", ""))
+    parser.add_argument("--disable-only", action="store_true")
     args = parser.parse_args()
     if args.confirmation != "DEPLOY_APEX_PRODUCTION":
         raise ReleaseError("exact confirmation DEPLOY_APEX_PRODUCTION is required")
+    client = RenderReleaseClient(os.environ.get("RENDER_API_KEY", ""))
+    if args.disable_only:
+        disabled = disable_auto_deploy(client)
+        print(f"APEX auto deploy disabled: {','.join(sorted(disabled))}")
+        return 0
     result = controlled_release(
-        RenderReleaseClient(os.environ.get("RENDER_API_KEY", "")),
+        client,
         commit_sha=args.sha.lower(),
         health_url=args.health_url,
     )
