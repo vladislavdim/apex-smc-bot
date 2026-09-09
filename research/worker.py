@@ -136,26 +136,31 @@ class ResearchWorker:
         self.store.checkpoint(job_id,job_type="FEATURES",symbol=symbol,timeframe=timeframe,
                               range_start=start,range_end=end,last_timestamp=cursor-1,
                               completed_units=completed,total_units=total,status="RUNNING")
-        # Work in bounded chunks. Each snapshot uses only candles available AS OF.
-        with self.store.transaction() as conn:
-            cur=conn.cursor(); cur.execute(self.store._sql("""SELECT close_time FROM market_candles
-                WHERE source='GATE' AND symbol=? AND timeframe=? AND is_closed=1 AND close_time>=? AND close_time<=?
-                ORDER BY close_time"""),(symbol,timeframe,cursor,end)); timestamps=[int(x[0]) for x in cur.fetchall()]
-        for pos,as_of in enumerate(timestamps,1):
-            candles=self.store.candles(symbol,timeframe,as_of=as_of,limit=240)
+        # One stream read plus batched writes: millions of candles must not cause
+        # millions of connections. Each rolling window is still strictly AS OF.
+        stream=self.store.candles_between(symbol,timeframe,max(0,cursor-TIMEFRAME_SECONDS[timeframe]*241),end)
+        positions=[(idx,int(x["close_time"])) for idx,x in enumerate(stream) if int(x["close_time"])>=cursor]
+        timestamps=[as_of for _,as_of in positions]
+        snapshots=[]; levels=[]
+        for pos,(idx,as_of) in enumerate(positions,1):
+            candles=stream[max(0,idx-239):idx+1]
             if len(candles)<50: continue
             try:
                 snapshot=compute_feature_snapshot(symbol,timeframe,candles,dataset_version=DATASET_VERSION)
-                self.store.save_feature_snapshot(symbol,timeframe,as_of,snapshot,feature_version=FEATURE_VERSION,
-                                                 dataset_version=DATASET_VERSION,quality=snapshot["data_quality"]["status"])
-                for level in levels_from_snapshot(snapshot): self.store.upsert_level(level)
+                snapshots.append({"symbol":symbol,"timeframe":timeframe,"as_of":as_of,"features":snapshot,
+                    "feature_version":FEATURE_VERSION,"dataset_version":DATASET_VERSION,
+                    "quality":snapshot["data_quality"]["status"]})
+                levels.extend(levels_from_snapshot(snapshot))
             except Exception as exc:
                 self.store.save_quality_issue(symbol,timeframe,"FEATURE_CALCULATION",open_time=as_of,
                                               severity="ERROR",detail={"error":str(exc)[:500]})
             if pos%100==0:
+                self.store.save_feature_snapshots(snapshots); self.store.upsert_levels(levels)
+                snapshots.clear(); levels.clear()
                 self.store.checkpoint(job_id,job_type="FEATURES",symbol=symbol,timeframe=timeframe,
                                       range_start=start,range_end=end,last_timestamp=as_of,
                                       completed_units=completed+pos,total_units=total,status="RUNNING")
+        self.store.save_feature_snapshots(snapshots); self.store.upsert_levels(levels)
         last=timestamps[-1] if timestamps else cursor-1
         self.store.update_coverage("FEATURE_SNAPSHOT",source="GATE",symbol=symbol,timeframe=timeframe,start=start,end=last,
                                   quality="VALID",availability="HISTORICAL",samples=len(timestamps),
