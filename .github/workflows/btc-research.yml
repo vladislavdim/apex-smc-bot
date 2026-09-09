@@ -1,0 +1,68 @@
+name: BTC One-Year Research
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/btc-research.yml
+      - scripts/run_btc_research_release.py
+      - research/**
+      - core/replay_lab.py
+      - core/setup_evidence.py
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: btc-one-year-research
+  cancel-in-progress: false
+
+jobs:
+  btc-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      APEX_RESEARCH_OUTPUT_DIR: research-data
+      APEX_RESEARCH_GATE_RPS: "1"
+      APEX_RESEARCH_GATE_MINUTE: "50"
+      APEX_RESEARCH_GATE_DAILY: "12000"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore previous BTC database
+        shell: bash
+        run: |
+          mkdir -p research-data
+          gh release download apex-research-btc-data --pattern 'BTCUSDT.research.db.gz' --dir research-data || true
+          if test -f research-data/BTCUSDT.research.db.gz; then
+            gzip -dc research-data/BTCUSDT.research.db.gz > research-data/BTCUSDT.research.db
+          fi
+      - name: Run bounded BTC research
+        run: python scripts/run_btc_research_release.py
+      - name: Verify and package
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, sqlite3
+          p='research-data/BTCUSDT.research.db'
+          with sqlite3.connect(p) as c:
+              assert c.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+              assert c.execute("SELECT COUNT(*) FROM market_candles WHERE symbol='BTCUSDT'").fetchone()[0] > 0
+          d=json.load(open('research-data/BTCUSDT.dashboard.json',encoding='utf-8'))
+          assert d.get('candles') and d.get('runs')
+          PY
+          gzip -c research-data/BTCUSDT.research.db > research-data/BTCUSDT.research.db.gz
+          gzip -c research-data/BTCUSDT.dashboard.json > research-data/BTCUSDT.dashboard.json.gz
+      - name: Publish research snapshot
+        shell: bash
+        run: |
+          gh release view apex-research-btc-data >/dev/null 2>&1 || gh release create apex-research-btc-data --title 'APEX BTC Research Data' --notes 'Machine-generated BTCUSDT Research/Shadow data. No live execution.'
+          gh release upload apex-research-btc-data research-data/BTCUSDT.research.db.gz research-data/BTCUSDT.dashboard.json.gz --clobber

@@ -7,9 +7,12 @@ telemetry is accepted at /ingest and persisted in Postgres.
 from __future__ import annotations
 
 import hmac
+import gzip
 import json
 import os
 import re
+import time
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +29,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "").strip()
 MARKET_DATABASE_URL = os.environ.get("APEX_MARKET_DATABASE_URL", "").strip()
+RESEARCH_GITHUB_REPO = os.environ.get("APEX_RESEARCH_GITHUB_REPO", "vladislavdim/apex-smc-bot").strip()
+RESEARCH_RELEASE_TAG = os.environ.get("APEX_RESEARCH_RELEASE_TAG", "apex-research-btc-data").strip()
+_RESEARCH_RELEASE_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
 PORT = int(os.environ.get("PORT", "10000"))
 STATS_BASELINE_UTC = datetime.fromisoformat("2026-09-03T14:54:22+00:00")  # PR #97 live on Render
 
@@ -35,6 +41,32 @@ def _connect():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
     return psycopg2.connect(DATABASE_URL, connect_timeout=8)
+
+
+def _github_research_dashboard() -> dict[str, Any]:
+    """Read the compact public snapshot; never download the SQLite asset here."""
+    now = time.monotonic()
+    if _RESEARCH_RELEASE_CACHE["value"] is not None and now-_RESEARCH_RELEASE_CACHE["at"] < 300:
+        return _RESEARCH_RELEASE_CACHE["value"]
+    api = f"https://api.github.com/repos/{RESEARCH_GITHUB_REPO}/releases/tags/{RESEARCH_RELEASE_TAG}"
+    request = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
+                                                   "User-Agent": "APEX-Research-Dashboard"})
+    with urllib.request.urlopen(request, timeout=12) as response:
+        release = json.loads(response.read())
+    asset = next((x for x in release.get("assets", [])
+                  if x.get("name") == "BTCUSDT.dashboard.json.gz"), None)
+    if not asset:
+        raise RuntimeError("BTC research dashboard asset is not published")
+    request = urllib.request.Request(asset["browser_download_url"],
+                                     headers={"User-Agent": "APEX-Research-Dashboard"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        compressed = response.read(20 * 1024 * 1024 + 1)
+    if len(compressed) > 20 * 1024 * 1024:
+        raise RuntimeError("BTC research dashboard asset exceeds 20 MiB")
+    value = json.loads(gzip.decompress(compressed))
+    value.setdefault("storage", {}).update({"source": "GITHUB_RELEASE", "cached_seconds": 300})
+    _RESEARCH_RELEASE_CACHE.update({"at": now, "value": value})
+    return value
 
 
 def ensure_schema() -> None:
@@ -758,16 +790,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc: self._json({"error":f"{type(exc).__name__}: {exc}"},500)
             return
         if p.path=="/api/research":
-            if not MARKET_DATABASE_URL:
-                self._json({"error":"APEX_MARKET_DATABASE_URL is not configured"},503); return
             try:
                 # The web process may observe a database created by an older
                 # research worker.  Additive/idempotent migrations are safe at
                 # the read boundary and prevent a stale schema from hiding
                 # the Research tab after a restart.
-                research_store = ResearchStore(MARKET_DATABASE_URL)
-                research_store.ensure_schema()
-                self._json(research_store.dashboard())
+                if MARKET_DATABASE_URL:
+                    research_store = ResearchStore(MARKET_DATABASE_URL)
+                    research_store.ensure_schema()
+                    data = research_store.dashboard()
+                else:
+                    data = _github_research_dashboard()
+                self._json(data)
             except Exception as exc:
                 print(f"[stats] research unavailable: {type(exc).__name__}")
                 self._json({"error":"research database unavailable"},503)
