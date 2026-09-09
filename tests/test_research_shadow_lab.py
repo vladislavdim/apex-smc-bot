@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from research.analytics import promotion_proposal, wilson_interval
+from research.gate_history import target_ranges
 from research.features import FEATURE_VERSION, compute_feature_snapshot, validate_candles
 from research.gate_history import ResearchBudget, backfill_pair
 from research.live_cache import read as cache_read
@@ -105,6 +106,17 @@ def test_dashboard_contains_separate_research_tab():
     assert "NO REAL EXECUTION" in source
     assert "renderResearchDiagnostics" in source
     assert "Counterfactual edges" in source
+    assert "id=liveDashboardV2" in source
+    assert "switchDashboard" in source
+    assert "Все найденные сетапы и результаты" in source
+
+
+def test_default_history_is_one_year_and_configurable(monkeypatch):
+    monkeypatch.delenv("APEX_RESEARCH_HISTORY_DAYS", raising=False)
+    ranges = target_ranges(400 * 86400)
+    assert ranges["15m"] == (35 * 86400, 400 * 86400)
+    monkeypatch.setenv("APEX_RESEARCH_HISTORY_DAYS", "180")
+    assert target_ranges(400 * 86400)["4h"] == (220 * 86400, 400 * 86400)
 
 
 def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):

@@ -130,9 +130,11 @@ def configured_universe() -> list[str]:
 
 def target_ranges(now: int | None = None) -> dict[str, tuple[int, int]]:
     end = int(now or time.time())
-    two_years = 730 * 86400; fast_days = max(180, min(int(os.environ.get("APEX_RESEARCH_5M_DAYS", "365")), 730))
-    return {"15m": (end-two_years,end), "1h": (end-two_years,end),
-            "4h": (end-two_years,end), "1d": (end-two_years,end), "5m": (end-fast_days*86400,end)}
+    history_days = max(90, min(int(os.environ.get("APEX_RESEARCH_HISTORY_DAYS", "365")), 730))
+    history = history_days * 86400
+    fast_days = max(90, min(int(os.environ.get("APEX_RESEARCH_5M_DAYS", "365")), history_days))
+    return {"15m": (end-history,end), "1h": (end-history,end),
+            "4h": (end-history,end), "1d": (end-history,end), "5m": (end-fast_days*86400,end)}
 
 
 def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, timeframe: str,

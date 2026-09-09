@@ -36,17 +36,17 @@ given Binance or Telegram credentials.
 
 | Timeframe | Coverage target | Universe |
 |---|---:|---:|
-| 15m, 1h, 4h, 1d | 730 days | up to 80 Gate pairs |
+| 15m, 1h, 4h, 1d | 365 days | up to 80 Gate pairs |
 | 5m | 365 days | configured FAST subset, default 5 pairs |
 
 At Gate's 2,000-candle page size the initial default backfill is approximately
-4,100 successful REST requests. The worker admits at most 1 request/second, 50 requests/minute and
+2,100 successful REST requests. The worker admits at most 1 request/second, 50 requests/minute and
 12,000 requests/day, retries with exponential backoff, and resumes from the
 last persisted candle/checkpoint. A steady-state refresh is expected to remain
 below roughly 8,000 requests/day for this default universe. These are APEX
 budgets, not claims about an exchange-wide shared-IP allowance.
 
-The two-year default is roughly 7.8 million OHLCV rows before indexes and
+The one-year default is roughly half the former two-year row count before indexes and
 feature snapshots. A dedicated durable PostgreSQL plan must therefore be sized
 and retained explicitly. Do not point this workload at an expiring/free
 database and call it production-ready.
@@ -56,7 +56,7 @@ database and call it production-ready.
 | Requirement | Status | Notes |
 |---|---|---|
 | Separate Market History DB | Implemented, configuration required | Dedicated URL; additive schema; SQLite only for local/test |
-| Gate 2-year OHLCV and incremental refresh | Implemented | 5m bounded separately; closed candles only |
+| Gate 1-year OHLCV and incremental refresh | Implemented | configurable up to 730 days; 5m bounded separately; closed candles only |
 | Gaps, duplicates, OHLC, listing metadata | Implemented | Issues and coverage exposed in Dashboard |
 | Feature Store | Implemented foundation | Structure, OB/FVG/breaker, volume, volatility, regime, VWAP/profile, RSI/MACD, CVD proxy |
 | Level lifecycle | Implemented foundation | Persisted objects; advanced reaction/sweep transitions accumulate with later workers |
@@ -93,22 +93,22 @@ database and call it production-ready.
 - `APEX_RESEARCH_MAX_RSS_MB` pauses at a durable checkpoint before the chosen
   memory ceiling; `APEX_RESEARCH_CPU_DUTY_PERCENT` and the batch yield prevent
   continuous feature/replay calculation from monopolising a small instance.
-- With 80 pairs the initial two-year OHLCV download is approximately 4,200
+- With 80 pairs the initial one-year OHLCV download is approximately 2,100
   successful 2,000-row pages (including the optional five-symbol 5m subset).
   A fully caught-up 30-minute refresh projects at most about 6,600 successful
   requests/day. Defaults therefore admit only 1 request/second, 50/minute and
   12,000/day, leaving retry headroom while enforcing an absolute local ceiling.
   Dashboard exposes used, denied, error and rate-limit counters.
-- SIGTERM never restarts a two-year job from zero: candle, feature, and replay
+- SIGTERM never restarts a historical job from zero: candle, feature, and replay
   checkpoints are idempotent and resume from the last committed timestamp.
 - Required: dedicated `APEX_MARKET_DATABASE_URL`.
-- Optional: `APEX_RESEARCH_PAIRS`, `APEX_RESEARCH_PAIR_LIMIT`,
+- Optional: `APEX_RESEARCH_PAIRS`, `APEX_RESEARCH_PAIR_LIMIT`, `APEX_RESEARCH_HISTORY_DAYS`,
   `APEX_RESEARCH_FAST_PAIRS`, `APEX_RESEARCH_5M_DAYS`,
   `APEX_RESEARCH_GATE_RPS`, `APEX_RESEARCH_GATE_DAILY`.
 - The web service needs only the same read URL to expose `/api/research`.
 - Do not run Research on `apex-smc-bot-1`. A separate worker and a durable,
   adequately sized PostgreSQL database are required before enabling the
-  two-year workload. Until then the production scanner remains unchanged.
+  historical workload. Until then the production scanner remains unchanged.
 - Research failures must not affect the production worker.
 - Database rollback is never automatic. Restore drills use an isolated target
   without live credentials.

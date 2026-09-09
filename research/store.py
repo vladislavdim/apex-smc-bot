@@ -849,6 +849,16 @@ class ResearchStore:
         setups = query("""SELECT setup_id,research_run_id,parent_strategy,symbol,direction,timeframe,
             first_seen,last_seen,state,checks_count,terminal_reason
             FROM research_setups ORDER BY last_seen DESC LIMIT 500""")
+        attempts = query("""SELECT attempt_id,setup_id,research_run_id,profile_id,parent_strategy,
+            symbol,direction,decision_time,stage,outcome,stop_code,entry,sl,tp1,tp2,terminal_tp,
+            rr,fidelity,snapshot_json
+            FROM research_attempts ORDER BY decision_time DESC LIMIT 200""")
+        attempt_trades = query("""SELECT t.attempt_id,t.track,t.status,t.entry_state,t.entry_time,
+            t.exit_time,t.exit_price,t.exit_reason,t.quantity,t.gross_r,t.net_r,t.pnl_pct,
+            t.mfe_r,t.mae_r,t.fees_r,t.slippage_r,t.giveback_r,t.targets_reached_json,
+            t.ambiguity,t.duration_seconds,t.duration_bars,t.cost_completeness
+            FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
+            ORDER BY a.decision_time DESC,t.track LIMIT 600""")
         trades = query("""SELECT a.parent_strategy,t.track,t.status,COUNT(*) AS count,
             AVG(t.net_r) AS expectancy,AVG(CASE WHEN t.net_r>0 THEN 1.0 ELSE 0.0 END)*100 AS win_rate
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
@@ -890,6 +900,7 @@ class ResearchStore:
         return {"schema_version": SCHEMA_VERSION, "generated_at": utc_now(), "candles": counts,
                 "jobs": jobs, "profiles": profiles, "runs": runs, "funnels": funnels,
                 "unique_funnels": unique_funnels, "setups": setups,
+                "attempts": attempts, "attempt_trades": attempt_trades,
                 "trades": trades,
                 "quality": quality, "levels": levels, "coverage": coverage, "evaluations": evaluations,
                 "active_shadow": active_shadow, "checks": checks, "sources": sources,
