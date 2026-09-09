@@ -2,8 +2,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from research.analytics import promotion_proposal, wilson_interval
 from research.features import FEATURE_VERSION, compute_feature_snapshot, validate_candles
 from research.gate_history import ResearchBudget, backfill_pair
