@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 import json
 import sqlite3
 import time
+from datetime import datetime, timezone
 
 
 def number(value):
@@ -122,9 +123,17 @@ def reconcile_one(path, client, now=None):
 def register_execution_orders(path):
     """Discover only order IDs owned by this bot; no exchange calls."""
     with closing(connect(path)) as conn:
-        rows = conn.execute("""SELECT e.* FROM trade_executions e JOIN signals s ON s.id=e.signal_id
-            WHERE e.mode='live' AND e.entry_order_id IS NOT NULL AND s.result!='pending'""").fetchall()
-        actions = conn.execute("SELECT * FROM manager_execution_actions WHERE exchange_order_id IS NOT NULL").fetchall()
+        # A live execution can still be ``pending`` in the signal table while
+        # its entry/protective orders are already on Binance.  Excluding those rows
+        # loses the very fills needed to close ACTUAL.  Ownership is established
+        # by the bot's execution row and order IDs, not by a scanner result.
+        rows = conn.execute("""SELECT e.* FROM trade_executions e
+            WHERE e.mode='live' AND e.entry_order_id IS NOT NULL""").fetchall()
+        actions_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='manager_execution_actions'"
+        ).fetchone()
+        actions = (conn.execute("SELECT * FROM manager_execution_actions WHERE exchange_order_id IS NOT NULL").fetchall()
+                   if actions_table else [])
     by_signal = {row["signal_id"]: row for row in rows}
     for row in rows:
         side = "BUY" if row["direction"] == "BULLISH" else "SELL"
@@ -139,9 +148,80 @@ def register_execution_orders(path):
                            "SELL" if row["direction"] == "BULLISH" else "BUY", kind == "SL")
 
 
-def actual_result(path, snapshot):
+def _candle_time_ms(candle):
+    """Read a Gate candle event time without trusting insertion order."""
+    value = candle.get("closed_at", candle.get("close_time", candle.get("timestamp")))
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        return int(raw if raw > 10_000_000_000 else raw * 1000)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _gate_excursion(snapshot, candles, entry_ms, exit_ms):
+    """Return MFE/MAE/target touches only when an immutable Gate stream exists.
+
+    This is descriptive context around confirmed fills, never evidence that an
+    ACTUAL order filled merely because a candle touched a level.
+    """
+    if not isinstance(candles, (list, tuple)):
+        return {"mfe_r": None, "mae_r": None, "gate_targets_touched": None,
+                "excursion_status": "UNAVAILABLE_NO_GATE_STREAM"}
+    risk = abs(float(snapshot.entry) - float(snapshot.initial_sl))
+    if risk <= 0 or entry_ms is None or exit_ms is None:
+        return {"mfe_r": None, "mae_r": None, "gate_targets_touched": None,
+                "excursion_status": "UNAVAILABLE_INVALID_WINDOW"}
+    selected = []
+    for candle in candles:
+        if not isinstance(candle, dict):
+            continue
+        ts = _candle_time_ms(candle)
+        if ts is None or ts < entry_ms or ts > exit_ms:
+            continue
+        try:
+            high = float(candle["high"]); low = float(candle["low"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        selected.append((ts, high, low))
+    if not selected:
+        return {"mfe_r": None, "mae_r": None, "gate_targets_touched": None,
+                "excursion_status": "UNAVAILABLE_NO_CLOSED_GATE_CANDLES"}
+    sign = 1.0 if snapshot.direction == "BULLISH" else -1.0
+    mfe = 0.0; mae = 0.0
+    target_names = []
+    for _ts, high, low in sorted(selected):
+        favorable = sign * ((high if sign > 0 else low) - float(snapshot.entry)) / risk
+        adverse = sign * ((low if sign > 0 else high) - float(snapshot.entry)) / risk
+        mfe = max(mfe, favorable, 0.0)
+        mae = max(mae, -adverse, 0.0)
+        for name, level in (("TP1", snapshot.tp1), ("TP2", snapshot.tp2), ("TP", snapshot.terminal_tp)):
+            if level is None or name in target_names:
+                continue
+            reached = high >= float(level) if sign > 0 else low <= float(level)
+            if reached:
+                target_names.append(name)
+    return {"mfe_r": round(mfe, 8), "mae_r": round(mae, 8),
+            "gate_targets_touched": target_names, "excursion_status": "GATE_CLOSED_STREAM"}
+
+
+def actual_result(path, snapshot, candles=None):
     signal_id = snapshot.signal_id
-    result = {"track": "ACTUAL", "status": "UNVERIFIED_EXECUTION", "net_r": None, "gross_r": None}
+    result = {
+        "track": "ACTUAL", "status": "UNVERIFIED_EXECUTION", "net_r": None,
+        "gross_r": None, "entry_state": "UNFILLED", "entry_time": None,
+        "exit_time": None, "mfe_r": None, "mae_r": None,
+        "targets_reached": None, "gate_targets_touched": None,
+        "excursion_status": "UNAVAILABLE",
+        "funding_r": None, "slippage_r": None,
+        "accounting_basis": "CONFIRMED_BOT_OWNED_FILLS_EXCLUDING_FUNDING",
+    }
     with closing(connect(path)) as conn:
         fills = conn.execute("SELECT * FROM confirmed_execution_fills WHERE signal_id=? ORDER BY time_ms,trade_id", (signal_id,)).fetchall()
         table = conn.execute("SELECT 1 FROM sqlite_master WHERE name='trade_executions'").fetchone()
@@ -153,6 +233,16 @@ def actual_result(path, snapshot):
     # Match the immutable original full quantity. Never infer an unobserved
     # entry or final fill from a price touching a Gate barrier.
     expected_quantity = number(execution["quantity"]) if execution else number(snapshot.quantity)
+    result.update({
+        "quantity": float(entry_qty) if entry_qty else float(expected_quantity),
+        "remaining_quantity": float(max(expected_quantity - exit_qty, Decimal(0))),
+        "entry_state": "FILLED" if entries else "UNFILLED",
+        "fee_assets": sorted({str(f["commission_asset"]) for f in fills}),
+    })
+    if entries:
+        result["entry_time"] = int(entries[0]["time_ms"])
+    if exits:
+        result["exit_time"] = int(exits[-1]["time_ms"])
     if not entries or not exits or entry_qty != expected_quantity or exit_qty != entry_qty:
         return result
     entry_value = sum(number(f["qty"])*number(f["price"]) for f in entries)
@@ -160,15 +250,31 @@ def actual_result(path, snapshot):
     sign = Decimal(1) if snapshot.direction == "BULLISH" else Decimal(-1)
     gross = sign * (exit_value-entry_value)
     risk = abs(number(snapshot.entry)-number(snapshot.initial_sl))*entry_qty
-    fees_known = all(f["commission_asset"] == "USDT" for f in fills)
+    fees_known = all(str(f["commission_asset"]).upper() == "USDT" for f in fills)
     fee = sum(number(f["commission"]) for f in fills)
+    entry_ms = int(entries[0]["time_ms"]); exit_ms = int(exits[-1]["time_ms"])
+    excursion = _gate_excursion(snapshot, candles, entry_ms, exit_ms)
+    target_fills = []
+    for fill in exits:
+        if fill["kind"] == "TP1" and "TP1" not in target_fills: target_fills.append("TP1")
+        if fill["kind"] == "TP2" and "TP2" not in target_fills: target_fills.append("TP2")
     result.update(status="CLOSED" if fees_known else "FEES_UNRESOLVED", gross_r=float(gross/risk),
                   net_r=float((gross-fee)/risk) if fees_known else None,
                   gross_pct=float(gross/entry_value*100),
                   realized_pct=float((gross-fee)/entry_value*100) if fees_known else None,
                   entry=float(entry_value/entry_qty), exit_price=float(exit_value/exit_qty),
                   exit_reason=exits[-1]["kind"], duration_seconds=(exits[-1]["time_ms"]-entries[0]["time_ms"])/1000,
-                  accounting_basis="confirmed_fills_after_commissions_excluding_funding")
-    with closing(connect(path)) as conn, conn:
-        conn.execute("UPDATE confirmed_execution_orders SET complete=1 WHERE signal_id=?", (signal_id,))
+                  accounting_basis="confirmed_fills_after_commissions_excluding_funding",
+                  fees_r=float(fee/risk) if risk and fees_known else None,
+                  fee_assets=sorted({str(f["commission_asset"]) for f in fills}),
+                  **excursion)
+    # Confirmed TP/SL/CLOSE fills are authoritative for ACTUAL.  Gate touches
+    # are retained only as descriptive context when no target fill was saved.
+    result["targets_reached"] = target_fills or None
+    # Only a fully closed, fully accounted position can close its reconciliation
+    # admission.  Protective orders are not marked complete during partial
+    # fills, so a restart still has a chance to observe their exchange state.
+    if exit_qty == entry_qty:
+        with closing(connect(path)) as conn, conn:
+            conn.execute("UPDATE confirmed_execution_orders SET complete=1 WHERE signal_id=?", (signal_id,))
     return result

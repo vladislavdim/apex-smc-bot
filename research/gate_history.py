@@ -138,11 +138,15 @@ def target_ranges(now: int | None = None) -> dict[str, tuple[int, int]]:
 def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, timeframe: str,
                   start: int, end: int, *, should_stop=None, on_progress=None) -> dict[str, Any]:
     period = TIMEFRAME_SECONDS[timeframe]
+    # Gate candles are interval-aligned.  Never checkpoint an arbitrary wall
+    # clock boundary as if it were an exchange candle boundary.
+    start = (int(start) // period) * period
+    end = (int(end) // period) * period
     # Stable across rolling refresh windows: a new cycle resumes this stream.
     job_id = stable_id("backfill", symbol, timeframe)
     existing = store.job(job_id)
-    cursor = max(start, int(existing.get("last_timestamp") or 0) + period,
-                 (store.max_open_time(symbol, timeframe) or 0) + period)
+    checkpoint = existing.get("last_timestamp")
+    cursor = max(start, int(checkpoint) + period) if checkpoint is not None else start
     total = max(1, (end-start)//period); completed = max(0, (cursor-start)//period)
     store.checkpoint(job_id, job_type="BACKFILL", symbol=symbol, timeframe=timeframe,
                      range_start=start, range_end=end, last_timestamp=cursor-period,
@@ -157,6 +161,9 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                 return {"job_id":job_id,"status":"PAUSED","pages":pages,"upserts":inserted}
             page_end = min(end, cursor + period * 1999)
             candles = client.candles(symbol,timeframe,cursor,page_end)
+            candles = sorted((row for row in candles
+                if row.get("is_closed") and cursor <= int(row["open_time"])
+                and int(row["open_time"]) + period <= end), key=lambda row: row["open_time"])
             if candles:
                 if int(candles[0]["open_time"]) > cursor:
                     store.save_quality_issue(symbol,timeframe,"MISSING_CANDLES",open_time=cursor,
@@ -167,7 +174,14 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                                              severity=issue.get("severity","WARNING"),detail=issue)
                 last=max(x["open_time"] for x in candles)
             else:
-                last=page_end-period
+                # Empty transport results do not establish historical absence.
+                # Keep the cursor before this page so a retry cannot skip it.
+                store.save_quality_issue(symbol,timeframe,"EMPTY_HISTORY_PAGE",open_time=cursor,
+                    severity="WARNING",detail={"start":cursor,"end":page_end})
+                store.checkpoint(job_id,job_type="BACKFILL",symbol=symbol,timeframe=timeframe,
+                    range_start=start,range_end=end,last_timestamp=cursor-period,
+                    completed_units=completed,total_units=total,status="PAUSED")
+                return {"job_id":job_id,"status":"PAUSED","pages":pages,"upserts":inserted}
             cursor=max(cursor+period,last+period); completed=min(total,max(0,(cursor-start)//period)); pages+=1
             store.checkpoint(job_id,job_type="BACKFILL",symbol=symbol,timeframe=timeframe,
                              range_start=start,range_end=end,last_timestamp=last,
@@ -179,7 +193,7 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                               quality="VALID",availability="HISTORICAL",samples=count,
                               metadata={"idempotent":True,"closed_only":True})
         store.checkpoint(job_id,job_type="BACKFILL",symbol=symbol,timeframe=timeframe,
-                         range_start=start,range_end=end,last_timestamp=end-period,
+                         range_start=start,range_end=end,last_timestamp=cursor-period,
                          completed_units=total,total_units=total,status="COMPLETED")
         return {"job_id":job_id,"status":"COMPLETED","pages":pages,"upserts":inserted,"candles":count}
     except Exception as exc:

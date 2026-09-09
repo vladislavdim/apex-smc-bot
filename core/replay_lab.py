@@ -139,8 +139,11 @@ class FrozenEntry:
 class _TrackState:
     track: str
     snapshot: FrozenEntry
-    status: str = "OPEN"
-    remaining_quantity: float = 1.0
+    # A replay starts before the hypothetical entry is necessarily filled.
+    # Keeping that state explicit prevents a pre-entry wick from becoming an
+    # impossible SL/TP result and makes candidate->fill conversion measurable.
+    status: str = "WAITING_ENTRY"
+    remaining_quantity: float = 0.0
     current_sl: float = 0.0
     gross_r: float = 0.0
     fee_r: float = 0.0
@@ -155,14 +158,18 @@ class _TrackState:
     exit_reason: str | None = None
     exit_price: float | None = None
     exit_candle_id: str | None = None
+    exit_time: str | None = None
     last_candle_id: str | None = None
     first_candle_at: str | None = None
     last_candle_at: str | None = None
+    entry_time: str | None = None
+    entry_index: int | None = None
+    entry_filled: bool = False
     closed_index: int | None = None
     excursion_uncertain: bool = False
 
     def __post_init__(self) -> None:
-        self.remaining_quantity = self.snapshot.quantity
+        self.remaining_quantity = 0.0
         self.current_sl = self.snapshot.initial_sl
 
 
@@ -185,6 +192,11 @@ def _touch(direction: str, price: float, candle: ReplayCandle, favorable: bool) 
     return candle.low <= price if favorable else candle.high >= price
 
 
+def _entry_touch(price: float, candle: ReplayCandle) -> bool:
+    """Whether a candle's traded range reached a pending entry level."""
+    return candle.low <= price <= candle.high
+
+
 def _add_target(state: _TrackState, name: str) -> None:
     if name not in state.targets_reached:
         state.targets_reached.append(name)
@@ -197,9 +209,53 @@ def _add_target(state: _TrackState, name: str) -> None:
 
 
 def _mark_excursion(state: _TrackState, candle: ReplayCandle) -> None:
+    if not state.entry_filled:
+        return
     snap = state.snapshot
-    state.mfe_r = max(state.mfe_r, _r(snap.direction, snap.entry, abs(snap.entry - snap.initial_sl), candle.high if snap.direction == "BULLISH" else candle.low))
-    state.mae_r = min(state.mae_r, _r(snap.direction, snap.entry, abs(snap.entry - snap.initial_sl), candle.low if snap.direction == "BULLISH" else candle.high))
+    risk = abs(snap.entry - snap.initial_sl)
+    favorable = _r(
+        snap.direction, snap.entry, risk,
+        candle.high if snap.direction == "BULLISH" else candle.low,
+    )
+    adverse = _r(
+        snap.direction, snap.entry, risk,
+        candle.low if snap.direction == "BULLISH" else candle.high,
+    )
+    # MFE/MAE are excursion magnitudes.  Older code exposed MAE as a
+    # negative number, which made giveback/quality reports inconsistent with
+    # the rest of the system.  Keep an explicitly positive MAE contract.
+    state.mfe_r = max(state.mfe_r, favorable, 0.0)
+    state.mae_r = max(state.mae_r, -adverse, 0.0)
+
+
+def _record_entry(state: _TrackState, price: float, quantity: float,
+                  fee_r: float, slippage_bps: float, candle: ReplayCandle,
+                  index: int) -> None:
+    """Fill the frozen entry without realizing PnL.
+
+    ``fee_r`` is a per-side fee expressed in R.  Keeping entry and exits
+    separate matters when a position later has multiple partial exits.
+    """
+    snap = state.snapshot
+    quantity = max(0.0, min(float(quantity), snap.quantity))
+    if quantity <= 0:
+        return
+    risk = abs(snap.entry - snap.initial_sl)
+    scale = quantity / max(snap.quantity, 1e-12)
+    state.fee_r += max(0.0, fee_r) * scale
+    state.slippage_r += (
+        abs(price) * max(0.0, slippage_bps) / 10000
+        / max(risk, 1e-12) * scale
+    )
+    state.remaining_quantity = quantity
+    state.entry_filled = True
+    state.status = "OPEN"
+    state.entry_time = candle.closed_at
+    state.entry_index = index
+    state.events.append({
+        "type": "ENTRY_FILL", "price": price, "quantity": quantity,
+        "candle_id": candle.candle_id,
+    })
 
 
 def _record_fill(state: _TrackState, price: float, quantity: float, fee_r: float, slippage_bps: float) -> None:
@@ -222,6 +278,7 @@ def _close(state: _TrackState, price: float, reason: str, candle: ReplayCandle, 
     state.exit_reason = reason
     state.exit_price = price
     state.exit_candle_id = candle.candle_id
+    state.exit_time = candle.closed_at
     state.closed_index = index
     state.events.append({"type": "CLOSE", "reason": reason, "price": price, "candle_id": candle.candle_id})
 
@@ -313,19 +370,28 @@ def _result(state: _TrackState, candles: list[ReplayCandle], fee_r: float, slipp
     if state.status == "CLOSED" and state.exit_price is not None:
         gross_pct = state.gross_r * abs(snap.entry - snap.initial_sl) / snap.entry * 100
         net_price_pct = gross_pct - ((state.fee_r + state.slippage_r) * abs(snap.entry - snap.initial_sl) / max(snap.entry, 1e-12) * 100)
-    duration_bars = (state.closed_index + 1) if state.closed_index is not None else len(candles)
+    if state.entry_index is not None:
+        duration_bars = ((state.closed_index - state.entry_index + 1)
+                         if state.closed_index is not None
+                         else max(0, len(candles) - state.entry_index))
+    else:
+        duration_bars = 0
     duration_seconds = None
-    start, end = _time(snap.entry_at), _time(state.last_candle_at)
+    start, end = _time(state.entry_time), _time(state.last_candle_at)
     if start is not None and end is not None and end >= start:
         duration_seconds = round(end - start, 3)
     return {
         "track": state.track, "signal_id": snap.signal_id, "symbol": snap.symbol,
         "strategy": snap.strategy, "direction": snap.direction, "status": state.status,
+        "entry_state": "FILLED" if state.entry_filled else "UNFILLED",
+        "entry_filled": state.entry_filled, "entry_time": state.entry_time,
+        "entry_index": state.entry_index,
         "quantity": snap.quantity, "remaining_quantity": state.remaining_quantity,
         "entry": snap.entry, "initial_sl": snap.initial_sl, "tp1": snap.tp1,
         "tp2": snap.tp2, "terminal_tp": snap.terminal_tp, "current_sl": state.current_sl,
         "tp1_reached": state.tp1_reached, "tp2_reached": state.tp2_reached,
         "exit_price": state.exit_price, "exit_reason": state.exit_reason,
+        "exit_time": state.exit_time,
         "gross_r": round(state.gross_r, 8) if state.status == "CLOSED" else None,
         "net_r": round(net_r, 8) if net_r is not None else None,
         "gross_pct": round(gross_pct, 8) if gross_pct is not None else None,
@@ -375,14 +441,38 @@ def _run_track(
     track: str, snapshot: FrozenEntry, candles: list[ReplayCandle], actions: Mapping[str, Any] | None,
     playbook: Callable[[FrozenEntry, Mapping[str, Any], ReplayCandle], Any] | None,
     ambiguous_policy: str, fee_r: float, slippage_bps: float,
+    entry_expiry_bars: int | None,
 ) -> dict[str, Any]:
+    entry_boundary = _time(snapshot.entry_at)
+    if entry_boundary is not None:
+        candles = [c for c in candles
+                   if _time(c.closed_at) is None or _time(c.closed_at) >= entry_boundary]
     state = _TrackState(track=track, snapshot=replace(snapshot))
     state.first_candle_at = candles[0].closed_at if candles else None
     history: list[dict[str, Any]] = []
     for index, candle in enumerate(candles):
-        if state.status != "OPEN":
+        if state.status == "CLOSED":
             break
         state.last_candle_id, state.last_candle_at = candle.candle_id, candle.closed_at
+
+        if not state.entry_filled:
+            # Entry is a level order in the virtual track.  It is only filled
+            # when the immutable Gate candle actually spans that level; no
+            # pre-entry candle may touch SL/TP or contribute MFE/MAE.
+            if _entry_touch(snapshot.entry, candle):
+                _record_entry(state, snapshot.entry, snapshot.quantity, fee_r,
+                              slippage_bps, candle, index)
+            elif entry_expiry_bars is not None and entry_expiry_bars > 0 and index + 1 >= entry_expiry_bars:
+                state.status = "EXPIRED"
+                state.exit_reason = "ENTRY_NOT_FILLED"
+                state.closed_index = index
+                state.events.append({"type": "ENTRY_EXPIRED", "candle_id": candle.candle_id})
+                history.append(asdict(candle))
+                break
+            else:
+                history.append(asdict(candle))
+                continue
+
         _mark_excursion(state, candle)
         if _touch(snapshot.direction, snapshot.tp1, candle, favorable=True):
             _add_target(state, "TP1")
@@ -416,10 +506,24 @@ def replay_three_tracks(
     *, actual_actions: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None = None,
     playbook: Callable[[FrozenEntry, Mapping[str, Any], ReplayCandle], Any] | None = None,
     ambiguous_policy: str = "SL_FIRST", fee_r: float = 0.02, slippage_bps: float = 0.0,
+    entry_expiry_bars: int | None = 12,
 ) -> dict[str, dict[str, Any]]:
-    """Run isolated ACTUAL/NO_MANAGER/PLAYBOOK_ONLY tracks."""
+    """Run isolated ACTUAL/NO_MANAGER/PLAYBOOK_ONLY tracks.
+
+    ``entry_expiry_bars`` bounds the pending-entry window.  Set it to ``None``
+    for an unbounded historical stream; the default is deliberately bounded so
+    a candidate cannot remain a phantom position forever.
+    """
     frozen = snapshot if isinstance(snapshot, FrozenEntry) else FrozenEntry.from_mapping(snapshot)
     stream = [c if isinstance(c, ReplayCandle) else ReplayCandle.from_mapping(c, i) for i, c in enumerate(candles)]
+    # A delayed insert/restart can hand a direct caller rows out of order.  Use
+    # Gate event time where available; preserve input order only for untimed
+    # synthetic fixtures.
+    stream = [item for _, item in sorted(
+        enumerate(stream), key=lambda pair: (
+            _time(pair[1].closed_at) if _time(pair[1].closed_at) is not None else float("inf"),
+            pair[0],
+        ))]
     action_map: dict[str, Any] = {}
     if isinstance(actual_actions, Mapping):
         action_map = {str(key): value for key, value in actual_actions.items()}
@@ -431,9 +535,9 @@ def replay_three_tracks(
     if policy not in {"SL_FIRST", "TP_FIRST", "AMBIGUOUS"}:
         raise ValueError("invalid_ambiguous_policy")
     return {
-        "ACTUAL": _run_track("ACTUAL", frozen, stream, action_map, None, policy, fee_r, slippage_bps),
-        "NO_MANAGER": _run_track("NO_MANAGER", frozen, stream, None, None, policy, fee_r, slippage_bps),
-        "PLAYBOOK_ONLY": _run_track("PLAYBOOK_ONLY", frozen, stream, None, playbook or default_book_playbook, policy, fee_r, slippage_bps),
+        "ACTUAL": _run_track("ACTUAL", frozen, stream, action_map, None, policy, fee_r, slippage_bps, entry_expiry_bars),
+        "NO_MANAGER": _run_track("NO_MANAGER", frozen, stream, None, None, policy, fee_r, slippage_bps, entry_expiry_bars),
+        "PLAYBOOK_ONLY": _run_track("PLAYBOOK_ONLY", frozen, stream, None, playbook or default_book_playbook, policy, fee_r, slippage_bps, entry_expiry_bars),
     }
 
 
@@ -590,7 +694,7 @@ def persist_replay_bundle(
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_hash, frozen.signal_id, track, str(row.get("status") or "UNKNOWN"),
              _number(row.get("net_r")), _number(row.get("gross_r")), _number(row.get("realized_pct")),
-             _number(row.get("mfe_r"), 0.0), _number(row.get("mae_r"), 0.0), _number(row.get("giveback_r")),
+             _number(row.get("mfe_r")), _number(row.get("mae_r")), _number(row.get("giveback_r")),
              int(row.get("duration_bars") or 0), row.get("exit_reason"),
              _canonical(row.get("targets_reached") or []), _canonical(row)),
         )
@@ -622,7 +726,9 @@ def replay_dashboard_summary(db_path: str = DB_PATH, limit: int = 100) -> list[d
     for item in list(grouped.values())[: max(1, int(limit))]:
         tracks = item["tracks"]
         from core.execution_ledger import actual_result
-        tracks["ACTUAL"] = actual_result(db_path, FrozenEntry.from_mapping(json.loads(item.pop("_snapshot"))))
+        tracks["ACTUAL"] = actual_result(
+            db_path, FrozenEntry.from_mapping(json.loads(item.pop("_snapshot"))),
+        )
         actual = _number((tracks.get("ACTUAL") or {}).get("net_r"))
         no_manager = _number((tracks.get("NO_MANAGER") or {}).get("net_r"))
         playbook = _number((tracks.get("PLAYBOOK_ONLY") or {}).get("net_r"))
@@ -639,6 +745,7 @@ def replay_persisted_trade(
     snapshot: FrozenEntry | Mapping[str, Any], *, db_path: str = DB_PATH,
     playbook: Callable[[FrozenEntry, Mapping[str, Any], ReplayCandle], Any] | None = None,
     ambiguous_policy: str = "SL_FIRST", fee_r: float = 0.02, slippage_bps: float = 0.0,
+    entry_expiry_bars: int | None = 12,
 ) -> str | None:
     """Replay the durable Gate stream captured by Manager V2 and persist it."""
     frozen = snapshot if isinstance(snapshot, FrozenEntry) else FrozenEntry.from_mapping(snapshot)
@@ -648,12 +755,17 @@ def replay_persisted_trade(
     results = replay_three_tracks(
         frozen, inputs["candles"], actual_actions=inputs["actions"], playbook=playbook,
         ambiguous_policy=ambiguous_policy, fee_r=fee_r, slippage_bps=slippage_bps,
+        entry_expiry_bars=entry_expiry_bars,
     )
     from core.execution_ledger import actual_result
-    results["ACTUAL"] = actual_result(db_path, frozen)
+    # The candle stream is passed only as a bounded, read-only excursion
+    # context for already-confirmed fills.  It can never manufacture an
+    # ACTUAL entry/exit; the ledger remains authoritative.
+    results["ACTUAL"] = actual_result(db_path, frozen, inputs["candles"])
     return persist_replay_bundle(
         frozen, inputs["candles"], results,
-        config={"ambiguous_policy": ambiguous_policy, "fee_r": fee_r, "slippage_bps": slippage_bps},
+        config={"ambiguous_policy": ambiguous_policy, "fee_r": fee_r,
+                "slippage_bps": slippage_bps, "entry_expiry_bars": entry_expiry_bars},
         db_path=db_path,
     )
 

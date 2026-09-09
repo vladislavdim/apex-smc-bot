@@ -87,6 +87,40 @@ class ResearchWorkerLimitTests(unittest.TestCase):
         self.assertEqual(result["timestamps"],3)
         self.assertEqual(result["attempts"],3)
 
+    def test_replay_checkpoints_committed_batch_before_pause(self):
+        snapshots=[{"symbol":"AAVEUSDT","timeframe":"15m","as_of":ts,
+            "features":{"price":100,"structure":{"direction":""}},
+            "feature_version":FEATURE_VERSION,"dataset_version":"test","quality":"VALID"}
+            for ts in range(1,61)]
+        self.store.save_feature_snapshots(snapshots)
+        checkpoints=[]
+        with patch.dict("os.environ",{"APEX_RESEARCH_REPLAY_BATCH":"25"}):
+            result=ReplayEngine(self.store).replay_profile("run","profile","FAST","AAVEUSDT",1,60,
+                on_checkpoint=lambda *args:checkpoints.append(args),
+                should_stop=lambda:bool(checkpoints))
+        self.assertEqual(result["status"],"PAUSED")
+        self.assertEqual(result["last_timestamp"],25)
+        self.assertEqual(checkpoints,[(25,25,60)])
+
+    def test_incomplete_backfill_does_not_start_features(self):
+        class Client:
+            def contract_metadata(self): return {}
+        worker=ResearchWorker(self.store,Client())
+        with patch("research.worker.configured_universe",return_value=["AAVEUSDT"]), \
+             patch("research.worker.backfill_pair",return_value={"status":"PAUSED"}), \
+             patch.object(worker,"_materialize_symbol") as features:
+            worker.cycle()
+        features.assert_not_called()
+
+    def test_service_requires_explicit_separate_database(self):
+        import research_worker
+        with patch.dict("os.environ",{},clear=True):
+            with self.assertRaisesRegex(RuntimeError,"Dedicated"):
+                research_worker.main()
+        with patch.dict("os.environ",{"APEX_MARKET_DATABASE_URL":"same","DATABASE_URL":"same"}):
+            with self.assertRaisesRegex(RuntimeError,"must not reuse"):
+                research_worker.main()
+
 
 if __name__=="__main__":
     unittest.main()

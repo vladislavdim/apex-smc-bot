@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 
@@ -9,14 +10,23 @@ from research.worker import ResearchWorker
 
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s")
-worker=ResearchWorker()
+worker=None
 
 
 def _stop(*_args):
-    worker.stop_requested=True
+    if worker is not None:
+        worker.stop_requested=True
 
 
 def main() -> None:
+    global worker
+    database_url=os.environ.get("APEX_MARKET_DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("Dedicated APEX_MARKET_DATABASE_URL is required for the Research service")
+    if database_url == os.environ.get("DATABASE_URL", "").strip():
+        raise RuntimeError("Research database must not reuse the LIVE telemetry database")
+    from research.store import ResearchStore
+    worker=ResearchWorker(store=ResearchStore(database_url))
     signal.signal(signal.SIGTERM,_stop); signal.signal(signal.SIGINT,_stop)
     while not worker.stop_requested:
         try:

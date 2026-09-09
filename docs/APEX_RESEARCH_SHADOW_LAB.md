@@ -40,7 +40,7 @@ given Binance or Telegram credentials.
 | 5m | 365 days | configured FAST subset, default 5 pairs |
 
 At Gate's 2,000-candle page size the initial default backfill is approximately
-4,100 successful REST requests. The worker admits at most 2 requests/second and
+4,100 successful REST requests. The worker admits at most 1 request/second, 50 requests/minute and
 12,000 requests/day, retries with exponential backoff, and resumes from the
 last persisted candle/checkpoint. A steady-state refresh is expected to remain
 below roughly 8,000 requests/day for this default universe. These are APEX
@@ -112,3 +112,18 @@ database and call it production-ready.
 - Research failures must not affect the production worker.
 - Database rollback is never automatic. Restore drills use an isolated target
   without live credentials.
+
+## Replay integrity and current limits
+
+- Each virtual track waits for its own entry fill; pre-entry prices never count
+  toward MFE/MAE or TP/SL. Entry expiry, entry time and duration are persisted.
+- ACTUAL comes from confirmed bot-owned fills. Gate excursions are descriptive
+  context only; candle touches are distinct from confirmed target executions.
+  Unknown fee assets keep net results unavailable.
+- Research setup identities distinguish repeated checks from unique structures.
+  Ambiguous historical STOP ownership remains explicitly unresolved.
+- Previous day/week highs/lows are calculated point-in-time and materialized
+  as levels. Missing external features remain unavailable.
+- Full production detector parity, paired ablation/walk-forward evaluation and
+  a provisioned isolated Research database/worker remain release prerequisites
+  for the complete specification. Surrogate profiles cannot establish live edge.

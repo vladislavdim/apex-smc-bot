@@ -169,6 +169,40 @@ def _metric_summary(values: list[float]) -> dict[str, Any]:
     }
 
 
+def _stop_owner(checks: list[dict[str, Any]], stop: dict[str, Any]) -> tuple[int | None, str]:
+    """Resolve one blocking STOP without blaming a check by list order."""
+    failed = [(idx, check) for idx, check in enumerate(checks)
+              if str(check.get("state") or "").upper() == "FAIL"]
+    if not failed:
+        return None, "NO_FAILED_CHECK"
+    explicit_index = stop.get("blocking_check_index")
+    if explicit_index is not None:
+        try:
+            idx = int(explicit_index)
+            if 0 <= idx < len(checks) and str(checks[idx].get("state") or "").upper() == "FAIL":
+                return idx, "EXPLICIT"
+        except (TypeError, ValueError):
+            pass
+    explicit_code = str(stop.get("blocking_check_code") or "").strip()
+    if explicit_code:
+        matches = [(idx, check) for idx, check in failed
+                   if str(check.get("code") or "").strip() == explicit_code]
+        if len(matches) == 1:
+            return matches[0][0], "EXPLICIT_CODE"
+    condition = str(stop.get("condition") or "").strip()
+    label = str(stop.get("label") or "").strip()
+    matches = [(idx, check) for idx, check in failed
+               if condition and str(check.get("condition") or "").strip() == condition]
+    if not matches:
+        matches = [(idx, check) for idx, check in failed
+                   if label and str(check.get("label") or "").strip() == label]
+    if len(matches) == 1:
+        return matches[0][0], "EXACT_TEXT"
+    if len(failed) == 1:
+        return failed[0][0], "SINGLE_FAILED_CHECK"
+    return None, "AMBIGUOUS"
+
+
 def _observed_funnels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -176,9 +210,14 @@ def _observed_funnels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for strategy, items in sorted(grouped.items()):
         steps: dict[str, dict[str, Any]] = {}
+        ambiguous_stops = 0
         for row in items:
             seen = set()
             raw_checks = row.get("checks", []) if isinstance(row.get("checks"), list) else []
+            stop = row.get("stop") if isinstance(row.get("stop"), dict) else {}
+            owner_index, owner_status = _stop_owner(raw_checks, stop) if stop else (None, "NO_STOP")
+            if stop and owner_status in {"AMBIGUOUS", "NO_FAILED_CHECK"}:
+                ambiguous_stops += 1
             for idx, check in enumerate(raw_checks):
                 if not isinstance(check, dict):
                     continue
@@ -192,7 +231,10 @@ def _observed_funnels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 bucket["passed"] += int(state == "PASS")
                 bucket["failed"] += int(state == "FAIL")
                 bucket["positions"].append(idx)
-                bucket["blocking_stops"] += int(bool(check.get("blocking_stop")))
+                # Old cohorts sometimes marked several checks or a passed
+                # check as blocking.  Count exactly one owner only when the
+                # stop can be justified from a failed predicate.
+                bucket["blocking_stops"] += int(owner_index == idx)
         min_reached = max(2, int(len(items) * 0.02))
         ordered = []
         for bucket in steps.values():
@@ -208,6 +250,7 @@ def _observed_funnels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ordered.sort(key=lambda x: (x["avg_position"], -x["reached"]))
         result.append({
             "strategy": strategy, "attempts": len(items), "steps": ordered[:30],
+            "ambiguous_stop_mappings": ambiguous_stops,
             "candidates": sum(str(x.get("outcome") or "").upper() == "CANDIDATE" for x in items),
             "pending_ltf": sum(str(x.get("outcome") or "").upper() == "PENDING_LTF" for x in items),
             "filtered": sum(str(x.get("outcome") or "").upper() == "FILTERED" for x in items),
@@ -658,9 +701,11 @@ function renderMicrostructure(){if(!LAST)return;let box=document.getElementById(
 setInterval(renderMicrostructure,2000);renderMicrostructure();
 </script><script>
 let RESEARCH=null;
-async function loadResearch(){const box=document.getElementById('researchShadowV2');if(!box)return;box.innerHTML='<h2>🧪 Research / Shadow</h2><span class=muted>Загрузка…</span>';const r=await fetch('/api/research?key='+encodeURIComponent(TOKEN));if(!r.ok){box.innerHTML='<h2>🧪 Research / Shadow</h2><span class=warn>База Research пока недоступна: HTTP '+r.status+'</span>';return}RESEARCH=await r.json();renderResearch()}
+async function loadResearch(){const box=document.getElementById('researchShadowV2');if(!box)return;box.innerHTML='<h2>🧪 Research / Shadow</h2><span class=muted>Загрузка…</span>';const r=await fetch('/api/research?key='+encodeURIComponent(TOKEN));if(!r.ok){box.innerHTML='<h2>🧪 Research / Shadow</h2><span class=warn>База Research пока недоступна: HTTP '+r.status+'</span>';return}RESEARCH=await r.json();renderResearch();renderResearchDiagnostics();renderResearchLifecycle()}
 function researchMeta(v){try{return typeof v==='string'?JSON.parse(v):v||{}}catch(_){return {raw:String(v||'')}}}
 function renderResearch(){const d=RESEARCH||{},meta=d.meta||{},runs=d.runs||[],jobs=d.jobs||[],candles=d.candles||[],funnels=d.funnels||[],trades=d.trades||[],quality=d.quality||[],evals=d.evaluations||[],active=d.active_shadow||[],pair=researchMeta(meta.pair_progress),worker=researchMeta(meta.worker_state),load=researchMeta(meta.research_load),api=d.api_usage||{},day=api.day||{},minute=api.minute||{};const state=worker.state||worker.raw||'NOT_STARTED',pct=Math.max(0,Math.min(100,Number(pair.pair_percent||0))),overall=Math.max(0,Math.min(100,Number(pair.overall_percent||0))),strategies=pair.strategy_status||{};researchShadowV2.innerHTML=`<h2>🧪 APEX Research / Shadow Lab</h2><div class=warn><b>NO REAL EXECUTION</b> · Research не меняет production-профили, Entry/SL/TP/RR, риск и Binance.</div><div class="cols section"><div class=card><h2>Текущая пара · ${esc(pair.current_symbol||'—')}</h2><div><b>${num(pair.pair_index||0)}/${num(pair.pair_total||0)} · ${num(pct)}%</b> · ${esc(pair.stage||state)}</div><div style="height:12px;background:#202a38;border-radius:8px;overflow:hidden;margin:8px 0"><div style="height:100%;width:${pct}%;background:#32d583"></div></div><div class=muted>Общий прогресс ${num(overall)}% · RSS ${num(pair.rss_mb||load.rss_mb)} MB</div><div>${Object.entries(strategies).map(([k,v])=>`<span class=badge style="margin:3px">${esc(k)} · ${esc(v)}</span>`).join('')}</div></div><div class=card><h2>Лимиты нагрузки</h2><div>Gate сегодня: <b>${num(day.used||0)}/${num(day.limit_value||0)}</b></div><div>Текущая минута: ${num(minute.used||0)}/${num(minute.limit_value||0)}</div><div class=muted>CPU duty ${num(load.cpu_duty_percent)}% · RSS guard ${num(load.max_rss_mb)} MB · denied ${num(day.denied||0)} · 429 ${num(day.rate_limited||0)}</div></div></div><div class="grid section">${candles.map(x=>`<div class=card><div class=muted>${esc(x.timeframe)} · ${num(x.symbols)} пар</div><div class=num>${num(x.candles)}</div><div class=muted>${x.coverage_start?new Date(Number(x.coverage_start)*1000).toISOString().slice(0,10):'—'} → ${x.coverage_end?new Date(Number(x.coverage_end)*1000).toISOString().slice(0,10):'—'}</div></div>`).join('')||'<div class=card><span class=muted>Backfill ещё не начат</span></div>'}</div><div class="cols section"><div class=card><h2>Research Health / Progress</h2><div class=muted>Worker: ${esc(state)}</div>${jobs.slice(0,20).map(x=>`<div class=crit><b>${esc(x.job_type)} · ${esc(x.symbol)} ${esc(x.timeframe)}</b><div>${num(x.progress)}% · ${esc(x.status)}</div><div class=muted>checkpoint ${esc(x.last_timestamp||'—')} · ${esc(x.error||'')}</div></div>`).join('')||'<span class=muted>Нет задач</span>'}</div><div class=card><h2>Dataset / Replay versions</h2>${runs.map(x=>`<div class=crit><b>${esc(x.run_type)}</b><div>${esc(x.strategy_version)} · ${num(x.progress)}% · ${esc(x.status)}</div><div class=muted>${esc(x.dataset_version)} · ${esc(x.feature_version)} · ${esc(String(x.code_sha||'').slice(0,8))}</div></div>`).join('')||'<span class=muted>Replay ещё не запускался</span>'}</div></div><div class="cols section"><div class=card><h2>Research Funnel</h2>${funnels.map(x=>`<span class=badge style="margin:3px">${esc(x.parent_strategy)} · ${esc(x.outcome)} ${num(x.count)}</span>`).join('')||'<span class=muted>Нет point-in-time attempts</span>'}</div><div class=card><h2>Shadow outcomes</h2>${trades.map(x=>`<div class=crit><b>${esc(x.parent_strategy)} · ${esc(x.track)} · ${esc(x.status)}</b><div>n=${num(x.count)} · WR ${num(x.win_rate)}% · expectancy ${num(x.expectancy)}R</div></div>`).join('')||'<span class=muted>Нет завершённых shadow-сделок</span>'}</div></div><div class="cols section"><div class=card><h2>Indicator / Segment Lab</h2>${evals.slice(0,30).map(x=>`<div class=crit><b>${esc(x.feature)} · ${esc(x.segment_json)}</b><div>n=${num(x.sample_size)} · expectancy ${num(x.expectancy)}R · uplift ${num(x.uplift)}R · OOS ${num(x.oos_uplift)}R</div><div class=muted>${esc(x.status)} · auto activation: forbidden</div></div>`).join('')||'<span class=muted>Нужны завершённые replay-сделки</span>'}</div><div class=card><h2>Data Quality</h2>${quality.map(x=>`<div class=crit><b class="${x.severity==='ERROR'?'bad':'warn'}">${esc(x.issue_type)}</b> · ${num(x.count)}</div>`).join('')||'<span class=good>Открытых ошибок истории нет</span>'}<h2 style="margin-top:14px">Shadow Active</h2>${active.map(x=>`<div class=crit><b>${esc(x.parent_strategy)} · ${esc(x.symbol)} · ${esc(x.direction)}</b><div>Entry ${num(x.entry)} · SL ${num(x.initial_sl)} · TP1 ${num(x.tp1)} · MFE ${num(x.mfe_r)}R</div></div>`).join('')||'<span class=muted>Нет активных виртуальных позиций</span>'}</div></div>`}
+function renderResearchDiagnostics(){const d=RESEARCH||{},box=document.getElementById('researchShadowV2');if(!box)return;const checks=d.checks||[],sources=d.sources||[],edges=d.track_edges||[];const grouped=checks.reduce((m,x)=>{const k=(x.parent_strategy||'UNKNOWN')+' · '+(x.label||x.check_code||'CHECK');(m[k]||(m[k]=[])).push(x);return m},{});const checkHtml=Object.entries(grouped).slice(0,80).map(([k,v])=>{const p=v.find(x=>x.status==='PASS'),f=v.find(x=>x.status==='FAIL'),n=v.find(x=>x.status==='NOT_REACHED');return '<div class=crit><b>'+esc(k)+'</b><div>✅ '+num(p&&p.count||0)+' · ❌ '+num(f&&f.count||0)+' · ⏭ '+num(n&&n.count||0)+'</div></div>'}).join('')||'<span class=muted>Журнал критериев ещё не накоплен</span>';const sourceHtml=sources.map(x=>'<div class=crit><b>'+esc(x.source)+'</b> · '+esc(x.status)+'<div class=muted>'+esc(x.authority)+' · SLA '+num(x.freshness_sla_seconds)+'s · '+esc(x.fallback_source||'no fallback')+'</div></div>').join('')||'<span class=muted>Source Registry ещё не инициализирован</span>';const edgeHtml=edges.slice(0,60).map(x=>'<div class=crit><b>'+esc(x.parent_strategy)+' · '+esc(x.symbol)+'</b><div>ACTUAL '+esc(x.actual_status||'UNAVAILABLE')+' · Groq edge '+num(x.groq_edge_r)+'R · rules edge '+num(x.groq_vs_rules_edge_r)+'R</div></div>').join('')||'<span class=muted>Нужны связанные ACTUAL fills и виртуальные треки</span>';box.insertAdjacentHTML('beforeend','<div class="cols section"><div class=card><h2>Check journal · PASS / FAIL / NOT REACHED</h2>'+checkHtml+'</div><div class=card><h2>Source Registry / provenance</h2>'+sourceHtml+'</div></div><div class="section card"><h2>Counterfactual edges</h2>'+edgeHtml+'</div>')}
+function renderResearchLifecycle(){const d=RESEARCH||{},box=document.getElementById('researchShadowV2');if(!box)return;const unique=d.unique_funnels||[],setups=d.setups||[],levels=d.levels||[],coverage=d.coverage||[];const uniqueHtml=unique.map(x=>'<span class="badge" style="margin:3px">'+esc(x.parent_strategy)+' · '+esc(x.state)+' '+num(x.count)+' ('+num(x.symbols)+' пар)</span>').join('')||'<span class=muted>Уникальные setup ещё не накоплены</span>';const setupHtml=setups.slice(0,40).map(x=>'<div class=crit><b>'+esc(x.parent_strategy)+' · '+esc(x.symbol)+' · '+esc(x.direction||'—')+'</b><div>'+esc(x.state)+' · '+esc(x.timeframe||'—')+' · checks '+num(x.checks_count)+'</div><div class=muted>'+esc(x.first_seen)+' → '+esc(x.last_seen)+' · '+esc(x.terminal_reason||'нет terminal reason')+'</div></div>').join('')||'<span class=muted>Нет setup lifecycle</span>';const levelHtml=levels.map(x=>'<span class="badge" style="margin:3px">'+esc(x.timeframe)+' · '+esc(x.level_type)+' · '+esc(x.status)+' '+num(x.count)+'</span>').join('')||'<span class=muted>Уровни ещё не материализованы</span>';const missing=coverage.filter(x=>String(x.quality||'').toUpperCase()!=='VALID').slice(0,20).map(x=>'<div class=crit><b>'+esc(x.feature)+' · '+esc(x.source)+'</b><div>'+esc(x.quality)+' · '+esc(x.availability)+' · samples '+num(x.samples)+'</div></div>').join('')||'<span class=good>Нет заявленных неполных feature-источников</span>';box.insertAdjacentHTML('beforeend','<div class="section card"><h2>Unique Setup Lifecycle</h2><div>'+uniqueHtml+'</div><div class="criteria" style="margin-top:8px">'+setupHtml+'</div></div><div class="cols section"><div class=card><h2>Materialized levels</h2>'+levelHtml+'</div><div class=card><h2>Feature coverage / unavailable is not zero</h2>'+missing+'</div></div>')}
 researchTab.addEventListener('click',loadResearch);
 </script></body></html>'''
 
@@ -702,7 +747,13 @@ class Handler(BaseHTTPRequestHandler):
             if not MARKET_DATABASE_URL:
                 self._json({"error":"APEX_MARKET_DATABASE_URL is not configured"},503); return
             try:
-                self._json(ResearchStore(MARKET_DATABASE_URL).dashboard())
+                # The web process may observe a database created by an older
+                # research worker.  Additive/idempotent migrations are safe at
+                # the read boundary and prevent a stale schema from hiding
+                # the Research tab after a restart.
+                research_store = ResearchStore(MARKET_DATABASE_URL)
+                research_store.ensure_schema()
+                self._json(research_store.dashboard())
             except Exception as exc:
                 print(f"[stats] research unavailable: {type(exc).__name__}")
                 self._json({"error":"research database unavailable"},503)

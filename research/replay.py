@@ -7,9 +7,11 @@ import os
 import statistics
 from bisect import bisect_right
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from core.execution_simulator import ExecutionModel, simulate_fill
+from core.replay_lab import replay_three_tracks as replay_manager_tracks
 from core.setup_evidence import assess_candidate
 from .features import FEATURE_VERSION
 from .store import ResearchStore, stable_id
@@ -49,19 +51,21 @@ def _geometry(snapshot: Mapping[str,Any], direction: str) -> dict[str,float] | N
     if not price or not atr or direction not in {"BULLISH","BEARISH"}: return None
     if direction=="BULLISH":
         structural_lows=[x for x in lows if x<price]; structural_highs=[x for x in highs if x>price]
-        sl=(max(structural_lows) if structural_lows else price-atr)-atr*.15
+        if not structural_lows or not structural_highs: return None
+        sl=max(structural_lows)-atr*.15
         candidates=sorted(structural_highs)
-        tp=next((x for x in candidates if (x-price)/(price-sl)>=2),price+2*(price-sl))
+        tp=candidates[0]
     else:
         structural_highs=[x for x in highs if x>price]; structural_lows=[x for x in lows if x<price]
-        sl=(min(structural_highs) if structural_highs else price+atr)+atr*.15
+        if not structural_highs or not structural_lows: return None
+        sl=min(structural_highs)+atr*.15
         candidates=sorted(structural_lows,reverse=True)
-        tp=next((x for x in candidates if (price-x)/(sl-price)>=2),price-2*(sl-price))
+        tp=candidates[0]
     risk=abs(price-sl)
     if risk<=0 or min(price,sl,tp)<=0: return None
     rr=abs(tp-price)/risk
     if rr<2: return None
-    return {"entry":price,"sl":sl,"tp1":price+(tp-price)*.6,"tp2":tp,"terminal_tp":tp,"rr":rr}
+    return {"entry":price,"sl":sl,"tp1":tp,"tp2":tp,"terminal_tp":tp,"rr":rr}
 
 
 def _candidate(strategy: str, snapshots: Mapping[str,Mapping[str,Any]], symbol: str) -> tuple[dict[str,Any],str]:
@@ -124,6 +128,70 @@ def _candidate(strategy: str, snapshots: Mapping[str,Mapping[str,Any]], symbol: 
     return candidate,stop
 
 
+def _attempt_checks(strategy: str, snapshots: Mapping[str, Mapping[str, Any]],
+                    candidate: Mapping[str, Any], stop: str) -> list[dict[str, Any]]:
+    """Create an auditable, ordered replay funnel.
+
+    These checks describe the research adapter's deterministic profile.  They
+    are intentionally labelled ``REPLAY_PROFILE``; until the production
+    detector is injectable, they must not be presented as an exact LIVE run.
+    """
+    working_tf = WORKING_TF[strategy]; working = snapshots.get(working_tf) or {}
+    quality = (working.get("data_quality") or {}).get("status")
+    direction = _direction(working)
+    technical = candidate.get("technical_evidence") or {}
+    values: list[tuple[str, str, bool, str, str, str, Any, Any]] = [
+        ("DATA_QUALITY", "Closed Gate candles are valid", quality == "VALID", "HARD_GATE", "DATA", quality, "VALID", None),
+        ("DIRECTION", "Directional structure exists", direction in {"BULLISH", "BEARISH"}, "HARD_GATE", "STRUCTURE", direction, "BULLISH|BEARISH", None),
+    ]
+    if strategy == "FAST":
+        values.extend([
+            ("SESSION", "Trading session is active", bool(technical.get("zone")), "HARD_GATE", "CONTEXT", technical.get("zone"), "active", None),
+            ("LOCATION", "OB or FVG location exists", bool(technical.get("ob") or technical.get("fvg")), "HARD_GATE", "LOCATION", bool(technical.get("ob") or technical.get("fvg")), True, None),
+            ("STRUCTURE_EVENT", "Fresh working-TF BOS/CHoCH", bool(technical.get("structure_event")), "HARD_GATE", "TRIGGER", technical.get("structure_event"), True, None),
+            ("VOLUME", "Relative volume confirms trigger", bool(technical.get("volume_confirmed")), "HARD_GATE", "PARTICIPATION", technical.get("volume_confirmed"), ">=2.0", None),
+        ])
+    elif strategy == "MTF":
+        alignment = technical.get("timeframe_alignment") or {}
+        values.extend([
+            ("MTF_ALIGNMENT", "1h and 4h align with working direction", alignment.get("1h") == direction and alignment.get("4h") == direction, "HARD_GATE", "CONTEXT", alignment, direction, None),
+            ("LOCATION", "HTF OB or FVG location exists", bool(technical.get("ob") or technical.get("fvg")), "HARD_GATE", "LOCATION", bool(technical.get("ob") or technical.get("fvg")), True, None),
+            ("STRUCTURE_EVENT", "Fresh 15m BOS/CHoCH", bool(technical.get("structure_event")), "HARD_GATE", "TRIGGER", technical.get("structure_event"), True, None),
+        ])
+    elif strategy == "SWING":
+        values.extend([
+            ("HTF_LOCATION", "4h OB or FVG location exists", bool(technical.get("ob") or technical.get("fvg")), "HARD_GATE", "LOCATION", bool(technical.get("ob") or technical.get("fvg")), True, None),
+            ("SWING_STRUCTURE", "Fresh 1h swing structure event", bool(technical.get("structure_event_1h")), "HARD_GATE", "TRIGGER", technical.get("structure_event_1h"), True, None),
+        ])
+    elif strategy == "ZONE":
+        values.extend([
+            ("RANGE_EXTREME", "Price is in expected premium/discount", technical.get("zone") in {"premium", "discount"}, "HARD_GATE", "LOCATION", technical.get("zone"), "premium|discount", None),
+            ("ZONE_STRUCTURE", "Fresh working-TF structure event", bool(technical.get("structure_event")), "HARD_GATE", "TRIGGER", technical.get("structure_event"), True, None),
+        ])
+    else:
+        values.extend([
+            ("WYCKOFF_RANGE", "Range/compression context is ready", bool(technical.get("phases")), "HARD_GATE", "LOCATION", technical.get("phases"), "phase", None),
+            ("WYCKOFF_TRIGGER", "SOS/SOW or phase trigger exists", bool(technical.get("sos") or technical.get("sow") or technical.get("reacc_trigger_validated")), "HARD_GATE", "TRIGGER", technical.get("sos") or technical.get("sow"), True, None),
+        ])
+    values.extend([
+        ("STRUCTURAL_LEVELS", "Real structural SL/TP levels exist", all(_num(candidate.get(x)) for x in ("entry", "sl", "terminal_tp")), "HARD_GATE", "GEOMETRY", {x: candidate.get(x) for x in ("entry", "sl", "terminal_tp")}, "non-null", None),
+        ("RR", "Terminal target meets locked RR floor", (_num(candidate.get("rr"), 0) or 0) >= 2.0, "HARD_GATE", "GEOMETRY", candidate.get("rr"), ">=2.0", None),
+    ])
+    checks=[]; blocked=False
+    for order,(code,label,passed,role,domain,measured,threshold,_unused) in enumerate(values):
+        if blocked:
+            status="NOT_REACHED"
+        else:
+            status="PASS" if passed else "FAIL"
+            if not passed: blocked=True
+        checks.append({"check_order":order,"check_code":code,"label":label,"role":role,
+            "domain":domain,"status":status,"measured":{"value":measured},
+            "threshold":{"value":threshold},"source_timeframe":working_tf,
+            "source_as_of":working.get("as_of"),"evidence":{"stop_code":stop,
+                "adapter":"REPLAY_PROFILE","point_in_time":True}})
+    return checks
+
+
 @dataclass(frozen=True)
 class ReplayConfig:
     entry_expiry_bars: int=12
@@ -145,18 +213,21 @@ class ReplayEngine:
         return _candidate(strategy,self.snapshots(symbol,as_of),symbol)
 
     def replay_profile(self,research_run_id: str,profile_id: str,strategy: str,symbol: str,
-                       start: int,end: int,*,on_progress=None) -> dict[str,Any]:
+                       start: int,end: int,*,on_progress=None,on_checkpoint=None,should_stop=None) -> dict[str,Any]:
         timestamps=self.store.feature_timestamps(symbol,WORKING_TF[strategy],start,end,FEATURE_VERSION)
         future=self.store.candles_between(symbol,WORKING_TF[strategy],start,end)
         future_close_times=[int(row["close_time"]) for row in future]
         attempts=trades=0; batch_size=max(25,min(int(os.environ.get("APEX_RESEARCH_REPLAY_BATCH","100")),500))
         timeframes=("15m","1h","4h","1d")
+        last_timestamp=None
         for offset in range(0,len(timestamps),batch_size):
+            if should_stop and should_stop():
+                return {"attempts":attempts,"trades":trades,"last_timestamp":last_timestamp,"status":"PAUSED"}
             batch=timestamps[offset:offset+batch_size]
             series={tf:self.store.feature_series(symbol,tf,batch[0],batch[-1],FEATURE_VERSION)
                     for tf in timeframes}
             series_times={tf:[item[0] for item in rows] for tf,rows in series.items()}
-            attempt_rows=[]; trade_rows=[]
+            attempt_rows=[]; trade_rows=[]; check_rows=[]
             for as_of in batch:
                 snapshots={}
                 for tf in timeframes:
@@ -166,6 +237,8 @@ class ReplayEngine:
                 geometry=all(_num(candidate.get(k)) for k in ("entry","sl","tp1"))
                 outcome="CANDIDATE" if not stop else "FILTERED"
                 attempt_id=stable_id(research_run_id,profile_id,symbol,as_of)
+                checks = _attempt_checks(strategy, snapshots, candidate, stop)
+                check_rows.extend([{**check, "attempt_id": attempt_id} for check in checks])
                 attempt_rows.append({"attempt_id":attempt_id,"research_run_id":research_run_id,
                     "profile_id":profile_id,"parent_strategy":strategy,"symbol":symbol,
                     "direction":candidate.get("direction"),"decision_time":as_of,
@@ -175,16 +248,100 @@ class ReplayEngine:
                     "snapshot":{"candidate":{k:v for k,v in candidate.items() if k!="feature_snapshot"},
                                 "feature_ref":{"symbol":symbol,"as_of":as_of,
                                     "feature_version":FEATURE_VERSION},
-                                "point_in_time":True,"filtered_shadow":bool(stop)}})
+                                "point_in_time":True,"filtered_shadow":bool(stop),
+                                "adapter":"REPLAY_PROFILE","fidelity":"SURROGATE_NOT_LIVE_DETECTOR",
+                                "checks_count":len(checks)}})
                 if geometry:
-                    track="FILTERED_SHADOW" if stop else "PROFILE_SHADOW"
-                    trade_rows.append(self.simulate_trade(attempt_id,track,candidate,as_of,end,
-                        future=future,future_close_times=future_close_times))
-            self.store.save_attempts(attempt_rows); self.store.save_trades(trade_rows)
+                    trade_rows.extend(self._research_track_rows(attempt_id, strategy, candidate, as_of, future))
+            self.store.save_attempts(attempt_rows); self.store.save_attempt_check_rows(check_rows)
+            self.store.save_trades(trade_rows)
             attempts+=len(attempt_rows); trades+=len(trade_rows)
+            last_timestamp=batch[-1]
+            if on_checkpoint: on_checkpoint(last_timestamp,offset+len(batch),len(timestamps))
             if on_progress: on_progress(offset+len(batch),len(timestamps))
         return {"attempts":attempts,"trades":trades,"timestamps":len(timestamps),
-                "last_timestamp":timestamps[-1] if timestamps else None}
+                "last_timestamp":last_timestamp,"status":"COMPLETED"}
+
+    def _research_track_rows(self, attempt_id: str, strategy: str,
+                             candidate: Mapping[str, Any], decision_time: int,
+                             future: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Persist isolated virtual tracks; ACTUAL stays execution-linked only."""
+        entry = _num(candidate.get("entry")); sl = _num(candidate.get("sl"))
+        if not entry or not sl:
+            return []
+        risk = abs(entry - sl)
+        # ``core.replay_lab`` charges one side at a time.  Keep entry and
+        # exits explicit so partial exits are not charged a full round-trip
+        # fee repeatedly; funding and basis stay unavailable.
+        fee_r = (self.config.fee_bps / 10000.0) * entry / max(risk, 1e-12)
+        stream = [{**dict(c), "timestamp": int(c.get("close_time") or c.get("open_time") or 0),
+                   "closed_at": datetime.fromtimestamp(int(c.get("close_time") or c.get("open_time") or 0), timezone.utc).isoformat(),
+                   "candle_id": f"{candidate.get('symbol')}:{candidate.get('timeframe')}:{c.get('open_time')}"}
+                  for c in future]
+        try:
+            tracks = replay_manager_tracks({**candidate, "strategy": strategy,
+                "signal_id": int(stable_id("research-signal", attempt_id)[:12], 16),
+                "entry_at": datetime.fromtimestamp(int(decision_time), timezone.utc).isoformat()}, stream, fee_r=fee_r,
+                slippage_bps=self.config.slippage_bps,
+                ambiguous_policy=self.config.ambiguity_policy,
+                entry_expiry_bars=self.config.entry_expiry_bars)
+        except (TypeError, ValueError, KeyError) as exc:
+            tracks = {"NO_MANAGER": {"status": "UNAVAILABLE", "error": str(exc)},
+                      "PLAYBOOK_ONLY": {"status": "UNAVAILABLE", "error": str(exc)}}
+        rows = [self._unavailable_actual(attempt_id, candidate)]
+        for track in ("NO_MANAGER", "PLAYBOOK_ONLY"):
+            result = tracks.get(track) or {}
+            rows.append({"attempt_id": attempt_id, "track": track,
+                "status": str(result.get("status") or "UNAVAILABLE"),
+                "entry_state": str(result.get("entry_state") or (
+                    "FILLED" if result.get("status") in {"OPEN", "CLOSED"} else "UNFILLED")),
+                "side": str(candidate.get("direction") or ""), "entry": entry,
+                "entry_time": result.get("entry_time"), "initial_sl": sl,
+                "current_sl": result.get("current_sl", sl), "tp1": candidate.get("tp1"),
+                "tp2": candidate.get("tp2"), "terminal_tp": candidate.get("terminal_tp"),
+                "exit_price": result.get("exit_price"), "exit_time": result.get("exit_time"),
+                "exit_reason": result.get("exit_reason"), "quantity": result.get("quantity", candidate.get("quantity", 1.0)),
+                "gross_r": result.get("gross_r"), "net_r": result.get("net_r"),
+                "pnl_pct": result.get("realized_pct"), "mfe_r": result.get("mfe_r"),
+                "mae_r": (abs(float(result["mae_r"])) if result.get("mae_r") is not None else None), "fees_r": result.get("fees_r"),
+                "slippage_r": result.get("slippage_r"), "giveback_r": result.get("giveback_r"),
+                "targets_reached": result.get("targets_reached") or [],
+                "ambiguity": result.get("exit_reason") if "AMBIGUOUS" in str(result.get("exit_reason") or "") else None,
+                "state": {"independent_track": True, "manager_actions_inherited": False,
+                          "virtual_execution": True, "decision_time": decision_time,
+                          "result_source": "core.replay_lab", "error": result.get("error"),
+                          "cost_completeness": "FEES_SLIPPAGE_ESTIMATED"},
+                "duration_seconds": result.get("duration_seconds"),
+                "duration_bars": result.get("duration_bars"),
+                "cost_completeness": "FEES_SLIPPAGE_ESTIMATED"})
+        return rows
+
+    @staticmethod
+    def _expired_virtual(attempt_id: str, candidate: Mapping[str, Any], track: str) -> dict[str, Any]:
+        sl = candidate.get("sl") or 0.0
+        return {"attempt_id": attempt_id, "track": track, "status": "EXPIRED",
+            "entry_state": "EXPIRED", "side": str(candidate.get("direction") or ""),
+            "entry": candidate.get("entry") or 0.0, "entry_time": None,
+            "initial_sl": sl, "current_sl": sl, "tp1": candidate.get("tp1") or 0.0,
+            "tp2": candidate.get("tp2"), "terminal_tp": candidate.get("terminal_tp") or 0.0,
+            "quantity": candidate.get("quantity", 1.0), "targets_reached": [], "ambiguity": None,
+            "state": {"independent_track": True, "virtual_execution": True,
+                      "unfilled_entry": True, "manager_actions_inherited": False}}
+
+    @staticmethod
+    def _unavailable_actual(attempt_id: str, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        level = candidate.get("sl") or 0.0
+        return {"attempt_id": attempt_id, "track": "ACTUAL", "status": "UNAVAILABLE",
+            "entry_state": "NOT_LINKED", "side": str(candidate.get("direction") or ""),
+            "entry": candidate.get("entry") or 0.0, "entry_time": None,
+            "initial_sl": level, "current_sl": level, "tp1": candidate.get("tp1") or 0.0,
+            "tp2": candidate.get("tp2"), "terminal_tp": candidate.get("terminal_tp") or candidate.get("tp2") or 0.0,
+            "quantity": 0.0, "gross_r": None, "net_r": None, "pnl_pct": None,
+            "mfe_r": None, "mae_r": None, "fees_r": None, "slippage_r": None,
+            "giveback_r": None, "targets_reached": [], "ambiguity": None,
+            "state": {"actual_only_from_bot_owned_fills": True,
+                      "manager_actions_inherited": False,
+                      "unavailable_reason": "historical_replay_has_no_confirmed_manager_execution"}}
 
     def refresh_open_tracks(self, research_run_id: str, end: int) -> int:
         updated=0
@@ -196,9 +353,13 @@ class ReplayEngine:
             candidate=(snapshot.get("candidate") or {})
             if not candidate:
                 continue
-            trade=self.simulate_trade(str(row["attempt_id"]),str(row["track"]),candidate,
-                                      int(row["decision_time"]),end)
-            self.store.save_trade(trade); updated+=1
+            future=self.store.candles_between(str(candidate.get("symbol") or row.get("symbol") or ""),
+                str(candidate.get("timeframe") or "15m"),int(row["decision_time"]),end)
+            refreshed=next((item for item in self._research_track_rows(str(row["attempt_id"]),
+                str(candidate.get("scan_type") or row.get("parent_strategy") or "FAST"),candidate,
+                int(row["decision_time"]),future) if item.get("track") == row.get("track")),None)
+            if refreshed:
+                self.store.save_trade(refreshed); updated+=1
         return updated
 
     def simulate_trade(self,attempt_id: str,track: str,candidate: Mapping[str,Any],decision_time: int,end: int,

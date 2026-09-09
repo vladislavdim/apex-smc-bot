@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
@@ -107,9 +107,20 @@ DDL = [
         stop_code TEXT NOT NULL DEFAULT '', entry DOUBLE PRECISION, sl DOUBLE PRECISION,
         tp1 DOUBLE PRECISION, tp2 DOUBLE PRECISION, terminal_tp DOUBLE PRECISION,
         rr DOUBLE PRECISION, snapshot_json TEXT NOT NULL,
+        fidelity TEXT NOT NULL DEFAULT 'UNKNOWN', setup_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         UNIQUE(research_run_id,profile_id,symbol,decision_time))""",
     "CREATE INDEX IF NOT EXISTS idx_research_attempts_funnel ON research_attempts(profile_id,outcome,decision_time)",
+    """CREATE TABLE IF NOT EXISTS research_setups (
+        setup_id TEXT PRIMARY KEY, research_run_id TEXT NOT NULL,
+        parent_strategy TEXT NOT NULL, symbol TEXT NOT NULL,
+        direction TEXT NOT NULL DEFAULT '', timeframe TEXT NOT NULL DEFAULT '',
+        first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+        state TEXT NOT NULL, checks_count INTEGER NOT NULL DEFAULT 0,
+        terminal_reason TEXT, snapshot_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(research_run_id,parent_strategy,symbol,setup_id))""",
+    "CREATE INDEX IF NOT EXISTS idx_research_setups_state ON research_setups(parent_strategy,state,last_seen DESC)",
     """CREATE TABLE IF NOT EXISTS research_trades (
         trade_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, track TEXT NOT NULL,
         status TEXT NOT NULL, entry_state TEXT NOT NULL, side TEXT NOT NULL,
@@ -122,7 +133,9 @@ DDL = [
         mfe_r DOUBLE PRECISION, mae_r DOUBLE PRECISION, fees_r DOUBLE PRECISION,
         slippage_r DOUBLE PRECISION, giveback_r DOUBLE PRECISION,
         targets_reached_json TEXT NOT NULL DEFAULT '[]', ambiguity TEXT,
-        state_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL,
+        state_json TEXT NOT NULL DEFAULT '{}', duration_seconds DOUBLE PRECISION,
+        duration_bars INTEGER, cost_completeness TEXT NOT NULL DEFAULT 'UNKNOWN',
+        updated_at TEXT NOT NULL,
         UNIQUE(attempt_id,track))""",
     "CREATE INDEX IF NOT EXISTS idx_research_trades_result ON research_trades(track,status,exit_time)",
     """CREATE TABLE IF NOT EXISTS research_feature_evaluations (
@@ -133,7 +146,8 @@ DDL = [
         profit_factor DOUBLE PRECISION, max_drawdown DOUBLE PRECISION,
         uplift DOUBLE PRECISION, oos_uplift DOUBLE PRECISION,
         confidence_low DOUBLE PRECISION, confidence_high DOUBLE PRECISION,
-        status TEXT NOT NULL, metrics_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        status TEXT NOT NULL, metrics_json TEXT NOT NULL, comparison_kind TEXT NOT NULL DEFAULT 'DESCRIPTIVE',
+        created_at TEXT NOT NULL,
         UNIQUE(research_run_id,profile_id,feature,segment_json))""",
     """CREATE TABLE IF NOT EXISTS research_hypotheses (
         hypothesis_id TEXT PRIMARY KEY, parent_strategy TEXT NOT NULL,
@@ -155,6 +169,20 @@ DDL = [
         limit_value INTEGER NOT NULL, updated_at TEXT NOT NULL,
         PRIMARY KEY(source,bucket_kind,bucket_start))""",
     "CREATE INDEX IF NOT EXISTS idx_research_api_usage_recent ON research_api_usage(source,bucket_start DESC)",
+    """CREATE TABLE IF NOT EXISTS research_source_registry (
+        source TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '',
+        authority TEXT NOT NULL DEFAULT 'CONTEXT_ONLY', coverage_json TEXT NOT NULL DEFAULT '{}',
+        freshness_sla_seconds INTEGER, rate_limits_json TEXT NOT NULL DEFAULT '{}',
+        license_json TEXT NOT NULL DEFAULT '{}', fallback_source TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'UNCONFIGURED', updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS research_attempt_checks (
+        check_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, check_order INTEGER NOT NULL,
+        check_code TEXT NOT NULL, label TEXT NOT NULL, role TEXT NOT NULL,
+        domain TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, measured_json TEXT NOT NULL DEFAULT '{}',
+        threshold_json TEXT NOT NULL DEFAULT '{}', source_timeframe TEXT NOT NULL DEFAULT '',
+        source_as_of INTEGER, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+        UNIQUE(attempt_id,check_code))""",
+    "CREATE INDEX IF NOT EXISTS idx_attempt_checks_funnel ON research_attempt_checks(attempt_id,status,check_order)",
 ]
 
 
@@ -194,6 +222,26 @@ class ResearchStore:
             cur = conn.cursor()
             for statement in DDL:
                 cur.execute(statement)
+            migrations = {
+                "research_attempts": [("fidelity", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
+                    ("setup_id", "TEXT NOT NULL DEFAULT ''")],
+                "research_trades": [("duration_seconds", "DOUBLE PRECISION"),
+                    ("duration_bars", "INTEGER"), ("cost_completeness", "TEXT NOT NULL DEFAULT 'UNKNOWN'")],
+                "research_feature_evaluations": [("comparison_kind", "TEXT NOT NULL DEFAULT 'DESCRIPTIVE'")],
+            }
+            for table, columns in migrations.items():
+                if self.postgres:
+                    cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name=%s", (table,))
+                    present={str(row[0]) for row in cur.fetchall()}
+                else:
+                    cur.execute(f"PRAGMA table_info({table})")
+                    present={str(row[1]) for row in cur.fetchall()}
+                for column, definition in columns:
+                    if column not in present:
+                        cur.execute(self._sql(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+            # This index is created after the additive setup_id migration so
+            # an existing v1/v2 research database can upgrade safely.
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_research_attempts_setup ON research_attempts(setup_id,decision_time)")
             now = utc_now()
             cur.execute(self._sql("""INSERT INTO research_meta(key,value_json,updated_at) VALUES(?,?,?)
                 ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at"""),
@@ -205,6 +253,55 @@ class ResearchStore:
                 VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET
                 value_json=excluded.value_json,updated_at=excluded.updated_at"""),
                 (key, canonical(value), utc_now()))
+
+    def upsert_source_contract(self, source: str, *, kind: str, owner: str = "",
+                               authority: str = "CONTEXT_ONLY", coverage: Mapping[str, Any] | None = None,
+                               freshness_sla_seconds: int | None = None,
+                               rate_limits: Mapping[str, Any] | None = None,
+                               license_info: Mapping[str, Any] | None = None,
+                               fallback_source: str = "", status: str = "UNCONFIGURED") -> None:
+        """Register provenance and limits without granting execution authority."""
+        with self.transaction() as conn:
+            conn.cursor().execute(self._sql("""INSERT INTO research_source_registry
+                (source,kind,owner,authority,coverage_json,freshness_sla_seconds,rate_limits_json,
+                 license_json,fallback_source,status,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(source) DO UPDATE SET kind=excluded.kind,owner=excluded.owner,
+                 authority=excluded.authority,coverage_json=excluded.coverage_json,
+                 freshness_sla_seconds=excluded.freshness_sla_seconds,rate_limits_json=excluded.rate_limits_json,
+                 license_json=excluded.license_json,fallback_source=excluded.fallback_source,
+                 status=excluded.status,updated_at=excluded.updated_at"""),
+                (str(source).upper(), kind, owner, authority, canonical(coverage or {}),
+                 freshness_sla_seconds, canonical(rate_limits or {}), canonical(license_info or {}),
+                 fallback_source, status, utc_now()))
+
+    def save_attempt_checks(self, attempt_id: str, checks: Iterable[Mapping[str, Any]]) -> int:
+        return self.save_attempt_check_rows(
+            [{**dict(check), "attempt_id": attempt_id} for check in checks])
+
+    def save_attempt_check_rows(self, checks: Iterable[Mapping[str, Any]]) -> int:
+        rows=[]; now=utc_now()
+        for index, check in enumerate(checks):
+            attempt_id=str(check.get("attempt_id") or "")
+            if not attempt_id:
+                continue
+            code=str(check.get("check_code") or check.get("code") or f"CHECK_{index}")
+            rows.append((stable_id("attempt-check",attempt_id,code),attempt_id,index,code,
+                str(check.get("label") or code),str(check.get("role") or "HARD_GATE"),
+                str(check.get("domain") or ""),str(check.get("status") or "UNAVAILABLE"),
+                canonical(check.get("measured") or {}),canonical(check.get("threshold") or {}),
+                str(check.get("source_timeframe") or ""),check.get("source_as_of"),
+                canonical(check.get("evidence") or {}),now))
+        if not rows: return 0
+        with self.transaction() as conn:
+            conn.cursor().executemany(self._sql("""INSERT INTO research_attempt_checks
+                (check_id,attempt_id,check_order,check_code,label,role,domain,status,measured_json,
+                 threshold_json,source_timeframe,source_as_of,evidence_json,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(check_id) DO UPDATE SET
+                 check_order=excluded.check_order,label=excluded.label,role=excluded.role,domain=excluded.domain,
+                 status=excluded.status,measured_json=excluded.measured_json,threshold_json=excluded.threshold_json,
+                 source_timeframe=excluded.source_timeframe,source_as_of=excluded.source_as_of,
+                 evidence_json=excluded.evidence_json"""),rows)
+        return len(rows)
 
     def admit_api_request(self, source: str, *, daily_limit: int, minute_limit: int,
                           units: int = 1, now: datetime | None = None) -> bool:
@@ -571,11 +668,39 @@ class ResearchStore:
     def save_attempt(self, attempt: Mapping[str, Any]) -> str:
         return self.save_attempts([attempt])[0]
 
+    @staticmethod
+    def _setup_id_for_attempt(attempt: Mapping[str, Any]) -> str:
+        """Derive a conservative, restart-stable setup identity."""
+        explicit = str(attempt.get("setup_id") or attempt.get("setup_key") or "").strip()
+        if explicit:
+            return explicit
+        snapshot = attempt.get("snapshot") if isinstance(attempt.get("snapshot"), Mapping) else {}
+        candidate = snapshot.get("candidate") if isinstance(snapshot.get("candidate"), Mapping) else {}
+        evidence = candidate.get("technical_evidence") if isinstance(candidate.get("technical_evidence"), Mapping) else {}
+        direction = str(attempt.get("direction") or candidate.get("direction") or "").upper()
+        timeframe = str(candidate.get("timeframe") or attempt.get("timeframe") or "")
+        # Do not include current price/RR: those legitimately evolve on each
+        # scan.  If no structural key exists, isolate this observation.
+        identity = {
+            "location_id": evidence.get("location_id") or evidence.get("zone_id") or evidence.get("ob_id") or evidence.get("fvg_id"),
+            "ob": evidence.get("ob"), "fvg": evidence.get("fvg"),
+            "zone": evidence.get("zone"), "zone_type": evidence.get("zone_type"),
+            "structure_event": evidence.get("structure_event") or evidence.get("event"),
+            "phases": evidence.get("phases"),
+        }
+        if not any(value not in (None, "", False, {}) for value in identity.values()):
+            identity = {"decision_time": int(attempt.get("decision_time") or 0)}
+        return stable_id("setup", attempt.get("research_run_id"),
+                         str(attempt.get("parent_strategy") or "").upper(),
+                         str(attempt.get("symbol") or "").upper(), direction,
+                         timeframe, canonical(identity))
+
     def save_attempts(self, attempts: Iterable[Mapping[str, Any]]) -> list[str]:
-        rows=[]; ids=[]; now=utc_now()
+        rows=[]; ids=[]; setup_rows=[]; now=utc_now()
         for attempt in attempts:
             attempt_id = str(attempt.get("attempt_id") or stable_id(attempt.get("research_run_id"),
                              attempt.get("profile_id"), attempt.get("symbol"), attempt.get("decision_time")))
+            setup_id = self._setup_id_for_attempt(attempt)
             ids.append(attempt_id)
             rows.append((attempt_id, attempt["research_run_id"], attempt["profile_id"],
                   str(attempt["parent_strategy"]).upper(), str(attempt["symbol"]).upper(),
@@ -583,15 +708,42 @@ class ResearchStore:
                   str(attempt.get("stage") or "SCAN"), str(attempt.get("outcome") or "FILTERED"),
                   str(attempt.get("stop_code") or ""), attempt.get("entry"), attempt.get("sl"),
                   attempt.get("tp1"), attempt.get("tp2"), attempt.get("terminal_tp"), attempt.get("rr"),
-                  canonical(attempt.get("snapshot") or {}), now))
+                  canonical(attempt.get("snapshot") or {}), str(attempt.get("fidelity") or "UNKNOWN"), setup_id, now))
+            snapshot = attempt.get("snapshot") if isinstance(attempt.get("snapshot"), Mapping) else {}
+            candidate = snapshot.get("candidate") if isinstance(snapshot.get("candidate"), Mapping) else {}
+            setup_rows.append((setup_id, attempt, str(attempt["parent_strategy"]).upper(),
+                               str(attempt["symbol"]).upper(), str(attempt.get("direction") or "").upper(),
+                               str(candidate.get("timeframe") or attempt.get("timeframe") or ""),
+                               candidate))
         if not rows: return []
         with self.transaction() as conn:
             conn.cursor().executemany(self._sql("""INSERT INTO research_attempts
                 (attempt_id,research_run_id,profile_id,parent_strategy,symbol,direction,decision_time,
-                 stage,outcome,stop_code,entry,sl,tp1,tp2,terminal_tp,rr,snapshot_json,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
+                 stage,outcome,stop_code,entry,sl,tp1,tp2,terminal_tp,rr,snapshot_json,fidelity,setup_id,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
                  stage=excluded.stage,outcome=excluded.outcome,stop_code=excluded.stop_code,
-                 snapshot_json=excluded.snapshot_json"""),rows)
+                 snapshot_json=excluded.snapshot_json,fidelity=excluded.fidelity,setup_id=excluded.setup_id"""),rows)
+            for setup_id, attempt, strategy, symbol, direction, timeframe, candidate in setup_rows:
+                conn.cursor().execute(self._sql("""INSERT INTO research_setups
+                    (setup_id,research_run_id,parent_strategy,symbol,direction,timeframe,
+                     first_seen,last_seen,state,checks_count,terminal_reason,snapshot_json,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(setup_id) DO UPDATE SET
+                     first_seen=MIN(research_setups.first_seen,excluded.first_seen),
+                     last_seen=MAX(research_setups.last_seen,excluded.last_seen),
+                     state=excluded.state,checks_count=excluded.checks_count,
+                     terminal_reason=excluded.terminal_reason,snapshot_json=excluded.snapshot_json,
+                     updated_at=excluded.updated_at"""),
+                    (setup_id, attempt["research_run_id"], strategy, symbol, direction, timeframe,
+                     int(attempt["decision_time"]), int(attempt["decision_time"]),
+                     str(attempt.get("outcome") or "FILTERED"), 1,
+                     str(attempt.get("stop_code") or "") or None,
+                     canonical(candidate if isinstance(candidate, Mapping) else {}), now, now))
+                count_cur = conn.cursor()
+                count_cur.execute(self._sql("SELECT COUNT(*) FROM research_attempts WHERE setup_id=?"), (setup_id,))
+                count = int(count_cur.fetchone()[0])
+                conn.cursor().execute(self._sql("UPDATE research_setups SET checks_count=?,updated_at=? WHERE setup_id=?"),
+                                     (count, now, setup_id))
         return ids
 
     def save_trade(self, trade: Mapping[str, Any]) -> str:
@@ -610,21 +762,25 @@ class ResearchStore:
                   trade.get("gross_r"), trade.get("net_r"), trade.get("pnl_pct"), trade.get("mfe_r"),
                   trade.get("mae_r"), trade.get("fees_r"), trade.get("slippage_r"), trade.get("giveback_r"),
                   canonical(trade.get("targets_reached") or []), trade.get("ambiguity"),
-                  canonical(trade.get("state") or {}), now))
+                  canonical(trade.get("state") or {}), trade.get("duration_seconds"), trade.get("duration_bars"),
+                  str(trade.get("cost_completeness") or ((trade.get("state") or {}).get("cost_completeness") if isinstance(trade.get("state"), Mapping) else None) or "UNKNOWN"), now))
         if not rows: return []
         with self.transaction() as conn:
             conn.cursor().executemany(self._sql("""INSERT INTO research_trades
                 (trade_id,attempt_id,track,status,entry_state,side,entry,entry_time,initial_sl,current_sl,
                  tp1,tp2,terminal_tp,exit_price,exit_time,exit_reason,quantity,gross_r,net_r,pnl_pct,
-                 mfe_r,mae_r,fees_r,slippage_r,giveback_r,targets_reached_json,ambiguity,state_json,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 mfe_r,mae_r,fees_r,slippage_r,giveback_r,targets_reached_json,ambiguity,state_json,
+                 duration_seconds,duration_bars,cost_completeness,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(trade_id) DO UPDATE SET status=excluded.status,entry_state=excluded.entry_state,
                  entry_time=excluded.entry_time,current_sl=excluded.current_sl,exit_price=excluded.exit_price,
                  exit_time=excluded.exit_time,exit_reason=excluded.exit_reason,gross_r=excluded.gross_r,
                  net_r=excluded.net_r,pnl_pct=excluded.pnl_pct,mfe_r=excluded.mfe_r,mae_r=excluded.mae_r,
                  fees_r=excluded.fees_r,slippage_r=excluded.slippage_r,giveback_r=excluded.giveback_r,
                  targets_reached_json=excluded.targets_reached_json,ambiguity=excluded.ambiguity,
-                 state_json=excluded.state_json,updated_at=excluded.updated_at"""),rows)
+                 state_json=excluded.state_json,duration_seconds=excluded.duration_seconds,
+                 duration_bars=excluded.duration_bars,cost_completeness=excluded.cost_completeness,
+                 updated_at=excluded.updated_at"""),rows)
         return ids
 
     def save_feature_evaluation(self, evaluation: Mapping[str, Any]) -> str:
@@ -639,18 +795,20 @@ class ResearchStore:
                   evaluation.get("profit_factor"), evaluation.get("max_drawdown"),
                   evaluation.get("uplift"), evaluation.get("oos_uplift"),
                   evaluation.get("confidence_low"), evaluation.get("confidence_high"),
-                  str(evaluation.get("status") or "INSUFFICIENT_DATA"), canonical(metrics), utc_now())
+                  str(evaluation.get("status") or "INSUFFICIENT_DATA"), canonical(metrics),
+                  str(evaluation.get("comparison_kind") or "DESCRIPTIVE"), utc_now())
         with self.transaction() as conn:
             conn.cursor().execute(self._sql("""INSERT INTO research_feature_evaluations
                 (evaluation_id,research_run_id,profile_id,feature,segment_json,sample_size,coverage,
                  win_rate,expectancy,profit_factor,max_drawdown,uplift,oos_uplift,confidence_low,
-                 confidence_high,status,metrics_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 confidence_high,status,metrics_json,comparison_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(evaluation_id) DO UPDATE SET sample_size=excluded.sample_size,
                  coverage=excluded.coverage,win_rate=excluded.win_rate,expectancy=excluded.expectancy,
                  profit_factor=excluded.profit_factor,max_drawdown=excluded.max_drawdown,
                  uplift=excluded.uplift,oos_uplift=excluded.oos_uplift,
                  confidence_low=excluded.confidence_low,confidence_high=excluded.confidence_high,
-                 status=excluded.status,metrics_json=excluded.metrics_json,created_at=excluded.created_at"""), values)
+                 status=excluded.status,metrics_json=excluded.metrics_json,comparison_kind=excluded.comparison_kind,
+                 created_at=excluded.created_at"""), values)
         return evaluation_id
 
     def completed_trade_rows(self, research_run_id: str, profile_id: str) -> list[dict[str, Any]]:
@@ -684,25 +842,58 @@ class ResearchStore:
         runs = query("SELECT * FROM research_runs ORDER BY started_at DESC LIMIT 20")
         funnels = query("""SELECT parent_strategy,outcome,COUNT(*) AS count
             FROM research_attempts GROUP BY parent_strategy,outcome ORDER BY parent_strategy,outcome""")
+        unique_funnels = query("""SELECT parent_strategy,state,COUNT(*) AS count,
+            COUNT(DISTINCT symbol) AS symbols
+            FROM research_setups GROUP BY parent_strategy,state
+            ORDER BY parent_strategy,state""")
+        setups = query("""SELECT setup_id,research_run_id,parent_strategy,symbol,direction,timeframe,
+            first_seen,last_seen,state,checks_count,terminal_reason
+            FROM research_setups ORDER BY last_seen DESC LIMIT 500""")
         trades = query("""SELECT a.parent_strategy,t.track,t.status,COUNT(*) AS count,
             AVG(t.net_r) AS expectancy,AVG(CASE WHEN t.net_r>0 THEN 1.0 ELSE 0.0 END)*100 AS win_rate
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
             GROUP BY a.parent_strategy,t.track,t.status ORDER BY a.parent_strategy,t.track,t.status""")
         quality = query("""SELECT severity,issue_type,COUNT(*) AS count FROM market_quality_issues
             WHERE status='OPEN' GROUP BY severity,issue_type ORDER BY count DESC""")
+        levels = query("""SELECT timeframe,level_type,status,COUNT(*) AS count,
+            COUNT(DISTINCT symbol) AS symbols
+            FROM market_levels GROUP BY timeframe,level_type,status
+            ORDER BY timeframe,level_type,status""")
         coverage = query("SELECT * FROM market_feature_coverage ORDER BY feature,source LIMIT 300")
         evaluations = query("""SELECT * FROM research_feature_evaluations
             ORDER BY created_at DESC LIMIT 200""")
+        checks = query("""SELECT parent_strategy,check_code,label,role,domain,status,COUNT(*) AS count,
+            MIN(check_order) AS first_order
+            FROM research_attempt_checks c JOIN research_attempts a ON a.attempt_id=c.attempt_id
+            GROUP BY parent_strategy,check_code,label,role,domain,status
+            ORDER BY parent_strategy,first_order,status""")
+        sources = query("SELECT * FROM research_source_registry ORDER BY source")
         active_shadow = query("""SELECT a.parent_strategy,a.symbol,a.direction,a.decision_time,
             t.track,t.status,t.entry,t.initial_sl,t.tp1,t.tp2,t.mfe_r,t.mae_r
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
             WHERE t.status='OPEN' ORDER BY a.decision_time DESC LIMIT 100""")
+        edge_rows = query("""SELECT a.attempt_id,a.parent_strategy,a.symbol,a.decision_time,
+            MAX(CASE WHEN t.track='ACTUAL' THEN t.net_r END) AS actual_r,
+            MAX(CASE WHEN t.track='NO_MANAGER' THEN t.net_r END) AS no_manager_r,
+            MAX(CASE WHEN t.track='PLAYBOOK_ONLY' THEN t.net_r END) AS playbook_only_r,
+            MAX(CASE WHEN t.track='ACTUAL' THEN t.status END) AS actual_status
+            FROM research_attempts a JOIN research_trades t ON t.attempt_id=a.attempt_id
+            GROUP BY a.attempt_id,a.parent_strategy,a.symbol,a.decision_time
+            ORDER BY a.decision_time DESC LIMIT 500""")
+        for row in edge_rows:
+            actual, no_manager, playbook = row.get("actual_r"), row.get("no_manager_r"), row.get("playbook_only_r")
+            row["groq_edge_r"] = actual - no_manager if actual is not None and no_manager is not None else None
+            row["groq_vs_rules_edge_r"] = actual - playbook if actual is not None and playbook is not None else None
+            row["playbook_edge_r"] = playbook - no_manager if playbook is not None and no_manager is not None else None
         meta = query("SELECT key,value_json,updated_at FROM research_meta")
         api_usage = self.api_usage("GATE_RESEARCH")
         return {"schema_version": SCHEMA_VERSION, "generated_at": utc_now(), "candles": counts,
-                "jobs": jobs, "profiles": profiles, "runs": runs, "funnels": funnels, "trades": trades,
-                "quality": quality, "coverage": coverage, "evaluations": evaluations,
-                "active_shadow": active_shadow,
+                "jobs": jobs, "profiles": profiles, "runs": runs, "funnels": funnels,
+                "unique_funnels": unique_funnels, "setups": setups,
+                "trades": trades,
+                "quality": quality, "levels": levels, "coverage": coverage, "evaluations": evaluations,
+                "active_shadow": active_shadow, "checks": checks, "sources": sources,
+                "track_edges": edge_rows,
                 "api_usage": api_usage,
                 "meta": {row["key"]: row["value_json"] for row in meta}}
 

@@ -7,7 +7,7 @@ import statistics
 from collections import defaultdict
 from typing import Any, Iterable, Mapping
 
-from .replay import chronological_splits, metrics
+from .replay import WORKING_TF, chronological_splits, metrics
 from .store import ResearchStore
 
 
@@ -46,27 +46,65 @@ def promotion_proposal(deltas: Iterable[float], *, baseline_drawdown: float,
 
 
 def evaluate_profile(store: ResearchStore, run_id: str, profile_id: str) -> list[dict[str, Any]]:
-    """Evaluate predefined causal segments; never searches arbitrary combinations."""
+    """Evaluate predefined point-in-time indicator segments.
+
+    Results are descriptive evidence only.  Explicitly prefer PLAYBOOK_ONLY
+    rows so an ACTUAL execution record cannot silently become the replay
+    baseline.
+    """
     rows = store.completed_trade_rows(run_id, profile_id)
-    if not rows:
+    analysis_rows = [row for row in rows if row.get("track") == "PLAYBOOK_ONLY"] or rows
+    if not analysis_rows:
         return []
-    timestamps = [int(row["decision_time"]) for row in rows]
+    timestamps = [int(row["decision_time"]) for row in analysis_rows]
     split = chronological_splits(timestamps)
     test_set = set(split["TEST"])
-    baseline = metrics([row["net_r"] for row in rows if row.get("net_r") is not None])
+    baseline = metrics([row["net_r"] for row in analysis_rows if row.get("net_r") is not None])
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in analysis_rows:
         try:
             snapshot = json.loads(row.get("snapshot_json") or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             snapshot = {}
         feature = ((snapshot.get("candidate") or {}).get("feature_snapshot") or {})
+        reference = snapshot.get("feature_ref") or {}
+        candidate = snapshot.get("candidate") or {}
+        if not feature and reference:
+            timeframe = candidate.get("timeframe") or WORKING_TF.get(candidate.get("scan_type"))
+            if timeframe:
+                feature = store.feature_snapshot(reference["symbol"], timeframe,
+                    as_of=int(reference["as_of"]),
+                    feature_version=reference.get("feature_version")) or {}
         segment_values = {
             "direction": row.get("side") or "UNKNOWN",
             "session": (feature.get("session") or {}).get("name") or "UNKNOWN",
             "regime": (feature.get("regime") or {}).get("primary") or "UNKNOWN",
             "volatility": (feature.get("regime") or {}).get("volatility") or "UNKNOWN",
         }
+        participation = feature.get("participation") or {}
+        volatility = feature.get("volatility") or {}
+        momentum = feature.get("momentum") or {}
+        location = feature.get("location") or {}
+        relative_volume = participation.get("relative_volume")
+        if relative_volume is not None:
+            rv = float(relative_volume)
+            segment_values["indicator.relative_volume"] = (
+                "<1.0" if rv < 1 else "1.0-1.6" if rv < 1.6 else "1.6-2.0" if rv < 2 else ">=2.0")
+        atr_percentile = volatility.get("atr_percentile")
+        if atr_percentile is not None:
+            ap = float(atr_percentile)
+            segment_values["indicator.atr_percentile"] = (
+                "LOW_<30" if ap < 30 else "NORMAL_30_70" if ap < 70 else "HIGH_>=70")
+        rsi_value = momentum.get("rsi")
+        if rsi_value is not None:
+            rsv = float(rsi_value)
+            segment_values["indicator.rsi"] = (
+                "OVERSOLD_<30" if rsv < 30 else "OVERBOUGHT_>=70" if rsv >= 70 else "MID_30_70")
+        segment_values["indicator.ob_present"] = "YES" if location.get("ob") else "NO"
+        segment_values["indicator.fvg_present"] = "YES" if location.get("fvg") else "NO"
+        price = float(feature.get("price") or 0)
+        vwap = float(location.get("vwap") or 0)
+        segment_values["indicator.vwap_side"] = "ABOVE" if vwap and price > vwap else "BELOW" if vwap else "UNKNOWN"
         for name, value in segment_values.items():
             groups[(name, str(value))].append(row)
     results = []
@@ -75,24 +113,24 @@ def evaluate_profile(store: ResearchStore, run_id: str, profile_id: str) -> list
         values = [float(x["net_r"]) for x in members if x.get("net_r") is not None]
         result = metrics(values)
         test_values = [float(x["net_r"]) for x in members if x.get("net_r") is not None and int(x["decision_time"]) in test_set]
-        test_baseline = [float(x["net_r"]) for x in rows if x.get("net_r") is not None and int(x["decision_time"]) in test_set]
+        test_baseline = [float(x["net_r"]) for x in analysis_rows if x.get("net_r") is not None and int(x["decision_time"]) in test_set]
         low, high = wilson_interval(sum(1 for x in values if x > 0), len(values))
-        proposal = promotion_proposal(
-            [x - float(baseline_expectancy or 0) for x in values],
-            baseline_drawdown=float(baseline.get("max_drawdown_r") or 0),
-            candidate_drawdown=float(result.get("max_drawdown_r") or 0),
-        )
         evaluation = {"research_run_id": run_id, "profile_id": profile_id,
             "feature": feature, "segment": {feature: value}, "sample_size": len(values),
-            "coverage": len(values)/len(rows), "win_rate": result.get("win_rate"),
+            "coverage": len(values)/len(analysis_rows), "win_rate": result.get("win_rate"),
             "expectancy": result.get("expectancy"), "profit_factor": result.get("profit_factor"),
             "max_drawdown": result.get("max_drawdown_r"),
             "uplift": (result.get("expectancy") - baseline_expectancy) if result.get("expectancy") is not None and baseline_expectancy is not None else None,
             "oos_uplift": (statistics.fmean(test_values)-statistics.fmean(test_baseline)) if test_values and test_baseline else None,
             "confidence_low": low, "confidence_high": high,
-            "status": "PROMOTION_CANDIDATE" if proposal["promotion_proposed"] else "LIVE_SHADOW",
+            "status": "DESCRIPTIVE_ONLY",
+            "comparison_kind": "INDICATOR_SEGMENT_DESCRIPTIVE",
             "metrics": {**result, "split_sizes": {k: len(v) for k,v in split.items()},
-                        "point_in_time": True, "promotion": proposal}}
+                        "point_in_time": True, "baseline_track": "PLAYBOOK_ONLY" if any(x.get("track") == "PLAYBOOK_ONLY" for x in rows) else "LEGACY",
+                        "promotion": {
+                            "promotion_proposed": False, "auto_activate": False,
+                            "reasons": ["paired_out_of_sample_experiment_required"],
+                        }, "comparison_kind": "segment_vs_population_not_causal"}}
         store.save_feature_evaluation(evaluation)
         results.append(evaluation)
     return results

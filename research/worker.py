@@ -66,6 +66,13 @@ class ResearchWorker:
         self._seed_feature_contracts()
 
     def _seed_feature_contracts(self) -> None:
+        budget = getattr(self.client, "budget", None)
+        self.store.upsert_source_contract("GATE", kind="CANONICAL_MARKET_DATA", owner="Gate.io",
+            authority="CANONICAL", freshness_sla_seconds=120,
+            rate_limits={"research_rps": round(1/getattr(budget,"minimum_interval",1.0), 3),
+                         "research_minute": getattr(budget,"minute",None),
+                         "research_daily": getattr(budget,"daily",None)},
+            license_info={"origin":"official public Gate API","historical":True}, status="READY")
         computed=("STRUCTURE","OB_FVG_BREAKER","VOLUME","VOLATILITY","VWAP",
                   "VOLUME_PROFILE","RSI","MACD","FIBONACCI","CVD_PROXY","REGIME","SESSION")
         unavailable=("CVD_REAL","OPEN_INTEREST","FUNDING","LONG_SHORT_RATIO","LIQUIDATIONS",
@@ -73,10 +80,16 @@ class ResearchWorker:
         for feature in computed:
             self.store.update_coverage(feature,source="GATE",quality="PENDING_BACKFILL",
                 availability="HISTORICAL",metadata={"execution_authority":False,"shadow_only":True})
+        self.store.upsert_source_contract("GATE_FEATURES", kind="DERIVED_FEATURES", owner="APEX/Gate",
+            authority="CONTEXT_ONLY", coverage={"features":list(computed)},
+            license_info={"origin":"derived from closed Gate candles"}, status="READY")
         for feature in unavailable:
             self.store.update_coverage(feature,source="UNCONFIGURED_EXTERNAL",quality="UNAVAILABLE",
                 availability="REQUIRES_POINT_IN_TIME_SOURCE",metadata={"execution_authority":False,
                 "shadow_only":True,"missing_is_not_zero":True})
+        self.store.upsert_source_contract("UNCONFIGURED_EXTERNAL", kind="OPTIONAL_CONTEXT", owner="Not configured",
+            authority="CONTEXT_ONLY", coverage={"features":list(unavailable)},
+            license_info={"origin":"no external source connected"}, status="UNCONFIGURED")
 
     def _seed_profiles(self) -> None:
         sha=os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "unknown"
@@ -127,7 +140,8 @@ class ResearchWorker:
             result=backfill_pair(self.store,self.client,symbol,timeframe,start,end,
                 should_stop=lambda:self.stop_requested,on_progress=progress)
             logging.info("[Research] backfill %s %s: %s",symbol,timeframe,result)
-            if result.get("status")=="PAUSED": return
+            if result.get("status")=="PAUSED":
+                raise ResourcePause(f"History incomplete for {symbol} {timeframe}; retry required")
             self._pair_progress(symbol,pair_index,pair_total,(tf_index+1)/len(timeframes)*30,
                 "GATE_HISTORY",timeframe=timeframe,gate_requests_today=self.client.budget.used_today)
         self._pair_progress(symbol,pair_index,pair_total,35,"DATA_QUALITY",quality="CHECKED")
@@ -151,7 +165,9 @@ class ResearchWorker:
         run_id=stable_id("continuous-replay",DATASET_VERSION,"research-v1",tuple(universe))
         run={"research_run_id":run_id,"run_type":"POINT_IN_TIME_CAUSAL_SHADOW","dataset_version":DATASET_VERSION,
              "strategy_version":"research-v1","feature_version":FEATURE_VERSION,"code_sha":sha,
-             "range_start":start,"range_end":end,"universe":universe,"config":{"rr_floor":2.0,"closed_only":True,"auto_promote":False},
+             "range_start":start,"range_end":end,"universe":universe,"config":{"rr_floor":2.0,"closed_only":True,"auto_promote":False,
+                "detector_mode":"REPLAY_PROFILE_SURROGATE","live_parity":"NOT_ESTABLISHED",
+                "tracks":["ACTUAL_LINKED_ONLY","NO_MANAGER","PLAYBOOK_ONLY"]},
              "status":"RUNNING","progress":0,"started_at":utc_now()}
         return self.store.save_run(run),run
 
@@ -171,8 +187,13 @@ class ResearchWorker:
                 self._pair_progress(symbol,pair_index,pair_total,70+(index-1+fraction)*5,
                                     "REPLAY",strategy=current)
                 self.throttle.yield_after(batch_started); batch_started=time.monotonic()
+            def checkpoint(last,done,total):
+                self.store.checkpoint(job_id,job_type="REPLAY",strategy_version="research-v1",
+                    symbol=symbol,timeframe=WORKING_TF[strategy],range_start=bounds[0],range_end=bounds[1],
+                    last_timestamp=last,completed_units=done,total_units=total,status="RUNNING")
             result=engine.replay_profile(run_id,self.profiles[strategy],strategy,symbol,replay_start,bounds[1],
-                                         on_progress=progress)
+                on_progress=progress,on_checkpoint=checkpoint,should_stop=lambda:self.stop_requested)
+            if result.get("status")=="PAUSED": return
             last=result.get("last_timestamp") or int(existing.get("last_timestamp") or replay_start-1)
             self.store.checkpoint(job_id,job_type="REPLAY",strategy_version="research-v1",
                 symbol=symbol,timeframe=WORKING_TF[strategy],range_start=bounds[0],range_end=bounds[1],
@@ -212,6 +233,9 @@ class ResearchWorker:
             except Exception as exc:
                 self.store.save_quality_issue(symbol,timeframe,"FEATURE_CALCULATION",open_time=as_of,
                                               severity="ERROR",detail={"error":str(exc)[:500]})
+                # Do not advance the committed checkpoint past a failed feature.
+                # Earlier uncommitted rows are safely recomputed after restart.
+                raise ResourcePause(f"Feature calculation failed: {symbol} {timeframe} {as_of}") from exc
             if pos%100==0:
                 self.store.save_feature_snapshots(snapshots); self.store.upsert_levels(levels)
                 snapshots.clear(); levels.clear()
