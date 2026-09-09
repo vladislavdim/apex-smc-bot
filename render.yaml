@@ -4,7 +4,9 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    autoDeploy: true
+    # Production releases are dispatched only by the verified controlled
+    # release workflow. Database backups and research snapshots never deploy.
+    autoDeploy: false
     buildFilter:
       ignoredPaths:
         - brain.db

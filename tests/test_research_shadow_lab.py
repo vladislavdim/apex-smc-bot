@@ -55,6 +55,24 @@ def test_backfill_resumes_without_duplicates(tmp_path):
     assert store.candle_count("AAVEUSDT","15m")==4
 
 
+def test_backfill_rewinds_and_repairs_a_persisted_gap(tmp_path):
+    store=ResearchStore(str(tmp_path/"history.db")); store.ensure_schema()
+    class Client:
+        repaired=False
+        def candles(self,symbol,timeframe,start,end):
+            values = (0, 1800, 2700) if not self.repaired else (0, 900, 1800, 2700)
+            return [candle(ts) for ts in values if start <= ts and ts+900 <= end]
+    client=Client()
+    first=backfill_pair(store,client,"AAVEUSDT","15m",0,3600)
+    assert first["status"]=="PAUSED"
+    assert store.earliest_open_quality_issue("AAVEUSDT","15m",issue_types=("MISSING_CANDLES",))==1800
+    client.repaired=True
+    second=backfill_pair(store,client,"AAVEUSDT","15m",0,3600)
+    assert second["status"]=="COMPLETED"
+    assert store.earliest_open_quality_issue("AAVEUSDT","15m",issue_types=("MISSING_CANDLES",)) is None
+    assert store.candle_count("AAVEUSDT","15m")==4
+
+
 def test_replay_waits_for_entry_and_uses_conservative_same_bar(tmp_path):
     store=ResearchStore(str(tmp_path/"history.db")); store.ensure_schema()
     # First future candle fills 100 and touches both 98 SL and 104 TP.

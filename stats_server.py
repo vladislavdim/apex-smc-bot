@@ -7,9 +7,14 @@ telemetry is accepted at /ingest and persisted in Postgres.
 from __future__ import annotations
 
 import hmac
+import gzip
+import hashlib
+import io
 import json
 import os
 import re
+import time
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +31,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "").strip()
 MARKET_DATABASE_URL = os.environ.get("APEX_MARKET_DATABASE_URL", "").strip()
+RESEARCH_GITHUB_REPO = os.environ.get("APEX_RESEARCH_GITHUB_REPO", "vladislavdim/apex-smc-bot").strip()
+RESEARCH_RELEASE_TAG = os.environ.get("APEX_RESEARCH_RELEASE_TAG", "apex-research-btc-data").strip()
+_RESEARCH_RELEASE_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
 PORT = int(os.environ.get("PORT", "10000"))
 STATS_BASELINE_UTC = datetime.fromisoformat("2026-09-03T14:54:22+00:00")  # PR #97 live on Render
 
@@ -35,6 +43,83 @@ def _connect():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
     return psycopg2.connect(DATABASE_URL, connect_timeout=8)
+
+
+def _github_research_dashboard() -> dict[str, Any]:
+    """Read the compact public snapshot; never download the SQLite asset here."""
+    now = time.monotonic()
+    if _RESEARCH_RELEASE_CACHE["value"] is not None and now-_RESEARCH_RELEASE_CACHE["at"] < 300:
+        return _RESEARCH_RELEASE_CACHE["value"]
+    api = f"https://api.github.com/repos/{RESEARCH_GITHUB_REPO}/releases/tags/{RESEARCH_RELEASE_TAG}"
+    request = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
+                                                   "User-Agent": "APEX-Research-Dashboard"})
+    with urllib.request.urlopen(request, timeout=12) as response:
+        release = json.loads(response.read())
+    assets = {str(x.get("name")): x for x in release.get("assets", []) if isinstance(x, dict)}
+    asset = assets.get("BTCUSDT.dashboard.json.gz")
+    manifest_asset = assets.get("BTCUSDT.manifest.json")
+    if not asset or not manifest_asset:
+        raise RuntimeError("BTC research snapshot manifest or dashboard asset is not published")
+
+    def download(url: str, limit: int, timeout: int) -> bytes:
+        request = urllib.request.Request(url, headers={"User-Agent": "APEX-Research-Dashboard"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            chunks: list[bytes] = []; size = 0
+            while True:
+                chunk = response.read(min(1024 * 1024, limit - size + 1))
+                if not chunk:
+                    break
+                chunks.append(chunk); size += len(chunk)
+                if size > limit:
+                    raise RuntimeError("BTC research dashboard asset exceeds configured size limit")
+        return b"".join(chunks)
+
+    manifest_payload = download(str(manifest_asset.get("browser_download_url") or ""), 1024 * 1024, 12)
+    try:
+        manifest = json.loads(manifest_payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("BTC research snapshot manifest is invalid") from exc
+    if not isinstance(manifest, dict) or manifest.get("snapshot_version") != "research-snapshot-v2":
+        raise RuntimeError("BTC research snapshot manifest version is unsupported")
+    if str(manifest.get("symbol") or "").upper() != "BTCUSDT" or tuple(manifest.get("timeframes") or ()) != ("15m", "1h", "4h", "1d"):
+        raise RuntimeError("BTC research snapshot manifest scope is invalid")
+    if manifest.get("no_real_execution") is not True or manifest.get("live_activation") != "FORBIDDEN":
+        raise RuntimeError("BTC research snapshot live-execution flag is invalid")
+
+    compressed = download(str(asset.get("browser_download_url") or ""), 20 * 1024 * 1024, 30)
+    expected_hash = str((manifest.get("dashboard_gz") or {}).get("sha256") or "").lower()
+    actual_hash = hashlib.sha256(compressed).hexdigest().lower()
+    if not expected_hash or not hmac.compare_digest(expected_hash, actual_hash):
+        raise RuntimeError("BTC research dashboard checksum does not match manifest")
+    if len(compressed) > 20 * 1024 * 1024:
+        raise RuntimeError("BTC research dashboard asset exceeds 20 MiB")
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
+            decompressed = stream.read(20 * 1024 * 1024 + 1)
+    except (OSError, EOFError) as exc:
+        raise RuntimeError("BTC research dashboard gzip is invalid") from exc
+    if len(decompressed) > 20 * 1024 * 1024:
+        raise RuntimeError("BTC research dashboard decompressed payload exceeds 20 MiB")
+    try:
+        value = json.loads(decompressed)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("BTC research dashboard JSON is invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("BTC research dashboard payload is not an object")
+    storage = value.get("storage") if isinstance(value.get("storage"), dict) else {}
+    runs = value.get("runs") if isinstance(value.get("runs"), list) else []
+    latest_run = runs[0] if runs and isinstance(runs[0], dict) else {}
+    manifest_run = manifest.get("latest_run") if isinstance(manifest.get("latest_run"), dict) else {}
+    if latest_run.get("status") != "COMPLETED" or float(latest_run.get("progress") or 0) < 100:
+        raise RuntimeError("BTC research dashboard run is not complete")
+    if manifest_run.get("research_run_id") and latest_run.get("research_run_id") != manifest_run.get("research_run_id"):
+        raise RuntimeError("BTC research dashboard run does not match manifest")
+    if storage.get("snapshot_version") and storage.get("snapshot_version") != manifest.get("snapshot_version"):
+        raise RuntimeError("BTC research dashboard storage generation mismatch")
+    value.setdefault("storage", {}).update({"source": "GITHUB_RELEASE", "cached_seconds": 300,
+                                             "manifest_verified": True})
+    _RESEARCH_RELEASE_CACHE.update({"at": now, "value": value})
+    return value
 
 
 def ensure_schema() -> None:
@@ -758,16 +843,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc: self._json({"error":f"{type(exc).__name__}: {exc}"},500)
             return
         if p.path=="/api/research":
-            if not MARKET_DATABASE_URL:
-                self._json({"error":"APEX_MARKET_DATABASE_URL is not configured"},503); return
             try:
                 # The web process may observe a database created by an older
                 # research worker.  Additive/idempotent migrations are safe at
                 # the read boundary and prevent a stale schema from hiding
                 # the Research tab after a restart.
-                research_store = ResearchStore(MARKET_DATABASE_URL)
-                research_store.ensure_schema()
-                self._json(research_store.dashboard())
+                if MARKET_DATABASE_URL:
+                    research_store = ResearchStore(MARKET_DATABASE_URL)
+                    research_store.ensure_schema()
+                    data = research_store.dashboard()
+                else:
+                    data = _github_research_dashboard()
+                self._json(data)
             except Exception as exc:
                 print(f"[stats] research unavailable: {type(exc).__name__}")
                 self._json({"error":"research database unavailable"},503)

@@ -149,6 +149,19 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
     existing = store.job(job_id)
     checkpoint = existing.get("last_timestamp")
     cursor = max(start, int(checkpoint) + period) if checkpoint is not None else start
+    # A prior empty page or detected gap is a repairable checkpoint.  Rewind
+    # only this stream (and only inside the requested rolling window), leaving
+    # other completed timeframes untouched.  Upserts are keyed by candle time,
+    # so replaying the page is idempotent after a restart.
+    repair_from = store.earliest_open_quality_issue(
+        symbol, timeframe,
+        issue_types=("EMPTY_HISTORY_PAGE", "MISSING_CANDLES", "TIMESTAMP_ORDER", "DUPLICATE"),
+        start=start, end=end,
+    )
+    if repair_from is not None:
+        # Validation reports a gap on the *later* candle.  Rewind one full
+        # interval so the missing predecessor can actually be fetched.
+        cursor = min(cursor, max(start, (int(repair_from) // period) * period - period))
     total = max(1, (end-start)//period); completed = max(0, (cursor-start)//period)
     store.checkpoint(job_id, job_type="BACKFILL", symbol=symbol, timeframe=timeframe,
                      range_start=start, range_end=end, last_timestamp=cursor-period,
@@ -171,9 +184,19 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                     store.save_quality_issue(symbol,timeframe,"MISSING_CANDLES",open_time=cursor,
                         severity="WARNING",detail={"expected":cursor,"observed":candles[0]["open_time"],"page_boundary":True})
                 inserted += store.upsert_candles(candles)
-                for issue in validate_candles(candles,timeframe):
+                page_issues = validate_candles(candles,timeframe)
+                for issue in page_issues:
                     store.save_quality_issue(symbol,timeframe,issue["type"],open_time=issue.get("open_time"),
                                              severity=issue.get("severity","WARNING"),detail=issue)
+                # A successful retry proves only the exact page was returned;
+                # resolve an earlier page marker at this boundary, never a
+                # different defect or an arbitrary issue for the stream.
+                if int(candles[0]["open_time"]) == cursor and not any(
+                    issue.get("type") in {"MISSING_CANDLES", "TIMESTAMP_ORDER", "DUPLICATE"}
+                    for issue in page_issues
+                ):
+                    for issue_type in ("EMPTY_HISTORY_PAGE", "MISSING_CANDLES"):
+                        store.resolve_quality_issue(symbol, timeframe, issue_type, open_time=cursor)
                 last=max(x["open_time"] for x in candles)
             else:
                 # Empty transport results do not establish historical absence.
@@ -190,6 +213,35 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                              completed_units=completed,total_units=total,status="RUNNING")
             if on_progress:
                 on_progress(completed,total)
+        # Validate the complete requested stream before declaring the job
+        # complete.  This catches a gap spanning two transport pages and lets
+        # a subsequent rolling run rewind to the exact unresolved candle.
+        stream = store.candles_between(symbol, timeframe, max(0, start-period), end)
+        stream = [row for row in stream if start <= int(row["open_time"]) < end]
+        complete_issues = validate_candles(stream, timeframe)
+        for issue in complete_issues:
+            store.save_quality_issue(symbol, timeframe, issue["type"], open_time=issue.get("open_time"),
+                                     severity=issue.get("severity", "WARNING"), detail=issue)
+        issue_keys = {(str(issue.get("type")), issue.get("open_time")) for issue in complete_issues}
+        repair_types = {"EMPTY_HISTORY_PAGE", "MISSING_CANDLES", "TIMESTAMP_ORDER", "DUPLICATE"}
+        for issue in store.quality_issues(symbol, timeframe, issue_types=tuple(repair_types), start=start, end=end):
+            key = (str(issue.get("issue_type")), issue.get("open_time"))
+            if issue.get("open_time") is not None and key not in issue_keys:
+                store.resolve_quality_issue(symbol, timeframe, str(issue["issue_type"]),
+                                            open_time=int(issue["open_time"]))
+        if complete_issues:
+            # Do not publish a range which still has a known missing/ordering
+            # defect.  The checkpoint remains resumable at the first issue.
+            blocking = [x for x in complete_issues if x.get("type") in repair_types]
+            if blocking:
+                first_issue = min(int(x.get("open_time") or start) for x in blocking)
+                store.checkpoint(job_id, job_type="BACKFILL", symbol=symbol, timeframe=timeframe,
+                                 range_start=start, range_end=end,
+                                 last_timestamp=max(start, first_issue-period), completed_units=max(0, (first_issue-start)//period),
+                                 total_units=total, status="PAUSED",
+                                 error="historical quality gap requires retry")
+                return {"job_id":job_id,"status":"PAUSED","pages":pages,"upserts":inserted,
+                        "quality_issues":len(complete_issues)}
         count=store.candle_count(symbol,timeframe)
         store.update_coverage("OHLCV",source="GATE",symbol=symbol,timeframe=timeframe,start=start,end=end,
                               quality="VALID",availability="HISTORICAL",samples=count,

@@ -495,6 +495,66 @@ class ResearchStore:
                  canonical(dict(detail or {})), "OPEN", utc_now()))
         return issue_id
 
+    def earliest_open_quality_issue(self, symbol: str, timeframe: str, *,
+                                    issue_types: Sequence[str] | None = None,
+                                    start: int | None = None, end: int | None = None) -> int | None:
+        """Return the earliest repairable open issue in a requested range.
+
+        The backfill cursor uses this value to revisit a previously incomplete
+        page after a restart.  Issues outside the current rolling window are
+        intentionally ignored; their diagnostics remain in the database.
+        """
+        where = ["source=?", "symbol=?", "timeframe=?", "status='OPEN'", "open_time IS NOT NULL"]
+        params: list[Any] = ["GATE", str(symbol).upper(), str(timeframe)]
+        if issue_types:
+            values = [str(value) for value in issue_types if str(value)]
+            if values:
+                where.append("issue_type IN (" + ",".join("?" for _ in values) + ")")
+                params.extend(values)
+        if start is not None:
+            where.append("open_time>=?"); params.append(int(start))
+        if end is not None:
+            where.append("open_time<=?"); params.append(int(end))
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(self._sql("SELECT MIN(open_time) FROM market_quality_issues WHERE " + " AND ".join(where)), params)
+            row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def resolve_quality_issue(self, symbol: str, timeframe: str, issue_type: str, *,
+                              open_time: int | None = None) -> int:
+        """Mark one repaired quality issue resolved, preserving its audit row."""
+        where = ["source=?", "symbol=?", "timeframe=?", "issue_type=?", "status='OPEN'"]
+        params: list[Any] = ["GATE", str(symbol).upper(), str(timeframe), str(issue_type)]
+        if open_time is not None:
+            where.append("open_time=?"); params.append(int(open_time))
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(self._sql("UPDATE market_quality_issues SET status='RESOLVED',resolved_at=? WHERE "
+                                  + " AND ".join(where)), [utc_now(), *params])
+            return int(cur.rowcount or 0)
+
+    def quality_issues(self, symbol: str, timeframe: str, *, status: str = "OPEN",
+                       issue_types: Sequence[str] | None = None,
+                       start: int | None = None, end: int | None = None) -> list[dict[str, Any]]:
+        """Read quality diagnostics for repair/observability without mutating them."""
+        where = ["source=?", "symbol=?", "timeframe=?", "status=?"]
+        params: list[Any] = ["GATE", str(symbol).upper(), str(timeframe), str(status)]
+        if issue_types:
+            values = [str(value) for value in issue_types if str(value)]
+            if values:
+                where.append("issue_type IN (" + ",".join("?" for _ in values) + ")")
+                params.extend(values)
+        if start is not None:
+            where.append("(open_time IS NULL OR open_time>=?)"); params.append(int(start))
+        if end is not None:
+            where.append("(open_time IS NULL OR open_time<=?)"); params.append(int(end))
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(self._sql("SELECT * FROM market_quality_issues WHERE " + " AND ".join(where)
+                                  + " ORDER BY open_time,detected_at"), params)
+            return [self._row_dict(cur, row) for row in cur.fetchall()]
+
     def save_feature_snapshot(self, symbol: str, timeframe: str, as_of: int,
                               features: Mapping[str, Any], *, feature_version: str,
                               dataset_version: str, quality: str = "VALID") -> str:
@@ -658,7 +718,12 @@ class ResearchStore:
                 (research_run_id,run_type,dataset_version,strategy_version,feature_version,code_sha,
                  range_start,range_end,universe_json,config_json,status,progress,started_at,finished_at,error)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(research_run_id) DO UPDATE SET
-                 status=excluded.status,progress=excluded.progress,finished_at=excluded.finished_at,error=excluded.error"""),
+                 run_type=excluded.run_type,dataset_version=excluded.dataset_version,
+                 strategy_version=excluded.strategy_version,feature_version=excluded.feature_version,
+                 code_sha=excluded.code_sha,range_start=excluded.range_start,range_end=excluded.range_end,
+                 universe_json=excluded.universe_json,config_json=excluded.config_json,
+                 status=excluded.status,progress=excluded.progress,started_at=excluded.started_at,
+                 finished_at=excluded.finished_at,error=excluded.error"""),
                 (run_id,str(run.get("run_type") or "REPLAY"),str(run["dataset_version"]),str(run["strategy_version"]),
                  str(run["feature_version"]),str(run.get("code_sha") or "unknown"),run.get("range_start"),run.get("range_end"),
                  canonical(run.get("universe") or []),canonical(run.get("config") or {}),str(run.get("status") or "RUNNING"),
@@ -860,7 +925,9 @@ class ResearchStore:
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
             ORDER BY a.decision_time DESC,t.track LIMIT 600""")
         trades = query("""SELECT a.parent_strategy,t.track,t.status,COUNT(*) AS count,
-            AVG(t.net_r) AS expectancy,AVG(CASE WHEN t.net_r>0 THEN 1.0 ELSE 0.0 END)*100 AS win_rate
+            COUNT(t.net_r) AS resolved_count,AVG(t.net_r) AS expectancy,
+            CASE WHEN COUNT(t.net_r)=0 THEN NULL
+                 ELSE AVG(CASE WHEN t.net_r>0 THEN 1.0 ELSE 0.0 END)*100 END AS win_rate
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
             GROUP BY a.parent_strategy,t.track,t.status ORDER BY a.parent_strategy,t.track,t.status""")
         quality = query("""SELECT severity,issue_type,COUNT(*) AS count FROM market_quality_issues

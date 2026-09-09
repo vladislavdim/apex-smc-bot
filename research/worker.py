@@ -162,7 +162,11 @@ class ResearchWorker:
     def _start_run(self,universe: list[str],ranges: dict[str,tuple[int,int]]) -> tuple[str,dict[str,Any]]:
         start=min(x[0] for x in ranges.values()); end=max(x[1] for x in ranges.values())
         sha=os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "unknown"
-        run_id=stable_id("continuous-replay",DATASET_VERSION,"research-v1",tuple(universe))
+        # A rolling daily run must retain its own immutable cohort metadata.
+        # The checkpoints remain stable per symbol/timeframe, while the run
+        # identity includes the exact point-in-time range being evaluated.
+        run_id=stable_id("continuous-replay",DATASET_VERSION,"research-v1",
+                         tuple(universe),int(start),int(end))
         run={"research_run_id":run_id,"run_type":"POINT_IN_TIME_CAUSAL_SHADOW","dataset_version":DATASET_VERSION,
              "strategy_version":"research-v1","feature_version":FEATURE_VERSION,"code_sha":sha,
              "range_start":start,"range_end":end,"universe":universe,"config":{"rr_floor":2.0,"closed_only":True,"auto_promote":False,
@@ -208,7 +212,10 @@ class ResearchWorker:
         start,end=bounds; job_id=stable_id("features",symbol,timeframe,FEATURE_VERSION)
         existing=self.store.job(job_id); cursor=max(start,int(existing.get("last_timestamp") or 0)+1)
         total=max(1,(end-start)//TIMEFRAME_SECONDS[timeframe])
-        completed=max(0,int(existing.get("completed_units") or 0))
+        # Recompute progress from the point-in-time cursor.  A rolling window
+        # moves its start every day; carrying the old completed_units would
+        # otherwise make a one-day increment appear >100% complete.
+        completed=max(0,min(total,(cursor-start)//TIMEFRAME_SECONDS[timeframe]))
         self.store.checkpoint(job_id,job_type="FEATURES",symbol=symbol,timeframe=timeframe,
                               range_start=start,range_end=end,last_timestamp=cursor-1,
                               completed_units=completed,total_units=total,status="RUNNING")

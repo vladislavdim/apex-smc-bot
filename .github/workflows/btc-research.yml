@@ -1,0 +1,111 @@
+name: BTC One-Year Research
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/btc-research.yml
+      - scripts/run_btc_research_release.py
+      - research/**
+      - core/replay_lab.py
+      - core/setup_evidence.py
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: btc-one-year-research
+  cancel-in-progress: false
+
+jobs:
+  btc-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      APEX_RESEARCH_OUTPUT_DIR: research-data
+      APEX_RESEARCH_GATE_RPS: "1"
+      APEX_RESEARCH_GATE_MINUTE: "50"
+      APEX_RESEARCH_GATE_DAILY: "12000"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore previous BTC database
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research-data
+          tag='apex-research-btc-data'
+          set +e
+          release_probe="$(gh api -i "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>&1)"
+          release_status=$?
+          set -e
+          if test "$release_status" -eq 0; then
+            # A published release is a three-file atomic generation.  A
+            # missing manifest or checksum mismatch is a hard failure; do not
+            # silently start from an older/empty database.
+            gh release download "$tag" --pattern 'BTCUSDT.research.db.gz' --dir research-data
+            gh release download "$tag" --pattern 'BTCUSDT.dashboard.json.gz' --dir research-data
+            gh release download "$tag" --pattern 'BTCUSDT.manifest.json' --dir research-data
+            python scripts/verify_btc_research_snapshot.py \
+              --db-gz research-data/BTCUSDT.research.db.gz \
+              --dashboard-gz research-data/BTCUSDT.dashboard.json.gz \
+              --manifest research-data/BTCUSDT.manifest.json \
+              --verify-compressed
+            gzip -dc research-data/BTCUSDT.research.db.gz > research-data/BTCUSDT.research.db
+          else
+            # Only an explicit GitHub 404 means this is the first cohort.
+            # Authentication, rate-limit and transport failures must stop the
+            # job instead of replacing the last good database with an empty
+            # or partial snapshot.
+            if printf '%s\n' "$release_probe" | grep -qE '^HTTP/[0-9.]+ 404 '; then
+              echo 'No prior BTC research release; starting the first cohort.'
+            else
+              echo "$release_probe" >&2
+              exit "$release_status"
+            fi
+          fi
+      - name: Run bounded BTC research
+        run: python scripts/run_btc_research_release.py
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          gzip -c research-data/BTCUSDT.research.db > research-data/BTCUSDT.research.db.gz
+          gzip -c research-data/BTCUSDT.dashboard.json > research-data/BTCUSDT.dashboard.json.gz
+          python scripts/verify_btc_research_snapshot.py \
+            --db research-data/BTCUSDT.research.db \
+            --dashboard research-data/BTCUSDT.dashboard.json \
+            --db-gz research-data/BTCUSDT.research.db.gz \
+            --dashboard-gz research-data/BTCUSDT.dashboard.json.gz \
+            --manifest research-data/BTCUSDT.manifest.json \
+            --history-days 365
+      - name: Publish research snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='apex-research-btc-data'
+          set +e
+          release_probe="$(gh api -i "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>&1)"
+          release_status=$?
+          set -e
+          if test "$release_status" -ne 0; then
+            if printf '%s\n' "$release_probe" | grep -qE '^HTTP/[0-9.]+ 404 '; then
+              gh release create "$tag" --title 'APEX BTC Research Data' --notes 'Machine-generated BTCUSDT Research/Shadow data. No live execution.'
+            else
+              echo "$release_probe" >&2
+              exit "$release_status"
+            fi
+          fi
+          # Data first, manifest last: readers reject mixed generations while
+          # the two large assets are being replaced.
+          gh release upload "$tag" \
+            research-data/BTCUSDT.research.db.gz research-data/BTCUSDT.dashboard.json.gz --clobber
+          gh release upload "$tag" research-data/BTCUSDT.manifest.json --clobber
