@@ -1969,6 +1969,19 @@ def get_candles(symbol, interval="1h", limit=200):
         _record_market_data(symbol, interval, True, source="Gate shared cache", candle_count=len(_gc), cached=True)
         return _gc[-requested_limit:]
 
+    # Durable Gate Market History is an optional read-through cache. It is
+    # accepted only when complete and fresh for the requested timeframe.
+    try:
+        from research.live_cache import read as _research_candle_read
+        _history = _research_candle_read(symbol, interval, requested_limit)
+        if len(_history) >= requested_limit:
+            candle_cache[cache_key] = (_history, time.time())
+            update_global_candles(symbol, interval, _history)
+            _record_market_data(symbol, interval, True, source="Gate Market History DB", candle_count=len(_history), cached=True)
+            return _history[-requested_limit:]
+    except Exception:
+        pass
+
     # 1. Brain Router — Gate USD-M in the default production policy.
     if _ROUTER_OK:
         try:
@@ -1977,6 +1990,11 @@ def get_candles(symbol, interval="1h", limit=200):
                 candle_cache[cache_key] = (rc, time.time())
                 update_global_candles(symbol, interval, rc)
                 _record_market_data(symbol, interval, True, source="Gate BrainRouter", candle_count=len(rc))
+                try:
+                    from research.live_cache import write as _research_candle_write
+                    _research_candle_write(symbol, interval, rc)
+                except Exception:
+                    pass
                 return rc[-requested_limit:]
         except Exception as e:
             _gate_errors.append(f"BrainRouter: {type(e).__name__}: {e}")
@@ -1991,6 +2009,11 @@ def get_candles(symbol, interval="1h", limit=200):
                 candle_cache[cache_key] = (candles, time.time())
                 update_global_candles(symbol, interval, candles)
                 _record_market_data(symbol, interval, True, source="Gate SMC adapter", candle_count=len(candles))
+                try:
+                    from research.live_cache import write as _research_candle_write
+                    _research_candle_write(symbol, interval, candles)
+                except Exception:
+                    pass
                 return candles[-requested_limit:]
             if isinstance(result, dict) and result.get("error"):
                 _gate_errors.append(f"SMC adapter: {result['error']}")
