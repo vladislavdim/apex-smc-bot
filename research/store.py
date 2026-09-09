@@ -322,15 +322,27 @@ class ResearchStore:
                               features: Mapping[str, Any], *, feature_version: str,
                               dataset_version: str, quality: str = "VALID") -> str:
         snapshot_id = stable_id("features", symbol, timeframe, as_of, feature_version, dataset_version)
+        self.save_feature_snapshots([{"symbol":symbol,"timeframe":timeframe,"as_of":as_of,
+            "features":features,"feature_version":feature_version,"dataset_version":dataset_version,
+            "quality":quality,"snapshot_id":snapshot_id}])
+        return snapshot_id
+
+    def save_feature_snapshots(self, snapshots: Iterable[Mapping[str, Any]]) -> int:
+        now=utc_now(); rows=[]
+        for item in snapshots:
+            symbol=str(item["symbol"]).upper(); timeframe=str(item["timeframe"]); as_of=int(item["as_of"])
+            feature_version=str(item["feature_version"]); dataset_version=str(item["dataset_version"])
+            rows.append((str(item.get("snapshot_id") or stable_id("features",symbol,timeframe,as_of,feature_version,dataset_version)),
+                "GATE",symbol,timeframe,as_of,feature_version,dataset_version,canonical(item["features"]),
+                str(item.get("quality") or "VALID"),now))
+        if not rows: return 0
         with self.transaction() as conn:
-            conn.cursor().execute(self._sql("""INSERT INTO market_feature_snapshots
+            conn.cursor().executemany(self._sql("""INSERT INTO market_feature_snapshots
                 (snapshot_id,source,symbol,timeframe,as_of,feature_version,dataset_version,
                  features_json,data_quality,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(snapshot_id) DO UPDATE SET features_json=excluded.features_json,
-                 data_quality=excluded.data_quality"""),
-                (snapshot_id, "GATE", symbol.upper(), timeframe, int(as_of), feature_version,
-                 dataset_version, canonical(features), quality, utc_now()))
-        return snapshot_id
+                 data_quality=excluded.data_quality"""),rows)
+        return len(rows)
 
     def feature_snapshot(self, symbol: str, timeframe: str, *, as_of: int | None = None,
                          feature_version: str | None = None) -> dict[str, Any]:
@@ -361,22 +373,32 @@ class ResearchStore:
         level_id = str(level.get("level_id") or stable_id("level", level.get("symbol"),
                        level.get("timeframe"), level.get("level_type"), level.get("created_at_ts"),
                        level.get("low"), level.get("high")))
-        fields = (level_id, str(level.get("source") or "GATE"), str(level["symbol"]).upper(),
+        self.upsert_levels([{**dict(level),"level_id":level_id}])
+        return level_id
+
+    def upsert_levels(self, levels: Iterable[Mapping[str, Any]]) -> int:
+        rows=[]; now=utc_now()
+        for level in levels:
+            level_id = str(level.get("level_id") or stable_id("level", level.get("symbol"),
+                           level.get("timeframe"), level.get("level_type"), level.get("created_at_ts"),
+                           level.get("low"), level.get("high")))
+            rows.append((level_id, str(level.get("source") or "GATE"), str(level["symbol"]).upper(),
                   str(level["timeframe"]), str(level["level_type"]), str(level.get("direction") or ""),
                   float(level["low"]), float(level["high"]), int(level["created_at_ts"]),
                   str(level.get("status") or "ACTIVE"), level.get("touched_at"), level.get("reacted_at"),
                   level.get("swept_at"), level.get("broken_at"), level.get("flipped_at"),
-                  level.get("expired_at"), canonical(level.get("attributes") or {}), utc_now())
+                  level.get("expired_at"), canonical(level.get("attributes") or {}), now))
+        if not rows: return 0
         with self.transaction() as conn:
-            conn.cursor().execute(self._sql("""INSERT INTO market_levels
+            conn.cursor().executemany(self._sql("""INSERT INTO market_levels
                 (level_id,source,symbol,timeframe,level_type,direction,low,high,created_at_ts,status,
                  touched_at,reacted_at,swept_at,broken_at,flipped_at,expired_at,attributes_json,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(level_id) DO UPDATE SET
                  status=excluded.status,touched_at=excluded.touched_at,reacted_at=excluded.reacted_at,
                  swept_at=excluded.swept_at,broken_at=excluded.broken_at,flipped_at=excluded.flipped_at,
                  expired_at=excluded.expired_at,attributes_json=excluded.attributes_json,
-                 updated_at=excluded.updated_at"""), fields)
-        return level_id
+                 updated_at=excluded.updated_at"""), rows)
+        return len(rows)
 
     def update_coverage(self, feature: str, *, source: str, symbol: str = "*", timeframe: str = "*",
                         start: int | None = None, end: int | None = None, quality: str = "UNKNOWN",
