@@ -22,9 +22,11 @@ GATE_CONTRACTS_URL = "https://api.gateio.ws/api/v4/futures/usdt/contracts"
 
 class ResearchBudget:
     """Conservative local admission control for optional research requests."""
-    def __init__(self, per_second: float = 2.0, daily: int = 12000):
+    def __init__(self, per_second: float = 1.0, daily: int = 12000, *,
+                 minute: int = 50, store: ResearchStore | None = None):
         self.minimum_interval = 1.0 / max(0.1, float(per_second))
         self.daily = max(100, int(daily)); self._last = 0.0
+        self.minute = max(1, int(minute)); self.store = store
         self._day = datetime.now(timezone.utc).date(); self._used = 0
         self._lock = threading.Lock()
 
@@ -33,7 +35,11 @@ class ResearchBudget:
             today = datetime.now(timezone.utc).date()
             if today != self._day:
                 self._day, self._used = today, 0
-            if self._used >= self.daily:
+            if self.store:
+                if not self.store.admit_api_request("GATE_RESEARCH", daily_limit=self.daily,
+                                                    minute_limit=self.minute):
+                    raise RuntimeError("research Gate persisted request budget exhausted")
+            elif self._used >= self.daily:
                 raise RuntimeError("research Gate daily request budget exhausted")
             wait = self.minimum_interval - (time.monotonic() - self._last)
             if wait > 0:
@@ -42,16 +48,20 @@ class ResearchBudget:
 
     @property
     def used_today(self) -> int:
+        if self.store:
+            return int(self.store.api_usage("GATE_RESEARCH")["day"].get("used") or 0)
         return self._used
 
 
 class GateHistoryClient:
-    def __init__(self, *, session: requests.Session | None = None, budget: ResearchBudget | None = None):
+    def __init__(self, *, session: requests.Session | None = None, budget: ResearchBudget | None = None,
+                 store: ResearchStore | None = None):
         self.session = session or requests.Session()
         self.session.headers.update({"User-Agent": "APEX-Research/1.0"})
         self.budget = budget or ResearchBudget(
-            float(os.environ.get("APEX_RESEARCH_GATE_RPS", "2")),
+            float(os.environ.get("APEX_RESEARCH_GATE_RPS", "1")),
             int(os.environ.get("APEX_RESEARCH_GATE_DAILY", "12000")),
+            minute=int(os.environ.get("APEX_RESEARCH_GATE_MINUTE", "50")), store=store,
         )
 
     def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
@@ -61,6 +71,9 @@ class GateHistoryClient:
             try:
                 response = self.session.get(url, params=params, timeout=20)
                 if response.status_code in {418, 429} or response.status_code >= 500:
+                    if self.budget.store:
+                        self.budget.store.record_api_result("GATE_RESEARCH",
+                            rate_limited=response.status_code in {418,429}, error=response.status_code>=500)
                     retry_after = float(response.headers.get("Retry-After") or 0)
                     time.sleep(min(60.0, max(retry_after, 2 ** attempt + random.random())))
                     last = RuntimeError(f"Gate HTTP {response.status_code}")
@@ -68,6 +81,8 @@ class GateHistoryClient:
                 response.raise_for_status()
                 return response.json()
             except (requests.RequestException, ValueError) as exc:
+                if self.budget.store:
+                    self.budget.store.record_api_result("GATE_RESEARCH",error=True)
                 last = exc
                 if attempt < 4:
                     time.sleep(min(30.0, 2 ** attempt + random.random()))
@@ -121,7 +136,7 @@ def target_ranges(now: int | None = None) -> dict[str, tuple[int, int]]:
 
 
 def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, timeframe: str,
-                  start: int, end: int) -> dict[str, Any]:
+                  start: int, end: int, *, should_stop=None, on_progress=None) -> dict[str, Any]:
     period = TIMEFRAME_SECONDS[timeframe]
     # Stable across rolling refresh windows: a new cycle resumes this stream.
     job_id = stable_id("backfill", symbol, timeframe)
@@ -135,6 +150,11 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
     pages=0; inserted=0
     try:
         while cursor <= end-period:
+            if should_stop and should_stop():
+                store.checkpoint(job_id,job_type="BACKFILL",symbol=symbol,timeframe=timeframe,
+                    range_start=start,range_end=end,last_timestamp=max(start,cursor-period),
+                    completed_units=completed,total_units=total,status="PAUSED")
+                return {"job_id":job_id,"status":"PAUSED","pages":pages,"upserts":inserted}
             page_end = min(end, cursor + period * 1999)
             candles = client.candles(symbol,timeframe,cursor,page_end)
             if candles:
@@ -152,6 +172,8 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
             store.checkpoint(job_id,job_type="BACKFILL",symbol=symbol,timeframe=timeframe,
                              range_start=start,range_end=end,last_timestamp=last,
                              completed_units=completed,total_units=total,status="RUNNING")
+            if on_progress:
+                on_progress(completed,total)
         count=store.candle_count(symbol,timeframe)
         store.update_coverage("OHLCV",source="GATE",symbol=symbol,timeframe=timeframe,start=start,end=end,
                               quality="VALID",availability="HISTORICAL",samples=count,

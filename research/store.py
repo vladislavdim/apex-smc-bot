@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -148,6 +148,13 @@ DDL = [
         before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}',
         reason TEXT NOT NULL DEFAULT '', code_sha TEXT NOT NULL DEFAULT '',
         occurred_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS research_api_usage (
+        source TEXT NOT NULL, bucket_kind TEXT NOT NULL, bucket_start TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0, denied INTEGER NOT NULL DEFAULT 0,
+        rate_limited INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0,
+        limit_value INTEGER NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(source,bucket_kind,bucket_start))""",
+    "CREATE INDEX IF NOT EXISTS idx_research_api_usage_recent ON research_api_usage(source,bucket_start DESC)",
 ]
 
 
@@ -198,6 +205,79 @@ class ResearchStore:
                 VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET
                 value_json=excluded.value_json,updated_at=excluded.updated_at"""),
                 (key, canonical(value), utc_now()))
+
+    def admit_api_request(self, source: str, *, daily_limit: int, minute_limit: int,
+                          units: int = 1, now: datetime | None = None) -> bool:
+        """Atomically reserve optional API capacity in durable UTC buckets.
+
+        The research worker is intentionally a single consumer. Row locks keep
+        the same contract safe if a replacement process overlaps during deploy.
+        """
+        moment = now or datetime.now(timezone.utc)
+        buckets = (
+            ("DAY", moment.strftime("%Y-%m-%d"), max(1, int(daily_limit))),
+            ("MINUTE", moment.strftime("%Y-%m-%dT%H:%MZ"), max(1, int(minute_limit))),
+        )
+        source = str(source).upper(); units = max(1, int(units)); updated = utc_now()
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            for kind, start, limit in buckets:
+                cur.execute(self._sql("""INSERT INTO research_api_usage
+                    (source,bucket_kind,bucket_start,used,denied,rate_limited,errors,limit_value,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source,bucket_kind,bucket_start) DO NOTHING"""),
+                    (source, kind, start, 0, 0, 0, 0, limit, updated))
+            allowed = True
+            for kind, start, limit in buckets:
+                lock = " FOR UPDATE" if self.postgres else ""
+                cur.execute(self._sql("""SELECT used FROM research_api_usage
+                    WHERE source=? AND bucket_kind=? AND bucket_start=?""" + lock),
+                    (source, kind, start))
+                row = cur.fetchone(); used = int(row[0]) if row else 0
+                if used + units > limit:
+                    allowed = False
+            if not allowed:
+                for kind, start, _limit in buckets:
+                    cur.execute(self._sql("""UPDATE research_api_usage SET denied=denied+1,updated_at=?
+                        WHERE source=? AND bucket_kind=? AND bucket_start=?"""),
+                        (updated, source, kind, start))
+                return False
+            for kind, start, limit in buckets:
+                cur.execute(self._sql("""UPDATE research_api_usage
+                    SET used=used+?,limit_value=?,updated_at=?
+                    WHERE source=? AND bucket_kind=? AND bucket_start=?"""),
+                    (units, limit, updated, source, kind, start))
+        return True
+
+    def record_api_result(self, source: str, *, rate_limited: bool = False,
+                          error: bool = False, now: datetime | None = None) -> None:
+        moment = now or datetime.now(timezone.utc); source = str(source).upper()
+        buckets = (("DAY", moment.strftime("%Y-%m-%d")),
+                   ("MINUTE", moment.strftime("%Y-%m-%dT%H:%MZ")))
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            for kind, start in buckets:
+                cur.execute(self._sql("""UPDATE research_api_usage SET
+                    rate_limited=rate_limited+?,errors=errors+?,updated_at=?
+                    WHERE source=? AND bucket_kind=? AND bucket_start=?"""),
+                    (int(rate_limited), int(error), utc_now(), source, kind, start))
+
+    def api_usage(self, source: str, *, now: datetime | None = None) -> dict[str, Any]:
+        moment = now or datetime.now(timezone.utc); source = str(source).upper()
+        starts = {"DAY": moment.strftime("%Y-%m-%d"),
+                  "MINUTE": moment.strftime("%Y-%m-%dT%H:%MZ")}
+        result: dict[str, Any] = {}
+        with self.transaction() as conn:
+            cur = conn.cursor()
+            for kind, start in starts.items():
+                cur.execute(self._sql("""SELECT used,denied,rate_limited,errors,limit_value
+                    FROM research_api_usage WHERE source=? AND bucket_kind=? AND bucket_start=?"""),
+                    (source, kind, start))
+                row = cur.fetchone()
+                result[kind.lower()] = self._row_dict(cur, row) if row else {
+                    "used": 0, "denied": 0, "rate_limited": 0, "errors": 0,
+                    "limit_value": 0,
+                }
+        return result
 
     def dataset_manifest(self) -> dict[str, Any]:
         with self.transaction() as conn:
@@ -369,6 +449,25 @@ class ResearchStore:
                 f"SELECT as_of FROM market_feature_snapshots WHERE {where} ORDER BY as_of"),params)
             return [int(row[0]) for row in cur.fetchall()]
 
+    def feature_series(self, symbol: str, timeframe: str, start: int, end: int,
+                       feature_version: str) -> list[tuple[int,dict[str,Any]]]:
+        """Return one prior snapshot plus a bounded point-in-time batch."""
+        with self.transaction() as conn:
+            cur=conn.cursor()
+            cur.execute(self._sql("""SELECT as_of,features_json FROM market_feature_snapshots
+                WHERE symbol=? AND timeframe=? AND feature_version=? AND as_of<=?
+                ORDER BY as_of DESC LIMIT 1"""),(symbol.upper(),timeframe,feature_version,int(start)))
+            prior=cur.fetchone()
+            cur.execute(self._sql("""SELECT as_of,features_json FROM market_feature_snapshots
+                WHERE symbol=? AND timeframe=? AND feature_version=? AND as_of>? AND as_of<=?
+                ORDER BY as_of"""),(symbol.upper(),timeframe,feature_version,int(start),int(end)))
+            rows=([prior] if prior else [])+list(cur.fetchall())
+        result=[]
+        for row in rows:
+            try: result.append((int(row[0]),json.loads(row[1])))
+            except (TypeError,ValueError,json.JSONDecodeError): continue
+        return result
+
     def upsert_level(self, level: Mapping[str, Any]) -> str:
         level_id = str(level.get("level_id") or stable_id("level", level.get("symbol"),
                        level.get("timeframe"), level.get("level_type"), level.get("created_at_ts"),
@@ -470,27 +569,40 @@ class ResearchStore:
         return run_id
 
     def save_attempt(self, attempt: Mapping[str, Any]) -> str:
-        attempt_id = str(attempt.get("attempt_id") or stable_id(attempt.get("research_run_id"),
-                         attempt.get("profile_id"), attempt.get("symbol"), attempt.get("decision_time")))
-        values = (attempt_id, attempt["research_run_id"], attempt["profile_id"],
+        return self.save_attempts([attempt])[0]
+
+    def save_attempts(self, attempts: Iterable[Mapping[str, Any]]) -> list[str]:
+        rows=[]; ids=[]; now=utc_now()
+        for attempt in attempts:
+            attempt_id = str(attempt.get("attempt_id") or stable_id(attempt.get("research_run_id"),
+                             attempt.get("profile_id"), attempt.get("symbol"), attempt.get("decision_time")))
+            ids.append(attempt_id)
+            rows.append((attempt_id, attempt["research_run_id"], attempt["profile_id"],
                   str(attempt["parent_strategy"]).upper(), str(attempt["symbol"]).upper(),
                   str(attempt.get("direction") or ""), int(attempt["decision_time"]),
                   str(attempt.get("stage") or "SCAN"), str(attempt.get("outcome") or "FILTERED"),
                   str(attempt.get("stop_code") or ""), attempt.get("entry"), attempt.get("sl"),
                   attempt.get("tp1"), attempt.get("tp2"), attempt.get("terminal_tp"), attempt.get("rr"),
-                  canonical(attempt.get("snapshot") or {}), utc_now())
+                  canonical(attempt.get("snapshot") or {}), now))
+        if not rows: return []
         with self.transaction() as conn:
-            conn.cursor().execute(self._sql("""INSERT INTO research_attempts
+            conn.cursor().executemany(self._sql("""INSERT INTO research_attempts
                 (attempt_id,research_run_id,profile_id,parent_strategy,symbol,direction,decision_time,
                  stage,outcome,stop_code,entry,sl,tp1,tp2,terminal_tp,rr,snapshot_json,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
                  stage=excluded.stage,outcome=excluded.outcome,stop_code=excluded.stop_code,
-                 snapshot_json=excluded.snapshot_json"""), values)
-        return attempt_id
+                 snapshot_json=excluded.snapshot_json"""),rows)
+        return ids
 
     def save_trade(self, trade: Mapping[str, Any]) -> str:
-        trade_id = str(trade.get("trade_id") or stable_id("trade", trade["attempt_id"], trade["track"]))
-        values = (trade_id, trade["attempt_id"], trade["track"], trade["status"], trade["entry_state"],
+        return self.save_trades([trade])[0]
+
+    def save_trades(self, trades: Iterable[Mapping[str, Any]]) -> list[str]:
+        rows=[]; ids=[]; now=utc_now()
+        for trade in trades:
+            trade_id = str(trade.get("trade_id") or stable_id("trade", trade["attempt_id"], trade["track"]))
+            ids.append(trade_id)
+            rows.append((trade_id, trade["attempt_id"], trade["track"], trade["status"], trade["entry_state"],
                   trade["side"], trade["entry"], trade.get("entry_time"), trade["initial_sl"],
                   trade.get("current_sl", trade["initial_sl"]), trade["tp1"], trade.get("tp2"),
                   trade.get("terminal_tp", trade.get("tp2") or trade["tp1"]), trade.get("exit_price"),
@@ -498,9 +610,10 @@ class ResearchStore:
                   trade.get("gross_r"), trade.get("net_r"), trade.get("pnl_pct"), trade.get("mfe_r"),
                   trade.get("mae_r"), trade.get("fees_r"), trade.get("slippage_r"), trade.get("giveback_r"),
                   canonical(trade.get("targets_reached") or []), trade.get("ambiguity"),
-                  canonical(trade.get("state") or {}), utc_now())
+                  canonical(trade.get("state") or {}), now))
+        if not rows: return []
         with self.transaction() as conn:
-            conn.cursor().execute(self._sql("""INSERT INTO research_trades
+            conn.cursor().executemany(self._sql("""INSERT INTO research_trades
                 (trade_id,attempt_id,track,status,entry_state,side,entry,entry_time,initial_sl,current_sl,
                  tp1,tp2,terminal_tp,exit_price,exit_time,exit_reason,quantity,gross_r,net_r,pnl_pct,
                  mfe_r,mae_r,fees_r,slippage_r,giveback_r,targets_reached_json,ambiguity,state_json,updated_at)
@@ -511,8 +624,8 @@ class ResearchStore:
                  net_r=excluded.net_r,pnl_pct=excluded.pnl_pct,mfe_r=excluded.mfe_r,mae_r=excluded.mae_r,
                  fees_r=excluded.fees_r,slippage_r=excluded.slippage_r,giveback_r=excluded.giveback_r,
                  targets_reached_json=excluded.targets_reached_json,ambiguity=excluded.ambiguity,
-                 state_json=excluded.state_json,updated_at=excluded.updated_at"""), values)
-        return trade_id
+                 state_json=excluded.state_json,updated_at=excluded.updated_at"""),rows)
+        return ids
 
     def save_feature_evaluation(self, evaluation: Mapping[str, Any]) -> str:
         segment = canonical(evaluation.get("segment") or {})
@@ -585,10 +698,12 @@ class ResearchStore:
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
             WHERE t.status='OPEN' ORDER BY a.decision_time DESC LIMIT 100""")
         meta = query("SELECT key,value_json,updated_at FROM research_meta")
+        api_usage = self.api_usage("GATE_RESEARCH")
         return {"schema_version": SCHEMA_VERSION, "generated_at": utc_now(), "candles": counts,
                 "jobs": jobs, "profiles": profiles, "runs": runs, "funnels": funnels, "trades": trades,
                 "quality": quality, "coverage": coverage, "evaluations": evaluations,
                 "active_shadow": active_shadow,
+                "api_usage": api_usage,
                 "meta": {row["key"]: row["value_json"] for row in meta}}
 
 

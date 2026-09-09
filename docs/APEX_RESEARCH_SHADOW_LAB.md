@@ -79,11 +79,36 @@ database and call it production-ready.
 ## Operational contract
 
 - Start command: `python research_worker.py`.
+- Processing is deliberately pair-sequential. One symbol completes Gate
+  history, quality validation, features, and all five strategy replays before
+  the worker releases its in-memory streams and advances to the next symbol.
+- Dashboard progress is weighted from 0 to 100 for each pair: Gate history
+  0–30, quality 30–35, features 35–70, five strategy replays 70–95, and
+  checkpoint/manifest finalisation 95–100. Overall progress is the completed
+  pair fraction plus the current pair fraction.
+- Gate research admission is stored in UTC day/minute buckets in the Research
+  DB, so a restart cannot reset its allowance. `APEX_RESEARCH_GATE_DAILY` and
+  `APEX_RESEARCH_GATE_MINUTE` are APEX-local ceilings, not claims about the
+  exchange's published limits.
+- `APEX_RESEARCH_MAX_RSS_MB` pauses at a durable checkpoint before the chosen
+  memory ceiling; `APEX_RESEARCH_CPU_DUTY_PERCENT` and the batch yield prevent
+  continuous feature/replay calculation from monopolising a small instance.
+- With 80 pairs the initial two-year OHLCV download is approximately 4,200
+  successful 2,000-row pages (including the optional five-symbol 5m subset).
+  A fully caught-up 30-minute refresh projects at most about 6,600 successful
+  requests/day. Defaults therefore admit only 1 request/second, 50/minute and
+  12,000/day, leaving retry headroom while enforcing an absolute local ceiling.
+  Dashboard exposes used, denied, error and rate-limit counters.
+- SIGTERM never restarts a two-year job from zero: candle, feature, and replay
+  checkpoints are idempotent and resume from the last committed timestamp.
 - Required: dedicated `APEX_MARKET_DATABASE_URL`.
 - Optional: `APEX_RESEARCH_PAIRS`, `APEX_RESEARCH_PAIR_LIMIT`,
   `APEX_RESEARCH_FAST_PAIRS`, `APEX_RESEARCH_5M_DAYS`,
   `APEX_RESEARCH_GATE_RPS`, `APEX_RESEARCH_GATE_DAILY`.
 - The web service needs only the same read URL to expose `/api/research`.
+- Do not run Research on `apex-smc-bot-1`. A separate worker and a durable,
+  adequately sized PostgreSQL database are required before enabling the
+  two-year workload. Until then the production scanner remains unchanged.
 - Research failures must not affect the production worker.
 - Database rollback is never automatic. Restore drills use an isolated target
   without live credentials.

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import statistics
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -144,25 +145,44 @@ class ReplayEngine:
         return _candidate(strategy,self.snapshots(symbol,as_of),symbol)
 
     def replay_profile(self,research_run_id: str,profile_id: str,strategy: str,symbol: str,
-                       start: int,end: int) -> dict[str,Any]:
+                       start: int,end: int,*,on_progress=None) -> dict[str,Any]:
         timestamps=self.store.feature_timestamps(symbol,WORKING_TF[strategy],start,end,FEATURE_VERSION)
-        attempts=trades=0
-        for as_of in timestamps:
-            candidate,stop=self.evaluate(strategy,symbol,as_of)
-            geometry=all(_num(candidate.get(k)) for k in ("entry","sl","tp1"))
-            outcome="CANDIDATE" if not stop else "FILTERED"
-            attempt={"research_run_id":research_run_id,"profile_id":profile_id,"parent_strategy":strategy,
-                     "symbol":symbol,"direction":candidate.get("direction"),"decision_time":as_of,
-                     "stage":"GEOMETRY" if geometry else "STRUCTURE","outcome":outcome,"stop_code":stop,
-                     "entry":candidate.get("entry"),"sl":candidate.get("sl"),"tp1":candidate.get("tp1"),
-                     "tp2":candidate.get("tp2"),"terminal_tp":candidate.get("terminal_tp"),"rr":candidate.get("rr"),
-                     "snapshot":{"candidate":candidate,"point_in_time":True,"filtered_shadow":bool(stop)}}
-            attempt_id=self.store.save_attempt(attempt); attempts+=1
-            # Every FILTERED setup with valid structural geometry receives a shadow outcome.
-            if geometry:
-                track="FILTERED_SHADOW" if stop else "PROFILE_SHADOW"
-                trade=self.simulate_trade(attempt_id,track,candidate,as_of,end)
-                self.store.save_trade(trade); trades+=1
+        future=self.store.candles_between(symbol,WORKING_TF[strategy],start,end)
+        future_close_times=[int(row["close_time"]) for row in future]
+        attempts=trades=0; batch_size=max(25,min(int(os.environ.get("APEX_RESEARCH_REPLAY_BATCH","100")),500))
+        timeframes=("15m","1h","4h","1d")
+        for offset in range(0,len(timestamps),batch_size):
+            batch=timestamps[offset:offset+batch_size]
+            series={tf:self.store.feature_series(symbol,tf,batch[0],batch[-1],FEATURE_VERSION)
+                    for tf in timeframes}
+            series_times={tf:[item[0] for item in rows] for tf,rows in series.items()}
+            attempt_rows=[]; trade_rows=[]
+            for as_of in batch:
+                snapshots={}
+                for tf in timeframes:
+                    position=bisect_right(series_times[tf],as_of)-1
+                    snapshots[tf]=series[tf][position][1] if position>=0 else {}
+                candidate,stop=_candidate(strategy,snapshots,symbol)
+                geometry=all(_num(candidate.get(k)) for k in ("entry","sl","tp1"))
+                outcome="CANDIDATE" if not stop else "FILTERED"
+                attempt_id=stable_id(research_run_id,profile_id,symbol,as_of)
+                attempt_rows.append({"attempt_id":attempt_id,"research_run_id":research_run_id,
+                    "profile_id":profile_id,"parent_strategy":strategy,"symbol":symbol,
+                    "direction":candidate.get("direction"),"decision_time":as_of,
+                    "stage":"GEOMETRY" if geometry else "STRUCTURE","outcome":outcome,"stop_code":stop,
+                    "entry":candidate.get("entry"),"sl":candidate.get("sl"),"tp1":candidate.get("tp1"),
+                    "tp2":candidate.get("tp2"),"terminal_tp":candidate.get("terminal_tp"),"rr":candidate.get("rr"),
+                    "snapshot":{"candidate":{k:v for k,v in candidate.items() if k!="feature_snapshot"},
+                                "feature_ref":{"symbol":symbol,"as_of":as_of,
+                                    "feature_version":FEATURE_VERSION},
+                                "point_in_time":True,"filtered_shadow":bool(stop)}})
+                if geometry:
+                    track="FILTERED_SHADOW" if stop else "PROFILE_SHADOW"
+                    trade_rows.append(self.simulate_trade(attempt_id,track,candidate,as_of,end,
+                        future=future,future_close_times=future_close_times))
+            self.store.save_attempts(attempt_rows); self.store.save_trades(trade_rows)
+            attempts+=len(attempt_rows); trades+=len(trade_rows)
+            if on_progress: on_progress(offset+len(batch),len(timestamps))
         return {"attempts":attempts,"trades":trades,"timestamps":len(timestamps),
                 "last_timestamp":timestamps[-1] if timestamps else None}
 
@@ -181,13 +201,20 @@ class ReplayEngine:
             self.store.save_trade(trade); updated+=1
         return updated
 
-    def simulate_trade(self,attempt_id: str,track: str,candidate: Mapping[str,Any],decision_time: int,end: int) -> dict[str,Any]:
+    def simulate_trade(self,attempt_id: str,track: str,candidate: Mapping[str,Any],decision_time: int,end: int,
+                       *,future: Sequence[Mapping[str,Any]]|None=None,
+                       future_close_times: Sequence[int]|None=None) -> dict[str,Any]:
         side=str(candidate.get("direction") or ""); entry=float(candidate["entry"]); sl=float(candidate["sl"])
         tp1=float(candidate["tp1"]); tp2=float(candidate.get("tp2") or candidate.get("terminal_tp") or tp1)
         terminal=float(candidate.get("terminal_tp") or tp2); risk=abs(entry-sl); timeframe=str(candidate.get("timeframe") or "1h")
-        future=self.store.candles_between(str(candidate["symbol"]),timeframe,decision_time,end)
+        first=0
+        if future is None:
+            future=self.store.candles_between(str(candidate["symbol"]),timeframe,decision_time,end)
+        elif future_close_times is not None:
+            first=bisect_right(future_close_times,int(decision_time))
         entered=False; entry_time=None; mfe=0.0; mae=0.0; targets=[]; ambiguity=None; exit_price=None; exit_time=None; reason=None
-        for idx,candle in enumerate(future):
+        for absolute_idx in range(first,len(future)):
+            idx=absolute_idx-first; candle=future[absolute_idx]
             high,low=float(candle["high"]),float(candle["low"]); ts=int(candle["close_time"])
             if not entered:
                 if low<=entry<=high:

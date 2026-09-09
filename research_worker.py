@@ -27,6 +27,12 @@ def main() -> None:
         for _ in range(180):
             if worker.stop_requested: break
             time.sleep(10)
+    # Persist a final non-trading lifecycle marker. In-flight candle/feature
+    # jobs already checkpoint inside the pair pipeline before this is reached.
+    try:
+        worker.store.set_meta("research_shutdown",{"status":"GRACEFUL","at":time.time()})
+    except Exception:
+        logging.exception("[Research] final shutdown marker failed")
 
 
 if __name__=="__main__": main()
