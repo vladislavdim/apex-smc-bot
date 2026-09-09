@@ -53,6 +53,16 @@ def evaluate_profile(store: ResearchStore, run_id: str, profile_id: str) -> list
     baseline.
     """
     rows = store.completed_trade_rows(run_id, profile_id)
+    from .experiments import paired_report
+    paired = paired_report(rows)
+    store.save_feature_evaluation({
+        "research_run_id": run_id, "profile_id": profile_id,
+        "feature": "paired_policy_walk_forward", "segment": {},
+        "sample_size": paired["overall"]["n"],
+        "status": "FIXED_POLICY_RESEARCH_ONLY",
+        "comparison_kind": paired["comparison_kind"], "metrics": paired,
+        "uplift": paired["overall"]["mean_delta_r"],
+    })
     analysis_rows = [row for row in rows if row.get("track") == "PLAYBOOK_ONLY"] or rows
     if not analysis_rows:
         return []
