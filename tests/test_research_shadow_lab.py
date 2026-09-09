@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from research.analytics import promotion_proposal, wilson_interval
+from research.gate_history import target_ranges
 from research.features import FEATURE_VERSION, compute_feature_snapshot, validate_candles
 from research.gate_history import ResearchBudget, backfill_pair
 from research.live_cache import read as cache_read
@@ -69,6 +70,20 @@ def test_replay_waits_for_entry_and_uses_conservative_same_bar(tmp_path):
     assert result["state"]["funding_r"] is None
 
 
+def test_research_replay_labels_actual_as_unavailable_and_keeps_virtual_tracks(tmp_path):
+    store=ResearchStore(str(tmp_path/"history.db")); store.ensure_schema()
+    engine=ReplayEngine(store)
+    rows=[candle(900,100)]
+    rows[0].update({"low":99,"high":106})
+    result=engine._research_track_rows("attempt","FAST",{
+        "symbol":"AAVEUSDT","timeframe":"15m","direction":"BULLISH",
+        "entry":100,"sl":95,"tp1":105,"tp2":110,"terminal_tp":110},900,rows)
+    assert {row["track"] for row in result}=={"ACTUAL","NO_MANAGER","PLAYBOOK_ONLY"}
+    actual=next(row for row in result if row["track"]=="ACTUAL")
+    assert actual["status"]=="UNAVAILABLE" and actual["net_r"] is None
+    assert all(row["state"]["manager_actions_inherited"] is False for row in result)
+
+
 def test_promotion_is_proposal_only_and_requires_all_safety_gates():
     good=promotion_proposal([.1]*30,baseline_drawdown=2,candidate_drawdown=1)
     assert good["promotion_proposed"] is True and good["auto_activate"] is False
@@ -89,6 +104,38 @@ def test_dashboard_contains_separate_research_tab():
     assert "id=researchShadowV2" in source
     assert 'p.path=="/api/research"' in source
     assert "NO REAL EXECUTION" in source
+    assert "renderResearchDiagnostics" in source
+    assert "Counterfactual edges" in source
+    assert "id=liveDashboardV2" in source
+    assert "switchDashboard" in source
+    assert "Все найденные сетапы и результаты" in source
+
+
+def test_default_history_is_one_year_and_configurable(monkeypatch):
+    monkeypatch.delenv("APEX_RESEARCH_HISTORY_DAYS", raising=False)
+    ranges = target_ranges(400 * 86400)
+    assert ranges["15m"] == (35 * 86400, 400 * 86400)
+    monkeypatch.setenv("APEX_RESEARCH_HISTORY_DAYS", "180")
+    assert target_ranges(400 * 86400)["4h"] == (220 * 86400, 400 * 86400)
+
+
+def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):
+    store=ResearchStore(str(tmp_path/"history.db")); store.ensure_schema()
+    store.upsert_source_contract("GATE",kind="MARKET_DATA",owner="Gate",authority="CANONICAL",
+                                freshness_sla_seconds=120,status="READY")
+    store.upsert_source_contract("GATE",kind="MARKET_DATA",owner="Gate",authority="CANONICAL",
+                                freshness_sla_seconds=120,status="READY")
+    checks=[{"check_code":"LOCATION","label":"OB/FVG","status":"PASS","role":"HARD_GATE",
+             "domain":"LOCATION","measured":{"ob":True},"threshold":{"value":True}}]
+    store.save_attempt({"attempt_id":"a","research_run_id":"r","profile_id":"p",
+                       "parent_strategy":"FAST","symbol":"AAVEUSDT","decision_time":1,
+                       "snapshot":{}})
+    assert store.save_attempt_checks("a",checks)==1
+    assert store.save_attempt_checks("a",checks)==1
+    dashboard=store.dashboard()
+    assert dashboard["schema_version"]==3
+    assert dashboard["sources"][0]["source"]=="GATE"
+    assert dashboard["checks"][0]["count"]==1
 
 
 def test_worker_end_to_end_is_checkpointed_and_execution_isolated(tmp_path):

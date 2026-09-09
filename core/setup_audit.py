@@ -312,12 +312,21 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
             exact = [(index, check) for index, check in failed
                      if label and str(check.get("label") or "").strip() == label]
         candidates = exact or failed
-        stop_line = stop.get("line")
-        preceding = [(index, check) for index, check in candidates
-                     if stop_line and check.get("line") and int(check["line"]) <= int(stop_line)]
-        owner_index = (preceding or candidates)[-1][0]
-        stop["blocking_check_index"] = owner_index
-        stop["blocking_check_code"] = payload["checks"][owner_index].get("code")
+        # If the stop cannot be matched to one predicate, do not invent an
+        # owner from list order.  Ambiguous telemetry is still retained, but
+        # downstream funnels must not blame an arbitrary check.
+        if not exact and len(candidates) != 1:
+            stop["blocking_mapping"] = "AMBIGUOUS"
+            stop["blocking_check_index"] = None
+            stop["blocking_check_code"] = None
+        else:
+            stop_line = stop.get("line")
+            preceding = [(index, check) for index, check in candidates
+                         if stop_line and check.get("line") and int(check["line"]) <= int(stop_line)]
+            owner_index = (preceding or candidates)[-1][0]
+            stop["blocking_mapping"] = "EXACT" if exact else "SINGLE_FAILED_CHECK"
+            stop["blocking_check_index"] = owner_index
+            stop["blocking_check_code"] = payload["checks"][owner_index].get("code")
     for index, check in enumerate(payload["checks"]):
         blocking = owner_index == index
         label = str(check.get("label", "")).lower()
