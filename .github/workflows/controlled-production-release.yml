@@ -1,0 +1,101 @@
+name: APEX Controlled Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full main commit SHA to deploy
+        required: true
+        type: string
+      confirmation:
+        description: Type DEPLOY_APEX_PRODUCTION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apex-production-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: inputs.confirmation == 'DEPLOY_APEX_PRODUCTION'
+    runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ steps.commit.outputs.release_sha }}
+    steps:
+      - name: Checkout exact release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Verify immutable main commit
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          test "$SHA" = "${{ inputs.release_sha }}"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SHA" origin/main
+          echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Full release verification
+        run: |
+          set -euo pipefail
+          python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+          python -m pytest -q
+          python -m unittest discover -s tests -q
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in Path('.github/workflows').glob('*.yml'):
+              yaml.safe_load(path.read_text(encoding='utf-8'))
+          page = Path('stats_server.py').read_text(encoding='utf-8')
+          start = page.find('<script')
+          end = page.find('</script>', start)
+          if start < 0 or end < 0:
+              raise SystemExit('Dashboard script block not found')
+          body = page[page.find('>', start) + 1:end]
+          Path('/tmp/apex-dashboard.js').write_text(body, encoding='utf-8')
+          PY
+          node --check /tmp/apex-dashboard.js
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      APEX_RELEASE_CONFIRMATION: DEPLOY_APEX_PRODUCTION
+    steps:
+      - name: Checkout verified release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install release dependency
+        run: pip install requests
+
+      - name: Disable commit deploys and release web then worker
+        run: >-
+          python scripts/render_controlled_release.py
+          --sha "${{ needs.verify.outputs.release_sha }}"
+

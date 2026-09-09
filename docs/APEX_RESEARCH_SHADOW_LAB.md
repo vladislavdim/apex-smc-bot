@@ -112,6 +112,15 @@ database and call it production-ready.
 - Research failures must not affect the production worker.
 - Database rollback is never automatic. Restore drills use an isolated target
   without live credentials.
+- `brain.db` snapshots remain on the dedicated `brain-backups` branch and the
+  Research SQLite snapshot remains a verified GitHub Release asset. Neither
+  path updates `main`, so neither is a production deployment trigger.
+- Production Render services use `.github/workflows/controlled-production-release.yml`.
+  The workflow accepts only an exact full SHA already reachable from `main`,
+  runs the complete verification suite, disables commit-triggered deployment,
+  deploys the web service, verifies `/health`, and only then deploys the sole
+  active worker. The suspended legacy worker is not present in the release
+  allow-list.
 
 ## Replay integrity and current limits
 
