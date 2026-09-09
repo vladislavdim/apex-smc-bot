@@ -86,6 +86,7 @@ def test_live_cache_is_opt_in(monkeypatch):
 def test_dashboard_contains_separate_research_tab():
     source=Path("stats_server.py").read_text(encoding="utf-8")
     assert "id=researchTab" in source
+    assert "id=researchShadowV2" in source
     assert 'p.path=="/api/research"' in source
     assert "NO REAL EXECUTION" in source
 
