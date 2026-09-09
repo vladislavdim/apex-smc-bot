@@ -18,6 +18,8 @@ from .store import ResearchStore, stable_id
 
 GATE_CANDLES_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
 GATE_CONTRACTS_URL = "https://api.gateio.ws/api/v4/futures/usdt/contracts"
+# Gate futures candlesticks accepts a maximum 1000-point time page.
+GATE_CANDLE_PAGE_LIMIT = 1000
 
 
 class ResearchBudget:
@@ -98,7 +100,8 @@ class GateHistoryClient:
         pair = get_pair(symbol)
         contract = str(pair.get("gate_symbol") or symbol.replace("USDT", "_USDT"))
         data = self._get(GATE_CANDLES_URL, {
-            "contract": contract, "interval": timeframe, "from": int(start), "to": int(end), "limit": 2000,
+            "contract": contract, "interval": timeframe, "from": int(start), "to": int(end),
+            "limit": GATE_CANDLE_PAGE_LIMIT,
         })
         now = int(time.time()); period = TIMEFRAME_SECONDS[timeframe]; rows=[]
         for raw in data if isinstance(data, list) else []:
@@ -174,7 +177,7 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                     range_start=start,range_end=end,last_timestamp=max(start,cursor-period),
                     completed_units=completed,total_units=total,status="PAUSED")
                 return {"job_id":job_id,"status":"PAUSED","pages":pages,"upserts":inserted}
-            page_end = min(end, cursor + period * 1999)
+            page_end = min(end, cursor + period * (GATE_CANDLE_PAGE_LIMIT - 1))
             candles = client.candles(symbol,timeframe,cursor,page_end)
             candles = sorted((row for row in candles
                 if row.get("is_closed") and cursor <= int(row["open_time"])
