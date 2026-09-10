@@ -132,7 +132,8 @@ def test_dashboard_contains_separate_research_tab():
 def test_default_history_is_one_year_and_configurable(monkeypatch):
     monkeypatch.delenv("APEX_RESEARCH_HISTORY_DAYS", raising=False)
     ranges = target_ranges(400 * 86400)
-    assert ranges["15m"] == (35 * 86400, 400 * 86400)
+    assert ranges["15m"] == (400 * 86400 - 9990 * 900, 400 * 86400)
+    assert ranges["1h"] == (35 * 86400, 400 * 86400)
     monkeypatch.setenv("APEX_RESEARCH_HISTORY_DAYS", "180")
     assert target_ranges(400 * 86400)["4h"] == (220 * 86400, 400 * 86400)
 

@@ -6081,8 +6081,8 @@ async def on_startup(app):
 
     # Safety snapshot. It creates a commit only when the verified DB changed.
     webhook_scheduler.add_job(
-        backup_db_to_github, "interval", minutes=10, jitter=60,
-        kwargs={"reason": "safety_10m"}, max_instances=1, coalesce=True,
+        backup_db_to_github, "interval", minutes=30, jitter=120,
+        kwargs={"reason": "safety_30m"}, max_instances=1, coalesce=True,
     )
 
     webhook_scheduler.start()
@@ -6324,10 +6324,12 @@ def main():
             scheduler.add_job(auto_research, "interval", hours=2)
             scheduler.add_job(check_alerts, "interval", minutes=5)
             scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
-            # One bounded safety pass every 10m; unchanged DBs create no commit.
+            # One bounded safety pass every 30m; event transitions and SIGTERM
+            # retain their own immediate paths.  Uploading a growing ~30MB
+            # SQLite file every 10m caused GitHub secondary-limit 403s.
             scheduler.add_job(
-                backup_db_to_github, "interval", minutes=10, jitter=60,
-                kwargs={"reason": "safety_10m"}, max_instances=1, coalesce=True,
+                backup_db_to_github, "interval", minutes=30, jitter=120,
+                kwargs={"reason": "safety_30m"}, max_instances=1, coalesce=True,
             )
             scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
             if BRAIN_BUILDER_AVAILABLE:

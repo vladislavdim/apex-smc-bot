@@ -179,6 +179,8 @@ def build_manifest(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "symbol": str(expected_symbol).upper(),
         "history_days": int(history_days),
+        "history_days_semantics": "REQUESTED_TARGET_NOT_PER_TIMEFRAME_GUARANTEE",
+        "coverage_policy": "GATE_CANONICAL_ONLY_NO_VENUE_SUBSTITUTION",
         "timeframes": list(expected_timeframes),
         "database": {"name": Path(db_path).name, "sha256": sha256_file(db_path),
                      "size_bytes": Path(db_path).stat().st_size},

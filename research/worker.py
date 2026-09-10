@@ -72,7 +72,10 @@ class ResearchWorker:
             rate_limits={"research_rps": round(1/getattr(budget,"minimum_interval",1.0), 3),
                          "research_minute": getattr(budget,"minute",None),
                          "research_daily": getattr(budget,"daily",None)},
-            license_info={"origin":"official public Gate API","historical":True}, status="READY")
+            coverage={"recent_max_points_per_interval":10000,
+                      "policy":"GATE_CANONICAL_ONLY_NO_VENUE_SUBSTITUTION"},
+            license_info={"origin":"official public Gate API","historical":True,
+                          "retention_is_interval_dependent":True}, status="READY")
         computed=("STRUCTURE","OB_FVG_BREAKER","VOLUME","VOLATILITY","VWAP",
                   "VOLUME_PROFILE","RSI","MACD","FIBONACCI","CVD_PROXY","REGIME","SESSION")
         unavailable=("CVD_REAL","OPEN_INTEREST","FUNDING","LONG_SHORT_RATIO","LIQUIDATIONS",

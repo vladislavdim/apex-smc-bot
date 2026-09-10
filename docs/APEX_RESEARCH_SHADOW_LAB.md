@@ -36,11 +36,16 @@ given Binance or Telegram credentials.
 
 | Timeframe | Coverage target | Universe |
 |---|---:|---:|
-| 15m, 1h, 4h, 1d | 365 days | up to 80 Gate pairs |
-| 5m | 365 days | configured FAST subset, default 5 pairs |
+| 1h, 4h, 1d | 365 days | up to 80 Gate pairs |
+| 15m | latest 9,990 candles (~104 days) | up to 80 Gate pairs |
+| 5m | latest 9,990 candles (~34 days) | configured FAST subset, default 5 pairs |
 
-At Gate's 2,000-candle page size the initial default backfill is approximately
-2,100 successful REST requests. The worker admits at most 1 request/second, 50 requests/minute and
+Gate's canonical futures endpoint rejects `limit` together with `from` and
+`to`, and rejects data older than the latest 10,000 candles for an interval.
+APEX therefore uses bounded 999-point time pages without `limit`; it never
+labels unavailable older 15m/5m history as a gap and never substitutes another
+venue. The initial default backfill is approximately 1,900 successful REST
+requests. The worker admits at most 1 request/second, 50 requests/minute and
 12,000 requests/day, retries with exponential backoff, and resumes from the
 last persisted candle/checkpoint. A steady-state refresh is expected to remain
 below roughly 8,000 requests/day for this default universe. These are APEX
@@ -56,7 +61,7 @@ database and call it production-ready.
 | Requirement | Status | Notes |
 |---|---|---|
 | Separate Market History DB | Implemented, configuration required | Dedicated URL; additive schema; SQLite only for local/test |
-| Gate 1-year OHLCV and incremental refresh | Implemented | configurable up to 730 days; 5m bounded separately; closed candles only |
+| Gate OHLCV and incremental refresh | Implemented with source retention | full requested year on 1h/4h/1d; latest ~104d on 15m and ~34d on 5m; closed candles only |
 | Gaps, duplicates, OHLC, listing metadata | Implemented | Issues and coverage exposed in Dashboard |
 | Feature Store | Implemented foundation | Structure, OB/FVG/breaker, volume, volatility, regime, VWAP/profile, RSI/MACD, CVD proxy |
 | Level lifecycle | Implemented foundation | Persisted objects; advanced reaction/sweep transitions accumulate with later workers |
@@ -93,8 +98,8 @@ database and call it production-ready.
 - `APEX_RESEARCH_MAX_RSS_MB` pauses at a durable checkpoint before the chosen
   memory ceiling; `APEX_RESEARCH_CPU_DUTY_PERCENT` and the batch yield prevent
   continuous feature/replay calculation from monopolising a small instance.
-- With 80 pairs the initial one-year OHLCV download is approximately 2,100
-  successful 2,000-row pages (including the optional five-symbol 5m subset).
+- With 80 pairs the initial OHLCV download is approximately 1,900 successful
+  999-point time pages (including the optional five-symbol 5m subset).
   A fully caught-up 30-minute refresh projects at most about 6,600 successful
   requests/day. Defaults therefore admit only 1 request/second, 50/minute and
   12,000/day, leaving retry headroom while enforcing an absolute local ceiling.

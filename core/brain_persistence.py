@@ -14,6 +14,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -78,6 +79,23 @@ class BrainPersistence:
             ),
             "X-GitHub-Api-Version": "2022-11-28",
         }
+
+    @staticmethod
+    def _github_error(response: Any) -> tuple[str, str]:
+        """Return a safe GitHub error classification without headers/tokens."""
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        message = str(payload.get("message") or "")[:240] if isinstance(payload, dict) else ""
+        lowered = message.lower()
+        transient = (
+            int(response.status_code) in {429, 500, 502, 503, 504}
+            or (int(response.status_code) == 403 and (
+                "rate limit" in lowered or "secondary" in lowered or "temporarily" in lowered
+            ))
+        )
+        return ("transient" if transient else "permanent"), message
 
     def _remote_metadata(self, ref: str | None = None) -> tuple[dict[str, Any] | None, str]:
         response = self.session.get(
@@ -394,10 +412,18 @@ class BrainPersistence:
                     "branch": self.branch,
                     "sha": current_sha,
                 }
-                response = self.session.put(
-                    self.contents_url, headers=self._headers(), json=upload,
-                    timeout=max(self.timeout, 30),
-                )
+                response = None
+                for attempt in range(3):
+                    response = self.session.put(
+                        self.contents_url, headers=self._headers(), json=upload,
+                        timeout=max(self.timeout, 30),
+                    )
+                    category, _message = self._github_error(response)
+                    if response.status_code in (200, 201, 409, 422) or category != "transient":
+                        break
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                assert response is not None
                 if response.status_code in (409, 422):
                     # Retry once only when GitHub still reports the exact blob
                     # we restored. If it advanced, this process is stale and
@@ -423,7 +449,11 @@ class BrainPersistence:
                     if response.status_code in (409, 422):
                         self._last_error = f"GitHub concurrent update HTTP {response.status_code}"
                         return {"status": "concurrent_update", "saved": False}
-                    raise RuntimeError(f"GitHub backup HTTP {response.status_code}")
+                    category, message = self._github_error(response)
+                    suffix = f" ({message})" if message else ""
+                    raise RuntimeError(
+                        f"GitHub backup HTTP {response.status_code} {category}{suffix}"
+                    )
                 payload = response.json() if hasattr(response, "json") else {}
                 new_sha = str((payload.get("content") or {}).get("sha") or "")
                 if not new_sha:
