@@ -14,12 +14,13 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import psycopg2
 import psycopg2.extras
@@ -50,19 +51,19 @@ def _github_research_dashboard() -> dict[str, Any]:
     now = time.monotonic()
     if _RESEARCH_RELEASE_CACHE["value"] is not None and now-_RESEARCH_RELEASE_CACHE["at"] < 300:
         return _RESEARCH_RELEASE_CACHE["value"]
-    api = f"https://api.github.com/repos/{RESEARCH_GITHUB_REPO}/releases/tags/{RESEARCH_RELEASE_TAG}"
-    request = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
-                                                   "User-Agent": "APEX-Research-Dashboard"})
-    with urllib.request.urlopen(request, timeout=12) as response:
-        release = json.loads(response.read())
-    assets = {str(x.get("name")): x for x in release.get("assets", []) if isinstance(x, dict)}
-    asset = assets.get("BTCUSDT.dashboard.json.gz")
-    manifest_asset = assets.get("BTCUSDT.manifest.json")
-    if not asset or not manifest_asset:
-        raise RuntimeError("BTC research snapshot manifest or dashboard asset is not published")
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", RESEARCH_GITHUB_REPO):
+        raise RuntimeError("BTC research GitHub repository setting is invalid")
+    if not RESEARCH_RELEASE_TAG:
+        raise RuntimeError("BTC research GitHub release tag is empty")
 
     def download(url: str, limit: int, timeout: int) -> bytes:
-        request = urllib.request.Request(url, headers={"User-Agent": "APEX-Research-Dashboard"})
+        if not url.startswith(("https://github.com/", "https://api.github.com/")):
+            raise RuntimeError("BTC research asset URL is not an approved GitHub URL")
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": "application/octet-stream", "User-Agent": "APEX-Research-Dashboard"},
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             chunks: list[bytes] = []; size = 0
             while True:
@@ -74,7 +75,34 @@ def _github_research_dashboard() -> dict[str, Any]:
                     raise RuntimeError("BTC research dashboard asset exceeds configured size limit")
         return b"".join(chunks)
 
-    manifest_payload = download(str(manifest_asset.get("browser_download_url") or ""), 1024 * 1024, 12)
+    encoded_tag = quote(RESEARCH_RELEASE_TAG, safe="")
+    direct_base = f"https://github.com/{RESEARCH_GITHUB_REPO}/releases/download/{encoded_tag}"
+    manifest_url = f"{direct_base}/BTCUSDT.manifest.json"
+    dashboard_url = f"{direct_base}/BTCUSDT.dashboard.json.gz"
+    source = "DIRECT_RELEASE"
+    try:
+        # Direct release URLs do not consume the unauthenticated GitHub REST
+        # quota shared by Render egress IPs.  The API lookup remains a fallback
+        # for repositories whose release assets were renamed or redirected.
+        manifest_payload = download(manifest_url, 1024 * 1024, 12)
+        compressed = download(dashboard_url, 20 * 1024 * 1024, 30)
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        api = f"https://api.github.com/repos/{RESEARCH_GITHUB_REPO}/releases/tags/{encoded_tag}"
+        request = urllib.request.Request(
+            api,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "APEX-Research-Dashboard"},
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            release = json.loads(response.read())
+        assets = {str(x.get("name")): x for x in release.get("assets", []) if isinstance(x, dict)}
+        asset = assets.get("BTCUSDT.dashboard.json.gz")
+        manifest_asset = assets.get("BTCUSDT.manifest.json")
+        if not asset or not manifest_asset:
+            raise RuntimeError("BTC research snapshot manifest or dashboard asset is not published")
+        manifest_payload = download(str(manifest_asset.get("browser_download_url") or ""), 1024 * 1024, 12)
+        compressed = download(str(asset.get("browser_download_url") or ""), 20 * 1024 * 1024, 30)
+        source = "RELEASE_API_FALLBACK"
+
     try:
         manifest = json.loads(manifest_payload)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -86,7 +114,6 @@ def _github_research_dashboard() -> dict[str, Any]:
     if manifest.get("no_real_execution") is not True or manifest.get("live_activation") != "FORBIDDEN":
         raise RuntimeError("BTC research snapshot live-execution flag is invalid")
 
-    compressed = download(str(asset.get("browser_download_url") or ""), 20 * 1024 * 1024, 30)
     expected_hash = str((manifest.get("dashboard_gz") or {}).get("sha256") or "").lower()
     actual_hash = hashlib.sha256(compressed).hexdigest().lower()
     if not expected_hash or not hmac.compare_digest(expected_hash, actual_hash):
@@ -116,7 +143,8 @@ def _github_research_dashboard() -> dict[str, Any]:
         raise RuntimeError("BTC research dashboard run does not match manifest")
     if storage.get("snapshot_version") and storage.get("snapshot_version") != manifest.get("snapshot_version"):
         raise RuntimeError("BTC research dashboard storage generation mismatch")
-    value.setdefault("storage", {}).update({"source": "GITHUB_RELEASE", "cached_seconds": 300,
+    value.setdefault("storage", {}).update({"source": "GITHUB_RELEASE", "release_transport": source,
+                                             "cached_seconds": 300,
                                              "manifest_verified": True})
     _RESEARCH_RELEASE_CACHE.update({"at": now, "value": value})
     return value
