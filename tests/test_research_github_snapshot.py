@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import json
+import urllib.error
 
 import stats_server
 
@@ -31,11 +32,6 @@ def test_dashboard_falls_back_to_bounded_github_release_asset(monkeypatch):
     calls = []
     def urlopen(request, timeout):
         calls.append(request.full_url)
-        if "/releases/tags/" in request.full_url:
-            return Response(json.dumps({"assets": [
-                {"name": "BTCUSDT.dashboard.json.gz", "browser_download_url": "https://example.test/BTCUSDT.dashboard.json.gz"},
-                {"name": "BTCUSDT.manifest.json", "browser_download_url": "https://example.test/BTCUSDT.manifest.json"},
-            ]}).encode())
         if request.full_url.endswith("manifest.json"):
             return Response(json.dumps(manifest).encode())
         return Response(compressed)
@@ -43,9 +39,37 @@ def test_dashboard_falls_back_to_bounded_github_release_asset(monkeypatch):
     monkeypatch.setitem(stats_server._RESEARCH_RELEASE_CACHE, "value", None)
     result = stats_server._github_research_dashboard()
     assert result["storage"]["source"] == "GITHUB_RELEASE"
-    assert len(calls) == 3
+    assert result["storage"]["release_transport"] == "DIRECT_RELEASE"
+    assert len(calls) == 2
+    assert not any("api.github.com" in url for url in calls)
     assert stats_server._github_research_dashboard() is result
-    assert len(calls) == 3
+    assert len(calls) == 2
+
+
+def test_dashboard_uses_release_api_if_direct_asset_is_unavailable(monkeypatch):
+    payload = {"runs": [{"research_run_id": "run-2", "status": "COMPLETED", "progress": 100}],
+               "storage": {"snapshot_version": "research-snapshot-v2"}}
+    compressed = gzip.compress(json.dumps(payload).encode())
+    manifest = {"snapshot_version": "research-snapshot-v2", "symbol": "BTCUSDT",
+                "timeframes": ["15m", "1h", "4h", "1d"], "no_real_execution": True,
+                "live_activation": "FORBIDDEN", "latest_run": {"research_run_id": "run-2"},
+                "dashboard_gz": {"sha256": hashlib.sha256(compressed).hexdigest()}}
+    calls = []
+    def urlopen(request, timeout):
+        calls.append(request.full_url)
+        if "/releases/download/" in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
+        if "/releases/tags/" in request.full_url:
+            return Response(json.dumps({"assets": [
+                {"name": "BTCUSDT.dashboard.json.gz", "browser_download_url": "https://github.com/test/dashboard"},
+                {"name": "BTCUSDT.manifest.json", "browser_download_url": "https://github.com/test/manifest"},
+            ]}).encode())
+        return Response(json.dumps(manifest).encode() if request.full_url.endswith("manifest") else compressed)
+    monkeypatch.setattr(stats_server.urllib.request, "urlopen", urlopen)
+    monkeypatch.setitem(stats_server._RESEARCH_RELEASE_CACHE, "value", None)
+    result = stats_server._github_research_dashboard()
+    assert result["storage"]["release_transport"] == "RELEASE_API_FALLBACK"
+    assert any("api.github.com" in url for url in calls)
 
 
 def test_dashboard_rejects_manifest_checksum_mismatch(monkeypatch):
@@ -55,12 +79,7 @@ def test_dashboard_rejects_manifest_checksum_mismatch(monkeypatch):
                 "timeframes": ["15m", "1h", "4h", "1d"], "no_real_execution": True,
                 "live_activation": "FORBIDDEN", "dashboard_gz": {"sha256": "0" * 64}}
     def urlopen(request, timeout):
-        if "/releases/tags/" in request.full_url:
-            return Response(json.dumps({"assets": [
-                {"name": "BTCUSDT.dashboard.json.gz", "browser_download_url": "https://example.test/dashboard"},
-                {"name": "BTCUSDT.manifest.json", "browser_download_url": "https://example.test/manifest"},
-            ]}).encode())
-        return Response(json.dumps(manifest).encode() if request.full_url.endswith("manifest") else payload)
+        return Response(json.dumps(manifest).encode() if request.full_url.endswith("manifest.json") else payload)
     monkeypatch.setattr(stats_server.urllib.request, "urlopen", urlopen)
     monkeypatch.setitem(stats_server._RESEARCH_RELEASE_CACHE, "value", None)
     try:
