@@ -16,6 +16,7 @@ import sqlite3
 import requests
 import logging
 import json
+import math
 import time
 import re
 from datetime import datetime
@@ -510,28 +511,35 @@ def fetch_fred_macro():
                     "series_id": series_id,
                     "api_key": api_key,
                     "file_type": "json",
-                    "limit": 2,
+                    # Daily series can expose "." for a holiday or a value
+                    # that has not been finalized yet.  Keep the fetch bounded
+                    # and select the two latest numeric observations below.
+                    "limit": 10,
                     "sort_order": "desc"
                 },
                 timeout=10
             )
             if r.status_code == 200:
                 obs = r.json().get("observations", [])
-                if obs:
-                    latest = obs[0]
-                    prev = obs[1] if len(obs) > 1 else obs[0]
+                numeric = []
+                for observation in obs:
                     try:
-                        val = float(latest["value"])
-                        prev_val = float(prev["value"])
-                        change = round(val - prev_val, 3)
-                        result[series_id] = {
-                            "name": name,
-                            "value": val,
-                            "change": change,
-                            "date": latest["date"]
-                        }
-                    except Exception as e:
-                        logging.warning(f"FRED parse {series_id}: {e}")
+                        value = float(observation.get("value"))
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(value):
+                        numeric.append((observation, value))
+                    if len(numeric) == 2:
+                        break
+                if numeric:
+                    latest, val = numeric[0]
+                    prev_val = numeric[1][1] if len(numeric) > 1 else val
+                    result[series_id] = {
+                        "name": name,
+                        "value": val,
+                        "change": round(val - prev_val, 3),
+                        "date": latest.get("date"),
+                    }
             time.sleep(0.3)
         except Exception as e:
             logging.debug(f"FRED {series_id}: {e}")
