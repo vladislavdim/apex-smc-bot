@@ -64,14 +64,14 @@ jobs:
           for path in Path('.github/workflows').glob('*.yml'):
               yaml.safe_load(path.read_text(encoding='utf-8'))
           page = Path('stats_server.py').read_text(encoding='utf-8')
-          start = page.find('<script')
-          end = page.find('</script>', start)
-          if start < 0 or end < 0:
-              raise SystemExit('Dashboard script block not found')
-          body = page[page.find('>', start) + 1:end]
-          Path('/tmp/apex-dashboard.js').write_text(body, encoding='utf-8')
+          import re
+          scripts = re.findall(r'<script[^>]*>(.*?)</script>', page, re.S)
+          if not scripts:
+              raise SystemExit('Dashboard script blocks not found')
+          for index, body in enumerate(scripts):
+              Path(f'/tmp/apex-dashboard-{index}.js').write_text(body, encoding='utf-8')
           PY
-          node --check /tmp/apex-dashboard.js
+          for script in /tmp/apex-dashboard-*.js; do node --check "$script"; done
 
   deploy:
     needs: verify
@@ -98,4 +98,3 @@ jobs:
         run: >-
           python scripts/render_controlled_release.py
           --sha "${{ needs.verify.outputs.release_sha }}"
-

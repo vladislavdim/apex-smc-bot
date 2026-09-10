@@ -140,6 +140,15 @@ def test_dashboard_contains_separate_research_tab():
     assert "Все найденные сетапы и результаты" in source
 
 
+def test_dashboard_preserves_last_successful_snapshot_during_502():
+    source = Path("stats_server.py").read_text(encoding="utf-8")
+    assert "function dashboardLoadWarning" in source
+    assert "последняя успешная статистика сохранена; нули не подставляются" in source
+    assert "const next=await r.json();LAST=next" in source
+    assert "function researchLoadWarning" in source
+    assert "Research HTTP "+"'"+"+r.status+"+"'"+" · сохранён последний успешный снимок." in source
+
+
 def test_default_history_is_one_year_and_configurable(monkeypatch):
     monkeypatch.delenv("APEX_RESEARCH_HISTORY_DAYS", raising=False)
     ranges = target_ranges(400 * 86400)
