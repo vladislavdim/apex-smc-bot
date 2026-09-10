@@ -189,6 +189,52 @@ def _attempt_checks(strategy: str, snapshots: Mapping[str, Mapping[str, Any]],
             "threshold":{"value":threshold},"source_timeframe":working_tf,
             "source_as_of":working.get("as_of"),"evidence":{"stop_code":stop,
                 "adapter":"REPLAY_PROFILE","point_in_time":True}})
+    regime = working.get("regime") or {}
+    participation = working.get("participation") or {}
+    volatility = working.get("volatility") or {}
+    momentum = working.get("momentum") or {}
+    location = working.get("location") or {}
+    live_v1 = (snapshots.get("1h") or {}).get("live_regime_reference") or {}
+    live_v2 = (snapshots.get("4h") or {}).get("live_regime_reference") or {}
+    research_primary = str(regime.get("primary") or "UNKNOWN")
+    if research_primary == "RANGE":
+        v1_exact = live_v1.get("mode") == "SIDEWAYS"
+        v2_family = live_v2.get("type") == "range"
+    elif research_primary in {"TREND_UP", "TREND_DOWN"}:
+        expected_direction = "BULLISH" if research_primary == "TREND_UP" else "BEARISH"
+        v1_exact = live_v1.get("mode") == "TRENDING" and live_v1.get("direction") == expected_direction
+        v2_family = live_v2.get("type") in {"trend", "trend_slow"}
+    else:
+        v1_exact = v2_family = False
+    shadow_context = [
+        ("SHADOW_RESEARCH_REGIME", "Research market regime", regime, "CONTEXT"),
+        ("SHADOW_LIVE_REGIME_V1", "Live 1h regime reference", live_v1 or None, "CONTEXT"),
+        ("SHADOW_LIVE_REGIME_V2", "Live 4h strategy regime reference", live_v2 or None, "CONTEXT"),
+        ("SHADOW_REGIME_PARITY", "Research/live regime parity", {
+            "research_primary": research_primary, "live_v1_exact": v1_exact,
+            "live_v2_family": v2_family, "all_agree": bool(v1_exact and v2_family),
+        }, "CONTEXT"),
+        ("SHADOW_SESSION", "Trading session", working.get("session"), "CONTEXT"),
+        ("SHADOW_ATR_PERCENTILE", "ATR percentile", volatility.get("atr_percentile"), "VOLATILITY"),
+        ("SHADOW_RELATIVE_VOLUME", "Relative volume", participation.get("relative_volume"), "PARTICIPATION"),
+        ("SHADOW_RSI", "RSI", momentum.get("rsi"), "MOMENTUM"),
+        ("SHADOW_MACD", "MACD", momentum.get("macd"), "MOMENTUM"),
+        ("SHADOW_VWAP_LOCATION", "Price relative to VWAP", {
+            "price": working.get("price"), "vwap": location.get("vwap"),
+            "distance_vwap_atr": location.get("distance_vwap_atr"),
+        }, "LOCATION"),
+        ("SHADOW_VOLUME_PROFILE", "Volume Profile POC/VAH/VAL", location.get("volume_profile"), "LOCATION"),
+        ("SHADOW_CVD_PROXY", "Candle-derived CVD proxy", participation.get("cvd"), "PARTICIPATION"),
+    ]
+    for code,label,value,domain in shadow_context:
+        checks.append({"check_order":len(checks),"check_code":code,"label":label,
+            "role":"SHADOW_CONTEXT","domain":domain,
+            "status":"OBSERVED" if value not in (None,{}) else "UNAVAILABLE",
+            "measured":{"value":value},"threshold":{"value":None},
+            "source_timeframe":working_tf,"source_as_of":working.get("as_of"),
+            "evidence":{"adapter":"REPLAY_PROFILE","point_in_time":True,
+                "execution_authority":False,"feature_version":working.get("feature_version"),
+                "live_parity_measured_not_assumed":True}})
     derivatives=working.get("derivatives") or {}
     labels={"trade_cvd_real":"Trade-based taker CVD","open_interest":"Open Interest",
         "funding_rate":"Funding history","liquidations":"Liquidation history",

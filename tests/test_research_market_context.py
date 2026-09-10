@@ -98,11 +98,48 @@ class ResearchMarketContextTests(unittest.TestCase):
                 "long_short_ratio":{"accounts":2}}}}
         checks=_attempt_checks("FAST",snapshots,{"technical_evidence":{}},"DATA_QUALITY")
         shadow=[x for x in checks if x["role"]=="SHADOW_CONTEXT"]
-        self.assertEqual(len(shadow),6)
-        self.assertTrue(all(x["status"]=="OBSERVED" for x in shadow))
+        derivatives=[x for x in shadow if x["domain"]=="DERIVATIVES"]
+        self.assertEqual(len(derivatives),6)
+        self.assertTrue(all(x["status"]=="OBSERVED" for x in derivatives))
         self.assertTrue(all(x["threshold"]["value"] is None for x in shadow))
         self.assertTrue(all(x["evidence"]["execution_authority"] is False for x in shadow))
         self.assertEqual(next(x for x in checks if x["check_code"]=="DATA_QUALITY")["status"],"FAIL")
+
+    def test_context_passport_compares_research_and_live_regime_formulas(self):
+        snapshots={
+            "15m":{"as_of":200,"feature_version":"research-features-v4",
+                "data_quality":{"status":"VALID"},"regime":{"primary":"RANGE"},
+                "participation":{"relative_volume":1.4,"cvd":{"value":3}},
+                "volatility":{"atr_percentile":42},"momentum":{"rsi":51,"macd":{"line":1}},
+                "location":{"vwap":99,"volume_profile":{"poc":100}},"price":100},
+            "1h":{"live_regime_reference":{"mode":"SIDEWAYS","direction":"BULLISH"}},
+            "4h":{"live_regime_reference":{"type":"range","enabled":["SWING","ZONE"]}},
+        }
+        checks=_attempt_checks("FAST",snapshots,{"technical_evidence":{}},"")
+        parity=next(x for x in checks if x["check_code"]=="SHADOW_REGIME_PARITY")
+        self.assertEqual(parity["role"],"SHADOW_CONTEXT")
+        self.assertEqual(parity["status"],"OBSERVED")
+        self.assertTrue(parity["measured"]["value"]["all_agree"])
+        self.assertIsNone(parity["threshold"]["value"])
+
+    def test_dashboard_reports_candidate_regime_parity_percentages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=ResearchStore(str(Path(tmp)/"research.db")); store.ensure_schema()
+            for index, agrees in enumerate((True, False)):
+                attempt=f"candidate-{index}"
+                store.save_attempt({"attempt_id":attempt,"research_run_id":"run",
+                    "profile_id":"profile","parent_strategy":"FAST","symbol":"BTCUSDT",
+                    "decision_time":index+1,"outcome":"CANDIDATE","snapshot":{}})
+                store.save_attempt_checks(attempt,[{"check_code":"SHADOW_REGIME_PARITY",
+                    "label":"Research/live regime parity","role":"SHADOW_CONTEXT",
+                    "domain":"CONTEXT","status":"OBSERVED","measured":{
+                        "value":{"live_v1_exact":agrees,"live_v2_family":True,
+                                 "all_agree":agrees}},"threshold":{"value":None}}])
+            row=store.dashboard()["context_parity"][0]
+            self.assertEqual(row["candidates"],2)
+            self.assertEqual(row["live_v1_exact_pct"],50.0)
+            self.assertEqual(row["live_v2_family_pct"],100.0)
+            self.assertEqual(row["all_agree_pct"],50.0)
 
 
 if __name__ == "__main__":

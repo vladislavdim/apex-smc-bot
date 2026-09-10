@@ -1005,6 +1005,29 @@ class ResearchStore:
             c.evidence_json FROM research_attempt_checks c
             JOIN research_attempts a ON a.attempt_id=c.attempt_id
             ORDER BY a.decision_time DESC,c.check_order LIMIT 2400""")
+        parity_rows = query("""SELECT a.parent_strategy,c.measured_json
+            FROM research_attempt_checks c JOIN research_attempts a ON a.attempt_id=c.attempt_id
+            WHERE c.check_code='SHADOW_REGIME_PARITY' AND a.outcome='CANDIDATE'""")
+        parity: dict[str, dict[str, Any]] = {}
+        for row in parity_rows:
+            strategy = str(row.get("parent_strategy") or "UNKNOWN")
+            bucket = parity.setdefault(strategy, {"parent_strategy":strategy,"candidates":0,
+                "live_v1_exact":0,"live_v2_family":0,"all_agree":0})
+            try:
+                measured = json.loads(row.get("measured_json") or "{}")
+                value = measured.get("value") or {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                value = {}
+            bucket["candidates"] += 1
+            for field in ("live_v1_exact", "live_v2_family", "all_agree"):
+                bucket[field] += int(value.get(field) is True)
+        context_parity = []
+        for strategy in sorted(parity):
+            row = parity[strategy]
+            total = max(1, int(row["candidates"]))
+            for field in ("live_v1_exact", "live_v2_family", "all_agree"):
+                row[field + "_pct"] = round(float(row[field]) / total * 100, 2)
+            context_parity.append(row)
         sources = query("SELECT * FROM research_source_registry ORDER BY source")
         context = query("""SELECT source,feature,quality,availability,COUNT(*) AS samples,
             COUNT(DISTINCT symbol) AS symbols,MIN(event_time) AS coverage_start,
@@ -1042,6 +1065,7 @@ class ResearchStore:
                 "active_shadow": active_shadow, "checks": checks,
                 "attempt_check_rows": attempt_check_rows, "sources": sources,
                 "market_context": context, "market_context_recent": context_recent,
+                "context_parity": context_parity,
                 "track_edges": edge_rows,
                 "api_usage": api_usage,
                 "meta": {row["key"]: row["value_json"] for row in meta}}

@@ -148,6 +148,12 @@ database and call it production-ready.
   `execution_authority=false`. They may be segmented by outcome only after the
   observation existed. They cannot change Entry, SL, TP, RR, direction, a
   production gate, position size or Manager action.
+- Every v4 attempt also stores a context passport: Research regime,
+  volatility/phase/session, RSI, MACD, VWAP, Volume Profile, ATR percentile,
+  relative volume, candle CVD proxy, and point-in-time references produced by
+  both live regime formulas (1h `get_market_regime` and 4h
+  `detect_market_regime_v2`). Dashboard reports exact/family agreement on
+  candidates. A mismatch is evidence to investigate, never an automatic gate.
 - Research run boundaries are aligned to an immutable UTC-day cohort, so a
   retry/restart resumes the same run instead of creating a second-level
   duplicate. Gate derivatives history is explicitly limited to the provider's

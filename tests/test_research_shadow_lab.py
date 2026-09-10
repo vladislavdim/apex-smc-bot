@@ -37,6 +37,17 @@ def test_features_are_point_in_time_and_closed_only():
     assert snapshot["closed_candles_only"] is True
 
 
+def test_feature_snapshot_materializes_live_regime_references_point_in_time():
+    hourly=[candle(i*3600,100+i*.1,"1h") for i in range(80)]
+    four_hour=[candle(i*14400,100+i*.2,"4h") for i in range(80)]
+    one=compute_feature_snapshot("AAVEUSDT","1h",hourly,dataset_version="test")
+    four=compute_feature_snapshot("AAVEUSDT","4h",four_hour,dataset_version="test")
+    assert one["live_regime_reference"]["formula"]=="live_get_market_regime_v1"
+    assert one["live_regime_reference"]["mode"] in {"SIDEWAYS","VOLATILE","TRENDING"}
+    assert four["live_regime_reference"]["formula"]=="live_detect_market_regime_v2"
+    assert four["live_regime_reference"]["type"] in {"accumulation","trend","trend_slow","range"}
+
+
 def test_quality_detects_gap_duplicate_and_bad_ohlc():
     rows=[candle(0),candle(1800),candle(1800)]
     rows[-1]["low"]=200
