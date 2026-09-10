@@ -68,7 +68,12 @@ def main(argv: list[str] | None = None) -> int:
                 db = Path(tmp) / "BTCUSDT.research.db"
                 dashboard = Path(tmp) / "BTCUSDT.dashboard.json"
                 try:
-                    _decompress_bounded(args.db_gz, db, max_bytes=256 * 1024 * 1024)
+                    # One BTC year contains feature snapshots plus the check
+                    # trail for five profiles and legitimately exceeds 256MB
+                    # uncompressed.  Keep a hard ceiling, but size it for the
+                    # measured single-pair workload; this runs in Actions, not
+                    # in the live Render worker.
+                    _decompress_bounded(args.db_gz, db, max_bytes=1024 * 1024 * 1024)
                     _decompress_bounded(args.dashboard_gz, dashboard, max_bytes=20 * 1024 * 1024)
                 except (OSError, EOFError) as exc:
                     raise SnapshotValidationError("compressed_payload_invalid") from exc

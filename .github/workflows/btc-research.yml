@@ -29,6 +29,9 @@ jobs:
       APEX_RESEARCH_GATE_RPS: "1"
       APEX_RESEARCH_GATE_MINUTE: "50"
       APEX_RESEARCH_GATE_DAILY: "12000"
+      # Research versioning must identify the exact immutable source cohort.
+      # GitHub-hosted jobs do not provide Render's RENDER_GIT_COMMIT.
+      GIT_COMMIT: ${{ github.sha }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4

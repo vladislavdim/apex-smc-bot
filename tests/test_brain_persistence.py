@@ -13,6 +13,7 @@ class _Response:
         self.status_code = status_code
         self._payload = payload or {}
         self.content = content
+        self.headers = {}
 
     def json(self):
         return self._payload
@@ -63,6 +64,14 @@ class _TransientConflictSession(_GitHubSession):
         if not self.puts:
             self.puts.append(json)
             return _Response(status_code=409)
+        return super().put(_url, headers=headers, json=json, timeout=timeout)
+
+
+class _TransientGatewaySession(_GitHubSession):
+    def put(self, _url, *, headers, json, timeout):
+        if not self.puts:
+            self.puts.append(json)
+            return _Response(status_code=502, payload={"message": "temporary gateway error"})
         return super().put(_url, headers=headers, json=json, timeout=timeout)
 
 
@@ -225,6 +234,17 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertEqual(session.puts[0]["sha"], "base")
         self.assertEqual(session.puts[1]["sha"], "base")
 
+    def test_transient_github_gateway_failure_is_retried(self):
+        _make_db(self.remote, knowledge_rows=1)
+        session = _TransientGatewaySession(_bytes(self.remote), sha="base")
+        manager = self._manager(session)
+        manager.restore()
+
+        result = manager.backup("retry_gateway")
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(len(session.puts), 2)
+
     def test_generation_survives_restart_and_advances_monotonically(self):
         _make_db(self.remote, knowledge_rows=1)
         session = _GitHubSession(_bytes(self.remote), sha="base")
@@ -279,7 +299,7 @@ class BrainPersistenceTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
             bot_source = source.read()
-        self.assertEqual(bot_source.count('minutes=10, jitter=60'), 2)
+        self.assertEqual(bot_source.count('kwargs={"reason": "safety_30m"}'), 2)
         self.assertGreaterEqual(bot_source.count('backup_db_to_github("render_sigterm")'), 2)
         self.assertIn('backup_db_to_github("experience_transition")', bot_source)
         self.assertNotIn("github_size > local_size * 2", bot_source)

@@ -18,8 +18,12 @@ from .store import ResearchStore, stable_id
 
 GATE_CANDLES_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
 GATE_CONTRACTS_URL = "https://api.gateio.ws/api/v4/futures/usdt/contracts"
-# Gate futures candlesticks accepts a maximum 1000-point time page.
-GATE_CANDLE_PAGE_LIMIT = 1000
+# Gate rejects ``limit`` when both ``from`` and ``to`` are present.  It also
+# exposes only the most recent 10,000 candles for a requested interval.  Keep
+# transport pages smaller than that hard retention boundary and reserve a few
+# points for clock/alignment drift between range construction and the request.
+GATE_CANDLE_PAGE_POINTS = 999
+GATE_RECENT_MAX_POINTS = 9990
 
 
 class ResearchBudget:
@@ -80,6 +84,18 @@ class GateHistoryClient:
                     time.sleep(min(60.0, max(retry_after, 2 ** attempt + random.random())))
                     last = RuntimeError(f"Gate HTTP {response.status_code}")
                     continue
+                if response.status_code >= 400:
+                    if self.budget.store:
+                        self.budget.store.record_api_result("GATE_RESEARCH", error=True)
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = {}
+                    label = str(payload.get("label") or "HTTP_ERROR")[:80] if isinstance(payload, dict) else "HTTP_ERROR"
+                    message = str(payload.get("message") or "request rejected")[:300] if isinstance(payload, dict) else "request rejected"
+                    # Gate's public error payload contains no credentials.  Do
+                    # not include response headers or request query strings.
+                    raise RuntimeError(f"Gate HTTP {response.status_code} {label}: {message}")
                 response.raise_for_status()
                 return response.json()
             except (requests.RequestException, ValueError) as exc:
@@ -101,7 +117,6 @@ class GateHistoryClient:
         contract = str(pair.get("gate_symbol") or symbol.replace("USDT", "_USDT"))
         data = self._get(GATE_CANDLES_URL, {
             "contract": contract, "interval": timeframe, "from": int(start), "to": int(end),
-            "limit": GATE_CANDLE_PAGE_LIMIT,
         })
         now = int(time.time()); period = TIMEFRAME_SECONDS[timeframe]; rows=[]
         for raw in data if isinstance(data, list) else []:
@@ -136,8 +151,16 @@ def target_ranges(now: int | None = None) -> dict[str, tuple[int, int]]:
     history_days = max(90, min(int(os.environ.get("APEX_RESEARCH_HISTORY_DAYS", "365")), 730))
     history = history_days * 86400
     fast_days = max(90, min(int(os.environ.get("APEX_RESEARCH_5M_DAYS", "365")), history_days))
-    return {"15m": (end-history,end), "1h": (end-history,end),
-            "4h": (end-history,end), "1d": (end-history,end), "5m": (end-fast_days*86400,end)}
+    requested = {"15m": end-history, "1h": end-history,
+                 "4h": end-history, "1d": end-history, "5m": end-fast_days*86400}
+    # The canonical Gate endpoint refuses candles older than 10,000 points for
+    # the requested interval.  Never pretend the unavailable 15m/5m history is
+    # a gap and never substitute a different venue.  Longer timeframes still
+    # retain the full requested year.
+    return {
+        timeframe: (max(start, end - TIMEFRAME_SECONDS[timeframe] * GATE_RECENT_MAX_POINTS), end)
+        for timeframe, start in requested.items()
+    }
 
 
 def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, timeframe: str,
@@ -177,7 +200,7 @@ def backfill_pair(store: ResearchStore, client: GateHistoryClient, symbol: str, 
                     range_start=start,range_end=end,last_timestamp=max(start,cursor-period),
                     completed_units=completed,total_units=total,status="PAUSED")
                 return {"job_id":job_id,"status":"PAUSED","pages":pages,"upserts":inserted}
-            page_end = min(end, cursor + period * (GATE_CANDLE_PAGE_LIMIT - 1))
+            page_end = min(end, cursor + period * (GATE_CANDLE_PAGE_POINTS - 1))
             candles = client.candles(symbol,timeframe,cursor,page_end)
             candles = sorted((row for row in candles
                 if row.get("is_closed") and cursor <= int(row["open_time"])

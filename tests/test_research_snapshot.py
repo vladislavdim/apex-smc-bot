@@ -57,6 +57,7 @@ class ResearchSnapshotTests(unittest.TestCase):
         manifest = build_manifest(db, dashboard, db_gz_path=db_gz, dashboard_gz_path=dashboard_gz)
         self.assertEqual(manifest["snapshot_version"], SNAPSHOT_VERSION)
         self.assertIs(manifest["no_real_execution"], True)
+        self.assertEqual(manifest["coverage_policy"], "GATE_CANONICAL_ONLY_NO_VENUE_SUBSTITUTION")
         manifest_path = self.tmp_path / "BTCUSDT.manifest.json"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         self.assertEqual(

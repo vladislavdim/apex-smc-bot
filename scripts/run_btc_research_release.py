@@ -42,11 +42,23 @@ def main() -> None:
             "BTC research did not complete: "
             f"status={latest.get('status')!s} progress={latest.get('progress')!s}"
         )
+    candle_coverage = {}
+    for row in dashboard.get("candles") or []:
+        if not isinstance(row, dict) or not row.get("timeframe"):
+            continue
+        candle_coverage[str(row["timeframe"])] = {
+            "candles": int(row.get("candles") or 0),
+            "coverage_start": row.get("coverage_start"),
+            "coverage_end": row.get("coverage_end"),
+        }
     dashboard["storage"] = {
         "kind": "GITHUB_RELEASE_ASSET",
         "symbol": "BTCUSDT",
-        "history_days": 365,
+        "requested_history_days": 365,
         "timeframes": ["15m", "1h", "4h", "1d"],
+        "candle_coverage": candle_coverage,
+        "gate_recent_limit_points": 10000,
+        "coverage_policy": "GATE_CANONICAL_ONLY_NO_VENUE_SUBSTITUTION",
         "incremental": True,
         "snapshot_version": "research-snapshot-v2",
         "research_run_id": latest.get("research_run_id"),
