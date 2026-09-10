@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest import mock
 
 from core import setup_audit
+import stats_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,29 @@ class TelemetryOnlyInvariantTests(unittest.TestCase):
         self.assertIn('"wyckoff_box_width":wy_box_range', STATS)
         self.assertIn('BOS/CHoCH age telemetry', STATS)
         self.assertIn('WYCKOFF Distribution width telemetry', STATS)
+
+    def test_live_decision_path_preserves_recorded_order(self):
+        row = {
+            "outcome": "FILTERED",
+            "checks": [
+                {"code": "data", "label": "Closed candles", "state": "PASS"},
+                {"code": "structure", "label": "Fresh BOS", "state": "PASS"},
+                {"code": "rr", "label": "RR >= 2", "state": "FAIL"},
+            ],
+            "stop": {"blocking_check_code": "rr"},
+        }
+        path = stats_server._live_decision_path(row)
+        self.assertEqual([step["code"] for step in path["steps"]], ["data", "structure", "rr"])
+        self.assertEqual(path["first_reached"]["code"], "data")
+        self.assertEqual(path["last_reached"]["code"], "rr")
+        self.assertEqual(path["last_passed"]["code"], "structure")
+        self.assertEqual(path["blocking_step"]["code"], "rr")
+        self.assertEqual(path["final_outcome"], "FILTERED")
+
+    def test_live_decision_path_is_dashboard_only(self):
+        self.assertIn('"source": "LIVE_AUDIT_ORDER"', STATS)
+        self.assertIn('[ACTUAL LIVE EXECUTION ORDER]', STATS)
+        self.assertNotIn("_live_decision_path", MARKET)
 
     def test_observer_does_not_change_decorated_return_value(self):
         @setup_audit.audit_strategy("TEST")
