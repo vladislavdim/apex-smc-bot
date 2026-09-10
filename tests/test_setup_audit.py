@@ -3,6 +3,8 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from core import setup_audit
 
@@ -10,6 +12,11 @@ from core import setup_audit
 class SetupAuditTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.previous_db_path = setup_audit.DB_PATH
+        self.previous_ingest_env = {
+            key: os.environ.get(key)
+            for key in ("APEX_STATS_INGEST_URL", "APEX_STATS_INGEST_TOKEN")
+        }
         setup_audit.DB_PATH = os.path.join(self.tmp.name, "audit.db")
         os.environ.pop("APEX_STATS_INGEST_URL", None)
         os.environ.pop("APEX_STATS_INGEST_TOKEN", None)
@@ -19,6 +26,12 @@ class SetupAuditTests(unittest.TestCase):
             setup_audit._EVENT_QUEUE.join()
         except Exception:
             pass
+        setup_audit.DB_PATH = self.previous_db_path
+        for key, value in self.previous_ingest_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         self.tmp.cleanup()
 
     def _rows(self):
@@ -86,6 +99,39 @@ class SetupAuditTests(unittest.TestCase):
         self.assertEqual(payload["attempt_key"], "abc")
         self.assertEqual(payload["stage"], "groq_quality_gate")
         self.assertEqual(payload["entry"], 100)
+
+    def test_retry_flush_posts_one_batch_and_marks_every_event(self):
+        for index in range(3):
+            setup_audit._persist_event({
+                "event_key": f"event-{index}", "kind": "attempt", "strategy": "FAST",
+                "symbol": "BTCUSDT", "occurred_at": f"2026-09-10T12:00:0{index}+00:00",
+                "payload": {"index": index},
+            })
+        os.environ["APEX_STATS_INGEST_URL"] = "https://stats.invalid/ingest"
+        os.environ["APEX_STATS_INGEST_TOKEN"] = "test-token"
+        with patch("requests.post", return_value=SimpleNamespace(status_code=200)) as post:
+            setup_audit._flush_unsynced(100)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(len(post.call_args.kwargs["json"]), 3)
+        conn = sqlite3.connect(setup_audit.DB_PATH)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM setup_audit_events WHERE synced=1").fetchone()[0], 3)
+        finally:
+            conn.close()
+
+    def test_retry_flush_chunks_large_backlog_below_server_limit(self):
+        for index in range(45):
+            setup_audit._persist_event({
+                "event_key": f"bulk-{index}", "kind": "attempt", "strategy": "FAST",
+                "symbol": "BTCUSDT", "occurred_at": f"2026-09-10T12:01:{index:02d}+00:00",
+                "payload": {"index": index},
+            })
+        os.environ["APEX_STATS_INGEST_URL"] = "https://stats.invalid/ingest"
+        os.environ["APEX_STATS_INGEST_TOKEN"] = "test-token"
+        with patch("requests.post", return_value=SimpleNamespace(status_code=200)) as post:
+            setup_audit._flush_unsynced(100)
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual([len(call.kwargs["json"]) for call in post.call_args_list], [20, 20, 5])
 
 
 if __name__ == "__main__":

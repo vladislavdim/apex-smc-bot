@@ -265,7 +265,7 @@ def _fast_timing_summary_db(mod: Any, mode: str, release_sha: str, symbol: str =
         params.append(release_sha)
     elif mode == "24h":
         where.append("occurred_at >= NOW() - INTERVAL '1 day'")
-    elif mode == "all":
+    elif mode in {"all", "stable"}:
         where.append("occurred_at >= %s::timestamptz")
         params.append(mod.STATS_BASELINE_UTC)
     if symbol:

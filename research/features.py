@@ -16,7 +16,7 @@ from core.market_structure import analyze_market_structure
 from .store import stable_id
 
 
-FEATURE_VERSION = "research-features-v1"
+FEATURE_VERSION = "research-features-v4"
 TIMEFRAME_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
@@ -242,6 +242,74 @@ def _regime(closes: list[float], atr_pct: float | None, range_percentile: float 
     return {"primary": primary, "volatility": volatility, "phase": phase}
 
 
+def _live_regime_v1_reference(candles: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Point-in-time equivalent of live ``get_market_regime`` for 1h data.
+
+    This is evidence only. It deliberately preserves the live formula's simple
+    averages (named EMA in production) so parity is measured, not assumed.
+    """
+    if len(candles) < 21:
+        return {"mode": "UNKNOWN", "direction": "NONE", "confidence": 0}
+    closes = [_number(c.get("close")) for c in candles]
+    highs = [_number(c.get("high")) for c in candles]
+    lows = [_number(c.get("low")) for c in candles]
+    avg_atr = statistics.fmean(high - low for high, low in zip(highs[-14:], lows[-14:]))
+    atr_pct = avg_atr / closes[-1] * 100 if closes[-1] else 0.0
+    avg20 = statistics.fmean(closes[-20:])
+    std20 = statistics.pstdev(closes[-20:])
+    bb_width = std20 * 4 / avg20 * 100 if avg20 else 0.0
+    average9 = statistics.fmean(closes[-9:])
+    average21 = statistics.fmean(closes[-21:])
+    direction = "BULLISH" if average9 > average21 else "BEARISH"
+    latest_up = _number(candles[-1].get("close")) > _number(candles[-1].get("open"))
+    streak = 1
+    for index in range(len(candles) - 2, max(len(candles) - 8, 0), -1):
+        candle_up = _number(candles[index].get("close")) > _number(candles[index].get("open"))
+        if candle_up != latest_up:
+            break
+        streak += 1
+    if bb_width < 3 and atr_pct < 1.5:
+        mode, confidence = "SIDEWAYS", 80
+    elif bb_width > 6 or atr_pct > 3:
+        mode, confidence = "VOLATILE", 70
+    elif streak >= 3:
+        mode, confidence = "TRENDING", 75
+    else:
+        mode, confidence = "TRENDING", 50
+    return {"mode": mode, "direction": direction, "confidence": confidence,
+            "bb_width": round(bb_width, 2), "atr_pct": round(atr_pct, 2),
+            "formula": "live_get_market_regime_v1"}
+
+
+def _live_regime_v2_reference(candles: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Point-in-time equivalent of live ``detect_market_regime_v2`` on 4h."""
+    if len(candles) < 20:
+        return {"type": "unknown", "enabled": ["MTF", "ZONE"]}
+    closes = [_number(c.get("close")) for c in candles]
+    highs = [_number(c.get("high")) for c in candles]
+    lows = [_number(c.get("low")) for c in candles]
+    average50 = statistics.fmean(closes[-50:]) if len(closes) >= 50 else closes[-1]
+    average20 = statistics.fmean(closes[-20:])
+    price = closes[-1]
+    atr_now = statistics.fmean(highs[-i] - lows[-i] for i in range(1, 8))
+    atr_median_reference = statistics.fmean(highs[-i] - lows[-i] for i in range(1, 21))
+    volatile = atr_now > atr_median_reference * 1.2
+    range_now = max(highs[-5:]) - min(lows[-5:])
+    range_previous = max(highs[-20:-5]) - min(lows[-20:-5])
+    compression = range_now < range_previous * 0.5
+    peak = max(highs[-40:]) if len(highs) >= 40 else max(highs)
+    drawdown = (peak - price) / peak * 100 if peak else 0.0
+    if compression and drawdown >= 5:
+        regime_type, enabled = "accumulation", ["WYCKOFF", "ZONE"]
+    elif (price > average50 and average20 > average50) or (price < average50 and average20 < average50):
+        regime_type, enabled = ("trend", ["MTF", "FAST", "SWING"]) if volatile else ("trend_slow", ["MTF", "ZONE"])
+    else:
+        regime_type, enabled = "range", ["SWING", "ZONE"]
+    return {"type": regime_type, "enabled": enabled, "volatile": volatile,
+            "compression": compression, "drawdown_pct": round(drawdown, 4),
+            "formula": "live_detect_market_regime_v2"}
+
+
 def compute_feature_snapshot(symbol: str, timeframe: str, candles: list[Mapping[str, Any]], *,
                              dataset_version: str = "gate-v1",
                              benchmark: Mapping[str, list[Mapping[str, Any]]] | None = None,
@@ -317,6 +385,10 @@ def compute_feature_snapshot(symbol: str, timeframe: str, candles: list[Mapping[
         "momentum": {"rsi": rsi(closes), "macd": _macd(closes)},
         "relative_strength": relative_strength,
         "regime": _regime(closes, atr_percentile, range_percentile),
+        "live_regime_reference": (
+            _live_regime_v1_reference(closed) if timeframe == "1h"
+            else _live_regime_v2_reference(closed) if timeframe == "4h" else None
+        ),
         "session": _session(int(closed[-1].get("open_time", closed[-1].get("timestamp", 0)) or 0)),
         "derivatives": dict(external or {}),
         "causal_domains": ["LOCATION", "STRUCTURE", "TRIGGER", "PARTICIPATION", "DERIVATIVES", "CONTEXT", "GEOMETRY"],

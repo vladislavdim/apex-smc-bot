@@ -115,6 +115,45 @@ def evaluate_profile(store: ResearchStore, run_id: str, profile_id: str) -> list
         price = float(feature.get("price") or 0)
         vwap = float(location.get("vwap") or 0)
         segment_values["indicator.vwap_side"] = "ABOVE" if vwap and price > vwap else "BELOW" if vwap else "UNKNOWN"
+        derivatives = feature.get("derivatives") or {}
+        funding = derivatives.get("funding_rate") or {}
+        rate = funding.get("rate")
+        if rate is not None:
+            rate=float(rate)
+            segment_values["shadow.funding_rate"] = (
+                "EXTREME_POSITIVE" if rate >= .001 else "POSITIVE" if rate > .0001
+                else "EXTREME_NEGATIVE" if rate <= -.001 else "NEGATIVE" if rate < -.0001
+                else "NEUTRAL")
+        oi = derivatives.get("open_interest") or {}
+        oi_change = oi.get("change_1h_pct")
+        if oi_change is not None:
+            change=float(oi_change)
+            segment_values["shadow.open_interest_change"] = (
+                "RISING_>=1%" if change >= 1 else "FALLING_<=-1%" if change <= -1 else "FLAT")
+        ratio = derivatives.get("long_short_ratio") or {}
+        account_ratio = ratio.get("accounts")
+        if account_ratio is not None:
+            value=float(account_ratio)
+            segment_values["shadow.long_short_ratio"] = (
+                "LONG_CROWDED" if value >= 1.2 else "SHORT_CROWDED" if value <= .8 else "BALANCED")
+        liquidations = derivatives.get("liquidations") or {}
+        long_liq=float(liquidations.get("long_usd") or 0); short_liq=float(liquidations.get("short_usd") or 0)
+        if long_liq or short_liq:
+            segment_values["shadow.liquidation_dominance"] = (
+                "LONG_LIQ" if long_liq > short_liq*1.2
+                else "SHORT_LIQ" if short_liq > long_liq*1.2 else "BALANCED")
+        cvd = derivatives.get("trade_cvd_real") or {}
+        imbalance = cvd.get("taker_imbalance")
+        if imbalance is not None:
+            value=float(imbalance)
+            segment_values["shadow.trade_cvd"] = (
+                "BUY_DOMINANT" if value >= .1 else "SELL_DOMINANT" if value <= -.1 else "BALANCED")
+        book = derivatives.get("order_book_liquidity") or {}
+        depth_imbalance = book.get("depth_imbalance")
+        if depth_imbalance is not None:
+            value=float(depth_imbalance)
+            segment_values["shadow.order_book_imbalance"] = (
+                "BID_HEAVY" if value >= .1 else "ASK_HEAVY" if value <= -.1 else "BALANCED")
         for name, value in segment_values.items():
             groups[(name, str(value))].append(row)
     results = []

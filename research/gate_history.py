@@ -147,7 +147,12 @@ def configured_universe() -> list[str]:
 
 
 def target_ranges(now: int | None = None) -> dict[str, tuple[int, int]]:
-    end = int(now or time.time())
+    # One immutable UTC-day cohort. Retries and restarts on the same day must
+    # reuse the same run id instead of leaving second-level RUNNING cohorts and
+    # recomputing an almost identical year.
+    raw_end = int(now or time.time())
+    cohort_seconds = max(900, int(os.environ.get("APEX_RESEARCH_COHORT_SECONDS", "86400")))
+    end = (raw_end // cohort_seconds) * cohort_seconds
     history_days = max(90, min(int(os.environ.get("APEX_RESEARCH_HISTORY_DAYS", "365")), 730))
     history = history_days * 86400
     fast_days = max(90, min(int(os.environ.get("APEX_RESEARCH_5M_DAYS", "365")), history_days))

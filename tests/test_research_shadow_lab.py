@@ -37,6 +37,17 @@ def test_features_are_point_in_time_and_closed_only():
     assert snapshot["closed_candles_only"] is True
 
 
+def test_feature_snapshot_materializes_live_regime_references_point_in_time():
+    hourly=[candle(i*3600,100+i*.1,"1h") for i in range(80)]
+    four_hour=[candle(i*14400,100+i*.2,"4h") for i in range(80)]
+    one=compute_feature_snapshot("AAVEUSDT","1h",hourly,dataset_version="test")
+    four=compute_feature_snapshot("AAVEUSDT","4h",four_hour,dataset_version="test")
+    assert one["live_regime_reference"]["formula"]=="live_get_market_regime_v1"
+    assert one["live_regime_reference"]["mode"] in {"SIDEWAYS","VOLATILE","TRENDING"}
+    assert four["live_regime_reference"]["formula"]=="live_detect_market_regime_v2"
+    assert four["live_regime_reference"]["type"] in {"accumulation","trend","trend_slow","range"}
+
+
 def test_quality_detects_gap_duplicate_and_bad_ohlc():
     rows=[candle(0),candle(1800),candle(1800)]
     rows[-1]["low"]=200
@@ -129,6 +140,15 @@ def test_dashboard_contains_separate_research_tab():
     assert "Все найденные сетапы и результаты" in source
 
 
+def test_dashboard_preserves_last_successful_snapshot_during_502():
+    source = Path("stats_server.py").read_text(encoding="utf-8")
+    assert "function dashboardLoadWarning" in source
+    assert "последняя успешная статистика сохранена; нули не подставляются" in source
+    assert "const next=await r.json();LAST=next" in source
+    assert "function researchLoadWarning" in source
+    assert "Research HTTP "+"'"+"+r.status+"+"'"+" · сохранён последний успешный снимок." in source
+
+
 def test_default_history_is_one_year_and_configurable(monkeypatch):
     monkeypatch.delenv("APEX_RESEARCH_HISTORY_DAYS", raising=False)
     ranges = target_ranges(400 * 86400)
@@ -136,6 +156,7 @@ def test_default_history_is_one_year_and_configurable(monkeypatch):
     assert ranges["1h"] == (35 * 86400, 400 * 86400)
     monkeypatch.setenv("APEX_RESEARCH_HISTORY_DAYS", "180")
     assert target_ranges(400 * 86400)["4h"] == (220 * 86400, 400 * 86400)
+    assert target_ranges(400 * 86400 + 12345)["1d"][1] == 400 * 86400
 
 
 def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):
@@ -152,7 +173,7 @@ def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):
     assert store.save_attempt_checks("a",checks)==1
     assert store.save_attempt_checks("a",checks)==1
     dashboard=store.dashboard()
-    assert dashboard["schema_version"]==3
+    assert dashboard["schema_version"]==4
     assert dashboard["sources"][0]["source"]=="GATE"
     assert dashboard["checks"][0]["count"]==1
 
