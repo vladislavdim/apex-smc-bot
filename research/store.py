@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -48,6 +48,13 @@ DDL = [
         data_quality TEXT NOT NULL DEFAULT 'VALID', payload_json TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY(source,symbol,timeframe,open_time))""",
     "CREATE INDEX IF NOT EXISTS idx_market_candles_asof ON market_candles(symbol,timeframe,open_time DESC)",
+    """CREATE TABLE IF NOT EXISTS market_context_observations (
+        observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, symbol TEXT NOT NULL,
+        feature TEXT NOT NULL, event_time INTEGER NOT NULL, received_at TEXT NOT NULL,
+        quality TEXT NOT NULL, availability TEXT NOT NULL,
+        point_in_time INTEGER NOT NULL DEFAULT 1, value_json TEXT NOT NULL,
+        UNIQUE(source,symbol,feature,event_time))""",
+    "CREATE INDEX IF NOT EXISTS idx_market_context_asof ON market_context_observations(symbol,feature,event_time DESC)",
     """CREATE TABLE IF NOT EXISTS market_quality_issues (
         issue_id TEXT PRIMARY KEY, source TEXT NOT NULL, symbol TEXT NOT NULL,
         timeframe TEXT NOT NULL, open_time INTEGER, issue_type TEXT NOT NULL,
@@ -435,6 +442,55 @@ class ResearchStore:
         with self.transaction() as conn:
             conn.cursor().executemany(sql, rows)
         return len(rows)
+
+    def upsert_context_observations(self, observations: Iterable[Mapping[str, Any]]) -> int:
+        """Persist point-in-time derivatives/microstructure context.
+
+        Context observations are deliberately isolated from candles and never
+        receive execution authority. Missing values are represented by
+        coverage metadata, not synthetic zeroes.
+        """
+        rows=[]; received=utc_now()
+        for item in observations:
+            source=str(item.get("source") or "").upper()
+            symbol=str(item.get("symbol") or "").upper()
+            feature=str(item.get("feature") or "").upper()
+            event_time=item.get("event_time")
+            if not source or not symbol or not feature or event_time is None:
+                continue
+            event_time=int(event_time)
+            rows.append((stable_id("context",source,symbol,feature,event_time),source,symbol,feature,
+                event_time,str(item.get("received_at") or received),str(item.get("quality") or "UNKNOWN"),
+                str(item.get("availability") or "OBSERVED"),int(bool(item.get("point_in_time",True))),
+                canonical(item.get("value") or {})))
+        if not rows: return 0
+        with self.transaction() as conn:
+            conn.cursor().executemany(self._sql("""INSERT INTO market_context_observations
+                (observation_id,source,symbol,feature,event_time,received_at,quality,availability,
+                 point_in_time,value_json) VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(source,symbol,feature,event_time) DO UPDATE SET
+                 received_at=excluded.received_at,quality=excluded.quality,
+                 availability=excluded.availability,point_in_time=excluded.point_in_time,
+                 value_json=excluded.value_json"""),rows)
+        return len(rows)
+
+    def context_rows(self, symbol: str, *, start: int | None = None,
+                     end: int | None = None) -> list[dict[str, Any]]:
+        where=["symbol=?"]; params: list[Any]=[str(symbol).upper()]
+        if start is not None:
+            where.append("event_time>=?"); params.append(int(start))
+        if end is not None:
+            where.append("event_time<=?"); params.append(int(end))
+        with self.transaction() as conn:
+            cur=conn.cursor(); cur.execute(self._sql("""SELECT source,symbol,feature,event_time,
+                received_at,quality,availability,point_in_time,value_json
+                FROM market_context_observations WHERE """+" AND ".join(where)+
+                " ORDER BY feature,event_time"),params)
+            rows=[self._row_dict(cur,row) for row in cur.fetchall()]
+        for row in rows:
+            try: row["value"]=json.loads(row.pop("value_json"))
+            except (TypeError,ValueError,json.JSONDecodeError): row["value"]={}
+        return rows
 
     def candles(self, symbol: str, timeframe: str, *, as_of: int | None = None,
                 limit: int = 500, source: str = "GATE") -> list[dict[str, Any]]:
@@ -944,7 +1000,20 @@ class ResearchStore:
             FROM research_attempt_checks c JOIN research_attempts a ON a.attempt_id=c.attempt_id
             GROUP BY parent_strategy,check_code,label,role,domain,status
             ORDER BY parent_strategy,first_order,status""")
+        attempt_check_rows = query("""SELECT c.attempt_id,c.check_order,c.check_code,c.label,c.role,
+            c.domain,c.status,c.measured_json,c.threshold_json,c.source_timeframe,c.source_as_of,
+            c.evidence_json FROM research_attempt_checks c
+            JOIN research_attempts a ON a.attempt_id=c.attempt_id
+            ORDER BY a.decision_time DESC,c.check_order LIMIT 2400""")
         sources = query("SELECT * FROM research_source_registry ORDER BY source")
+        context = query("""SELECT source,feature,quality,availability,COUNT(*) AS samples,
+            COUNT(DISTINCT symbol) AS symbols,MIN(event_time) AS coverage_start,
+            MAX(event_time) AS coverage_end
+            FROM market_context_observations
+            GROUP BY source,feature,quality,availability
+            ORDER BY feature,source""")
+        context_recent = query("""SELECT source,symbol,feature,event_time,quality,availability,value_json
+            FROM market_context_observations ORDER BY event_time DESC LIMIT 200""")
         active_shadow = query("""SELECT a.parent_strategy,a.symbol,a.direction,a.decision_time,
             t.track,t.status,t.entry,t.initial_sl,t.tp1,t.tp2,t.mfe_r,t.mae_r
             FROM research_trades t JOIN research_attempts a ON a.attempt_id=t.attempt_id
@@ -970,7 +1039,9 @@ class ResearchStore:
                 "attempts": attempts, "attempt_trades": attempt_trades,
                 "trades": trades,
                 "quality": quality, "levels": levels, "coverage": coverage, "evaluations": evaluations,
-                "active_shadow": active_shadow, "checks": checks, "sources": sources,
+                "active_shadow": active_shadow, "checks": checks,
+                "attempt_check_rows": attempt_check_rows, "sources": sources,
+                "market_context": context, "market_context_recent": context_recent,
                 "track_edges": edge_rows,
                 "api_usage": api_usage,
                 "meta": {row["key"]: row["value_json"] for row in meta}}

@@ -7,13 +7,20 @@ only; it never changes a trading predicate or market calculation.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import os
+import threading
 import time
 from typing import Any
 
 from core import runtime_observability as ro
 
 _APPLIED = False
+_DASHBOARD_CACHE: "OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]]" = OrderedDict()
+_DASHBOARD_CACHE_LOCK = threading.Lock()
+_DASHBOARD_BUILD_LOCK = threading.Lock()
+_DASHBOARD_CACHE_TTL_SECONDS = max(5.0, float(os.environ.get("APEX_DASHBOARD_CACHE_TTL_SECONDS", "45")))
+_DASHBOARD_CACHE_MAX_ENTRIES = max(2, int(os.environ.get("APEX_DASHBOARD_CACHE_MAX_ENTRIES", "16")))
 
 
 def _mark_elapsed(context: dict[str, Any], field: str, now: float) -> None:
@@ -179,46 +186,87 @@ def _patch_stats_globals() -> None:
         def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome: str = "", groq: str = "",
                             min_rr: float | None = None, max_rr: float | None = None, from_date: str = "", to_date: str = "",
                             page: int = 1, page_size: int = 100, release: str = "current") -> dict[str, Any]:
-            # The public dashboard is deliberately pinned to the newest
-            # deploy. Even a handcrafted release query cannot mix versions.
-            mode = "current"
-            releases = release_rows(mod)
-            current = ro._release_sha() or (releases[0]["sha"] if releases else "")
-            selected = current
-            effective_days = 30
+            # Routine deploys keep one stable denominator. A formula change
+            # requires a deliberate baseline bump. Dashboard aggregation can
+            # scan tens of thousands of JSON events, so only one request may
+            # build it at a time; concurrent browser refreshes get the last
+            # completed value instead of multiplying memory/DB load.
+            mode = "stable"
             effective_from = from_date
-
-            selected_row = next((row for row in releases if row["sha"] == selected), None)
-            if selected and not effective_from:
-                first_seen = selected_row.get("first_seen") if selected_row else None
-                if first_seen is not None:
-                    try:
-                        effective_from = first_seen.date().isoformat()
-                    except Exception:
-                        effective_from = str(first_seen)[:10]
-                else:
-                    effective_from = mod.STATS_BASELINE_UTC.date().isoformat()
-
-            result = original(
-                effective_days, strategy, symbol, outcome, groq, min_rr, max_rr,
-                effective_from, to_date, page, page_size, selected,
+            if not effective_from:
+                effective_from = mod.STATS_BASELINE_UTC.date().isoformat()
+            cache_key = (
+                str(strategy or "").upper(), str(symbol or "").upper(), str(outcome or "").upper(),
+                str(groq or "").upper(), min_rr, max_rr, effective_from, to_date,
+                max(1, int(page)), max(1, min(500, int(page_size))),
             )
-            result["cohort_mode"] = mode
-            result["current_release_sha"] = current
-            result["previous_release_sha"] = ""
-            result["available_releases"] = [current] if current else []
-            result["release_sha"] = selected
-            if selected_row and selected_row.get("first_seen"):
-                try:
-                    result["release_started_at"] = selected_row["first_seen"].isoformat()
-                except Exception:
-                    result["release_started_at"] = str(selected_row["first_seen"])
-            else:
-                result["release_started_at"] = ""
-            result["fast_stage_timing"] = fast_timing_summary_db(
-                mod, mode, selected, symbol=symbol, from_date=from_date, to_date=to_date,
-            )
-            return result
+
+            def cached(now: float, *, fresh_only: bool) -> dict[str, Any] | None:
+                with _DASHBOARD_CACHE_LOCK:
+                    item = _DASHBOARD_CACHE.get(cache_key)
+                    if not item or (fresh_only and now - item[0] > _DASHBOARD_CACHE_TTL_SECONDS):
+                        return None
+                    _DASHBOARD_CACHE.move_to_end(cache_key)
+                    value = dict(item[1])
+                    value["dashboard_cache"] = {
+                        "status": "HIT" if fresh_only else "STALE_WHILE_REVALIDATE",
+                        "age_seconds": round(max(0.0, now - item[0]), 1),
+                    }
+                    return value
+
+            now = time.monotonic()
+            hit = cached(now, fresh_only=True)
+            if hit is not None:
+                return hit
+            acquired = _DASHBOARD_BUILD_LOCK.acquire(blocking=False)
+            if not acquired:
+                stale = cached(now, fresh_only=False)
+                if stale is not None:
+                    return stale
+                acquired = _DASHBOARD_BUILD_LOCK.acquire(timeout=12.0)
+                if not acquired:
+                    raise TimeoutError("dashboard aggregation is busy; retry shortly")
+            try:
+                # A different request might have filled the cache while this
+                # request waited for the single-flight lock.
+                hit = cached(time.monotonic(), fresh_only=True)
+                if hit is not None:
+                    return hit
+                started = time.monotonic()
+                releases = release_rows(mod)
+                current = ro._release_sha() or (releases[0]["sha"] if releases else "")
+                result = original(
+                    30, strategy, symbol, outcome, groq, min_rr, max_rr,
+                    effective_from, to_date, page, page_size, "",
+                )
+                result["cohort_mode"] = mode
+                result["current_release_sha"] = current
+                result["previous_release_sha"] = ""
+                result["available_releases"] = [current] if current else []
+                result["release_sha"] = current
+                result["release_started_at"] = mod.STATS_BASELINE_UTC.isoformat()
+                result["fast_stage_timing"] = fast_timing_summary_db(
+                    mod, mode, "", symbol=symbol, from_date=from_date, to_date=to_date,
+                )
+                result["dashboard_cache"] = {
+                    "status": "MISS",
+                    "build_ms": round((time.monotonic() - started) * 1000.0, 1),
+                }
+                stored_at = time.monotonic()
+                with _DASHBOARD_CACHE_LOCK:
+                    _DASHBOARD_CACHE[cache_key] = (stored_at, dict(result))
+                    _DASHBOARD_CACHE.move_to_end(cache_key)
+                    while len(_DASHBOARD_CACHE) > _DASHBOARD_CACHE_MAX_ENTRIES:
+                        _DASHBOARD_CACHE.popitem(last=False)
+                return result
+            except Exception:
+                stale = cached(time.monotonic(), fresh_only=False)
+                if stale is not None:
+                    stale["dashboard_cache"]["status"] = "STALE_AFTER_ERROR"
+                    return stale
+                raise
+            finally:
+                _DASHBOARD_BUILD_LOCK.release()
 
         def ingest_without_history_purge(raw: Any) -> int:
             items = raw if isinstance(raw, list) else [raw]

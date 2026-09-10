@@ -102,6 +102,10 @@ class ResearchWorkerLimitTests(unittest.TestCase):
         self.assertEqual(result["last_timestamp"],25)
         self.assertEqual(checkpoints,[(25,25,60)])
 
+    def test_replay_checkpoint_is_scoped_to_immutable_run(self):
+        source=Path("research/worker.py").read_text(encoding="utf-8")
+        self.assertIn('stable_id("replay",run_id,self.profiles[strategy],symbol)',source)
+
     def test_incomplete_backfill_does_not_start_features(self):
         class Client:
             def contract_metadata(self): return {}

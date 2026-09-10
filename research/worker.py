@@ -12,6 +12,7 @@ from .gate_history import GateHistoryClient, backfill_pair, configured_universe,
 from .store import ResearchStore, stable_id, utc_now
 from .replay import ReplayEngine
 from .analytics import evaluate_profile
+from .market_context import PointInTimeContextIndex, collect_market_context
 
 
 DATASET_VERSION = "gate-history-v1"
@@ -78,14 +79,28 @@ class ResearchWorker:
                           "retention_is_interval_dependent":True}, status="READY")
         computed=("STRUCTURE","OB_FVG_BREAKER","VOLUME","VOLATILITY","VWAP",
                   "VOLUME_PROFILE","RSI","MACD","FIBONACCI","CVD_PROXY","REGIME","SESSION")
-        unavailable=("CVD_REAL","OPEN_INTEREST","FUNDING","LONG_SHORT_RATIO","LIQUIDATIONS",
-                     "LIQUIDITY_HEATMAP","MARKET_CAP","MARKET_BREADTH","BTC_DOMINANCE")
+        unavailable=("MARKET_CAP","MARKET_BREADTH","BTC_DOMINANCE")
         for feature in computed:
             self.store.update_coverage(feature,source="GATE",quality="PENDING_BACKFILL",
                 availability="HISTORICAL",metadata={"execution_authority":False,"shadow_only":True})
         self.store.upsert_source_contract("GATE_FEATURES", kind="DERIVED_FEATURES", owner="APEX/Gate",
             authority="CONTEXT_ONLY", coverage={"features":list(computed)},
             license_info={"origin":"derived from closed Gate candles"}, status="READY")
+        self.store.upsert_source_contract("GATE_CONTRACT_STATS",kind="DERIVATIVES_HISTORY",owner="Gate.io",
+            authority="SHADOW_CONTEXT",coverage={"features":["OPEN_INTEREST","LONG_SHORT_RATIO","LIQUIDATIONS"],
+            "interval":"1h","historical_depth":"PROVIDER_DEPENDENT"},freshness_sla_seconds=7200,
+            rate_limits={"shared_budget":"GATE_RESEARCH"},license_info={"origin":"official public Gate API"},status="READY")
+        self.store.upsert_source_contract("GATE_FUNDING",kind="DERIVATIVES_HISTORY",owner="Gate.io",
+            authority="SHADOW_CONTEXT",coverage={"features":["FUNDING_RATE"]},freshness_sla_seconds=36000,
+            rate_limits={"shared_budget":"GATE_RESEARCH"},license_info={"origin":"official public Gate API"},status="READY")
+        self.store.upsert_source_contract("GATE_TRADES",kind="PUBLIC_TRADE_TAPE",owner="Gate.io",
+            authority="SHADOW_CONTEXT",coverage={"features":["TRADE_CVD_REAL"],"history":"RECENT_ONLY"},
+            freshness_sla_seconds=120,rate_limits={"shared_budget":"GATE_RESEARCH"},
+            license_info={"origin":"official public Gate API","signed_size":"taker_side"},status="READY")
+        self.store.upsert_source_contract("GATE_ORDER_BOOK",kind="PUBLIC_DEPTH",owner="Gate.io",
+            authority="SHADOW_CONTEXT",coverage={"features":["ORDER_BOOK_LIQUIDITY"],"history":"FORWARD_ONLY"},
+            freshness_sla_seconds=5,rate_limits={"shared_budget":"GATE_RESEARCH","preferred_transport":"WEBSOCKET"},
+            license_info={"origin":"official public Gate API","historical_depth":False},status="READY")
         for feature in unavailable:
             self.store.update_coverage(feature,source="UNCONFIGURED_EXTERNAL",quality="UNAVAILABLE",
                 availability="REQUIRES_POINT_IN_TIME_SOURCE",metadata={"execution_authority":False,
@@ -100,7 +115,7 @@ class ResearchWorker:
                 "EXECUTION_SAFETY","RISK_LIMITS","MAX_EXPOSURE","BINANCE_VALIDATION","DATA_FRESHNESS","RR_GTE_2"]
         for strategy in WORKING_TF:
             self.store.upsert_profile(strategy,"production-current","PRODUCTION_REFERENCE",{},locked,sha)
-            self.profiles[strategy]=self.store.upsert_profile(strategy,"research-v1","LIVE_SHADOW",{"working_timeframe":WORKING_TF[strategy]},locked,sha)
+            self.profiles[strategy]=self.store.upsert_profile(strategy,"research-v2","LIVE_SHADOW",{"working_timeframe":WORKING_TF[strategy]},locked,sha)
 
     def _set_state(self, state: str, **detail: Any) -> None:
         self.store.set_meta("worker_state",{"state":state,**detail})
@@ -168,10 +183,10 @@ class ResearchWorker:
         # A rolling daily run must retain its own immutable cohort metadata.
         # The checkpoints remain stable per symbol/timeframe, while the run
         # identity includes the exact point-in-time range being evaluated.
-        run_id=stable_id("continuous-replay",DATASET_VERSION,"research-v1",
+        run_id=stable_id("continuous-replay",DATASET_VERSION,"research-v2",
                          tuple(universe),int(start),int(end))
         run={"research_run_id":run_id,"run_type":"POINT_IN_TIME_CAUSAL_SHADOW","dataset_version":DATASET_VERSION,
-             "strategy_version":"research-v1","feature_version":FEATURE_VERSION,"code_sha":sha,
+             "strategy_version":"research-v2","feature_version":FEATURE_VERSION,"code_sha":sha,
              "range_start":start,"range_end":end,"universe":universe,"config":{"rr_floor":2.0,"closed_only":True,"auto_promote":False,
                 "detector_mode":"REPLAY_PROFILE_SURROGATE","live_parity":"NOT_ESTABLISHED",
                 "tracks":["ACTUAL_LINKED_ONLY","NO_MANAGER","PLAYBOOK_ONLY"]},
@@ -185,7 +200,11 @@ class ResearchWorker:
             if self.stop_requested: return
             self.pair_status[strategy]="RUNNING"
             self._pair_progress(symbol,pair_index,pair_total,70+(index-1)*5,"REPLAY",strategy=strategy)
-            bounds=ranges[WORKING_TF[strategy]]; job_id=stable_id("replay",self.profiles[strategy],symbol)
+            # A checkpoint belongs to one immutable research cohort. Reusing a
+            # profile-level cursor here made a new daily/full-year run process
+            # only the last one or two candles and left its analytics empty.
+            job_id=stable_id("replay",run_id,self.profiles[strategy],symbol)
+            bounds=ranges[WORKING_TF[strategy]]
             existing=self.store.job(job_id); replay_start=max(bounds[0],int(existing.get("last_timestamp") or 0)+1)
             batch_started=time.monotonic()
             def progress(done,total,current=strategy):
@@ -195,14 +214,14 @@ class ResearchWorker:
                                     "REPLAY",strategy=current)
                 self.throttle.yield_after(batch_started); batch_started=time.monotonic()
             def checkpoint(last,done,total):
-                self.store.checkpoint(job_id,job_type="REPLAY",strategy_version="research-v1",
+                self.store.checkpoint(job_id,job_type="REPLAY",strategy_version="research-v2",
                     symbol=symbol,timeframe=WORKING_TF[strategy],range_start=bounds[0],range_end=bounds[1],
                     last_timestamp=last,completed_units=done,total_units=total,status="RUNNING")
             result=engine.replay_profile(run_id,self.profiles[strategy],strategy,symbol,replay_start,bounds[1],
                 on_progress=progress,on_checkpoint=checkpoint,should_stop=lambda:self.stop_requested)
             if result.get("status")=="PAUSED": return
             last=result.get("last_timestamp") or int(existing.get("last_timestamp") or replay_start-1)
-            self.store.checkpoint(job_id,job_type="REPLAY",strategy_version="research-v1",
+            self.store.checkpoint(job_id,job_type="REPLAY",strategy_version="research-v2",
                 symbol=symbol,timeframe=WORKING_TF[strategy],range_start=bounds[0],range_end=bounds[1],
                 last_timestamp=last,completed_units=1,total_units=1,status="COMPLETED")
             self.pair_status[strategy]="COMPLETED"
@@ -225,6 +244,8 @@ class ResearchWorker:
         # One stream read plus batched writes: millions of candles must not cause
         # millions of connections. Each rolling window is still strictly AS OF.
         stream=self.store.candles_between(symbol,timeframe,max(0,cursor-TIMEFRAME_SECONDS[timeframe]*241),end)
+        context_index=PointInTimeContextIndex(
+            self.store.context_rows(symbol,start=max(0,start-86400),end=end))
         positions=[(idx,int(x["close_time"])) for idx,x in enumerate(stream) if int(x["close_time"])>=cursor]
         snapshots=[]; levels=[]
         batch_started=time.monotonic()
@@ -235,7 +256,8 @@ class ResearchWorker:
             candles=stream[max(0,idx-239):idx+1]
             if len(candles)<50: continue
             try:
-                snapshot=compute_feature_snapshot(symbol,timeframe,candles,dataset_version=DATASET_VERSION)
+                snapshot=compute_feature_snapshot(symbol,timeframe,candles,dataset_version=DATASET_VERSION,
+                                                  external=context_index.as_of(as_of))
                 snapshots.append({"symbol":symbol,"timeframe":timeframe,"as_of":as_of,"features":snapshot,
                     "feature_version":FEATURE_VERSION,"dataset_version":DATASET_VERSION,
                     "quality":snapshot["data_quality"]["status"]})
@@ -280,6 +302,15 @@ class ResearchWorker:
                 self._pair_progress(symbol,pair_index,len(universe),0,"START_PAIR")
                 self._backfill_symbol(symbol,pair_index,len(universe),ranges,metadata)
                 if self.stop_requested: break
+                context_pairs={x.strip().upper().replace("_","") for x in os.environ.get(
+                    "APEX_RESEARCH_CONTEXT_PAIRS","BTCUSDT").split(",") if x.strip()}
+                if (symbol in context_pairs and
+                        os.environ.get("APEX_RESEARCH_MARKET_CONTEXT_ENABLED","1") == "1"):
+                    result=collect_market_context(self.store,self.client,symbol,
+                        min(x[0] for x in ranges.values()),max(x[1] for x in ranges.values()))
+                    logging.info("[Research] shadow market context %s: %s",symbol,result)
+                    self._pair_progress(symbol,pair_index,len(universe),35,"SHADOW_CONTEXT",
+                        context_features=result.get("features"),context_errors=result.get("errors"))
                 self._materialize_symbol(symbol,pair_index,len(universe),ranges)
                 if self.stop_requested: break
                 self._replay_symbol(run_id,run,symbol,pair_index,len(universe),ranges)

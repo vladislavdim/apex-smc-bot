@@ -16,7 +16,7 @@ from core.market_structure import analyze_market_structure
 from .store import stable_id
 
 
-FEATURE_VERSION = "research-features-v1"
+FEATURE_VERSION = "research-features-v3"
 TIMEFRAME_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
 

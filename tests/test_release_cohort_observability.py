@@ -1,10 +1,12 @@
 import os
+import time
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from core import runtime_observability as ro
+from core import runtime_observability_overrides as overrides
 
 
 class ReleaseCohortObservabilityTests(unittest.TestCase):
@@ -84,10 +86,36 @@ class ReleaseCohortObservabilityTests(unittest.TestCase):
             result = module.build_dashboard(days=1, release="all")
 
         assert calls[0][0] == 30
-        assert calls[0][11] == "latest-sha"
-        assert result["cohort_mode"] == "current"
+        assert calls[0][11] == ""
+        assert result["cohort_mode"] == "stable"
         assert result["available_releases"] == ["latest-sha"]
         assert result["previous_release_sha"] == ""
+
+    def test_dashboard_single_flight_serves_cached_value(self):
+        calls = []
+
+        def original(*args):
+            calls.append(args)
+            time.sleep(0.05)
+            return {"summary": {"attempts": 7}}
+
+        module = SimpleNamespace(
+            build_dashboard=original,
+            HTML="",
+            STATS_BASELINE_UTC=datetime(2026, 9, 10, 7, 55, 47, tzinfo=timezone.utc),
+            _connect=lambda: (_ for _ in ()).throw(RuntimeError("test")),
+            _metric_summary=lambda values: {"count": len(values)},
+            _num=lambda value: value if isinstance(value, (int, float)) else None,
+        )
+        with overrides._DASHBOARD_CACHE_LOCK:
+            overrides._DASHBOARD_CACHE.clear()
+        ro._patch_stats_module(module)
+        first = module.build_dashboard()
+        second = module.build_dashboard()
+        self.assertEqual(first["summary"]["attempts"], 7)
+        self.assertEqual(second["summary"]["attempts"], 7)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(second["dashboard_cache"]["status"], "HIT")
 
 
 if __name__ == "__main__":

@@ -175,14 +175,15 @@ def _persist_event(event: dict[str, Any]) -> None:
         logging.debug("[SetupAudit] local persistence skipped: %s", exc)
 
 
-def _post_event(event: dict[str, Any]) -> bool:
+def _post_events(events: list[dict[str, Any]]) -> bool:
     url = os.environ.get("APEX_STATS_INGEST_URL", "").strip()
     token = os.environ.get("APEX_STATS_INGEST_TOKEN", "").strip()
-    if not url or not token:
+    if not url or not token or not events:
         return False
     try:
         import requests
-        response = requests.post(url, json=event,
+        payload: Any = events[0] if len(events) == 1 else events
+        response = requests.post(url, json=payload,
             headers={"X-APEX-Ingest-Token": token, "Content-Type": "application/json"}, timeout=4)
         if 200 <= response.status_code < 300:
             return True
@@ -190,12 +191,18 @@ def _post_event(event: dict[str, Any]) -> bool:
     except Exception as exc:
         try:
             conn = _connect()
-            conn.execute("UPDATE setup_audit_events SET sync_attempts=sync_attempts+1,last_sync_error=? WHERE event_key=?",
-                         (str(exc)[:500], event.get("event_key")))
+            conn.executemany(
+                "UPDATE setup_audit_events SET sync_attempts=sync_attempts+1,last_sync_error=? WHERE event_key=?",
+                [(str(exc)[:500], event.get("event_key")) for event in events],
+            )
             conn.commit(); conn.close()
         except Exception:
             pass
         return False
+
+
+def _post_event(event: dict[str, Any]) -> bool:
+    return _post_events([event])
 
 
 def _mark_synced(event_key: str) -> None:
@@ -215,17 +222,27 @@ def _flush_unsynced(limit: int = 100) -> None:
         rows = conn.execute("""SELECT event_key,kind,strategy,symbol,occurred_at,payload_json
             FROM setup_audit_events WHERE synced=0 ORDER BY occurred_at LIMIT ?""", (int(limit),)).fetchall()
         conn.close()
+        events = []
         for key, kind, strategy, symbol, occurred_at, payload_json in rows:
             try:
                 payload = json.loads(payload_json or "{}")
             except Exception:
                 payload = {}
-            event = {"event_key": key, "kind": kind, "strategy": strategy, "symbol": symbol,
-                     "occurred_at": occurred_at, "payload": payload}
-            if _post_event(event):
-                _mark_synced(key)
-            else:
+            events.append({"event_key": key, "kind": kind, "strategy": strategy, "symbol": symbol,
+                           "occurred_at": occurred_at, "payload": payload})
+        # The web endpoint accepts at most 2 MB. Twenty maximum-size audit
+        # payloads remain below that boundary while still reducing a 100-event
+        # retry burst to at most five HTTP requests.
+        for offset in range(0, len(events), 20):
+            batch = events[offset:offset + 20]
+            if not _post_events(batch):
                 break
+            conn = _connect()
+            conn.executemany(
+                "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
+                [(event["event_key"],) for event in batch],
+            )
+            conn.commit(); conn.close()
     except Exception:
         return
 

@@ -189,6 +189,19 @@ def _attempt_checks(strategy: str, snapshots: Mapping[str, Mapping[str, Any]],
             "threshold":{"value":threshold},"source_timeframe":working_tf,
             "source_as_of":working.get("as_of"),"evidence":{"stop_code":stop,
                 "adapter":"REPLAY_PROFILE","point_in_time":True}})
+    derivatives=working.get("derivatives") or {}
+    labels={"trade_cvd_real":"Trade-based taker CVD","open_interest":"Open Interest",
+        "funding_rate":"Funding history","liquidations":"Liquidation history",
+        "order_book_liquidity":"Order-book liquidity","long_short_ratio":"Long/short ratio"}
+    for key,label in labels.items():
+        value=derivatives.get(key)
+        checks.append({"check_order":len(checks),"check_code":"SHADOW_"+key.upper(),
+            "label":label,"role":"SHADOW_CONTEXT","domain":"DERIVATIVES",
+            "status":"OBSERVED" if isinstance(value,Mapping) else "UNAVAILABLE",
+            "measured":{"value":value},"threshold":{"value":None},
+            "source_timeframe":working_tf,"source_as_of":working.get("as_of"),
+            "evidence":{"adapter":"REPLAY_PROFILE","point_in_time":True,
+                "execution_authority":False,"missing_is_not_zero":True}})
     return checks
 
 

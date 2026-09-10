@@ -24,8 +24,10 @@ given Binance or Telegram credentials.
 4. Point-in-time causal shadow replay advances chronologically. Candidates can
    wait for entry, expire, hit TP/SL, or remain open. Same-candle TP/SL ambiguity
    is conservative `SL_FIRST` when a lower timeframe is unavailable.
-5. Fees and slippage are estimated on entry and exit. Missing funding/basis are
-   stored as unavailable, never zero.
+5. Fees and slippage are estimated on entry and exit. Gate funding, OI,
+   liquidation aggregates and long/short ratios are joined strictly as-of.
+   Recent signed public trades produce real taker CVD. Missing values are
+   unavailable, never zero.
 6. Segment analytics use chronological 60/20/20 splits. Promotion stays a
    proposal and requires at least 30 eligible observations plus all safety,
    drawdown, tail and outlier gates.
@@ -68,16 +70,17 @@ database and call it production-ready.
 | Point-in-time replay | Implemented causal shadow | Honest profile label; not falsely called an exact import of stateful live detectors |
 | Filtered-candidate outcomes | Implemented | Valid geometry continues as `FILTERED_SHADOW` |
 | Entry waiting, expiry, TP/SL ambiguity | Implemented | Conservative ordering |
-| Costs | Partial, explicit | fees/slippage estimated; historical funding/basis unavailable until sourced |
+| Costs | Partial, explicit | fees/slippage estimated; Gate funding history is stored as shadow context, while historical basis remains unavailable |
 | Feature attribution / chronological OOS | Implemented foundation | predefined causal segments; no random split or combinatorial mining |
 | Ablations/interactions | Requires comparable profile runs | schema/versioning ready; no invented result |
-| Strategy profiles and audit | Implemented foundation | production reference and research-v1 remain separate |
+| Strategy profiles and audit | Implemented foundation | production reference and research-v2 remain separate |
 | Promotion engine | Implemented proposal gate | never automatic |
 | Dashboard Research/Shadow | Implemented | coverage, jobs, runs, funnels, outcomes, features, quality, virtual positions |
 | Restart/checkpoints/idempotency | Implemented | stable stream job IDs and continuous replay run |
 | Gate read-through for live scanner | Implemented opt-in | only fresh, complete history; otherwise existing Gate path |
-| OI/funding/long-short/liquidations/real CVD | Requires licensed historical source/data | schema accepts point-in-time context; no present-day backfill |
-| Historical heatmap/order book | Requires source and storage | live Gate microstructure remains shadow; no inferred market-maker intent |
+| OI/funding/long-short/liquidations | Implemented Gate shadow context | official public Gate contract statistics/funding; provider-retained history only |
+| Real trade-based CVD | Implemented, recent-only | signed Gate taker trades; bounded recent tape is never presented as one-year coverage |
+| Order-book/liquidity heatmap | Implemented, forward-only | bounded Gate ladder snapshots; historical depth is not fabricated and no market-maker intent is inferred |
 | Two-year research results | Requires completed backfill/replay | Dashboard must show progress, not fabricated metrics |
 | New strategy discovery | Research-only future profile | never auto-created or promoted live |
 
@@ -109,7 +112,10 @@ database and call it production-ready.
 - Required: dedicated `APEX_MARKET_DATABASE_URL`.
 - Optional: `APEX_RESEARCH_PAIRS`, `APEX_RESEARCH_PAIR_LIMIT`, `APEX_RESEARCH_HISTORY_DAYS`,
   `APEX_RESEARCH_FAST_PAIRS`, `APEX_RESEARCH_5M_DAYS`,
-  `APEX_RESEARCH_GATE_RPS`, `APEX_RESEARCH_GATE_DAILY`.
+  `APEX_RESEARCH_GATE_RPS`, `APEX_RESEARCH_GATE_DAILY`,
+  `APEX_RESEARCH_CONTEXT_PAIRS`, `APEX_RESEARCH_MARKET_CONTEXT_ENABLED`,
+  `APEX_RESEARCH_TRADE_CVD_HOURS`, `APEX_RESEARCH_TRADE_CVD_PAGES`,
+  `APEX_RESEARCH_ORDERBOOK_LEVELS`.
 - The web service needs only the same read URL to expose `/api/research`.
 - Do not run Research on `apex-smc-bot-1`. A separate worker and a durable,
   adequately sized PostgreSQL database are required before enabling the
@@ -138,6 +144,23 @@ database and call it production-ready.
   Ambiguous historical STOP ownership remains explicitly unresolved.
 - Previous day/week highs/lows are calculated point-in-time and materialized
   as levels. Missing external features remain unavailable.
+- All six market-context features have role `SHADOW_CONTEXT` and
+  `execution_authority=false`. They may be segmented by outcome only after the
+  observation existed. They cannot change Entry, SL, TP, RR, direction, a
+  production gate, position size or Manager action.
+- Research run boundaries are aligned to an immutable UTC-day cohort, so a
+  retry/restart resumes the same run instead of creating a second-level
+  duplicate. Gate derivatives history is explicitly limited to the provider's
+  last 180 days; trade CVD is recent-only and order-book depth forward-only.
+- Strategy Lab's public dashboard uses a fixed cohort baseline
+  (`APEX_STATS_BASELINE_UTC`, currently `2026-09-10T07:55:47Z`). Deploys do not
+  reset counters. Change this baseline only with a validated formula/settings
+  promotion; then a new cohort deliberately starts at zero.
+- Dashboard aggregation is single-flight and cached for 45 seconds. Concurrent
+  refreshes receive the last completed result while one request rebuilds it;
+  failed rebuilds retain the last good value. Audit retry backlogs are sent in
+  batches of at most 20 events to remain below the 2 MB ingest boundary and to
+  avoid the request bursts that previously coincided with Render restarts.
 - Full production detector parity, paired ablation/walk-forward evaluation and
   a provisioned isolated Research database/worker remain release prerequisites
   for the complete specification. Surrogate profiles cannot establish live edge.

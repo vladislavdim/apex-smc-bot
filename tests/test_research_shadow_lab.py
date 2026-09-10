@@ -136,6 +136,7 @@ def test_default_history_is_one_year_and_configurable(monkeypatch):
     assert ranges["1h"] == (35 * 86400, 400 * 86400)
     monkeypatch.setenv("APEX_RESEARCH_HISTORY_DAYS", "180")
     assert target_ranges(400 * 86400)["4h"] == (220 * 86400, 400 * 86400)
+    assert target_ranges(400 * 86400 + 12345)["1d"][1] == 400 * 86400
 
 
 def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):
@@ -152,7 +153,7 @@ def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):
     assert store.save_attempt_checks("a",checks)==1
     assert store.save_attempt_checks("a",checks)==1
     dashboard=store.dashboard()
-    assert dashboard["schema_version"]==3
+    assert dashboard["schema_version"]==4
     assert dashboard["sources"][0]["source"]=="GATE"
     assert dashboard["checks"][0]["count"]==1
 
