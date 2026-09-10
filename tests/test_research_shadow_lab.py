@@ -138,6 +138,10 @@ def test_dashboard_contains_separate_research_tab():
     assert "id=liveDashboardV2" in source
     assert "switchDashboard" in source
     assert "Все найденные сетапы и результаты" in source
+    assert "Порядок построения найденных сделок" in source
+    assert "FIRST · первое основание" in source
+    assert "LAST TRIGGER · последний сигнал" in source
+    assert "FINAL CHECK · финальная проверка" in source
 
 
 def test_dashboard_preserves_last_successful_snapshot_during_502():
@@ -176,6 +180,37 @@ def test_attempt_checks_and_source_registry_are_idempotent(tmp_path):
     assert dashboard["schema_version"]==4
     assert dashboard["sources"][0]["source"]=="GATE"
     assert dashboard["checks"][0]["count"]==1
+
+
+def test_candidate_decision_path_exposes_first_trigger_and_final_validation(tmp_path):
+    store=ResearchStore(str(tmp_path/"history.db")); store.ensure_schema()
+    store.save_run({"research_run_id":"run-a","dataset_version":"dataset-a",
+                    "strategy_version":"strategy-a","feature_version":"features-a",
+                    "status":"COMPLETED","progress":100})
+    store.save_attempt({"attempt_id":"candidate-a","research_run_id":"run-a","profile_id":"profile-a",
+                       "parent_strategy":"FAST","symbol":"BTCUSDT","direction":"BULLISH",
+                       "decision_time":100,"outcome":"CANDIDATE","entry":100,"sl":99,
+                       "tp1":102,"tp2":103,"terminal_tp":103,"rr":3,"snapshot":{}})
+    store.save_attempt_checks("candidate-a",[
+        {"check_code":"DATA_QUALITY","label":"Closed candles","role":"HARD_GATE",
+         "domain":"DATA","status":"PASS","measured":{"value":"VALID"},
+         "threshold":{"value":"VALID"}},
+        {"check_code":"DIRECTION","label":"Direction","role":"HARD_GATE",
+         "domain":"STRUCTURE","status":"PASS","measured":{"value":"BULLISH"},
+         "threshold":{"value":"BULLISH|BEARISH"}},
+        {"check_code":"STRUCTURE_EVENT","label":"Fresh BOS","role":"HARD_GATE",
+         "domain":"TRIGGER","status":"PASS","measured":{"value":True},
+         "threshold":{"value":True}},
+        {"check_code":"RR","label":"RR floor","role":"HARD_GATE",
+         "domain":"GEOMETRY","status":"PASS","measured":{"value":3},
+         "threshold":{"value":">=2"}},
+    ])
+    path=store.dashboard()["decision_paths"][0]
+    assert path["first_basis"]["code"]=="DIRECTION"
+    assert path["final_trigger"]["code"]=="STRUCTURE_EVENT"
+    assert path["final_validation"]["code"]=="RR"
+    assert [step["code"] for step in path["steps"]]==[
+        "DATA_QUALITY","DIRECTION","STRUCTURE_EVENT","RR"]
 
 
 def test_worker_end_to_end_is_checkpointed_and_execution_isolated(tmp_path):

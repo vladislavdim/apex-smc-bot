@@ -1005,6 +1005,47 @@ class ResearchStore:
             c.evidence_json FROM research_attempt_checks c
             JOIN research_attempts a ON a.attempt_id=c.attempt_id
             ORDER BY a.decision_time DESC,c.check_order LIMIT 2400""")
+        decision_path_rows = query("""SELECT a.attempt_id,a.parent_strategy,a.symbol,a.direction,
+            a.decision_time,a.entry,a.sl,a.tp1,a.tp2,a.terminal_tp,a.rr,
+            c.check_order,c.check_code,c.label,c.domain,c.status,c.measured_json,c.threshold_json,
+            c.source_timeframe,c.source_as_of
+            FROM research_attempts a JOIN research_attempt_checks c ON c.attempt_id=a.attempt_id
+            WHERE a.outcome='CANDIDATE' AND c.role='HARD_GATE'
+              AND a.research_run_id=(SELECT research_run_id FROM research_runs
+                  ORDER BY started_at DESC LIMIT 1)
+            ORDER BY a.decision_time DESC,a.attempt_id,c.check_order LIMIT 5000""")
+        decision_paths_by_attempt: dict[str, dict[str, Any]] = {}
+        for row in decision_path_rows:
+            attempt_id = str(row.get("attempt_id") or "")
+            path = decision_paths_by_attempt.setdefault(attempt_id, {
+                "attempt_id": attempt_id,
+                "parent_strategy": row.get("parent_strategy"), "symbol": row.get("symbol"),
+                "direction": row.get("direction"), "decision_time": row.get("decision_time"),
+                "entry": row.get("entry"), "sl": row.get("sl"), "tp1": row.get("tp1"),
+                "tp2": row.get("tp2"), "terminal_tp": row.get("terminal_tp"), "rr": row.get("rr"),
+                "steps": [],
+            })
+            def decoded(field: str) -> Any:
+                try:
+                    value = json.loads(row.get(field) or "{}")
+                    return value.get("value") if isinstance(value, Mapping) and "value" in value else value
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return row.get(field)
+            path["steps"].append({
+                "order": row.get("check_order"), "code": row.get("check_code"),
+                "label": row.get("label"), "domain": row.get("domain"), "status": row.get("status"),
+                "measured": decoded("measured_json"), "threshold": decoded("threshold_json"),
+                "source_timeframe": row.get("source_timeframe"), "source_as_of": row.get("source_as_of"),
+            })
+        decision_paths = []
+        for path in decision_paths_by_attempt.values():
+            steps = path["steps"]
+            strategy_steps = [x for x in steps if x.get("domain") not in {"DATA", "GEOMETRY"}]
+            trigger_steps = [x for x in steps if x.get("domain") in {"TRIGGER", "PARTICIPATION"}]
+            path["first_basis"] = (strategy_steps or steps or [None])[0]
+            path["final_trigger"] = (trigger_steps or strategy_steps or steps or [None])[-1]
+            path["final_validation"] = (steps or [None])[-1]
+            decision_paths.append(path)
         parity_rows = query("""SELECT a.parent_strategy,c.measured_json
             FROM research_attempt_checks c JOIN research_attempts a ON a.attempt_id=c.attempt_id
             WHERE c.check_code='SHADOW_REGIME_PARITY' AND a.outcome='CANDIDATE'""")
@@ -1064,6 +1105,7 @@ class ResearchStore:
                 "quality": quality, "levels": levels, "coverage": coverage, "evaluations": evaluations,
                 "active_shadow": active_shadow, "checks": checks,
                 "attempt_check_rows": attempt_check_rows, "sources": sources,
+                "decision_paths": decision_paths,
                 "market_context": context, "market_context_recent": context_recent,
                 "context_parity": context_parity,
                 "track_edges": edge_rows,
