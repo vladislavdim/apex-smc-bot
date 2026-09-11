@@ -214,6 +214,18 @@ def _mark_synced(event_key: str) -> None:
         pass
 
 
+def _mark_many_synced(events: list[dict[str, Any]]) -> None:
+    try:
+        conn = _connect()
+        conn.executemany(
+            "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
+            [(str(event.get("event_key") or ""),) for event in events],
+        )
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+
+
 def _flush_unsynced(limit: int = 100) -> None:
     if not os.environ.get("APEX_STATS_INGEST_URL") or not os.environ.get("APEX_STATS_INGEST_TOKEN"):
         return
@@ -247,6 +259,19 @@ def _flush_unsynced(limit: int = 100) -> None:
         return
 
 
+def _process_event_batch(event: dict[str, Any]) -> int:
+    # A scan can emit hundreds of audit events in a few milliseconds. Drain a
+    # bounded micro-batch so the Dashboard receives one POST, not one per event.
+    batch = [event]
+    while len(batch) < 20:
+        try: batch.append(_EVENT_QUEUE.get_nowait())
+        except queue.Empty: break
+    for item in batch: _persist_event(item)
+    if _post_events(batch): _mark_many_synced(batch)
+    for _ in batch: _EVENT_QUEUE.task_done()
+    return len(batch)
+
+
 def _worker() -> None:
     last_retry = 0.0
     while True:
@@ -254,11 +279,7 @@ def _worker() -> None:
             event = _EVENT_QUEUE.get(timeout=1.0)
         except queue.Empty:
             event = None
-        if event:
-            _persist_event(event)
-            if _post_event(event):
-                _mark_synced(str(event.get("event_key")))
-            _EVENT_QUEUE.task_done()
+        if event: _process_event_batch(event)
         now = time.monotonic()
         if now - last_retry >= 30.0:
             _flush_unsynced(100)
@@ -351,6 +372,12 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
         check["role"] = "HARD_GATE" if blocking else "SOFT_CONTEXT" if "non-blocking" in label or "warning only" in label else "OBSERVED_CHECK"
     payload["telemetry_schema_version"] = 2
     emit_event("attempt", context["strategy"], context.get("symbol", ""), payload, event_key=context["attempt_key"])
+    try:
+        from core.live_lab_profile import schedule as _schedule_lab_profile
+        _schedule_lab_profile(context["strategy"], context.get("symbol", ""),
+            attempt_key=context["attempt_key"], live_outcome=outcome)
+    except Exception:
+        pass
 
 
 def audit_observe(key: str, value: Any, *, append: bool = False) -> None:

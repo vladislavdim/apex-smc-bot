@@ -185,6 +185,10 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
             live_tape.ingest_gate(full)
             live_tape.ingest_gate(delta)
             self.assertEqual(live_tape._gate_books["BTCUSDT"].last_update_id, 11)
+            book = live_tape.order_book_snapshot("BTCUSDT", now=live_tape._gate_books["BTCUSDT"].observed_at)
+            self.assertEqual(book["freshness_status"], "FRESH")
+            self.assertEqual({row["side"] for row in book["heatmap_levels"]}, {"BID", "ASK"})
+            self.assertFalse(book["execution_authority"])
             with self.assertRaises(live_tape.GateDepthResync):
                 live_tape.ingest_gate(gap)
         self.assertEqual(live_tape._gate_books["BTCUSDT"].status, "RESYNC_REQUIRED")

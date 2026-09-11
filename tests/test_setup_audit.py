@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import sqlite3
 import tempfile
 import unittest
@@ -132,6 +133,23 @@ class SetupAuditTests(unittest.TestCase):
             setup_audit._flush_unsynced(100)
         self.assertEqual(post.call_count, 3)
         self.assertEqual([len(call.kwargs["json"]) for call in post.call_args_list], [20, 20, 5])
+
+    def test_fresh_events_are_sent_as_one_micro_batch(self):
+        event_queue = queue.Queue()
+        events = [{"event_key": f"fresh-{index}", "kind": "attempt", "payload": {}}
+                  for index in range(4)]
+        for event in events: event_queue.put(event)
+        first = event_queue.get()
+        with patch.object(setup_audit, "_EVENT_QUEUE", event_queue), \
+                patch.object(setup_audit, "_persist_event") as persist, \
+                patch.object(setup_audit, "_post_events", return_value=True) as post, \
+                patch.object(setup_audit, "_mark_many_synced") as mark:
+            count = setup_audit._process_event_batch(first)
+        self.assertEqual(count, 4)
+        self.assertEqual(persist.call_count, 4)
+        post.assert_called_once_with(events)
+        mark.assert_called_once_with(events)
+        self.assertEqual(event_queue.unfinished_tasks, 0)
 
 
 if __name__ == "__main__":

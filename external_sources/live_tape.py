@@ -175,6 +175,24 @@ def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
         "bias": "bullish" if buy > sell * 1.25 else "bearish" if sell > buy * 1.25 else "neutral" if buy + sell else "unknown",
         "age_seconds": max((v["age_seconds"] for v in sources.values()), default=None)}
 
+def order_book_snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
+    """Return the sequence-verified Gate book and a bounded heatmap ladder."""
+    reducer = _gate_books.get(symbol.upper())
+    if reducer is None:
+        return {"source": "gate_ws", "status": "UNAVAILABLE",
+                "freshness_status": "UNKNOWN", "heatmap_levels": [],
+                "availability": "FORWARD_ONLY", "execution_authority": False}
+    value = reducer.features(now=now or time.time())
+    value["heatmap_levels"] = [
+        {"side": "BID", "price": price, "size": size}
+        for price, size in sorted(reducer.bids.items(), reverse=True)[:50]
+    ] + [
+        {"side": "ASK", "price": price, "size": size}
+        for price, size in sorted(reducer.asks.items())[:50]
+    ]
+    value.update({"availability": "FORWARD_ONLY", "execution_authority": False})
+    return value
+
 def _persist_snapshot(data: dict[str, Any], db_path: str = _DB_PATH) -> None:
     try:
         conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False); conn.execute("PRAGMA journal_mode=WAL")
@@ -269,7 +287,7 @@ async def start(symbols: list[str]) -> dict[str, Any]:
         subs = [{"time": int(time.time()), "channel": channel, "event": "subscribe", "payload": gate} for channel in ("futures.trades", "futures.book_ticker", "futures.tickers")]
         requested_depth = {
             item.strip().upper().replace("/", "")
-            for item in os.environ.get("APEX_GATE_DEPTH_SYMBOLS", "").split(",") if item.strip()
+            for item in os.environ.get("APEX_GATE_DEPTH_SYMBOLS", "BTCUSDT").split(",") if item.strip()
         }
         depth_gate = [get_pair(s)["gate_symbol"] for s in _configured_symbols if s in requested_depth and get_pair(s).get("gate_supported")][:3]
         if depth_gate:
