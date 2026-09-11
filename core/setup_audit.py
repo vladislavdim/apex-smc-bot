@@ -351,6 +351,12 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
         check["role"] = "HARD_GATE" if blocking else "SOFT_CONTEXT" if "non-blocking" in label or "warning only" in label else "OBSERVED_CHECK"
     payload["telemetry_schema_version"] = 2
     emit_event("attempt", context["strategy"], context.get("symbol", ""), payload, event_key=context["attempt_key"])
+    try:
+        from core.live_lab_profile import schedule as _schedule_lab_profile
+        _schedule_lab_profile(context["strategy"], context.get("symbol", ""),
+            attempt_key=context["attempt_key"], live_outcome=outcome)
+    except Exception:
+        pass
 
 
 def audit_observe(key: str, value: Any, *, append: bool = False) -> None:
