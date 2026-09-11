@@ -654,13 +654,16 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
     for key, item in latest_market_data.items():
         status = str(item.get("status") or "UNKNOWN").upper()
         success_at = item.get("last_success_at") or last_market_success.get(key) or market_success_history.get(key)
+        closed_candle_at = item.get("last_closed_candle_at")
         market_rows.append({
             "symbol": key[0], "timeframe": key[1], "status": status,
             "source": item.get("source") or item.get("provider") or "Gate",
             "reason": item.get("reason") or "", "candle_count": item.get("candle_count") or 0,
             "last_success_at": success_at,
+            "last_closed_candle_at": closed_candle_at,
+            "freshness_basis": "LAST_CLOSED_CANDLE" if closed_candle_at else "UNKNOWN",
             "last_update_at": item.get("last_update_at") or item.get("occurred_at"),
-            **_market_freshness(success_at, key[1], now_utc),
+            **_market_freshness(closed_candle_at, key[1], now_utc),
         })
     market_rows.sort(key=lambda x: (x["status"] == "OK" and x["freshness_status"] == "FRESH", x["symbol"], x["timeframe"]))
     market_data = {
@@ -736,7 +739,7 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
     }
 
     opportunity_states = Counter()
-    opportunities = []
+    opportunities_by_identity = {}
     for row in joined:
         if not row.get("near_setup"):
             continue
@@ -757,17 +760,31 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         if entry is not None and tp1 is not None and current is not None and direction in {"BULLISH", "BEARISH"}:
             target_passed = current >= tp1 if direction == "BULLISH" else current <= tp1
             state = "TARGET_ALREADY_PASSED" if target_passed else "AWAITING_REPLAY"
-        opportunity_states[state] += 1
         telemetry = row.get("telemetry") if isinstance(row.get("telemetry"), dict) else {}
         target_geometry = telemetry.get("fast_rr_geometry") or telemetry.get("fast_target_geometry") or {}
-        opportunities.append({
+        structure = candidate.get("structure_event") or snap.get("structure_event") or {}
+        identity = (
+            str(row.get("strategy") or "").upper(), str(row.get("symbol") or "").upper(), direction,
+            str(candidate.get("setup_id") or snap.get("setup_id") or candidate.get("zone_id") or
+                snap.get("zone_id") or (structure.get("candle_time") if isinstance(structure, dict) else "") or ""),
+            round(entry, 10) if entry is not None else None,
+            round(sl, 10) if sl is not None else None,
+            round(tp1, 10) if tp1 is not None else None,
+            str(stop.get("code") or stop.get("label") or ""),
+        )
+        opportunity = {
             "attempt_id": row.get("attempt_key"), "occurred_at": row.get("finished_at") or row.get("occurred_at"),
             "strategy": row.get("strategy"), "symbol": row.get("symbol"), "direction": direction,
             "stop_reason": stop.get("label") or stop.get("code"), "entry": entry, "sl": sl,
             "tp1": tp1, "rr": row.get("rr_value"), "decision_price": current,
             "execution_state": state, "target_already_passed": target_passed,
-            "target_geometry": target_geometry,
-        })
+            "target_geometry": target_geometry, "setup_identity": "|".join(map(str, identity[:4])),
+        }
+        # Events arrive newest-first. Repeated scans of the same immutable
+        # geometry are observations of one setup, not new opportunities.
+        opportunities_by_identity.setdefault(identity, opportunity)
+    opportunities = list(opportunities_by_identity.values())
+    opportunity_states.update(item["execution_state"] for item in opportunities)
     opportunities.sort(key=lambda x: x.get("occurred_at") or "", reverse=True)
     opportunity_review = {"counts": dict(opportunity_states), "recent": opportunities[:100]}
 
@@ -807,19 +824,22 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
         name = str(row.get("strategy") or "UNKNOWN")
         item = lab_summary.setdefault(name, {"strategy": name, "runs": 0, "lab_candidates": 0,
             "live_candidates": 0, "same_outcome": 0, "unavailable": 0, "match_total": 0.0,
-            "match_count": 0})
+            "match_count": 0, "candidate_agreement": 0, "pending_vs_filtered": 0})
         item["runs"] += 1
         lab_outcome = str(row.get("lab_outcome") or "").upper()
         live_outcome = str(row.get("live_outcome") or "").upper()
         item["lab_candidates"] += lab_outcome == "CANDIDATE"
         item["live_candidates"] += live_outcome == "CANDIDATE"
         item["same_outcome"] += bool(lab_outcome and live_outcome and lab_outcome == live_outcome)
+        item["candidate_agreement"] += ((lab_outcome == "CANDIDATE") == (live_outcome == "CANDIDATE"))
+        item["pending_vs_filtered"] += {lab_outcome, live_outcome} == {"PENDING_LTF", "FILTERED"}
         item["unavailable"] += lab_outcome == "UNAVAILABLE"
         match = _num(row.get("hard_gate_match_pct"))
         if match is not None:
             item["match_total"] += match; item["match_count"] += 1
     for item in lab_summary.values():
         item["outcome_agreement_pct"] = round(item["same_outcome"] / item["runs"] * 100, 2) if item["runs"] else None
+        item["candidate_agreement_pct"] = round(item["candidate_agreement"] / item["runs"] * 100, 2) if item["runs"] else None
         item["avg_hard_gate_match_pct"] = round(item["match_total"] / item["match_count"], 2) if item["match_count"] else None
         item.pop("match_total", None); item.pop("match_count", None)
 
@@ -848,7 +868,11 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
     # Keep the legacy attempt denominator available for release comparisons;
     # the user-facing pending_ltf value is the unique active-watch count above.
     legacy_pending_ltf = {"pending_ltf":sum(r.get("outcome")=="PENDING_LTF" for r in joined)}
-    reviews_n=sum(groq_counts.values()); delivered=sum(1 for r in joined if any(str(d.get("stage") or "").lower()=="delivered" or str(d.get("outcome") or "").upper()=="ACCEPT" for d in r.get("decisions",[])))
+    reviews_n=sum(groq_counts.values()); delivered_attempts=sum(1 for r in joined if any(str(d.get("stage") or "").lower()=="delivered" or str(d.get("outcome") or "").upper()=="ACCEPT" for d in r.get("decisions",[])))
+    delivered_signal_ids = {
+        str(t.get("signal_id")) for t in opened if t.get("signal_id") not in (None, "")
+    }
+    delivered = max(delivered_attempts, len(delivered_signal_ids), len(opened))
     return {"period_days":days,"baseline":"post97","baseline_utc":STATS_BASELINE_UTC.isoformat(),"generated_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),
       "release_filter":release,"release_sha":active_release,"available_releases":available_releases[:12],"funnels":funnels,
       "bos_choch_age":bos_age_stats,"wyckoff_dist_range":wy_dist_range,"wyckoff_box_width":wy_box_range,
@@ -863,7 +887,7 @@ def build_dashboard(days: int = 1, strategy: str = "", symbol: str = "", outcome
       "lab_profile_shadow":{"total":len(lab_profile_events),"by_strategy":sorted(lab_summary.values(),key=lambda x:x["strategy"]),"recent":compact_lab_events},
       "portfolio_risk":portfolio,"execution_mode":execution_mode,"incidents":incidents,"versions":versions,
       "execution_health":execution_health,"manager_db":manager_db,"learning_v2":learning_v2,
-      "summary":{"attempts":total,"candidates":sum(r.get("outcome")=="CANDIDATE" for r in joined),"pending_ltf":len(ltf_rows),"pending_ltf_attempts":legacy_pending_ltf["pending_ltf"],"near_setups":sum(bool(r.get("near_setup")) for r in joined),"groq_total":reviews_n,"groq_approve":groq_counts.get("APPROVE",0),"groq_wait":groq_counts.get("WAIT",0),"groq_reject":groq_counts.get("REJECT",0),"delivered":delivered,"scan_events":len(scan_events)},
+      "summary":{"attempts":total,"candidates":sum(r.get("outcome")=="CANDIDATE" for r in joined),"pending_ltf":len(ltf_rows),"pending_ltf_attempts":legacy_pending_ltf["pending_ltf"],"near_setups":len(opportunities),"groq_total":reviews_n,"groq_approve":groq_counts.get("APPROVE",0),"groq_wait":groq_counts.get("WAIT",0),"groq_reject":groq_counts.get("REJECT",0),"delivered":delivered,"scan_events":len(scan_events)},
       "strategy_counts":dict(Counter(str(r.get("strategy") or "UNKNOWN") for r in joined)),
       "failures":[{"label":k,"count":v} for k,v in failures.most_common(30)],
       "failures_by_strategy":{k:[{"label":a,"count":b} for a,b in v.most_common(30)] for k,v in by_strategy.items()},
@@ -943,7 +967,7 @@ function renderResearchLifecycle(){const d=RESEARCH||{},box=document.getElementB
 </script><script>
 function renderLabProfileShadow(){
  const data=LAST&&LAST.lab_profile_shadow||{},summary=data.by_strategy||[],recent=data.recent||[];
- const cardsHtml=summary.map(x=>'<div class=crit><b>'+esc(x.strategy)+'</b> · runs '+num(x.runs)+'<div>LAB candidates '+num(x.lab_candidates)+' · LIVE candidates '+num(x.live_candidates)+' · same outcome '+num(x.outcome_agreement_pct)+'%</div><div class=muted>Среднее совпадение достигнутых hard gates '+num(x.avg_hard_gate_match_pct)+'% · unavailable '+num(x.unavailable)+'</div></div>').join('');
+ const cardsHtml=summary.map(x=>'<div class=crit><b>'+esc(x.strategy)+'</b> · runs '+num(x.runs)+'<div>LAB candidates '+num(x.lab_candidates)+' · LIVE candidates '+num(x.live_candidates)+' · exact outcome '+num(x.outcome_agreement_pct)+'%</div><div>Candidate/non-candidate agreement '+num(x.candidate_agreement_pct)+'% · pending↔filtered '+num(x.pending_vs_filtered)+'</div><div class=muted>Среднее совпадение достигнутых hard gates '+num(x.avg_hard_gate_match_pct)+'% · unavailable '+num(x.unavailable)+'</div></div>').join('');
  const rowsHtml=recent.slice(0,25).map(x=>{const c=x.candidate||{},steps=x.ordered_hard_gates||[],first=steps[0],last=steps.length?steps[steps.length-1]:null,chain=steps.map((s,i)=>(i+1)+'. '+(s.status==='PASS'?'✅':s.status==='FAIL'?'❌':'⏭')+' '+esc(s.label||s.code)).join(' → ');return '<details class=crit><summary><b>'+esc(x.strategy)+' · '+esc(x.symbol)+'</b> · LIVE '+esc(x.live_outcome)+' ↔ LAB '+esc(x.lab_outcome)+' · match '+num(x.hard_gate_match_pct)+'%</summary><div>'+esc((x.occurred_at||'').replace('T',' ').slice(0,19))+' UTC · stop '+esc(x.stop_code||'—')+'</div><div>Entry '+num(c.entry)+' · SL '+num(c.sl)+' · TP1 '+num(c.tp1)+' · TP2 '+num(c.tp2)+' · TP3/terminal '+num(c.terminal_tp)+' · RR '+num(c.rr)+'</div><div class=muted>FIRST '+esc(first&&(first.label||first.code)||'—')+' · LAST '+esc(last&&(last.label||last.code)||'—')+'</div><div class=muted>'+((chain)||esc(x.error||'Нет журнала'))+'</div></details>'}).join('');
  labProfileShadow.innerHTML='<div class=muted>Всего shadow-сравнений '+num(data.total||0)+'. Они не могут отправлять ордера.</div><div class=criteria>'+(cardsHtml||'<span class=muted>Ожидаются новые live-проверки</span>')+'</div>'+rowsHtml;
 }

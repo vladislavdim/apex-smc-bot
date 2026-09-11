@@ -1027,6 +1027,15 @@ def get_confirmed_candles(candles: list) -> list:
     return candles[:-1]
 
 
+def _last_closed_candle_time(candles: list):
+    """Return the venue timestamp of the newest completed bar for health telemetry."""
+    closed = get_confirmed_candles(candles)
+    if not closed or not isinstance(closed[-1], dict):
+        return None
+    row = closed[-1]
+    return row.get("timestamp") or row.get("time") or row.get("open_time") or row.get("t")
+
+
 def ema_value(values: list, period: int) -> float | None:
     """Return a standard exponentially weighted moving average value."""
     if not values or period <= 0 or len(values) < period:
@@ -1959,14 +1968,16 @@ def get_candles(symbol, interval="1h", limit=200):
         cached, ts = candle_cache[cache_key]
         # Never satisfy a larger history request with a shorter cached sample.
         if time.time() - ts < cache_ttl and len(cached) >= requested_limit:
-            _record_market_data(symbol, interval, True, source="Gate cache", candle_count=len(cached), cached=True)
+            _record_market_data(symbol, interval, True, source="Gate cache", candle_count=len(cached), cached=True,
+                                last_closed_candle_at=_last_closed_candle_time(cached))
             return cached[-requested_limit:]
 
     # Проверяем global candles storage. Same rule: it must satisfy this request.
     _gc = get_global_candles(symbol, interval)
     if _gc and len(_gc) >= requested_limit:
         candle_cache[cache_key] = (_gc, time.time())
-        _record_market_data(symbol, interval, True, source="Gate shared cache", candle_count=len(_gc), cached=True)
+        _record_market_data(symbol, interval, True, source="Gate shared cache", candle_count=len(_gc), cached=True,
+                            last_closed_candle_at=_last_closed_candle_time(_gc))
         return _gc[-requested_limit:]
 
     # Durable Gate Market History is an optional read-through cache. It is
@@ -1977,7 +1988,8 @@ def get_candles(symbol, interval="1h", limit=200):
         if len(_history) >= requested_limit:
             candle_cache[cache_key] = (_history, time.time())
             update_global_candles(symbol, interval, _history)
-            _record_market_data(symbol, interval, True, source="Gate Market History DB", candle_count=len(_history), cached=True)
+            _record_market_data(symbol, interval, True, source="Gate Market History DB", candle_count=len(_history), cached=True,
+                                last_closed_candle_at=_last_closed_candle_time(_history))
             return _history[-requested_limit:]
     except Exception:
         pass
@@ -1989,7 +2001,8 @@ def get_candles(symbol, interval="1h", limit=200):
             if rc and len(rc) >= 3:
                 candle_cache[cache_key] = (rc, time.time())
                 update_global_candles(symbol, interval, rc)
-                _record_market_data(symbol, interval, True, source="Gate BrainRouter", candle_count=len(rc))
+                _record_market_data(symbol, interval, True, source="Gate BrainRouter", candle_count=len(rc),
+                                    last_closed_candle_at=_last_closed_candle_time(rc))
                 try:
                     from research.live_cache import write as _research_candle_write
                     _research_candle_write(symbol, interval, rc)
@@ -2008,7 +2021,8 @@ def get_candles(symbol, interval="1h", limit=200):
             if candles and len(candles) >= 3:
                 candle_cache[cache_key] = (candles, time.time())
                 update_global_candles(symbol, interval, candles)
-                _record_market_data(symbol, interval, True, source="Gate SMC adapter", candle_count=len(candles))
+                _record_market_data(symbol, interval, True, source="Gate SMC adapter", candle_count=len(candles),
+                                    last_closed_candle_at=_last_closed_candle_time(candles))
                 try:
                     from research.live_cache import write as _research_candle_write
                     _research_candle_write(symbol, interval, candles)
@@ -8200,6 +8214,18 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
 
         # ── 7. Quality score (минимум 3 из 8) ──
         q_score = 0
+        # Decision passport only: these named components mirror the existing
+        # score exactly and do not add, remove, or reorder any trading gate.
+        _zone_quality_components = {
+            "wick_rejection": {"role": "QUALITY", "passed": False},
+            "closed_1h_bos_choch": {"role": "HARD_GATE", "passed": False},
+            "rsi_30_70": {"role": "QUALITY", "passed": False, "value": None},
+            "directional_fvg": {"role": "QUALITY", "passed": False},
+            "btc_4h_alignment": {"role": "QUALITY", "passed": False},
+            "funding_neutral_or_contrarian": {"role": "QUALITY", "passed": False, "value": None},
+            "rejection_volume_1_3x": {"role": "QUALITY", "passed": False, "value": None},
+            "recent_imbalance": {"role": "QUALITY_PENALTY", "passed": None},
+        }
 
         # Q0: Wick rejection — тень > тела
         try:
@@ -8208,11 +8234,13 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
                 _body_z = abs(candles[-1]["close"] - candles[-1]["open"])
                 if _wick_z > _body_z:
                     q_score += 1
+                    _zone_quality_components["wick_rejection"]["passed"] = True
             else:
                 _wick_z = candles[-1]["high"] - candles[-1]["close"]
                 _body_z = abs(candles[-1]["close"] - candles[-1]["open"])
                 if _wick_z > _body_z:
                     q_score += 1
+                    _zone_quality_components["wick_rejection"]["passed"] = True
         except Exception:
             pass
 
@@ -8227,6 +8255,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             )
             if _zone_structure_event:
                 _zone_ltf_structure = True
+                _zone_quality_components["closed_1h_bos_choch"]["passed"] = True
         except Exception:
             pass
         if passive_watch and not _zone_ltf_structure:
@@ -8247,8 +8276,10 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         try:
             rmd = detect_rsi_macd_divergence(candles, direction)
             rsi_val = rmd.get("rsi") if rmd else None
+            _zone_quality_components["rsi_30_70"]["value"] = rsi_val
             if rsi_val is not None and 30 <= rsi_val <= 70:
                 q_score += 1
+                _zone_quality_components["rsi_30_70"]["passed"] = True
         except Exception:
             pass
 
@@ -8256,8 +8287,10 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         try:
             if fvg and direction == "BULLISH" and fvg["bottom"] > price:
                 q_score += 1
+                _zone_quality_components["directional_fvg"]["passed"] = True
             elif fvg and direction == "BEARISH" and fvg["top"] < price:
                 q_score += 1
+                _zone_quality_components["directional_fvg"]["passed"] = True
         except Exception:
             pass
 
@@ -8266,6 +8299,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             btc_4h = smc_on_tf("BTCUSDT", "4h")
             if btc_4h and direction in str(btc_4h).upper():
                 q_score += 1
+                _zone_quality_components["btc_4h_alignment"]["passed"] = True
         except Exception:
             pass
 
@@ -8274,13 +8308,17 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         _zone_funding_warning = ""
         try:
             fr = get_funding_rate(symbol)
+            _zone_quality_components["funding_neutral_or_contrarian"]["value"] = fr
             if fr is not None:
                 if direction == "BULLISH" and fr < 0:
                     q_score += 1  # Шорты накопились — хорошо для LONG
+                    _zone_quality_components["funding_neutral_or_contrarian"]["passed"] = True
                 elif direction == "BEARISH" and fr > 0:
                     q_score += 1  # Лонги накопились — хорошо для SHORT
+                    _zone_quality_components["funding_neutral_or_contrarian"]["passed"] = True
                 elif abs(fr) < 0.05:
                     q_score += 1  # Нейтральный
+                    _zone_quality_components["funding_neutral_or_contrarian"]["passed"] = True
                 elif (direction == "BULLISH" and fr > 0.2) or (direction == "BEARISH" and fr < -0.2):
                     _zone_funding_warning = f"extreme crowded funding {fr:+.4f}%"
         except Exception:
@@ -8289,8 +8327,12 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         # Q7: Свеча с объёмом на отбое > 1.3x avg
         try:
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
+            _zone_quality_components["rejection_volume_1_3x"]["value"] = (
+                last["volume"] / avg_vol if avg_vol else None
+            )
             if last["volume"] > avg_vol * 1.3:
                 q_score += 1
+                _zone_quality_components["rejection_volume_1_3x"]["passed"] = True
         except Exception:
             pass
 
@@ -8314,6 +8356,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             if not _imbalance_found:
                 q_score = max(0, q_score - 1)
                 logging.debug(f"[ZONE] {symbol}: нет FVG дисбаланса — q_score снижен до {q_score}")
+            _zone_quality_components["recent_imbalance"]["passed"] = _imbalance_found
         except Exception:
             pass
 
@@ -8432,6 +8475,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             "zone_type": zone_type,
             "zone":      "Discount" if direction == "BULLISH" else "Premium",
             "q_score":   q_score,
+            "quality_components": _zone_quality_components,
             "htf_dir":   htf_1d,
             "funding_warning": _zone_funding_warning,
             "logic":     logic,

@@ -52,6 +52,7 @@ _LIVE_RECONCILE_STATUSES = (
     "PROTECTED",
     "PROTECTED_NO_TP",
     "CLEANUP_PENDING",
+    "STOP_REPLACEMENT_PENDING",
 )
 
 
@@ -660,6 +661,11 @@ def ensure_execution_schema(db_path: str = DB_PATH) -> None:
         conn.execute("ALTER TABLE trade_executions ADD COLUMN active_stop_price REAL")
     except sqlite3.OperationalError:
         pass
+    for column in ("pending_stop_order_id", "previous_stop_order_id"):
+        try:
+            conn.execute(f"ALTER TABLE trade_executions ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
@@ -671,7 +677,8 @@ def cached_execution_snapshot(signal_id: int, db_path: str = DB_PATH) -> dict[st
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """SELECT signal_id,mode,symbol,direction,status,entry,sl,active_stop_price,tp1,tp2,quantity,
-                  entry_order_id,stop_order_id,tp1_order_id,tp2_order_id,last_error,updated_at
+                  entry_order_id,stop_order_id,pending_stop_order_id,previous_stop_order_id,
+                  tp1_order_id,tp2_order_id,last_error,updated_at
            FROM trade_executions WHERE signal_id=?""",
         (int(signal_id),),
     ).fetchone()
@@ -788,7 +795,7 @@ def execute_manager_review(
             level = _decimal(requested_level)
             entry = _decimal(snapshot["entry"])
             current_stop = _decimal(snapshot.get("active_stop_price") or snapshot["sl"])
-            geometry_ok = current_stop < level and level >= entry if direction == "BULLISH" else current_stop > level and level <= entry
+            geometry_ok = current_stop < level if direction == "BULLISH" else current_stop > level
             if not geometry_ok:
                 raise ValueError("protect level does not improve risk toward breakeven")
             rounded = _nearest_step(level, rules.tick_size)
@@ -798,16 +805,29 @@ def execute_manager_review(
             )
             new_stop_id = _required_remote_order_id(new_stop, "manager protective stop")
             old_stop_id = str(snapshot.get("stop_order_id") or "")
+            execution_id = int(_execution_id(db_path, signal_id))
+            # Persist the newly installed protection before touching the old
+            # order. A restart or failed cancellation can therefore reconcile
+            # two known IDs instead of creating a third stop blindly.
+            _update_execution(
+                db_path, execution_id, "STOP_REPLACEMENT_PENDING",
+                stop_order_id=new_stop_id, pending_stop_order_id=new_stop_id,
+                previous_stop_order_id=old_stop_id, active_stop_price=float(rounded),
+            )
             if old_stop_id and old_stop_id != new_stop_id:
                 client.cancel_algo_order(old_stop_id)
             _update_execution(
-                db_path, int(_execution_id(db_path, signal_id)), str(snapshot["status"]),
-                stop_order_id=new_stop_id, active_stop_price=float(rounded),
+                db_path, execution_id, str(snapshot["status"]), stop_order_id=new_stop_id,
+                pending_stop_order_id=None, previous_stop_order_id=None,
+                active_stop_price=float(rounded),
             )
             _finish_manager_action(db_path, action_key, "EXECUTED", order_id=new_stop_id)
             try:
                 from core.trade_manager import confirm_manager_action
-                confirm_manager_action(signal_id, action, "EXECUTED", db_path)
+                confirm_manager_action(
+                    signal_id, action, "EXECUTED", db_path,
+                    confirmed_protect_level=float(rounded),
+                )
             except Exception:
                 pass
             return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": new_stop_id}
@@ -842,7 +862,14 @@ def execute_manager_review(
         _finish_manager_action(db_path, action_key, "EXECUTED", order_id=order_id)
         try:
             from core.trade_manager import confirm_manager_action
-            confirm_manager_action(signal_id, action, "EXECUTED", db_path)
+            remaining_fraction = None
+            if action == "PARTIAL_EXIT":
+                original_quantity = _decimal(snapshot.get("quantity") or amount)
+                remaining_fraction = float(max(Decimal("0"), amount - quantity) / original_quantity) if original_quantity > 0 else None
+            confirm_manager_action(
+                signal_id, action, "EXECUTED", db_path,
+                remaining_fraction=remaining_fraction,
+            )
         except Exception:
             pass
         outward_action = "EXIT" if action == "CLOSE" else action
@@ -906,7 +933,7 @@ def _live_reconcile_rows(db_path: str) -> list[sqlite3.Row]:
     for row in rows:
         status = str(row["status"])
         signal_pending = str(row["signal_result"]) == "pending"
-        if status in {"ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING"}:
+        if status in {"ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}:
             actionable.append(row)
         elif status == "PROTECTED" and (not signal_pending or int(row["signal_id"]) in cutover_ids):
             actionable.append(row)
@@ -1102,7 +1129,8 @@ def execute_approved_candidate(
 
 
 def _update_execution(db_path: str, execution_id: int, status: str, **fields: Any) -> None:
-    allowed = {"stop_order_id", "tp1_order_id", "tp2_order_id", "last_error", "quantity", "active_stop_price"}
+    allowed = {"stop_order_id", "pending_stop_order_id", "previous_stop_order_id",
+               "tp1_order_id", "tp2_order_id", "last_error", "quantity", "active_stop_price"}
     updates = ["status=?", "updated_at=CURRENT_TIMESTAMP"]
     values: list[Any] = [status]
     for key, value in fields.items():
@@ -1295,6 +1323,46 @@ def _cleanup_protective_orders(
     return {"status": status, "signal_id": signal_id}
 
 
+def _reconcile_stop_replacement(
+    row: sqlite3.Row, client: BinanceFuturesClient, db_path: str,
+) -> dict[str, Any]:
+    """Finish a known two-stop handover without ever creating another stop."""
+    previous_id = str(row["previous_stop_order_id"] or "")
+    new_id = str(row["pending_stop_order_id"] or row["stop_order_id"] or "")
+    if not new_id:
+        raise RuntimeError("pending stop replacement has no installed stop id")
+    if previous_id and previous_id != new_id:
+        try:
+            client.cancel_algo_order(previous_id)
+        except BinanceAPIError as exc:
+            if exc.code not in {-2011, -2013}:
+                raise
+    next_status = "PROTECTED" if row["tp1_order_id"] and row["tp2_order_id"] else "PROTECTED_NO_TP"
+    _update_execution(
+        db_path, int(row["id"]), next_status, stop_order_id=new_id,
+        pending_stop_order_id=None, previous_stop_order_id=None, last_error="",
+    )
+    conn = _connect(db_path)
+    conn.execute(
+        """UPDATE manager_execution_actions
+              SET status='EXECUTED',exchange_order_id=?,error='',updated_at=CURRENT_TIMESTAMP
+            WHERE action_key=(SELECT action_key FROM manager_execution_actions
+                               WHERE signal_id=? AND action IN ('PROTECT','MOVE_STOP_TO_BREAKEVEN')
+                               ORDER BY created_at DESC LIMIT 1)""",
+        (new_id, int(row["signal_id"])),
+    )
+    conn.commit(); conn.close()
+    try:
+        from core.trade_manager import confirm_manager_action
+        confirm_manager_action(
+            int(row["signal_id"]), "PROTECT", "EXECUTED", db_path,
+            confirmed_protect_level=float(row["active_stop_price"]),
+        )
+    except Exception:
+        pass
+    return {"status": "STOP_REPLACEMENT_RECOVERED", "signal_id": row["signal_id"]}
+
+
 def reconcile_live_executions(
     *, db_path: str = DB_PATH, config: ExecutionConfig | None = None,
     client: BinanceFuturesClient | None = None,
@@ -1365,6 +1433,9 @@ def _reconcile_live_executions_unlocked(
     for row in rows:
         try:
             signal_pending = str(row["signal_result"]) == "pending"
+            if row["status"] == "STOP_REPLACEMENT_PENDING":
+                outcomes.append(_reconcile_stop_replacement(row, client, db_path))
+                continue
             if row["status"] == "CLEANUP_PENDING" or (
                 row["status"] in {"PROTECTED", "PROTECTED_NO_TP"} and not signal_pending
             ):
@@ -1423,7 +1494,7 @@ def _reconcile_live_executions_unlocked(
             logging.error("[AutoTrading] reconcile signal %s: %s", row["signal_id"], exc)
             retry_status = (
                 str(row["status"])
-                if row["status"] in {"PROTECTED", "PROTECTED_NO_TP", "CLEANUP_PENDING"}
+                if row["status"] in {"PROTECTED", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}
                 else "ENTRY_PENDING"
             )
             _update_execution(db_path, int(row["id"]), retry_status, last_error=str(exc))

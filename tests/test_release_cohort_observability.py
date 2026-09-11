@@ -37,7 +37,7 @@ class ReleaseCohortObservabilityTests(unittest.TestCase):
             ),
         )
 
-    def test_dashboard_exposes_only_current_release(self):
+    def test_dashboard_exposes_stable_baseline(self):
         source = (
             '<div class=tabs id=periods><button class="btn active" data-days=1>24 часа</button>'
             '<button class=btn data-days=7>7 дней</button><button class=btn data-days=30>30 дней</button>'
@@ -47,7 +47,7 @@ class ReleaseCohortObservabilityTests(unittest.TestCase):
         )
         rendered = ro._patch_stats_html(source)
         self.assertIn("id=currentRelease", rendered)
-        self.assertIn("Current release only", rendered)
+        self.assertIn("Stable baseline", rendered)
         self.assertNotIn("id=previousRelease", rendered)
         self.assertNotIn("id=last24", rendered)
         self.assertNotIn("id=allHistory", rendered)

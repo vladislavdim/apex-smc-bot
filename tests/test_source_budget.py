@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from external_sources.budget import SourceBudget, Policy, BudgetDenied, request_scope, projected_load, plan_daily_load
 from external_sources.http_client import ExternalHTTPClient, ExternalHTTPError
-from core.control_loop import ensure_control_schema, upsert_ltf_watch
+from core.control_loop import due_ltf_watches, ensure_control_schema, upsert_ltf_watch
 
 
 class BudgetTests(unittest.TestCase):
@@ -86,6 +86,17 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(after[1], before[1])
             self.assertEqual(after[2], before[2])
             self.assertEqual(after[3], 'reobserved')
+
+    def test_ltf_watch_is_suppressed_for_existing_active_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'brain.db')
+            ensure_control_schema(path)
+            conn = __import__('sqlite3').connect(path)
+            conn.execute('CREATE TABLE signals(id INTEGER PRIMARY KEY,symbol TEXT,direction TEXT,signal_type TEXT,result TEXT)')
+            conn.execute("INSERT INTO signals VALUES(1,'AAVEUSDT','BULLISH','ZONE','pending')")
+            conn.commit(); conn.close()
+            upsert_ltf_watch('ZONE', 'AAVEUSDT', 'BULLISH', '1h', 'waiting structure', 8, path)
+            self.assertEqual(due_ltf_watches(db_path=path), [])
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):

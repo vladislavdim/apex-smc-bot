@@ -271,6 +271,35 @@ def actual_result(path, snapshot, candles=None):
     # Confirmed TP/SL/CLOSE fills are authoritative for ACTUAL.  Gate touches
     # are retained only as descriptive context when no target fill was saved.
     result["targets_reached"] = target_fills or None
+    # Confirmed bot-owned Binance fills are the ACTUAL accounting authority.
+    # Replace any earlier candle-touch estimate in Manager/Replay only after a
+    # complete entry and complete exit have both been reconciled.
+    with closing(connect(path)) as conn, conn:
+        tables = {str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "trade_manager_state" in tables:
+            conn.execute(
+                """UPDATE trade_manager_state
+                      SET status='CLOSED',manager_state='CLOSED',close_result=?,
+                          exit_price=?,realized_pct=?,realized_r=?,closed_at=CURRENT_TIMESTAMP,
+                          last_price=?,current_r=?,last_event='CONFIRMED_BINANCE_FILLS',
+                          updated_at=CURRENT_TIMESTAMP
+                    WHERE signal_id=?""",
+                (str(result.get("exit_reason") or "FILLED").lower(), result.get("exit_price"),
+                 result.get("realized_pct"), result.get("net_r"), result.get("exit_price"),
+                 result.get("net_r"), int(signal_id)),
+            )
+        if "trade_manager_replay_tracks" in tables:
+            conn.execute(
+                """UPDATE trade_manager_replay_tracks
+                      SET gross_r=?,net_r=?,realized_pct=?,fees_slippage_r=?,
+                          exit_reason=?,closed_at=COALESCE(closed_at,CURRENT_TIMESTAMP),
+                          updated_at=CURRENT_TIMESTAMP
+                    WHERE signal_id=? AND track='ACTUAL'""",
+                (result.get("gross_r"), result.get("net_r"), result.get("realized_pct"),
+                 result.get("fees_r"), str(result.get("exit_reason") or "FILLED"), int(signal_id)),
+            )
     # Only a fully closed, fully accounted position can close its reconciliation
     # admission.  Protective orders are not marked complete during partial
     # fills, so a restart still has a chance to observe their exchange state.
