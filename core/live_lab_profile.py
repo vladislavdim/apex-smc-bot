@@ -138,7 +138,8 @@ def schedule(strategy: str, symbol: str, *, attempt_key: str = "", live_outcome:
     now = time.monotonic(); key = (strategy, symbol)
     cadence = max(60, int(os.environ.get("APEX_LAB_PROFILE_SHADOW_INTERVAL_SECONDS", "180")))
     with _LOCK:
-        if now - _LAST.get(key, 0) < cadence: return False
+        last_run = _LAST.get(key)
+        if last_run is not None and now - last_run < cadence: return False
         _LAST[key] = now
         if not _STARTED:
             threading.Thread(target=_worker, name="apex-live-lab-shadow", daemon=True).start(); _STARTED = True
