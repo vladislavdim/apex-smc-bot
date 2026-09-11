@@ -116,7 +116,9 @@ def test_manager_cycle_processes_each_closed_candle_once_and_keeps_levels(tmp_pa
 
     assert len(first) == 1
     assert second == []
-    assert len(calls) == 1
+    # A routine closed-candle heartbeat is persisted for replay but must not
+    # invoke Groq when no material management event occurred.
+    assert len(calls) == 0
     state = load_state(1, db_path)
     assert (state["initial_entry"], state["initial_sl"], state["initial_tp1"]) == (100, 95, 110)
 
@@ -130,13 +132,14 @@ def test_manager_prompt_receives_compact_fresh_external_context(tmp_path):
         return '{"action":"HOLD","confidence":0.8,"reason":"context checked"}'
 
     manager_cycle(
-        lambda: {"BTCUSDT": {"price": 102}},
+        lambda: {"BTCUSDT": {"price": 111}},
         lambda *_args: _candles(),
         groq,
         external_context=lambda *_args: {
             "open_interest": {"change_1h_pct": 2.1, "trend": "rising", "status": "fresh"},
             "liquidations": {"dominance": "short", "status": "fresh"},
             "external_bias": "bullish", "external_confidence": .71,
+            "significant_conflict": True,
             "large_orders": {"source_values": {"bulky": "excluded"}, "bias": "bullish"},
         },
         db_path=db_path,
@@ -230,3 +233,42 @@ def test_restart_reconciles_stale_manager_state_from_closed_signal(tmp_path):
     state = load_state(1, db_path)
     assert state["status"] == "CLOSED"
     assert state["close_result"] == "sl"
+
+
+def test_live_execution_that_never_opened_is_not_managed_as_actual_position(tmp_path):
+    db_path = _db(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE trade_executions (
+                   signal_id INTEGER PRIMARY KEY, mode TEXT, status TEXT,
+                   quantity REAL, entry_order_id TEXT
+               )"""
+        )
+        conn.execute(
+            "INSERT INTO trade_executions VALUES (1,'live','SKIPPED_BELOW_MIN_NOTIONAL',0,'')"
+        )
+
+    # A known rejected live execution must never create a Manager ACTUAL row.
+    assert register_pending_signals(db_path) == 0
+    assert load_state(1, db_path) is None
+
+    # Also repair a row created by an older build before execution was checked.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM trade_executions")
+    assert register_pending_signals(db_path) == 1
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO trade_executions VALUES (1,'live','SKIPPED_BELOW_MIN_NOTIONAL',0,'')"
+        )
+    assert reconcile_manager_states_from_signals(db_path) == 1
+    state = load_state(1, db_path)
+    assert state["status"] == "CLOSED"
+    assert state["manager_state"] == "CLOSED"
+    assert state["close_result"] == "NOT_OPENED:SKIPPED_BELOW_MIN_NOTIONAL"
+    assert state["realized_r"] is None
+    with sqlite3.connect(db_path) as conn:
+        actual = conn.execute(
+            "SELECT quantity_fraction,exit_reason FROM trade_manager_replay_tracks "
+            "WHERE signal_id=1 AND track='ACTUAL'"
+        ).fetchone()
+    assert actual == (0.0, "NOT_OPENED:SKIPPED_BELOW_MIN_NOTIONAL")
