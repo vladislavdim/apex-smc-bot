@@ -3212,6 +3212,13 @@ def _has_pending_signal_for_symbol(symbol: str) -> bool:
         return False
 
 
+from core.signal_delivery import (
+    claim_signal_delivery as _claim_signal_delivery,
+    release_signal_delivery_claim as _release_signal_delivery_claim,
+    signal_delivery_key as _signal_delivery_key,
+)
+
+
 def _attach_learning_evidence(sd: dict) -> None:
     """Give the single final Groq gate factual rules/errors without changing levels."""
     strategy = _signal_type_from_candidate(sd)
@@ -3397,59 +3404,81 @@ async def _send_signal(sd):
         await _remember("APPROVE", "approved but Telegram ADMIN_IDS empty")
         return False
     now_ts = time.time()
-    cache_key = f"{sd['symbol']}:{sd.get('grade','MTF')}:{sd['direction']}:{sd.get('timeframe','1h')}"
+    cache_key = _signal_delivery_key(sd, _strategy)
     try:
-        import sqlite3 as _sq3
-        _cd = _sq3.connect("brain.db", timeout=10)
-        row = _cd.execute("SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (cache_key,)).fetchone()
-        last_sent = row[0] if row else 0
-        if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
-            _cd.close()
+        claimed = await asyncio.to_thread(
+            _claim_signal_delivery, DB_PATH, cache_key, now_ts,
+            _SIGNAL_COOLDOWN_HOURS * 3600,
+        )
+        if not claimed:
             logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
             _record_strategy_decision(sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
             await _remember("WAIT", "duplicate signal cooldown")
             return False
-        _cd.close()
     except Exception as _cde:
-        logging.warning(f"[_send_signal] cooldown DB ошибка: {_cde}")
+        logging.warning(f"[_send_signal] atomic cooldown claim DB ошибка: {_cde}")
         last_sent = _sent_signal_cache.get(cache_key, 0)
         if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
             logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
             await _remember("WAIT", "duplicate signal cooldown cache")
             return False
-        # Значение кладём в fallback-кэш только после подтверждённой отправки.
-        pass
+    _sent_signal_cache[cache_key] = now_ts
     delivered = False
-    for admin_id in ADMIN_IDS:
-        ok = await _send_with_retry(admin_id, sd["text"], parse_mode="HTML")
-        if ok:
-            delivered = True
-            logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
     try:
+        sent_destinations = set()
+        for admin_id in ADMIN_IDS:
+            destination = (int(admin_id), 0)
+            if destination in sent_destinations:
+                continue
+            sent_destinations.add(destination)
+            ok = await _send_with_retry(admin_id, sd["text"], parse_mode="HTML")
+            if ok:
+                delivered = True
+                logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
         scan_type = str(sd.get("scan_type", "")).lower()
         if scan_type == "fast":
-            fast_ok = await _send_with_retry(
-                SIGNAL_CHANNEL_SWING, sd["text"], parse_mode="HTML",
-                message_thread_id=FAST_DEAL_THREAD_ID,
-            )
+            destination = (int(SIGNAL_CHANNEL_SWING), int(FAST_DEAL_THREAD_ID))
+            fast_ok = False
+            if destination not in sent_destinations:
+                sent_destinations.add(destination)
+                fast_ok = await _send_with_retry(
+                    SIGNAL_CHANNEL_SWING, sd["text"], parse_mode="HTML",
+                    message_thread_id=FAST_DEAL_THREAD_ID,
+                )
             delivered = delivered or fast_ok
             if fast_ok:
                 logging.info("[_send_signal] Отправлено в FAST thread: %s", sd.get("symbol"))
         else:
             channel_text = _format_channel_signal(sd)
-            main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+            destination = (int(SIGNAL_CHANNEL_MAIN), 0)
+            main_ok = False
+            if destination not in sent_destinations:
+                sent_destinations.add(destination)
+                main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
             delivered = delivered or main_ok
             if main_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
         if scan_type == "swing":
             channel_text = _format_channel_signal(sd)
-            swing_ok = await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+            destination = (int(SIGNAL_CHANNEL_SWING), int(SWING_THREAD_ID))
+            swing_ok = False
+            if destination not in sent_destinations:
+                sent_destinations.add(destination)
+                swing_ok = await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
             delivered = delivered or swing_ok
             if swing_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
+    except asyncio.CancelledError:
+        await asyncio.to_thread(_release_signal_delivery_claim, DB_PATH, cache_key, now_ts)
+        if _sent_signal_cache.get(cache_key) == now_ts:
+            _sent_signal_cache.pop(cache_key, None)
+        raise
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
+        await asyncio.to_thread(_release_signal_delivery_claim, DB_PATH, cache_key, now_ts)
+        if _sent_signal_cache.get(cache_key) == now_ts:
+            _sent_signal_cache.pop(cache_key, None)
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
         _record_strategy_decision(sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
         await _remember("APPROVE", "approved; Telegram delivery failed")
@@ -3468,15 +3497,6 @@ async def _send_signal(sd):
             "[AutoTrading] signal=%s symbol=%s status=%s",
             signal_id, sd.get("symbol"), execution.get("status"),
         )
-    try:
-        import sqlite3 as _sq3
-        _cd = _sq3.connect("brain.db", timeout=10)
-        _cd.execute("INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?,?)", (cache_key, now_ts))
-        _cd.commit()
-        _cd.close()
-    except Exception as _cde:
-        logging.warning(f"[_send_signal] cooldown write ошибка: {_cde}")
-        _sent_signal_cache[cache_key] = now_ts
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     await _remember("APPROVE", "signal delivered", sd.get("_external_quality_review"))
     if _run_id:
@@ -3484,6 +3504,10 @@ async def _send_signal(sd):
             _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
             "DELIVERY", "DELIVERED", "TELEGRAM", {"signal_id": signal_id}, DB_PATH,
         )
+    # Delivered signals and their cooldown are critical operational state.
+    # Persist them immediately so a Render restart cannot restore a snapshot
+    # from before Telegram delivery and emit the same setup again.
+    await backup_db_to_github(f"signal_{_strategy.lower()}")
     return True
 
 
@@ -4041,7 +4065,6 @@ async def _auto_scan_swing_impl():
             delivered = await _send_signal(sd)
             if delivered:
                 logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
-                await backup_db_to_github("signal_swing")
             await asyncio.sleep(1)
 
         except Exception as e:
@@ -4407,7 +4430,6 @@ async def _auto_wyckoff_scan_impl():
             delivered = await _send_signal(sd)
             if delivered:
                 logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
-                await backup_db_to_github("signal_wyckoff")
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -4581,7 +4603,6 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
             delivered = await _send_signal(_fast_sd)
             if delivered:
                 logging.info(f"[FastDeal] {symbol} {direction} RR={r['rr']} → отправлен")
-                await backup_db_to_github("signal_fast")
             await asyncio.sleep(1)
 
         except Exception as e:
