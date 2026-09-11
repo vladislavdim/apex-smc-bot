@@ -539,6 +539,19 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
                 WHERE COALESCE(m.status,'ACTIVE')!='CLOSED'
                   AND LOWER(COALESCE(s.result,'pending'))!='pending'"""
         ).fetchall()
+        has_executions = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_executions'"
+        ).fetchone()
+        not_opened_rows = conn.execute(
+            """SELECT m.signal_id,te.status
+                 FROM trade_manager_state m JOIN trade_executions te ON te.signal_id=m.signal_id
+                WHERE COALESCE(m.status,'ACTIVE')!='CLOSED'
+                  AND te.mode='live'
+                  AND COALESCE(te.quantity,0)<=0
+                  AND COALESCE(te.entry_order_id,'')=''
+                  AND (te.status LIKE 'SKIPPED_%' OR te.status LIKE 'BLOCKED_%'
+                       OR te.status IN ('DISABLED','LIVE_NOT_ARMED'))"""
+        ).fetchall() if has_executions else []
     finally:
         conn.close()
     reconciled = 0
@@ -558,6 +571,40 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
             int(row[0]), result, float(exit_price or row[7]), db_path=db_path
         ):
             reconciled += 1
+    # A delivered Telegram candidate is not necessarily a Binance position.
+    # When live execution proved that no order was submitted, close only the
+    # ACTUAL manager lane without fabricating an exit/PnL.  Counterfactual
+    # replay tracks remain available for Research.
+    for row in not_opened_rows:
+        signal_id, execution_status = int(row[0]), str(row[1] or "NOT_OPENED")
+        conn = _connect(db_path)
+        conn.execute(
+            """UPDATE trade_manager_state
+                  SET status='CLOSED',manager_state='CLOSED',close_result=?,
+                      exit_price=NULL,realized_pct=NULL,realized_r=NULL,
+                      closed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                WHERE signal_id=? AND COALESCE(status,'ACTIVE')!='CLOSED'""",
+            (f"NOT_OPENED:{execution_status}", signal_id),
+        )
+        conn.execute(
+            """UPDATE trade_manager_replay_tracks
+                  SET state_json=?,quantity_fraction=0,gross_r=NULL,net_r=NULL,
+                      realized_pct=NULL,exit_reason=?,closed_at=CURRENT_TIMESTAMP,
+                      updated_at=CURRENT_TIMESTAMP
+                WHERE signal_id=? AND track='ACTUAL' AND closed_at IS NULL""",
+            (json.dumps({"status": "NOT_OPENED", "execution_status": execution_status}),
+             f"NOT_OPENED:{execution_status}", signal_id),
+        )
+        conn.execute(
+            """INSERT INTO trade_manager_events
+               (signal_id,event_type,action,confidence,facts_json,reason)
+               VALUES (?,'EXECUTION_NOT_OPENED','HOLD',1.0,?,?)""",
+            (signal_id, json.dumps({"execution_status": execution_status}),
+             "Binance execution did not submit an entry order"),
+        )
+        conn.commit()
+        conn.close()
+        reconciled += 1
     return reconciled
 
 
@@ -1031,10 +1078,29 @@ def register_pending_signals(db_path: str = DB_PATH) -> int:
         ).fetchall()
     except sqlite3.Error:
         rows = []
+    non_open_live_ids: set[int] = set()
+    try:
+        has_executions = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_executions'"
+        ).fetchone()
+        if has_executions:
+            non_open_live_ids = {
+                int(item[0]) for item in conn.execute(
+                    """SELECT signal_id FROM trade_executions
+                         WHERE mode='live' AND COALESCE(quantity,0)<=0
+                           AND COALESCE(entry_order_id,'')=''
+                           AND (status LIKE 'SKIPPED_%' OR status LIKE 'BLOCKED_%'
+                                OR status IN ('DISABLED','LIVE_NOT_ARMED'))"""
+                ).fetchall()
+            }
+    except sqlite3.Error:
+        non_open_live_ids = set()
     conn.close()
     registered = 0
     for row in rows:
         data = dict(row)
+        if int(data["id"]) in non_open_live_ids:
+            continue
         if str(data.pop("lifecycle_status", "active")).lower() != "active":
             continue
         before = load_state(int(data["id"]), db_path)
