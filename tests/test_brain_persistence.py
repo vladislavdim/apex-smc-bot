@@ -75,6 +75,17 @@ class _TransientGatewaySession(_GitHubSession):
         return super().put(_url, headers=headers, json=json, timeout=timeout)
 
 
+class _TransientValidationSession(_GitHubSession):
+    def put(self, _url, *, headers, json, timeout):
+        if not self.puts:
+            self.puts.append(json)
+            return _Response(
+                status_code=403,
+                payload={"message": "Timed out validating rule, please try again"},
+            )
+        return super().put(_url, headers=headers, json=json, timeout=timeout)
+
+
 def _make_db(path, knowledge_rows=1):
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -241,6 +252,17 @@ class BrainPersistenceTests(unittest.TestCase):
         manager.restore()
 
         result = manager.backup("retry_gateway")
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(len(session.puts), 2)
+
+    def test_transient_github_validation_timeout_is_retried(self):
+        _make_db(self.remote, knowledge_rows=1)
+        session = _TransientValidationSession(_bytes(self.remote), sha="base")
+        manager = self._manager(session)
+        manager.restore()
+
+        result = manager.backup("retry_validation_timeout")
 
         self.assertTrue(result["saved"])
         self.assertEqual(len(session.puts), 2)

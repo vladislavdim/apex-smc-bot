@@ -93,7 +93,11 @@ class BrainPersistence:
         transient = (
             int(response.status_code) in {429, 500, 502, 503, 504}
             or (int(response.status_code) == 403 and (
-                "rate limit" in lowered or "secondary" in lowered or "temporarily" in lowered
+                "rate limit" in lowered
+                or "secondary" in lowered
+                or "temporarily" in lowered
+                or "timed out" in lowered
+                or "please try again" in lowered
             ))
         )
         return ("transient" if transient else "permanent"), message
