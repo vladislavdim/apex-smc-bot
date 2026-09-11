@@ -11,6 +11,12 @@ class LiveLabProfileTests(unittest.TestCase):
         with patch.dict(os.environ, {"APEX_LAB_PROFILE_SHADOW": "0"}):
             self.assertFalse(live_lab_profile.schedule("FAST", "BTCUSDT"))
 
+    def test_default_is_enabled_only_on_render(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(live_lab_profile._enabled())
+        with patch.dict(os.environ, {"RENDER": "true"}, clear=True):
+            self.assertTrue(live_lab_profile._enabled())
+
     def test_unknown_strategy_never_queues(self):
         self.assertFalse(live_lab_profile.schedule("OTHER", "BTCUSDT"))
 
