@@ -19,7 +19,8 @@ class LiveLabProfileTests(unittest.TestCase):
             self.assertFalse(live_lab_profile.schedule("FAST", "ETHUSDT"))
 
     def test_cadence_deduplicates(self):
-        with patch.dict(os.environ, {"APEX_LAB_PROFILE_SHADOW": "1"}), patch.object(live_lab_profile, "_STARTED", True), patch.object(live_lab_profile._QUEUE, "put_nowait") as put:
+        with patch.dict(os.environ, {"APEX_LAB_PROFILE_SHADOW": "1",
+                "APEX_LAB_PROFILE_SHADOW_SYMBOLS": "BTCUSDT"}), patch.object(live_lab_profile, "_STARTED", True), patch.object(live_lab_profile._QUEUE, "put_nowait") as put:
             self.assertTrue(live_lab_profile.schedule("FAST", "BTCUSDT"))
             self.assertFalse(live_lab_profile.schedule("FAST", "BTCUSDT")); put.assert_called_once()
 
