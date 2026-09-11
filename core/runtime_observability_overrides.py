@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+import hashlib
+import json
 import os
 import threading
 import time
@@ -21,6 +23,8 @@ _DASHBOARD_CACHE_LOCK = threading.Lock()
 _DASHBOARD_BUILD_LOCK = threading.Lock()
 _DASHBOARD_CACHE_TTL_SECONDS = max(5.0, float(os.environ.get("APEX_DASHBOARD_CACHE_TTL_SECONDS", "45")))
 _DASHBOARD_CACHE_MAX_ENTRIES = max(2, int(os.environ.get("APEX_DASHBOARD_CACHE_MAX_ENTRIES", "16")))
+_DASHBOARD_PERSIST_CHECKED: set[str] = set()
+_DASHBOARD_REFRESH_LOCAL = threading.local()
 
 
 def _mark_elapsed(context: dict[str, Any], field: str, now: float) -> None:
@@ -200,6 +204,9 @@ def _patch_stats_globals() -> None:
                 str(groq or "").upper(), min_rr, max_rr, effective_from, to_date,
                 max(1, int(page)), max(1, min(500, int(page_size))),
             )
+            persistent_key = hashlib.sha256(
+                json.dumps(cache_key, ensure_ascii=True, default=str, separators=(",", ":")).encode()
+            ).hexdigest()
 
             def cached(now: float, *, fresh_only: bool) -> dict[str, Any] | None:
                 with _DASHBOARD_CACHE_LOCK:
@@ -215,17 +222,91 @@ def _patch_stats_globals() -> None:
                     return value
 
             now = time.monotonic()
-            hit = cached(now, fresh_only=True)
-            if hit is not None:
-                return hit
-            acquired = _DASHBOARD_BUILD_LOCK.acquire(blocking=False)
-            if not acquired:
+            forced_refresh = bool(getattr(_DASHBOARD_REFRESH_LOCAL, "forced", False))
+
+            def persist(value: dict[str, Any]) -> None:
+                try:
+                    conn = mod._connect()
+                    try:
+                        with conn, conn.cursor() as cur:
+                            cur.execute(
+                                """INSERT INTO apex_stats_dashboard_cache(cache_key,payload,built_at)
+                                   VALUES (%s,%s::jsonb,NOW())
+                                   ON CONFLICT(cache_key) DO UPDATE SET
+                                     payload=EXCLUDED.payload,built_at=EXCLUDED.built_at""",
+                                (persistent_key, mod.json.dumps(value, ensure_ascii=False, default=str)),
+                            )
+                    finally:
+                        conn.close()
+                except Exception:
+                    pass
+
+            def load_persisted() -> dict[str, Any] | None:
+                with _DASHBOARD_CACHE_LOCK:
+                    if persistent_key in _DASHBOARD_PERSIST_CHECKED:
+                        return None
+                    _DASHBOARD_PERSIST_CHECKED.add(persistent_key)
+                try:
+                    conn = mod._connect()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT payload,EXTRACT(EPOCH FROM (NOW()-built_at)) "
+                                "FROM apex_stats_dashboard_cache WHERE cache_key=%s",
+                                (persistent_key,),
+                            )
+                            row = cur.fetchone()
+                    finally:
+                        conn.close()
+                    if row and isinstance(row[0], dict):
+                        value = dict(row[0])
+                        value["dashboard_cache"] = {
+                            "status": "PERSISTED_STALE",
+                            "age_seconds": round(max(0.0, float(row[1] or 0)), 1),
+                        }
+                        return value
+                except Exception:
+                    pass
+                return None
+
+            def refresh_background() -> None:
+                if not _DASHBOARD_BUILD_LOCK.acquire(blocking=False):
+                    return
+                def run() -> None:
+                    _DASHBOARD_REFRESH_LOCAL.forced = True
+                    try:
+                        build_dashboard(
+                            days, strategy, symbol, outcome, groq, min_rr, max_rr,
+                            from_date, to_date, page, page_size, release,
+                        )
+                    except Exception:
+                        pass
+                    finally:
+                        _DASHBOARD_REFRESH_LOCAL.forced = False
+                        _DASHBOARD_BUILD_LOCK.release()
+                threading.Thread(target=run, name="dashboard-cache-refresh", daemon=True).start()
+
+            if not forced_refresh:
+                hit = cached(now, fresh_only=True)
+                if hit is not None:
+                    return hit
                 stale = cached(now, fresh_only=False)
+                if stale is None:
+                    stale = load_persisted()
+                    if stale is not None:
+                        with _DASHBOARD_CACHE_LOCK:
+                            _DASHBOARD_CACHE[cache_key] = (
+                                now - _DASHBOARD_CACHE_TTL_SECONDS - 1.0, dict(stale)
+                            )
                 if stale is not None:
+                    refresh_background()
                     return stale
-                acquired = _DASHBOARD_BUILD_LOCK.acquire(timeout=12.0)
-                if not acquired:
-                    raise TimeoutError("dashboard aggregation is busy; retry shortly")
+
+            acquired = forced_refresh or _DASHBOARD_BUILD_LOCK.acquire(blocking=False)
+            if not acquired:
+                # Do not occupy an HTTP thread while another request performs
+                # the expensive aggregation. This preserves /health and ingest.
+                raise TimeoutError("dashboard aggregation is warming; retry shortly")
             try:
                 # A different request might have filled the cache while this
                 # request waited for the single-flight lock.
@@ -260,6 +341,7 @@ def _patch_stats_globals() -> None:
                     _DASHBOARD_CACHE.move_to_end(cache_key)
                     while len(_DASHBOARD_CACHE) > _DASHBOARD_CACHE_MAX_ENTRIES:
                         _DASHBOARD_CACHE.popitem(last=False)
+                persist(result)
                 return result
             except Exception:
                 stale = cached(time.monotonic(), fresh_only=False)
@@ -268,7 +350,8 @@ def _patch_stats_globals() -> None:
                     return stale
                 raise
             finally:
-                _DASHBOARD_BUILD_LOCK.release()
+                if not forced_refresh:
+                    _DASHBOARD_BUILD_LOCK.release()
 
         def ingest_without_history_purge(raw: Any) -> int:
             items = raw if isinstance(raw, list) else [raw]
