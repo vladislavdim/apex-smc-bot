@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -165,6 +166,9 @@ def ensure_schema() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_apex_stats_recent ON apex_stats_events(occurred_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_apex_stats_lookup ON apex_stats_events(strategy,symbol,occurred_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_apex_stats_kind ON apex_stats_events(kind,occurred_at DESC)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS apex_stats_dashboard_cache (
+                cache_key TEXT PRIMARY KEY, payload JSONB NOT NULL,
+                built_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
     finally:
         conn.close()
 
@@ -1036,9 +1040,22 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self,fmt,*args): print(f"[stats] {self.command} {urlparse(self.path).path}")
 
 
+class APEXStatsServer(ThreadingHTTPServer):
+    # A burst of ingest and browser refreshes must not fill the tiny stdlib
+    # accept queue and make /health unreachable at Render's proxy.
+    daemon_threads = True
+    request_queue_size = 128
+
+
 def main():
     if not DATABASE_URL or not DASHBOARD_TOKEN or not INGEST_TOKEN: raise SystemExit("DATABASE_URL, DASHBOARD_TOKEN and INGEST_TOKEN are required")
-    ensure_schema(); print(f"APEX Strategy Stats listening on :{PORT}"); ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()
+    ensure_schema()
+    # Warm the default cache without delaying port binding. Until it completes,
+    # /health and ingest remain responsive and duplicate dashboard builds fail
+    # fast instead of occupying every request thread.
+    threading.Thread(target=lambda: build_dashboard(), name="dashboard-cache-warm", daemon=True).start()
+    print(f"APEX Strategy Stats listening on :{PORT}")
+    APEXStatsServer(("0.0.0.0",PORT),Handler).serve_forever()
 
 
 if __name__=="__main__": main()
