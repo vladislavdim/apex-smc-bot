@@ -614,10 +614,20 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
         "SELECT symbol,update_id,payload_json,created_at FROM gate_microstructure_shadow ORDER BY created_at DESC LIMIT 20"
     ).fetchall()] if "gate_microstructure_shadow" in table_names else []
     if "trade_manager_state" in table_names:
+        historical_states = {str(row[0]): int(row[1]) for row in conn.execute(
+            "SELECT manager_state,COUNT(*) FROM trade_manager_state GROUP BY manager_state"
+        ).fetchall()}
+        active_states = {str(row[0]): int(row[1]) for row in conn.execute(
+            """SELECT m.manager_state,COUNT(*) FROM trade_manager_state m
+                 JOIN signals s ON s.id=m.signal_id
+                WHERE COALESCE(m.status,'ACTIVE')!='CLOSED'
+                  AND LOWER(COALESCE(s.result,'pending'))='pending'
+                GROUP BY m.manager_state"""
+        ).fetchall()} if "signals" in table_names else {}
         result["manager_db"] = {
-            "states": {str(row[0]): int(row[1]) for row in conn.execute(
-                "SELECT manager_state,COUNT(*) FROM trade_manager_state GROUP BY manager_state"
-            ).fetchall()},
+            "states": active_states,
+            "historical_states": historical_states,
+            "active_count": sum(active_states.values()),
             "trades": [dict(row) for row in conn.execute(
                 """SELECT signal_id,symbol,strategy,direction,manager_state,status,last_price,current_r,
                           tp1_seen,tp2_seen,tp3_seen,position_fraction,last_event,last_action,

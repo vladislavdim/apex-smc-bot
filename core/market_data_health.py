@@ -22,6 +22,21 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _candle_time(value: Any) -> str | None:
+    try:
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric > 10_000_000_000:
+                numeric /= 1000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc).isoformat(timespec="seconds")
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 def record_market_data(
     symbol: str,
     timeframe: str,
@@ -31,6 +46,7 @@ def record_market_data(
     reason: str = "",
     candle_count: int = 0,
     cached: bool = False,
+    last_closed_candle_at: Any = None,
 ) -> None:
     """Record current candle availability without affecting the caller."""
     try:
@@ -39,6 +55,7 @@ def record_market_data(
             return
         now = time.monotonic()
         timestamp = _utc_now()
+        closed_at = _candle_time(last_closed_candle_at)
         with _LOCK:
             previous = _STATE.get(key, {})
             last_success = timestamp if ok else previous.get("last_success_at")
@@ -48,6 +65,7 @@ def record_market_data(
                 "ok": bool(ok),
                 "last_success_at": last_success,
                 "last_update_at": timestamp,
+                "last_closed_candle_at": closed_at or previous.get("last_closed_candle_at"),
                 "emitted_at": now,
             }
             if not (changed or due):
@@ -69,6 +87,7 @@ def record_market_data(
                 "cached": bool(cached),
                 "last_success_at": last_success,
                 "last_update_at": timestamp,
+                "last_closed_candle_at": state.get("last_closed_candle_at"),
             },
         )
     except Exception:

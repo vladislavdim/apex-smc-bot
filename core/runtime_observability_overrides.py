@@ -245,6 +245,8 @@ def _patch_stats_globals() -> None:
                 result["available_releases"] = [current] if current else []
                 result["release_sha"] = current
                 result["release_started_at"] = mod.STATS_BASELINE_UTC.isoformat()
+                result["runtime_release_sha"] = current
+                result["baseline_started_at"] = mod.STATS_BASELINE_UTC.isoformat()
                 result["fast_stage_timing"] = fast_timing_summary_db(
                     mod, mode, "", symbol=symbol, from_date=from_date, to_date=to_date,
                 )

@@ -7,6 +7,7 @@ from core.trade_manager import (
     load_manager_message,
     load_state,
     manager_cycle,
+    reconcile_manager_states_from_signals,
     register_pending_signals,
     store_manager_message,
 )
@@ -218,3 +219,14 @@ def test_closed_trade_remains_in_manager_and_has_final_accounting(tmp_path):
     card = format_final_trade_card(state)
     assert "СДЕЛКА ЗАКРЫТА" in card
     assert "+10.00%" in card
+
+
+def test_restart_reconciles_stale_manager_state_from_closed_signal(tmp_path):
+    db_path = _db(tmp_path)
+    register_pending_signals(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE signals SET result='sl' WHERE id=1")
+    assert reconcile_manager_states_from_signals(db_path) == 1
+    state = load_state(1, db_path)
+    assert state["status"] == "CLOSED"
+    assert state["close_result"] == "sl"

@@ -2,16 +2,8 @@ name: BTC One-Year Research
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/btc-research.yml
-      - scripts/run_btc_research_release.py
-      - research/**
-      - core/replay_lab.py
-      - core/setup_evidence.py
-  schedule:
-    - cron: "17 3 * * *"
+# Temporarily manual-only: the historical database is intentionally retained,
+# while expensive restore/backfill/replay runs are paused until re-enabled.
 
 permissions:
   contents: write

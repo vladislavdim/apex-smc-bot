@@ -17,10 +17,14 @@ def test_market_data_events_are_transition_throttled():
     with patch.object(market_data_health, "emit_event", side_effect=lambda *args, **kwargs: captured.append((args, kwargs))):
         market_data_health.record_market_data("AAVEUSDT", "15m", False, reason="Gate HTTP 500")
         market_data_health.record_market_data("AAVEUSDT", "15m", False, reason="Gate HTTP 500")
-        market_data_health.record_market_data("AAVEUSDT", "15m", True, candle_count=120)
+        market_data_health.record_market_data(
+            "AAVEUSDT", "15m", True, candle_count=120,
+            last_closed_candle_at=1788777900000,
+        )
     assert len(captured) == 2
     assert captured[0][0][3]["status"] == "FAILED"
     assert captured[1][0][3]["status"] == "OK"
+    assert captured[1][0][3]["last_closed_candle_at"] == "2026-09-07T10:45:00+00:00"
 
 
 def test_dashboard_aggregates_gate_and_ltf_lifecycle():

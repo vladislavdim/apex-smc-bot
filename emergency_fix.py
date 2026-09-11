@@ -27,7 +27,10 @@ def patch_database_connection():
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")  # 30 секунд
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=10000")
+            # Bound each connection to ~4 MiB. The previous positive value was
+            # page-count based (~40 MiB at 4 KiB/page) and multiplied transient
+            # memory pressure during concurrent manager/backup activity.
+            conn.execute("PRAGMA cache_size=-4096")
         except:
             pass
         

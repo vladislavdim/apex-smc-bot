@@ -127,6 +127,7 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
             tp3_seen INTEGER NOT NULL DEFAULT 0,
             manager_target REAL,
             manager_protect_level REAL,
+            proposed_protect_level REAL,
             last_event TEXT,
             last_action TEXT,
             last_confidence REAL,
@@ -203,6 +204,7 @@ def ensure_trade_manager_schema(db_path: str = DB_PATH) -> None:
     for table, column, typedef in (
         ("trade_manager_state", "manager_target", "REAL"),
         ("trade_manager_state", "manager_protect_level", "REAL"),
+        ("trade_manager_state", "proposed_protect_level", "REAL"),
         ("trade_manager_events", "manager_target", "REAL"),
         ("trade_manager_events", "manager_protect_level", "REAL"),
         ("trade_manager_state", "tp3_seen", "INTEGER NOT NULL DEFAULT 0"),
@@ -513,6 +515,50 @@ def finalize_manager_trade(
     except Exception:
         pass
     return load_state(signal_id, db_path)
+
+
+def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
+    """Close stale ACTUAL manager rows when the canonical signal is closed.
+
+    Counterfactual replay tracks remain available and may continue on later
+    candles; this only prevents a finished live signal from being managed as
+    an active trade after a restart.
+    """
+    ensure_trade_manager_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        signal_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+        }
+        if not {"id", "result"}.issubset(signal_columns):
+            return 0
+        rows = conn.execute(
+            """SELECT m.signal_id,s.result,m.initial_sl,m.initial_tp1,
+                      m.initial_tp2,m.initial_tp3,m.last_price,m.initial_entry
+                 FROM trade_manager_state m JOIN signals s ON s.id=m.signal_id
+                WHERE COALESCE(m.status,'ACTIVE')!='CLOSED'
+                  AND LOWER(COALESCE(s.result,'pending'))!='pending'"""
+        ).fetchall()
+    finally:
+        conn.close()
+    reconciled = 0
+    for row in rows:
+        result = str(row[1] or "closed").lower()
+        if result == "sl" or "stop" in result:
+            exit_price = row[2]
+        elif "tp3" in result:
+            exit_price = row[5] or row[4] or row[3]
+        elif "tp2" in result:
+            exit_price = row[4] or row[3]
+        elif "tp" in result:
+            exit_price = row[3]
+        else:
+            exit_price = row[6] or row[7]
+        if finalize_manager_trade(
+            int(row[0]), result, float(exit_price or row[7]), db_path=db_path
+        ):
+            reconciled += 1
+    return reconciled
 
 
 def normalize_strategy(value: Any) -> str:
@@ -828,6 +874,21 @@ def review_active_trade(
     try:
         raw = ask_groq(_prompt(state, events, facts), max_tokens=300)
         review = _parse_review(raw, facts, state)
+        if str(review.get("action") or "").upper() == "CLOSE":
+            reverse_structure = bool(
+                facts.get("structure_against_trade")
+                and str(facts.get("structure_event") or "").upper() in {"BOS", "CHOCH"}
+            )
+            deterministic_close = (
+                ("INVALIDATION_HIT" in events and "AMBIGUOUS_BARRIERS" not in events)
+                or reverse_structure
+            )
+            if not deterministic_close:
+                review.update({
+                    "action": "HOLD", "protect_level": None,
+                    "reason": "CLOSE rejected: no deterministic thesis invalidation or confirmed reversal",
+                    "next_trigger": "initial SL or confirmed opposite BOS/CHoCH",
+                })
         valid, next_state = validate_transition(current_state, review.get("action"))
         if not valid:
             review = {
@@ -1164,7 +1225,8 @@ def persist_review(
     tp2_seen = int(state.get("tp2_seen") or 0) or int("TP2_HIT" in events)
     tp3_seen = int(state.get("tp3_seen") or 0) or int("TP3_HIT" in events)
     manager_target = review.get("management_target") or state.get("manager_target")
-    protect_level = review.get("protect_level") or state.get("manager_protect_level")
+    protect_level = state.get("manager_protect_level")
+    proposed_protect_level = review.get("protect_level")
     candle_id = facts.get("management_candle_id") or state.get("last_reviewed_candle")
     current_state = str(state.get("manager_state") or "PROTECTED").upper()
     if "TP1_HIT" in events and current_state in {"PROTECTED", "MANAGING"}:
@@ -1190,12 +1252,13 @@ def persist_review(
     conn.execute(
         """UPDATE trade_manager_state
            SET last_price=?,best_price=?,current_r=?,tp1_seen=?,tp2_seen=?,tp3_seen=?,manager_target=?,
-               manager_protect_level=?,last_event=?,last_action=?,last_confidence=?,
+               manager_protect_level=?,proposed_protect_level=?,last_event=?,last_action=?,last_confidence=?,
                last_reviewed_candle=?,manager_state=?,no_progress_bars=?,progress_anchor_r=?,
                last_progress_candle=?,
                updated_at=CURRENT_TIMESTAMP WHERE signal_id=?""",
         (
             price, best, current_r, tp1_seen, tp2_seen, tp3_seen, manager_target, protect_level,
+            proposed_protect_level,
             ",".join(events), review.get("action"), review.get("confidence"),
             str(candle_id) if candle_id is not None else None, next_state, no_progress, anchor,
             str(facts.get("progress_candle_id")) if facts.get("progress_candle_id") is not None else state.get("last_progress_candle"),
@@ -1260,7 +1323,9 @@ def persist_review(
 
 
 def confirm_manager_action(
-    signal_id: int, action: str, execution_status: str, db_path: str = DB_PATH,
+    signal_id: int, action: str, execution_status: str, db_path: str = DB_PATH, *,
+    confirmed_protect_level: float | None = None,
+    remaining_fraction: float | None = None,
 ) -> bool:
     """Commit exactly one state transition after its action is confirmed."""
     canonical = {"EXIT": "CLOSE", "WAIT_CONFIRMATION": "HOLD"}.get(
@@ -1268,7 +1333,7 @@ def confirm_manager_action(
     )
     conn = _connect(db_path)
     row = conn.execute(
-        "SELECT manager_state FROM trade_manager_state WHERE signal_id=?", (int(signal_id),)
+        "SELECT manager_state,proposed_protect_level FROM trade_manager_state WHERE signal_id=?", (int(signal_id),)
     ).fetchone()
     if not row:
         conn.close()
@@ -1280,12 +1345,19 @@ def confirm_manager_action(
     if not valid or not (internal_confirmed or exchange_confirmed):
         conn.close()
         return False
+    confirmed_level = confirmed_protect_level if canonical in {"PROTECT", "MOVE_STOP_TO_BREAKEVEN"} else None
+    fraction = None
+    if canonical == "PARTIAL_EXIT" and remaining_fraction is not None:
+        fraction = max(0.0, min(1.0, float(remaining_fraction)))
     conn.execute(
         """UPDATE trade_manager_state SET manager_state=?,
                   partial_exit_done=CASE WHEN ?='PARTIAL_EXIT' THEN 1 ELSE partial_exit_done END,
-                  position_fraction=CASE WHEN ?='PARTIAL_EXIT' THEN MAX(0,position_fraction-0.5) ELSE position_fraction END,
+                  position_fraction=CASE WHEN ?='PARTIAL_EXIT' AND ? IS NOT NULL THEN ? ELSE position_fraction END,
+                  manager_protect_level=CASE WHEN ? IN ('PROTECT','MOVE_STOP_TO_BREAKEVEN') AND ? IS NOT NULL THEN ? ELSE manager_protect_level END,
+                  proposed_protect_level=CASE WHEN ? IN ('PROTECT','MOVE_STOP_TO_BREAKEVEN') THEN NULL ELSE proposed_protect_level END,
                   updated_at=CURRENT_TIMESTAMP WHERE signal_id=?""",
-        (next_state, canonical, canonical, int(signal_id)),
+        (next_state, canonical, canonical, fraction, fraction,
+         canonical, confirmed_level, confirmed_level, canonical, int(signal_id)),
     )
     conn.commit()
     conn.close()
@@ -1407,6 +1479,7 @@ def manager_cycle(
     material event. Returned items are ready for Telegram delivery by bot.py.
     """
     ensure_trade_manager_schema(db_path)
+    reconcile_manager_states_from_signals(db_path)
     register_pending_signals(db_path)
     try:
         prices = get_prices() or {}
@@ -1522,7 +1595,11 @@ def manager_cycle(
         decision_state = dict(state)
         if "TP1_HIT" in events and str(state.get("manager_state") or "PROTECTED") in {"PROTECTED", "MANAGING"}:
             decision_state["manager_state"] = "TP1_REACHED"
-        review = review_active_trade(decision_state, events, facts, ask_groq)
+        # Every closed management candle is still persisted for replay and
+        # NO_PROGRESS, but an otherwise uneventful candle is not a reason to
+        # ask Groq and over-manage the position.
+        material_events = [event for event in events if event != "MANAGEMENT_CANDLE_CLOSE"]
+        review = review_active_trade(decision_state, material_events, facts, ask_groq)
         notify = should_notify(state, events, review)
         persist_review(state, price, events, facts, review, db_path)
         if str(review.get("action") or "HOLD").upper() in {"HOLD", "LET_RUN"}:

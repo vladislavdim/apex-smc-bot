@@ -487,15 +487,58 @@ def upsert_ltf_watch(
     ensure_control_schema(db_path)
     conn = _connect(db_path)
     conn.execute("BEGIN IMMEDIATE")
+    normalized = _strategy_name(strategy)
+    signal_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+    }
+    active_signal = False
+    if {"symbol", "result"}.issubset(signal_columns):
+        clauses = ["UPPER(symbol)=?", "LOWER(COALESCE(result,'pending'))='pending'"]
+        params: list[Any] = [str(symbol).upper()]
+        if "direction" in signal_columns:
+            clauses.append("UPPER(COALESCE(direction,''))=?")
+            params.append(str(direction).upper())
+        strategy_column = next(
+            (column for column in ("strategy", "signal_type", "grade") if column in signal_columns),
+            None,
+        )
+        if strategy_column:
+            clauses.append(f"UPPER(COALESCE({strategy_column},''))=?")
+            params.append(normalized)
+        active_signal = bool(conn.execute(
+            f"SELECT 1 FROM signals WHERE {' AND '.join(clauses)} LIMIT 1", params
+        ).fetchone())
     old = conn.execute("SELECT * FROM ltf_watchlist WHERE strategy=? AND symbol=?",
-                       (_strategy_name(strategy), symbol)).fetchone()
+                       (normalized, symbol)).fetchone()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    if active_signal:
+        if old and old["state"] == "WAITING":
+            conn.execute(
+                """UPDATE ltf_watchlist SET state='RESOLVED',reason='ALREADY_OPEN',
+                          resolved_at=CURRENT_TIMESTAMP,last_checked_at=CURRENT_TIMESTAMP
+                   WHERE strategy=? AND symbol=?""",
+                (normalized, symbol),
+            )
+            row = dict(conn.execute(
+                "SELECT * FROM ltf_watchlist WHERE strategy=? AND symbol=?", (normalized, symbol)
+            ).fetchone())
+            conn.commit(); conn.close()
+            try:
+                _emit_stats_event("ltf_watch", normalized, symbol, {
+                    **row, "identity_scope": "strategy_symbol_direction_tf_watch",
+                    "reobserved": False, "suppressed_by_active_signal": True,
+                })
+            except Exception:
+                pass
+        else:
+            conn.commit(); conn.close()
+        return
     same = bool(old and old["state"] == "WAITING" and old["expires_at"] > now
                 and old["direction"] == direction and old["required_timeframe"] == required_timeframe)
     if same:
         # Re-observation is not a new setup and cannot extend its original TTL.
         conn.execute("UPDATE ltf_watchlist SET reason=? WHERE strategy=? AND symbol=?",
-                     (reason, _strategy_name(strategy), symbol))
+                     (reason, normalized, symbol))
     else:
         if old:
             conn.execute("""INSERT OR REPLACE INTO ltf_setup_history VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -510,13 +553,13 @@ def upsert_ltf_watch(
             state='WAITING',reason=excluded.reason,expires_at=excluded.expires_at,
             setup_id=excluded.setup_id,created_at=CURRENT_TIMESTAMP,
             attempts=0,misses=0,last_checked_at=NULL,resolved_at=NULL""",
-            (_strategy_name(strategy),symbol,direction,required_timeframe,reason,
+            (normalized,symbol,direction,required_timeframe,reason,
              f"+{int(ttl_hours)} hours",uuid.uuid4().hex))
     row = dict(conn.execute("SELECT * FROM ltf_watchlist WHERE strategy=? AND symbol=?",
-                            (_strategy_name(strategy),symbol)).fetchone())
+                            (normalized,symbol)).fetchone())
     conn.commit(); conn.close()
     try:
-        _emit_stats_event("ltf_watch", _strategy_name(strategy), symbol,
+        _emit_stats_event("ltf_watch", normalized, symbol,
                           {**row, "identity_scope": "strategy_symbol_direction_tf_watch", "reobserved": same})
     except Exception:
         pass
@@ -529,6 +572,33 @@ def due_ltf_watches(limit: int = 12, db_path: str = DB_PATH) -> list[dict[str, A
         """UPDATE ltf_watchlist SET state='EXPIRED',resolved_at=CURRENT_TIMESTAMP
            WHERE state='WAITING' AND expires_at <= CURRENT_TIMESTAMP"""
     )
+    signal_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+    }
+    if {"symbol", "result"}.issubset(signal_columns):
+        strategy_expr = next(
+            (column for column in ("strategy", "signal_type", "grade") if column in signal_columns),
+            None,
+        )
+        direction_match = (
+            "AND UPPER(COALESCE(s.direction,''))=UPPER(COALESCE(ltf_watchlist.direction,''))"
+            if "direction" in signal_columns else ""
+        )
+        strategy_match = (
+            f"AND UPPER(COALESCE(s.{strategy_expr},''))=UPPER(ltf_watchlist.strategy)"
+            if strategy_expr else ""
+        )
+        conn.execute(
+            f"""UPDATE ltf_watchlist
+                   SET state='RESOLVED',reason='ALREADY_OPEN',
+                       resolved_at=CURRENT_TIMESTAMP,last_checked_at=CURRENT_TIMESTAMP
+                 WHERE state='WAITING' AND EXISTS (
+                       SELECT 1 FROM signals s
+                        WHERE UPPER(s.symbol)=UPPER(ltf_watchlist.symbol)
+                          AND LOWER(COALESCE(s.result,'pending'))='pending'
+                          {direction_match} {strategy_match}
+                 )"""
+        )
     rows = conn.execute(
         """SELECT * FROM ltf_watchlist WHERE state='WAITING'
            ORDER BY CASE WHEN last_checked_at IS NULL THEN 0 ELSE 1 END,

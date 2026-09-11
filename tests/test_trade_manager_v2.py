@@ -5,7 +5,7 @@ from core.trade_execution import ExecutionConfig, LIVE_CONFIRMATION, ensure_exec
 from core.trade_manager import (
     MANAGEMENT_TF, NO_PROGRESS_BARS, PROGRESS_TF, TRANSITION_MATRIX, activate_v2_once,
     confirm_manager_action, ensure_trade_manager_schema, load_state, no_progress_event_due,
-    register_active_trade, replay_closed_candle, review_active_trade,
+    persist_review, register_active_trade, replay_closed_candle, review_active_trade,
     validate_transition,
 )
 
@@ -98,6 +98,36 @@ def test_exchange_transition_commits_only_after_confirmation(tmp_path):
     assert load_state(1, db)["manager_state"] == "PROTECTED"
     assert confirm_manager_action(1, "PROTECT", "EXECUTED", db)
     assert load_state(1, db)["manager_state"] == "MANAGING"
+
+
+def test_proposed_protection_is_not_confirmed_before_exchange(tmp_path):
+    db = str(tmp_path / "brain.db")
+    register_active_trade({"id": 1, "symbol": "AAVEUSDT", "grade": "MTF", "direction": "BULLISH", "entry": 100, "sl": 95, "tp1": 105}, db_path=db)
+    row = load_state(1, db)
+    persist_review(row, 101, ["BOS"], {"management_candle_id": "c1"},
+                   {"action": "PROTECT", "confidence": .9, "protect_level": 98}, db)
+    pending = load_state(1, db)
+    assert pending["manager_protect_level"] is None
+    assert pending["proposed_protect_level"] == 98
+    assert confirm_manager_action(1, "PROTECT", "EXECUTED", db, confirmed_protect_level=98)
+    assert load_state(1, db)["manager_protect_level"] == 98
+
+
+def test_external_conflict_alone_cannot_authorize_close():
+    review = review_active_trade(
+        state(), ["EXTERNAL_CONFLICT"], {"external_conflict": True},
+        lambda *_a, **_k: '{"action":"CLOSE","confidence":.99,"reason":"conflict"}',
+    )
+    assert review["action"] == "HOLD"
+
+
+def test_partial_exit_uses_confirmed_remaining_fraction(tmp_path):
+    db = str(tmp_path / "brain.db")
+    register_active_trade({"id": 1, "symbol": "AAVEUSDT", "grade": "MTF", "direction": "BULLISH", "entry": 100, "sl": 95, "tp1": 105}, db_path=db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE trade_manager_state SET manager_state='TP1_REACHED' WHERE signal_id=1")
+    assert confirm_manager_action(1, "PARTIAL_EXIT", "EXECUTED", db, remaining_fraction=.7)
+    assert load_state(1, db)["position_fraction"] == .7
 
 
 def test_cutover_reconciliation_uses_one_position_snapshot_and_keeps_protection(tmp_path):

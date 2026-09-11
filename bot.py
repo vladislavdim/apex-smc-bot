@@ -118,6 +118,7 @@ from core.trade_manager import (
     manager_cycle as _trade_manager_cycle,
     load_active_states as _load_active_manager_states,
     finalize_manager_trade as _finalize_manager_trade,
+    reconcile_manager_states_from_signals as _reconcile_manager_states_from_signals,
     load_manager_message as _load_manager_message,
     store_manager_message as _store_manager_message,
     telegram_content_hash as _telegram_content_hash,
@@ -3713,6 +3714,7 @@ async def auto_trade_reconcile_job():
 async def _run_trade_manager_once():
     """Manage activated analytics trades using Gate data, outside the scan lock."""
     try:
+        await asyncio.to_thread(_reconcile_manager_states_from_signals, DB_PATH)
         await asyncio.to_thread(_register_pending_manager_signals, DB_PATH)
         manager_states = await asyncio.to_thread(_load_active_manager_states, DB_PATH)
         configured_trade_risk = float(os.environ.get("AUTO_TRADING_RISK_PCT", "0.5") or 0.5)
@@ -3815,7 +3817,10 @@ async def _run_trade_manager_once():
                 int(update.get("signal_id") or 0), update.get("telegram", ""),
             )
         if durable_events:
-            await backup_db_to_github("trade_manager_event")
+            logging.info(
+                "[TradeManager] %s durable event(s) committed; next scheduled/SIGTERM snapshot will persist them",
+                durable_events,
+            )
     except asyncio.CancelledError:
         logging.info("[TradeManager] cycle stopped during process shutdown")
     except Exception as exc:
@@ -4106,7 +4111,8 @@ def _zone_candidate_from_setup(r):
         "rr": r.get("rr"), "grade": "ZONE", "text": text,
         "confluence_score": int(r["rr"] * 20), "regime": "ZONE", "scan_type": "zone",
         "technical_evidence": {key: r.get(key) for key in (
-            "logic", "zone", "zone_type", "q_score", "htf_dir", "funding_warning", "structure_event"
+            "logic", "zone", "zone_type", "q_score", "quality_components",
+            "htf_dir", "funding_warning", "structure_event"
         ) if r.get(key) is not None},
     }
     candidate["technical_evidence"]["causal_matrix_ready"] = True
