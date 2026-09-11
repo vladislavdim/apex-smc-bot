@@ -17,7 +17,10 @@ _SNAPSHOTS: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
 
 
 def _enabled() -> bool:
-    return os.environ.get("APEX_LAB_PROFILE_SHADOW", "1").strip().lower() not in {"0", "false", "off", "no"}
+    configured = os.environ.get("APEX_LAB_PROFILE_SHADOW")
+    if configured is None:
+        return os.environ.get("RENDER", "").strip().lower() in {"1", "true", "yes"}
+    return configured.strip().lower() not in {"0", "false", "off", "no"}
 
 
 def _normalise_closed(candles: list[Mapping[str, Any]], timeframe: str) -> list[dict[str, Any]]:
