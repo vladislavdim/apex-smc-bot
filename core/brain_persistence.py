@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import sqlite3
 import tempfile
@@ -346,6 +347,7 @@ class BrainPersistence:
                     "error": self._last_error or "verified restore has not completed",
                 }
             temp_path = ""
+            payload_path = ""
             try:
                 metadata, state = self._remote_metadata()
                 if state != "ok" or metadata is None:
@@ -401,23 +403,64 @@ class BrainPersistence:
                 finally:
                     target.close()
                 self._integrity(temp_path)
-                with open(temp_path, "rb") as snapshot:
-                    content = snapshot.read()
-                upload = {
-                    "message": (
-                        f"brain.db backup {now[:16].replace('T', ' ')} "
-                        f"g{generation} [{str(reason)[:32]}] [skip ci]"
-                    ),
-                    "content": base64.b64encode(content).decode("ascii"),
-                    "branch": self.branch,
-                    "sha": current_sha,
-                }
+                snapshot_size = os.path.getsize(temp_path)
+                message = (
+                    f"brain.db backup {now[:16].replace('T', ' ')} "
+                    f"g{generation} [{str(reason)[:32]}] [skip ci]"
+                )
+                # GitHub's Contents API requires Base64 inside JSON. Reading a
+                # 40+ MiB database, encoding it, and then letting requests
+                # encode the JSON held roughly three full copies in RAM and
+                # caused periodic Render OOM restarts. Production sessions use
+                # a disk-backed streaming JSON body; injected test transports
+                # keep the small legacy dictionary contract.
+                streaming = bool(requests is not None and isinstance(self.session, requests.Session))
+                upload = None
+                if streaming:
+                    fd, payload_path = tempfile.mkstemp(
+                        dir=os.path.dirname(temp_path), prefix="brain-upload-", suffix=".json"
+                    )
+                    with os.fdopen(fd, "wb") as payload, open(temp_path, "rb") as snapshot:
+                        payload.write((
+                            '{"message":' + json.dumps(message) + ',"content":"'
+                        ).encode("utf-8"))
+                        # Multiple of three: only the final Base64 chunk may
+                        # contain padding, so concatenation stays valid.
+                        while True:
+                            chunk = snapshot.read(1_048_575)
+                            if not chunk:
+                                break
+                            payload.write(base64.b64encode(chunk))
+                        payload.write((
+                            '","branch":' + json.dumps(self.branch) +
+                            ',"sha":' + json.dumps(current_sha) + '}'
+                        ).encode("utf-8"))
+                else:
+                    with open(temp_path, "rb") as snapshot:
+                        content = snapshot.read()
+                    upload = {
+                        "message": message,
+                        "content": base64.b64encode(content).decode("ascii"),
+                        "branch": self.branch,
+                        "sha": current_sha,
+                    }
+
+                def put_snapshot():
+                    if not streaming:
+                        return self.session.put(
+                            self.contents_url, headers=self._headers(), json=upload,
+                            timeout=max(self.timeout, 30),
+                        )
+                    headers = {**self._headers(), "Content-Type": "application/json"}
+                    with open(payload_path, "rb") as body:
+                        return self.session.put(
+                            self.contents_url, headers=headers, data=body,
+                            timeout=max(self.timeout, 30),
+                        )
+
                 response = None
                 for attempt in range(3):
-                    response = self.session.put(
-                        self.contents_url, headers=self._headers(), json=upload,
-                        timeout=max(self.timeout, 30),
-                    )
+                    response = put_snapshot()
                     category, _message = self._github_error(response)
                     if response.status_code in (200, 201, 409, 422) or category != "transient":
                         break
@@ -441,10 +484,7 @@ class BrainPersistence:
                             "remote_blob_sha": refreshed_sha,
                             "local_base_sha": current_sha,
                         }
-                    response = self.session.put(
-                        self.contents_url, headers=self._headers(), json=upload,
-                        timeout=max(self.timeout, 30),
-                    )
+                    response = put_snapshot()
                 if response.status_code not in (200, 201):
                     if response.status_code in (409, 422):
                         self._last_error = f"GitHub concurrent update HTTP {response.status_code}"
@@ -471,7 +511,7 @@ class BrainPersistence:
                     "saved": True,
                     "blob_sha": new_sha,
                     "generation": generation,
-                    "size": len(content),
+                    "size": snapshot_size,
                     "counts": self._counts(temp_path),
                     "backed_up_at": now,
                 }
@@ -479,6 +519,8 @@ class BrainPersistence:
                 self._last_error = str(exc)
                 return {"status": "backup_failed", "saved": False, "error": str(exc)}
             finally:
+                if payload_path and os.path.exists(payload_path):
+                    os.unlink(payload_path)
                 if temp_path and os.path.exists(temp_path):
                     os.unlink(temp_path)
 
