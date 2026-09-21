@@ -1,7 +1,7 @@
 import inspect
 import unittest
 from pathlib import Path
-from apex.ui.dashboard import server as stats_server
+import stats_server
 
 class StrategyStatsFinalTests(unittest.TestCase):
     def test_setup_audit_uses_versioned_state_db(self):

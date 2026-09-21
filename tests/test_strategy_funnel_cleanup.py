@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from apex.ui.dashboard import server as stats_server
+import stats_server
 
 
 class StrategyFunnelCleanupTests(unittest.TestCase):
@@ -12,7 +12,7 @@ class StrategyFunnelCleanupTests(unittest.TestCase):
         cls.setup = Path('core/setup_evidence.py').read_text(encoding='utf-8')
         cls.audit = Path('core/setup_audit.py').read_text(encoding='utf-8')
         cls.catalog = Path('core/strategy_catalog.py').read_text(encoding='utf-8')
-        cls.stats = Path('apex/ui/dashboard/server.py').read_text(encoding='utf-8')
+        cls.stats = Path('stats_server.py').read_text(encoding='utf-8')
 
     def test_swing_4h_structure_is_context_but_1h_is_mandatory(self):
         self.assertIn('4h BOS/CHoCH context after trigger (non-blocking)', self.market)

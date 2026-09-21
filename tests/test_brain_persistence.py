@@ -364,7 +364,7 @@ class BrainPersistenceTests(unittest.TestCase):
 
     def test_runtime_has_periodic_and_sigterm_safety_paths(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn('state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m")', bot_source)
         self.assertEqual(bot_source.count('_v3_maintenance_and_backup("render_sigterm")'), 1)

@@ -52,7 +52,6 @@ class DashboardSettings:
     dashboard_token: str = field(repr=False)
     ingest_token: str = field(repr=False)
     market_database_url: str = field(default="", repr=False)
-    release_sha: str = ""
     port: int = 10000
     stats_baseline_utc: datetime = datetime.fromisoformat(DEFAULT_STATS_BASELINE_UTC)
     cache_ttl_seconds: int = 45
@@ -66,7 +65,6 @@ class DashboardSettings:
             dashboard_token=str(source.get("DASHBOARD_TOKEN") or "").strip(),
             ingest_token=str(source.get("INGEST_TOKEN") or "").strip(),
             market_database_url=str(source.get("APEX_MARKET_DATABASE_URL") or "").strip(),
-            release_sha=str(source.get("RENDER_GIT_COMMIT") or source.get("GIT_COMMIT") or "").strip(),
             port=_port(source),
             stats_baseline_utc=_baseline(source),
             cache_ttl_seconds=_bounded_int(source, "APEX_DASHBOARD_CACHE_TTL_SECONDS", 45, 5, 600),

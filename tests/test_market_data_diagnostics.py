@@ -6,7 +6,7 @@ os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 with patch("groq.Groq", return_value=object()):
     import market
-from apex.ui.dashboard import server as stats_server
+import stats_server
 from core import market_data_health
 from core import smc_engine
 
