@@ -27,19 +27,25 @@ def empty_context(symbol: str) -> dict[str, Any]:
         "source_registry_version": 1,
         "open_interest": {"value": None, "change_1h_pct": None, "change_4h_pct": None, "trend": "unknown", **meta, "source_values": {}},
         "funding": {"rate": None, "extreme": False, "bias": "neutral", **meta, "source_values": {}},
-        "liquidations": {"long_usd": 0, "short_usd": 0, "dominance": "unknown", **meta, "source_values": {}},
+        "liquidations": {"long_usd": None, "short_usd": None, "dominance": "unknown", **meta, "source_values": {}},
+        "long_short_ratio": {
+            "accounts": None, "takers": None, "top_accounts": None,
+            "top_positions": None, "change_1h": None,
+            **meta, "source_values": {},
+        },
         "large_orders": {"buy_pressure": None, "sell_pressure": None, "bias": "unknown", "method": None, **meta, "source_values": {}},
         "exchange_flow": {"inflow_usd": None, "outflow_usd": None, "bias": "unknown", **meta, "source_values": {}},
         "whale_activity": {"buy_usd": None, "sell_usd": None, "bias": "unknown", "confidence": 0, **meta, "source_values": {}},
         "smart_money": {"buy_usd": None, "sell_usd": None, "bias": "unknown", "confidence": 0, "top_wallets": [], "method": None, **meta, "source_values": {}},
         "live_tape": {
-            "buy_usd_60s": 0.0, "sell_usd_60s": 0.0,
-            "long_liq_usd_300s": 0.0, "short_liq_usd_300s": 0.0,
+            "buy_usd_60s": None, "sell_usd_60s": None,
+            "cvd_real_delta_usd_60s": None, "trade_count_60s": None,
+            "long_liq_usd_300s": None, "short_liq_usd_300s": None,
             "bias": "unknown", "sources": [], "age_seconds": None,
             "status": "unknown", "source_values": {},
         },
         "onchain_activity": {
-            "btc_large_transfers_usd": None, "btc_large_transfer_count": 0,
+            "btc_large_transfers_usd": None, "btc_large_transfer_count": None,
             "oli_labels": [], "status": "unknown", "sources": [], "age_seconds": None,
         },
         "slow_regime": {
@@ -48,7 +54,7 @@ def empty_context(symbol: str) -> dict[str, Any]:
             "status": "unknown", "source": None, "age_seconds": None,
         },
         "options_context": {
-            "underlying": None, "underlying_price": None, "contracts": 0,
+            "underlying": None, "underlying_price": None, "contracts": None,
             "calls_open_interest": None, "puts_open_interest": None,
             "put_call_oi_ratio": None, "put_call_volume_ratio": None,
             "positioning": "unknown", "dvol": None, "dvol_change_1h": None,
@@ -80,7 +86,7 @@ def empty_context(symbol: str) -> dict[str, Any]:
         "external_bias": "unknown",
         "external_confidence": 0,
         "microstructure": {
-            "source": "gate_ws", "status": "disabled", "scope": "SHADOW_CONTEXT",
+            "source": "gate_ws", "status": "disabled", "scope": "LIVE_CONTEXT",
             "institutional_intent": False,
         },
     }

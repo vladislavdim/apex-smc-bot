@@ -8,8 +8,9 @@ import stats_server
 class StrategyTuningTradeStatsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.market = Path("market.py").read_text(encoding="utf-8")
+        cls.market = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
         cls.stats = Path("stats_server.py").read_text(encoding="utf-8")
+        cls.dashboard = Path("apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 
     def test_swing_retains_structure_and_final_rr_after_ltf_refinement(self):
         self.assertIn("find_swings(candles, lookback=7)", self.market)
@@ -36,7 +37,7 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
         self.assertIn("_emit_trade_stats_event", self.market)
         self.assertIn('"trade_event"', self.market)
         self.assertIn('"trade_stats":trade_stats', self.stats)
-        self.assertIn("Статистика сделок", self.stats)
+        self.assertIn("Статистика реальных сделок", self.dashboard)
         self.assertIn("realized_r", self.stats)
         self.assertIn("pnl_pct", self.stats)
 
@@ -66,7 +67,7 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
             },
         ]
         with patch.object(stats_server, "_fetch", return_value=events):
-            data = stats_server.build_dashboard(days=1)
+            data = stats_server._build_dashboard_uncached(days=1)
         trade = data["trade_stats"]
         self.assertEqual(trade["opened"], 1)
         self.assertEqual(trade["closed"], 1)

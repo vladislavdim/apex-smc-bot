@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from collections import defaultdict
 from typing import Any
 
@@ -36,7 +37,7 @@ def _wilson(wins: int, total: int, z: float = 1.96) -> tuple[float, float]:
 
 def validation_report(db_path: str, min_samples: int = 30) -> dict[str, Any]:
     """Return per-strategy/direction results; never claim quality on tiny N."""
-    conn = sqlite3.connect(db_path, timeout=20)
+    conn = _connect_compatibility_db(db_path, timeout=20)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(

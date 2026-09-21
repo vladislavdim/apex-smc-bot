@@ -12,15 +12,23 @@ import hashlib
 import hmac
 import calendar
 import logging
-import os
 import re
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.repositories.execution_account import ExecutionAccountRepository
+from apex.db.repositories.executions import ExecutionRepository
+from apex.db.repositories.manager import ManagerRepository
+from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
+from apex.db.execution_recovery import append_recovery, replay_recovery
+from apex.domain.ids import derived_id, is_id
+from apex.execution.plan import client_order_ids
 import threading
 import time
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any, Mapping
 from urllib.parse import urlencode
+from apex.config.settings import ApexConfig
 
 try:
     import requests
@@ -35,7 +43,7 @@ except ImportError:  # direct core/ import compatibility
     from signal_integrity import validate_candidate
 
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 LIVE_CONFIRMATION = "ENABLE_LIVE_BINANCE_FUTURES"
 _TRUTHY = {"1", "true", "yes", "on"}
 _reconcile_process_lock = threading.Lock()
@@ -44,10 +52,90 @@ _binance_blocked_until = 0.0
 _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
 _account_cache_lock = threading.Lock()
+_ACCOUNT_STATE_FACTORY = None
+
+
+def configure_execution_state(connection_factory=None) -> None:
+    """Bind non-signal execution state to apex_state.db in production."""
+    global _ACCOUNT_STATE_FACTORY
+    _ACCOUNT_STATE_FACTORY = connection_factory
+
+
+def _execution_account_repository(db_path: str) -> ExecutionAccountRepository:
+    factory = _ACCOUNT_STATE_FACTORY or (lambda: _connect(db_path))
+    return ExecutionAccountRepository(factory)
+
+
+def _execution_state_repository() -> ExecutionRepository | None:
+    """Return the V3 execution writer only when State DB is configured."""
+    return ExecutionRepository(_ACCOUNT_STATE_FACTORY) if _ACCOUNT_STATE_FACTORY else None
+
+
+def _manager_state_repository() -> ManagerRepository | None:
+    return ManagerRepository(_ACCOUNT_STATE_FACTORY) if _ACCOUNT_STATE_FACTORY else None
+
+
+def _reconciliation_required_signal_ids(db_path: str) -> set[int]:
+    """Read Manager cutover ownership from State, with legacy compatibility."""
+    repository = _manager_state_repository()
+    if repository is not None:
+        try:
+            return repository.reconciliation_required(limit=5000)
+        except Exception as exc:
+            logging.error("[APEX V3] Manager State read unavailable: %s", type(exc).__name__)
+            return set()
+    conn = _connect(db_path)
+    try:
+        return {
+            int(item[0]) for item in conn.execute(
+                "SELECT signal_id FROM trade_manager_state WHERE manager_state='RECONCILIATION_REQUIRED'"
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
+
+
+def _mirror_execution_record(values: Mapping[str, Any]) -> bool:
+    """Write canonical execution State without risking Binance recovery.
+
+    State is the cutover authority. A failure is surfaced by the runtime parity
+    gate; raising here could strand an already accepted Binance order outside
+    the temporary compatibility recovery path.
+    """
+    repository = _execution_state_repository()
+    if repository is None:
+        return True
+    try:
+        signal_id = int(values["signal_id"])
+        if repository.get(signal_id) is None:
+            repository.register(values)
+        repository.bind_identity(
+            signal_id,
+            execution_id=values.get("execution_id"),
+            candidate_id=values.get("candidate_id"),
+            position_id=values.get("position_id"),
+        )
+        repository.update_exchange_state(
+            signal_id,
+            **{
+                key: values.get(key) for key in (
+                    "status", "quantity", "entry_order_id", "stop_order_id",
+                    "tp1_order_id", "tp2_order_id", "active_stop_price",
+                    "pending_stop_order_id", "previous_stop_order_id", "last_error",
+                ) if key in values
+            },
+        )
+        return True
+    except Exception as exc:
+        logging.error("[APEX V3] execution dual-write deferred: %s", type(exc).__name__)
+        return False
 _binance_metrics_lock = threading.Lock()
 _binance_request_metrics = {"total": 0, "rate_limited": 0, "last_status": None, "last_request_epoch": None}
 _DEFAULT_BALANCE_CACHE_TTL_SECONDS = 900
 _LIVE_RECONCILE_STATUSES = (
+    "SUBMITTING",
     "ENTRY_PENDING",
     "PROTECTED",
     "PROTECTED_NO_TP",
@@ -130,39 +218,28 @@ class ExecutionConfig:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ExecutionConfig":
-        source = os.environ if env is None else env
-        mode = str(source.get("AUTO_TRADING_MODE", "paper")).strip().lower()
+        config = ApexConfig.from_env(env)
+        execution = config.execution
+        mode = execution.mode
         if mode not in {"paper", "live"}:
             mode = "paper"
-        try:
-            leverage = int(source.get("AUTO_TRADING_LEVERAGE", "5"))
-        except (TypeError, ValueError):
-            leverage = 5
-        try:
-            retries = int(source.get("AUTO_TRADING_RETRIES", "3"))
-        except (TypeError, ValueError):
-            retries = 3
         return cls(
-            enabled=_env_bool(source.get("AUTO_TRADING_ENABLED"), False),
+            enabled=execution.enabled,
             mode=mode,
-            leverage=max(1, min(5, leverage)),
-            risk_pct=_bounded_float(source.get("AUTO_TRADING_RISK_PCT"), 0.5, 0.05, 1.0),
-            paper_balance_usdt=_bounded_float(
-                source.get("AUTO_TRADING_PAPER_BALANCE_USDT"), 1000.0, 0.0, 1_000_000_000.0,
-            ),
-            fee_bps=_bounded_float(source.get("AUTO_TRADING_FEE_BPS"), 10.0, 0.0, 100.0),
-            tp1_fraction=_bounded_float(source.get("AUTO_TRADING_TP1_FRACTION"), 0.5, 0.1, 0.9),
-            api_key=str(source.get("BINANCE_API_KEY", "")).strip(),
-            api_secret=str(source.get("BINANCE_API_SECRET", "")).strip(),
-            base_url=str(source.get("BINANCE_FUTURES_API_URL", "https://fapi.binance.com")).rstrip("/"),
-            live_confirmation=str(source.get("AUTO_TRADING_LIVE_CONFIRM", "")).strip(),
-            timeout_seconds=_bounded_float(source.get("AUTO_TRADING_TIMEOUT_SECONDS"), 8.0, 3.0, 10.0),
-            retries=max(1, min(4, retries)),
-            kill_switch=_env_bool(source.get("AUTO_TRADING_KILL_SWITCH"), False),
-            max_open_positions=_bounded_int(source.get("AUTO_TRADING_MAX_OPEN_POSITIONS"), 3, 1, 10),
-            max_daily_loss_pct=_bounded_float(
-                source.get("AUTO_TRADING_MAX_DAILY_LOSS_PCT"), 2.0, 0.25, 10.0,
-            ),
+            leverage=max(1, min(5, execution.leverage)),
+            risk_pct=max(0.05, min(1.0, config.risk.risk_pct)),
+            paper_balance_usdt=max(0.0, min(1_000_000_000.0, execution.paper_balance_usdt)),
+            fee_bps=max(0.0, min(100.0, execution.fee_bps)),
+            tp1_fraction=max(0.1, min(0.9, execution.tp1_fraction)),
+            api_key=execution.binance_api_key,
+            api_secret=execution.binance_api_secret,
+            base_url=execution.binance_base_url,
+            live_confirmation=execution.live_confirmation,
+            timeout_seconds=max(3.0, min(10.0, execution.timeout_seconds)),
+            retries=max(1, min(4, execution.retries)),
+            kill_switch=execution.kill_switch,
+            max_open_positions=max(1, min(10, config.risk.max_open_positions)),
+            max_daily_loss_pct=max(0.25, min(10.0, config.risk.max_daily_loss_pct)),
         )
 
     @property
@@ -373,6 +450,14 @@ class BinanceFuturesClient:
                             time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(deadline)),
                             response.status_code,
                         )
+                        try:
+                            from apex.telemetry.incidents import report_incident
+                            report_incident(
+                                "BINANCE_RATE_LIMIT", "binance", "ERROR",
+                                {"http_status": response.status_code, "blocked_until": deadline},
+                            )
+                        except Exception:
+                            pass
                         raise error
                     if error_code == -1021 and signed and attempt < max_attempts - 1:
                         self._sync_server_time()
@@ -480,11 +565,28 @@ class BinanceFuturesClient:
     def available_usdt(self) -> float:
         return self.usdt_balance_details()["available_balance"]
 
-    def income_history(self, limit: int = 100, start_time: int | None = None) -> list[dict[str, Any]]:
+    def income_history(
+        self,
+        limit: int = 100,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        *,
+        income_type: str | None = None,
+        symbol: str | None = None,
+        page: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Return recent USD-M income records (Binance defaults to seven days)."""
         params = {"limit": max(1, min(int(limit), 1000))}
         if start_time is not None:
             params["startTime"] = int(start_time)
+        if end_time is not None:
+            params["endTime"] = int(end_time)
+        if income_type:
+            params["incomeType"] = str(income_type).upper()
+        if symbol:
+            params["symbol"] = str(symbol).upper()
+        if page is not None:
+            params["page"] = max(1, int(page))
         result = self._request("GET", "/fapi/v1/income", params, signed=True)
         return result if isinstance(result, list) else []
 
@@ -600,11 +702,14 @@ class BinanceFuturesClient:
         return self._submit_standard_order({
             "symbol": symbol, "side": side, "positionSide": "BOTH", "type": "MARKET",
             "quantity": quantity, "reduceOnly": "true", "newClientOrderId": client_id,
+            # Binance documents that RESULT returns the final FILLED response
+            # for MARKET orders. Manager state must never advance on ACK only.
+            "newOrderRespType": "RESULT",
         })
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
@@ -672,6 +777,19 @@ def ensure_execution_schema(db_path: str = DB_PATH) -> None:
 
 def cached_execution_snapshot(signal_id: int, db_path: str = DB_PATH) -> dict[str, Any]:
     """Return manager context from SQLite without touching Binance."""
+    repository = _execution_state_repository()
+    if repository is not None:
+        row = repository.get(int(signal_id))
+        if row is None:
+            return {"signal_id": int(signal_id), "status": "NOT_EXECUTED"}
+        return {
+            key: row.get(key) for key in (
+                "signal_id", "mode", "symbol", "direction", "status", "entry", "sl",
+                "active_stop_price", "tp1", "tp2", "quantity", "entry_order_id",
+                "stop_order_id", "pending_stop_order_id", "previous_stop_order_id",
+                "tp1_order_id", "tp2_order_id", "last_error", "updated_at",
+            )
+        }
     ensure_execution_schema(db_path)
     conn = _connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -689,31 +807,68 @@ def cached_execution_snapshot(signal_id: int, db_path: str = DB_PATH) -> dict[st
 def _claim_manager_action(
     db_path: str, action_key: str, signal_id: int, action: str, requested_level: float | None,
 ) -> bool:
-    conn = _connect(db_path)
-    cursor = conn.execute(
-        """INSERT INTO manager_execution_actions
-           (action_key,signal_id,action,status,requested_level)
-           VALUES (?,?,?,'PROCESSING',?)
-           ON CONFLICT(action_key) DO UPDATE SET status='PROCESSING',error=NULL,
-             updated_at=CURRENT_TIMESTAMP
-           WHERE manager_execution_actions.status='ERROR'
-             AND manager_execution_actions.updated_at <= datetime('now','-1 minute')""",
-        (str(action_key), int(signal_id), str(action), requested_level),
-    )
-    conn.commit()
-    claimed = cursor.rowcount == 1
-    conn.close()
+    repository = _execution_state_repository()
+    if repository is not None:
+        try:
+            return repository.claim_action(action_key, signal_id, action, requested_level)
+        except Exception as exc:
+            # Idempotency is a capital-safety invariant. Never execute an
+            # exchange mutation when canonical State cannot own its claim.
+            logging.error("[APEX V3] execution action State claim failed: %s", type(exc).__name__)
+            return False
+    ensure_execution_schema(db_path)
+    conn = None
+    try:
+        conn = _connect(db_path)
+        cursor = conn.execute(
+            """INSERT INTO manager_execution_actions
+               (action_key,signal_id,action,status,requested_level)
+               VALUES (?,?,?,'PROCESSING',?)
+               ON CONFLICT(action_key) DO UPDATE SET status='PROCESSING',error=NULL,
+                 updated_at=CURRENT_TIMESTAMP
+               WHERE manager_execution_actions.status='ERROR'
+                 AND manager_execution_actions.updated_at <= datetime('now','-1 minute')""",
+            (str(action_key), int(signal_id), str(action), requested_level),
+        )
+        conn.commit()
+        claimed = cursor.rowcount == 1
+        conn.close()
+        conn = None
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.rollback()
+            conn.close()
+        logging.error("[APEX V3] compatibility action claim failed: %s", type(exc).__name__)
+        return False
     return claimed
 
 
 def _finish_manager_action(
     db_path: str, action_key: str, status: str, *, order_id: str = "", error: str = "",
 ) -> None:
+    repository = _execution_state_repository()
+    if repository is not None:
+        try:
+            repository.finish_action(action_key, status, order_id=order_id, error=error)
+            return
+        except Exception as exc:
+            logging.error("[APEX V3] execution action State finish deferred: %s", type(exc).__name__)
+            append_recovery(db_path, {
+                "kind": "manager_action_finish", "action_key": str(action_key),
+                "status": str(status), "order_id": str(order_id or ""),
+                "error": str(error or "")[:1000],
+            })
+            return
+    ensure_execution_schema(db_path)
     conn = _connect(db_path)
     conn.execute(
-        """UPDATE manager_execution_actions SET status=?,exchange_order_id=?,error=?,
-                  updated_at=CURRENT_TIMESTAMP WHERE action_key=?""",
-        (str(status), str(order_id or ""), str(error or "")[:1000], str(action_key)),
+        """INSERT INTO manager_execution_actions(
+                  action_key,signal_id,action,status,requested_level,exchange_order_id,error
+               ) VALUES(?,0,'RECOVERY',?,NULL,?,?)
+               ON CONFLICT(action_key) DO UPDATE SET status=excluded.status,
+                  exchange_order_id=excluded.exchange_order_id,error=excluded.error,
+                  updated_at=CURRENT_TIMESTAMP""",
+        (str(action_key), str(status), str(order_id or ""), str(error or "")[:1000]),
     )
     conn.commit()
     conn.close()
@@ -734,22 +889,35 @@ def execute_manager_review(
     # Formal V2 transition validation always precedes risk/exchange checks.
     try:
         from core.trade_manager import validate_transition
-        conn = _connect(db_path)
-        table_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_manager_state'"
-        ).fetchone()
-        manager_row = conn.execute(
-            "SELECT manager_state,partial_exit_done,initial_entry FROM trade_manager_state WHERE signal_id=?",
-            (signal_id,),
-        ).fetchone() if table_exists else None
-        conn.close()
+        repository = _manager_state_repository()
+        if repository is not None:
+            manager_row = repository.get(signal_id)
+            if manager_row is None:
+                return {"signal_id": signal_id, "status": "MANAGER_STATE_UNAVAILABLE", "action": action}
+        else:
+            conn = _connect(db_path)
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_manager_state'"
+            ).fetchone()
+            manager_row = conn.execute(
+                "SELECT manager_state,partial_exit_done,initial_entry FROM trade_manager_state WHERE signal_id=?",
+                (signal_id,),
+            ).fetchone() if table_exists else None
+            conn.close()
         facts = update.get("facts") if isinstance(update.get("facts"), Mapping) else {}
         if manager_row:
-            manager_state = str(facts.get("manager_state_before") or manager_row[0] or "PROTECTED")
+            manager_state = str(
+                facts.get("manager_state_before")
+                or (manager_row.get("manager_state") if isinstance(manager_row, Mapping) else manager_row[0])
+                or "PROTECTED"
+            )
             valid_transition, _ = validate_transition(manager_state, action)
             if not valid_transition:
                 return {"signal_id": signal_id, "status": "INVALID_STATE_TRANSITION", "action": action}
-            if action == "PARTIAL_EXIT" and int(manager_row[1] or 0):
+            partial_done = (
+                manager_row.get("partial_exit_done") if isinstance(manager_row, Mapping) else manager_row[1]
+            )
+            if action == "PARTIAL_EXIT" and int(partial_done or 0):
                 return {"signal_id": signal_id, "status": "DUPLICATE_SKIPPED", "action": action}
     except sqlite3.Error:
         manager_row = None
@@ -805,19 +973,18 @@ def execute_manager_review(
             )
             new_stop_id = _required_remote_order_id(new_stop, "manager protective stop")
             old_stop_id = str(snapshot.get("stop_order_id") or "")
-            execution_id = int(_execution_id(db_path, signal_id))
             # Persist the newly installed protection before touching the old
             # order. A restart or failed cancellation can therefore reconcile
             # two known IDs instead of creating a third stop blindly.
             _update_execution(
-                db_path, execution_id, "STOP_REPLACEMENT_PENDING",
+                db_path, signal_id, "STOP_REPLACEMENT_PENDING",
                 stop_order_id=new_stop_id, pending_stop_order_id=new_stop_id,
                 previous_stop_order_id=old_stop_id, active_stop_price=float(rounded),
             )
             if old_stop_id and old_stop_id != new_stop_id:
                 client.cancel_algo_order(old_stop_id)
             _update_execution(
-                db_path, execution_id, str(snapshot["status"]), stop_order_id=new_stop_id,
+                db_path, signal_id, str(snapshot["status"]), stop_order_id=new_stop_id,
                 pending_stop_order_id=None, previous_stop_order_id=None,
                 active_stop_price=float(rounded),
             )
@@ -844,9 +1011,17 @@ def execute_manager_review(
         order = client.emergency_close(
             symbol, direction, _plain_decimal(quantity), f"apex_mx_{signal_id}_{action_key[:8]}",
         )
-        order_id = str(order.get("orderId") or "")
+        order_id = _required_remote_order_id(order, "manager market reduction")
+        order_status = str(order.get("status") or "").upper()
+        executed_quantity = _decimal(order.get("executedQty") or order.get("cumQty") or "0")
+        if order_status != "FILLED" or executed_quantity <= 0:
+            raise RuntimeError(
+                f"manager market action not fill-confirmed: {order_status or 'UNKNOWN'}"
+            )
+        if executed_quantity > amount:
+            raise RuntimeError("manager fill exceeds confirmed Binance position")
         if action == "CLOSE":
-            _update_execution(db_path, int(_execution_id(db_path, signal_id)), "CLEANUP_PENDING")
+            _update_execution(db_path, signal_id, "CLEANUP_PENDING")
             conn = _connect(db_path)
             try:
                 conn.execute(
@@ -865,7 +1040,8 @@ def execute_manager_review(
             remaining_fraction = None
             if action == "PARTIAL_EXIT":
                 original_quantity = _decimal(snapshot.get("quantity") or amount)
-                remaining_fraction = float(max(Decimal("0"), amount - quantity) / original_quantity) if original_quantity > 0 else None
+                remaining = max(Decimal("0"), amount - executed_quantity)
+                remaining_fraction = float(remaining / original_quantity) if original_quantity > 0 else None
             confirm_manager_action(
                 signal_id, action, "EXECUTED", db_path,
                 remaining_fraction=remaining_fraction,
@@ -880,60 +1056,68 @@ def execute_manager_review(
         return {"signal_id": signal_id, "status": "ERROR", "action": action, "error": str(exc)}
 
 
-def _execution_id(db_path: str, signal_id: int) -> int:
-    conn = _connect(db_path)
-    row = conn.execute("SELECT id FROM trade_executions WHERE signal_id=?", (int(signal_id),)).fetchone()
-    conn.close()
-    if not row:
-        raise RuntimeError("execution row disappeared")
-    return int(row[0])
-
-
-def _live_reconcile_rows(db_path: str) -> list[sqlite3.Row]:
+def _live_reconcile_rows(db_path: str) -> list[Mapping[str, Any]]:
     """Return only live executions that currently require Binance I/O.
 
     The scheduler calls reconciliation frequently, so the database is the
     first gate.  A Binance client must not even be constructed when there is
     no submitted entry or active order to protect/clean up.
     """
-    ensure_execution_schema(db_path)
-    conn = _connect(db_path)
-    conn.row_factory = sqlite3.Row
-    has_signals = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signals'"
-    ).fetchone()
-    placeholders = ",".join("?" for _ in _LIVE_RECONCILE_STATUSES)
-    if has_signals:
-        rows = conn.execute(
-            f"""SELECT te.*, COALESCE(s.result, 'pending') AS signal_result
-                FROM trade_executions te LEFT JOIN signals s ON s.id=te.signal_id
-                WHERE te.mode='live' AND te.status IN ({placeholders})""",
-            _LIVE_RECONCILE_STATUSES,
-        ).fetchall()
+    if _ACCOUNT_STATE_FACTORY is not None:
+        try:
+            replay_recovery(db_path, _ACCOUNT_STATE_FACTORY)
+            state_rows = ExecutionRepository(
+                _ACCOUNT_STATE_FACTORY
+            ).requiring_reconciliation(_LIVE_RECONCILE_STATUSES)
+            lifecycle = SignalLifecycleRepository(_ACCOUNT_STATE_FACTORY).get_many(
+                [int(row["signal_id"]) for row in state_rows]
+            )
+        except Exception as exc:
+            logging.error("[APEX V3] execution/lifecycle State read unavailable: %s", type(exc).__name__)
+            return []
+        # State is the V3 lifecycle authority. Missing rows remain pending so
+        # an incomplete migration can never trigger protective-order cleanup.
+        rows = [
+            {
+                **row,
+                "signal_result": (
+                    str(lifecycle[int(row["signal_id"])]["result"])
+                    if int(row["signal_id"]) in lifecycle
+                    else "pending"
+                ),
+            }
+            for row in state_rows
+        ]
     else:
-        rows = conn.execute(
-            f"""SELECT te.*, 'pending' AS signal_result
-                FROM trade_executions te
-                WHERE te.mode='live' AND te.status IN ({placeholders})""",
-            _LIVE_RECONCILE_STATUSES,
-        ).fetchall()
-    cutover_ids: set[int] = set()
-    has_manager = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_manager_state'"
-    ).fetchone()
-    if has_manager:
-        cutover_ids = {
-            int(item[0]) for item in conn.execute(
-                "SELECT signal_id FROM trade_manager_state WHERE manager_state='RECONCILIATION_REQUIRED'"
+        ensure_execution_schema(db_path)
+        conn = _connect(db_path)
+        conn.row_factory = sqlite3.Row
+        has_signals = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signals'"
+        ).fetchone()
+        placeholders = ",".join("?" for _ in _LIVE_RECONCILE_STATUSES)
+        if has_signals:
+            rows = conn.execute(
+                f"""SELECT te.*, COALESCE(s.result, 'pending') AS signal_result
+                    FROM trade_executions te LEFT JOIN signals s ON s.id=te.signal_id
+                    WHERE te.mode='live' AND te.status IN ({placeholders})""",
+                _LIVE_RECONCILE_STATUSES,
             ).fetchall()
-        }
-    conn.close()
+        else:
+            rows = conn.execute(
+                f"""SELECT te.*, 'pending' AS signal_result
+                    FROM trade_executions te
+                    WHERE te.mode='live' AND te.status IN ({placeholders})""",
+                _LIVE_RECONCILE_STATUSES,
+            ).fetchall()
+        conn.close()
+    cutover_ids = _reconciliation_required_signal_ids(db_path)
 
-    actionable: list[sqlite3.Row] = []
+    actionable: list[Mapping[str, Any]] = []
     for row in rows:
         status = str(row["status"])
         signal_pending = str(row["signal_result"]) == "pending"
-        if status in {"ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}:
+        if status in {"SUBMITTING", "ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}:
             actionable.append(row)
         elif status == "PROTECTED" and (not signal_pending or int(row["signal_id"]) in cutover_ids):
             actionable.append(row)
@@ -944,8 +1128,45 @@ def _store_execution(
     db_path: str, signal_id: int, config: ExecutionConfig, candidate: dict[str, Any],
     status: str, plan: dict[str, Any] | None = None, error: str = "", entry_order_id: str = "",
 ) -> dict[str, Any]:
-    ensure_execution_schema(db_path)
     plan = plan or {}
+    candidate_id = str(candidate.get("_v3_candidate_id") or "")
+    if not is_id(candidate_id, "candidate"):
+        candidate_id = ""
+    execution_id = derived_id(
+        "execution", candidate_id or f"compatibility-signal:{int(signal_id)}",
+    )
+    record = {
+        "signal_id": signal_id,
+        "execution_id": execution_id,
+        "candidate_id": candidate_id or None,
+        "mode": config.mode,
+        "exchange": "binance_futures",
+        "symbol": str(candidate.get("symbol", "")),
+        "direction": str(candidate.get("direction", "")),
+        "status": status,
+        "entry": float(plan.get("entry", candidate.get("entry", 0)) or 0),
+        "sl": float(plan.get("sl", candidate.get("sl", 0)) or 0),
+        "tp1": float(plan.get("tp1", candidate.get("tp1", candidate.get("tp", 0))) or 0),
+        "tp2": float(plan.get("tp2", candidate.get("tp2") or candidate.get("tp1", candidate.get("tp", 0))) or 0),
+        "tp3": candidate.get("tp3"),
+        "quantity": float(plan.get("quantity", 0) or 0),
+        "risk_usdt": float(plan.get("risk_budget", 0) or 0),
+        "balance_usdt": float(plan.get("available_balance", 0) or 0),
+        "leverage": int(plan.get("leverage", config.leverage) or config.leverage),
+        "entry_order_id": str(entry_order_id or ""),
+        "last_error": str(error or "")[:1000],
+    }
+    # Freeze the immutable execution plan in State first. A failed post-order
+    # write is preserved in the append-only recovery journal, never brain.db.
+    state_persisted = _mirror_execution_record(record)
+    if _execution_state_repository() is not None:
+        if not state_persisted and entry_order_id:
+            append_recovery(db_path, {"kind": "execution_snapshot", "values": record})
+        return {
+            "status": status, "signal_id": signal_id, "error": error, "plan": plan,
+            "state_persisted": state_persisted, "execution_id": execution_id,
+        }
+    ensure_execution_schema(db_path)
     conn = _connect(db_path)
     conn.execute(
         """INSERT INTO trade_executions
@@ -956,19 +1177,18 @@ def _store_execution(
              status=excluded.status, entry_order_id=COALESCE(NULLIF(excluded.entry_order_id,''), trade_executions.entry_order_id),
              last_error=excluded.last_error, updated_at=CURRENT_TIMESTAMP""",
         (
-            signal_id, config.mode, str(candidate.get("symbol", "")), str(candidate.get("direction", "")), status,
-            float(plan.get("entry", candidate.get("entry", 0)) or 0),
-            float(plan.get("sl", candidate.get("sl", 0)) or 0),
-            float(plan.get("tp1", candidate.get("tp1", candidate.get("tp", 0))) or 0),
-            float(plan.get("tp2", candidate.get("tp2") or candidate.get("tp1", candidate.get("tp", 0))) or 0),
-            float(plan.get("quantity", 0) or 0), float(plan.get("risk_budget", 0) or 0),
-            float(plan.get("available_balance", 0) or 0), int(plan.get("leverage", config.leverage) or config.leverage),
-            str(entry_order_id or ""), str(error or "")[:1000],
+            record["signal_id"], record["mode"], record["symbol"], record["direction"],
+            record["status"], record["entry"], record["sl"], record["tp1"], record["tp2"],
+            record["quantity"], record["risk_usdt"], record["balance_usdt"],
+            record["leverage"], record["entry_order_id"], record["last_error"],
         ),
     )
     conn.commit()
     conn.close()
-    return {"status": status, "signal_id": signal_id, "error": error, "plan": plan}
+    return {
+        "status": status, "signal_id": signal_id, "error": error, "plan": plan,
+        "state_persisted": state_persisted, "execution_id": execution_id,
+    }
 
 
 def execute_approved_candidate(
@@ -979,18 +1199,47 @@ def execute_approved_candidate(
     config = config or ExecutionConfig.from_env()
     if not config.enabled:
         return {"status": "DISABLED", "signal_id": signal_id}
-    # Manager V2 cutover fence: no new execution can bypass the sole-manager
-    # runtime switch. Missing legacy table remains backward compatible in paper.
+    # V3 readiness is the final local admission fence before any Binance
+    # account or order call.  Manager/reconciliation paths do not use this
+    # function and therefore remain available while new entries are off.
     try:
-        conn = _connect(db_path)
-        row = conn.execute(
-            "SELECT value FROM trade_manager_runtime WHERE key='opens_enabled'"
-        ).fetchone()
-        conn.close()
-        if row and str(row[0]) != "1":
+        from apex.app.runtime import entry_admission
+
+        admitted, runtime_reason = entry_admission()
+    except Exception as runtime_error:
+        admitted, runtime_reason = False, f"runtime supervisor unavailable: {runtime_error}"
+    if not admitted:
+        return _store_execution(
+            db_path,
+            signal_id,
+            config,
+            candidate,
+            "BLOCKED_RUNTIME_NOT_READY",
+            error=runtime_reason or "APEX runtime is not ready for new entries",
+        )
+    # V3 entry_admission above is the canonical runtime fence. The historical
+    # V2 opens flag remains only for an unconfigured compatibility runtime.
+    try:
+        manager_repository = _manager_state_repository()
+        if manager_repository is None:
+            conn = _connect(db_path)
+            row = conn.execute(
+                "SELECT value FROM trade_manager_runtime WHERE key='opens_enabled'"
+            ).fetchone()
+            conn.close()
+            opens_enabled = str(row[0]) if row else "1"
+            if opens_enabled != "1":
+                return {"status": "BLOCKED_MANAGER_CUTOVER", "signal_id": signal_id}
+    except sqlite3.Error as exc:
+        if _ACCOUNT_STATE_FACTORY is None:
+            # Compatibility-only tests/installations may predate Manager V2.
+            pass
+        else:
+            logging.error("[APEX V3] Manager runtime admission unavailable: %s", type(exc).__name__)
             return {"status": "BLOCKED_MANAGER_CUTOVER", "signal_id": signal_id}
-    except sqlite3.Error:
-        pass
+    except Exception as exc:
+        logging.error("[APEX V3] Manager runtime admission unavailable: %s", type(exc).__name__)
+        return {"status": "BLOCKED_MANAGER_CUTOVER", "signal_id": signal_id}
 
     risk_state = candidate.get("_strategy_risk_state") or {}
     if str(risk_state.get("mode", "NORMAL")).upper() == "PAUSED":
@@ -1027,11 +1276,8 @@ def execute_approved_candidate(
 
         # Telegram delivery stays fail-open, but real money is fail-closed.
         review = candidate.get("_external_quality_review")
-        try:
-            min_groq = float(os.environ.get("AUTO_TRADING_MIN_GROQ_CONFIDENCE", os.environ.get("GROQ_MIN_APPROVAL_CONFIDENCE", "0.70")))
-        except ValueError:
-            min_groq = 0.70
-        min_groq = max(0.0, min(1.0, min_groq)); groq_error = ""
+        min_groq = ApexConfig.from_env().execution.min_groq_confidence
+        groq_error = ""
         if not candidate.get("_external_quality_reviewed") or not isinstance(review, dict): groq_error = "missing Groq quality review"
         elif bool(review.get("degraded")): groq_error = "degraded Groq quality review"
         elif str(review.get("decision", "")).upper() != "APPROVE": groq_error = f"Groq decision is {review.get('decision', 'missing')}"
@@ -1102,7 +1348,16 @@ def execute_approved_candidate(
         # Isolated margin bounds a symbol failure to its allocated margin.
         client.set_isolated_margin(symbol)
         client.set_leverage(symbol, config.leverage)
-        response = client.place_limit_entry(plan, f"apex_e_{signal_id}")
+        intent = _store_execution(
+            db_path, signal_id, config, candidate, "SUBMITTING", plan,
+        )
+        if _execution_state_repository() is not None and not intent.get("state_persisted"):
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_STATE_PERSISTENCE", plan,
+                error="canonical execution intent was not persisted",
+            )
+        client_order_id = client_order_ids(str(intent["execution_id"]))["entry"]
+        response = client.place_limit_entry(plan, client_order_id)
         order_id = str(response.get("orderId", ""))
         if not order_id:
             raise RuntimeError("Binance did not return an entry order id")
@@ -1128,20 +1383,44 @@ def execute_approved_candidate(
         return _store_execution(db_path, signal_id, config, candidate, "ERROR", error=str(exc))
 
 
-def _update_execution(db_path: str, execution_id: int, status: str, **fields: Any) -> None:
-    allowed = {"stop_order_id", "pending_stop_order_id", "previous_stop_order_id",
+def _update_execution(db_path: str, signal_id: int, status: str, **fields: Any) -> None:
+    """Persist exchange state, journaling only a failed canonical mutation."""
+    allowed = {"entry_order_id", "stop_order_id", "pending_stop_order_id", "previous_stop_order_id",
                "tp1_order_id", "tp2_order_id", "last_error", "quantity", "active_stop_price"}
+    changes = {key: value for key, value in fields.items() if key in allowed}
+    repository = _execution_state_repository()
+    state_updated = False
+    if repository is not None:
+        try:
+            state_updated = repository.update_exchange_state(
+                int(signal_id), status=status, **changes,
+            )
+            if state_updated:
+                return
+        except Exception as exc:
+            logging.error("[APEX V3] execution State update deferred: %s", type(exc).__name__)
+        append_recovery(db_path, {
+            "kind": "execution_update", "signal_id": int(signal_id),
+            "status": str(status), "changes": changes,
+        })
+        return
+    ensure_execution_schema(db_path)
     updates = ["status=?", "updated_at=CURRENT_TIMESTAMP"]
     values: list[Any] = [status]
-    for key, value in fields.items():
-        if key in allowed:
-            updates.append(f"{key}=?")
-            values.append(value)
-    values.append(execution_id)
+    for key, value in changes.items():
+        updates.append(f"{key}=?")
+        values.append(value)
+    values.append(int(signal_id))
     conn = _connect(db_path)
-    conn.execute(f"UPDATE trade_executions SET {', '.join(updates)} WHERE id=?", values)
+    conn.execute(f"UPDATE trade_executions SET {', '.join(updates)} WHERE signal_id=?", values)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM trade_executions WHERE signal_id=?", (int(signal_id),)
+    ).fetchone()
     conn.commit()
     conn.close()
+    if row is not None and not state_updated:
+        _mirror_execution_record(dict(row))
 
 
 def _remote_order_id(response: Mapping[str, Any]) -> str:
@@ -1160,7 +1439,6 @@ def _install_brackets(
     row: sqlite3.Row, client: BinanceFuturesClient, config: ExecutionConfig,
     db_path: str, filled_quantity: Decimal,
 ) -> dict[str, Any]:
-    execution_id = int(row["id"])
     signal_id = int(row["signal_id"])
     symbol = str(row["symbol"])
     direction = str(row["direction"])
@@ -1168,7 +1446,7 @@ def _install_brackets(
     rules = client.symbol_rules(symbol)
     quantity = _floor_step(filled_quantity, rules.step_size)
     if quantity < rules.min_qty:
-        _update_execution(db_path, execution_id, "ERROR", last_error="filled quantity below exchange minimum")
+        _update_execution(db_path, signal_id, "ERROR", last_error="filled quantity below exchange minimum")
         return {"status": "ERROR", "signal_id": signal_id}
 
     try:
@@ -1184,7 +1462,7 @@ def _install_brackets(
         except Exception as close_error:
             status = "UNPROTECTED_POSITION"
             stop_error = RuntimeError(f"stop failed: {stop_error}; emergency close failed: {close_error}")
-        _update_execution(db_path, execution_id, status, last_error=str(stop_error), quantity=float(quantity))
+        _update_execution(db_path, signal_id, status, last_error=str(stop_error), quantity=float(quantity))
         return {"status": status, "signal_id": signal_id}
 
     tp1_id = tp2_id = ""
@@ -1223,7 +1501,7 @@ def _install_brackets(
 
     status = "PROTECTED" if not errors else "PROTECTED_NO_TP"
     _update_execution(
-        db_path, execution_id, status, stop_order_id=stop_id, tp1_order_id=tp1_id,
+        db_path, signal_id, status, stop_order_id=stop_id, tp1_order_id=tp1_id,
         tp2_order_id=tp2_id, last_error="; ".join(errors), quantity=float(quantity),
         active_stop_price=float(row["sl"]),
     )
@@ -1234,11 +1512,10 @@ def _retry_missing_take_profits(
     row: sqlite3.Row, client: BinanceFuturesClient, config: ExecutionConfig, db_path: str,
 ) -> dict[str, Any]:
     """Retry only absent take orders; never duplicate the protective stop."""
-    execution_id = int(row["id"])
     signal_id = int(row["signal_id"])
     if not row["stop_order_id"]:
         _update_execution(
-            db_path, execution_id, "UNPROTECTED_POSITION",
+            db_path, signal_id, "UNPROTECTED_POSITION",
             last_error="cannot retry take orders because protective stop id is missing",
         )
         return {"status": "UNPROTECTED_POSITION", "signal_id": signal_id}
@@ -1282,7 +1559,7 @@ def _retry_missing_take_profits(
     complete = bool(tp2_id) if distinct_tp2 else bool(tp1_id)
     status = "PROTECTED" if complete and not errors else "PROTECTED_NO_TP"
     _update_execution(
-        db_path, execution_id, status, tp1_order_id=tp1_id, tp2_order_id=tp2_id,
+        db_path, signal_id, status, tp1_order_id=tp1_id, tp2_order_id=tp2_id,
         last_error="; ".join(errors),
     )
     return {"status": status, "signal_id": signal_id}
@@ -1292,7 +1569,6 @@ def _cleanup_protective_orders(
     row: sqlite3.Row, client: BinanceFuturesClient, db_path: str,
 ) -> dict[str, Any]:
     """Cancel only this signal's surviving algo orders after it is closed."""
-    execution_id = int(row["id"])
     signal_id = int(row["signal_id"])
     errors = []
     for field in ("stop_order_id", "tp1_order_id", "tp2_order_id"):
@@ -1318,7 +1594,7 @@ def _cleanup_protective_orders(
     )[:30]
     status = "CLEANUP_PENDING" if errors else f"CLOSED_{result}"
     _update_execution(
-        db_path, execution_id, status, last_error="; ".join(errors),
+        db_path, signal_id, status, last_error="; ".join(errors),
     )
     return {"status": status, "signal_id": signal_id}
 
@@ -1339,19 +1615,37 @@ def _reconcile_stop_replacement(
                 raise
     next_status = "PROTECTED" if row["tp1_order_id"] and row["tp2_order_id"] else "PROTECTED_NO_TP"
     _update_execution(
-        db_path, int(row["id"]), next_status, stop_order_id=new_id,
+        db_path, int(row["signal_id"]), next_status, stop_order_id=new_id,
         pending_stop_order_id=None, previous_stop_order_id=None, last_error="",
     )
-    conn = _connect(db_path)
-    conn.execute(
-        """UPDATE manager_execution_actions
-              SET status='EXECUTED',exchange_order_id=?,error='',updated_at=CURRENT_TIMESTAMP
-            WHERE action_key=(SELECT action_key FROM manager_execution_actions
-                               WHERE signal_id=? AND action IN ('PROTECT','MOVE_STOP_TO_BREAKEVEN')
-                               ORDER BY created_at DESC LIMIT 1)""",
-        (new_id, int(row["signal_id"])),
-    )
-    conn.commit(); conn.close()
+    repository = _execution_state_repository()
+    action_row = None
+    if repository is not None:
+        action_row = repository.latest_action(
+            int(row["signal_id"]), ("PROTECT", "MOVE_STOP_TO_BREAKEVEN"),
+        )
+        action_key = str(action_row.get("action_key") or "") if action_row else ""
+        if action_key:
+            _finish_manager_action(
+                db_path, action_key, "EXECUTED", order_id=new_id,
+            )
+    else:
+        ensure_execution_schema(db_path)
+        conn = _connect(db_path)
+        legacy_action = conn.execute(
+            """SELECT action_key FROM manager_execution_actions
+                 WHERE signal_id=? AND action IN ('PROTECT','MOVE_STOP_TO_BREAKEVEN')
+                 ORDER BY created_at DESC LIMIT 1""",
+            (int(row["signal_id"]),),
+        ).fetchone()
+        action_key = str(legacy_action[0]) if legacy_action else ""
+        conn.execute(
+            """UPDATE manager_execution_actions
+                  SET status='EXECUTED',exchange_order_id=?,error='',updated_at=CURRENT_TIMESTAMP
+                WHERE action_key=?""",
+            (new_id, action_key),
+        )
+        conn.commit(); conn.close()
     try:
         from core.trade_manager import confirm_manager_action
         confirm_manager_action(
@@ -1383,9 +1677,17 @@ def reconcile_live_executions(
         active_config = config or ExecutionConfig.from_env()
         if active_config.live_armed:
             try:
-                from core.execution_ledger import register_execution_orders, reconcile_one
+                from core.execution_ledger import (
+                    reconcile_funding_one, reconcile_one, register_execution_orders,
+                )
                 register_execution_orders(db_path)
-                reconcile_one(db_path, lambda: client or BinanceFuturesClient(active_config))
+                ledger_status = reconcile_one(
+                    db_path, lambda: client or BinanceFuturesClient(active_config)
+                )
+                if ledger_status in {"IDLE", "DEFERRED"}:
+                    reconcile_funding_one(
+                        db_path, lambda: client or BinanceFuturesClient(active_config)
+                    )
             except Exception as exc:
                 logging.warning("[ExecutionLedger] accounting unavailable: %s", type(exc).__name__)
         return outcomes
@@ -1406,29 +1708,27 @@ def _reconcile_live_executions_unlocked(
         return []
     client = client or BinanceFuturesClient(config)
     outcomes = []
-    protected_cutover_ids: set[int] = set()
-    conn = _connect(db_path)
-    try:
-        protected_cutover_ids = {
-            int(item[0]) for item in conn.execute(
-                "SELECT signal_id FROM trade_manager_state WHERE manager_state='RECONCILIATION_REQUIRED'"
-            ).fetchall()
-        }
-    except sqlite3.Error:
-        protected_cutover_ids = set()
-    finally:
-        conn.close()
+    protected_cutover_ids = _reconciliation_required_signal_ids(db_path)
     # One bounded, batched position snapshot confirms every already-protected
     # cutover row. Existing protective orders are deliberately not queried,
     # cancelled or recreated here.
     open_position_symbols: set[str] = set()
-    if any(int(row["signal_id"]) in protected_cutover_ids and row["status"] == "PROTECTED" for row in rows):
+    position_snapshot_available = True
+    if any(
+        row["status"] in {"PROTECTED", "PROTECTED_NO_TP"}
+        and (
+            str(row["signal_result"]) != "pending"
+            or int(row["signal_id"]) in protected_cutover_ids
+        )
+        for row in rows
+    ):
         try:
             open_position_symbols = {
                 str(item.get("symbol") or "").upper() for item in client.open_positions()
                 if abs(float(item.get("positionAmt") or 0)) > 0
             }
         except Exception as exc:
+            position_snapshot_available = False
             logging.warning("[AutoTrading] bounded V2 cutover snapshot unavailable: %s", exc)
     for row in rows:
         try:
@@ -1436,9 +1736,21 @@ def _reconcile_live_executions_unlocked(
             if row["status"] == "STOP_REPLACEMENT_PENDING":
                 outcomes.append(_reconcile_stop_replacement(row, client, db_path))
                 continue
-            if row["status"] == "CLEANUP_PENDING" or (
-                row["status"] in {"PROTECTED", "PROTECTED_NO_TP"} and not signal_pending
-            ):
+            if row["status"] == "CLEANUP_PENDING":
+                outcomes.append(_cleanup_protective_orders(row, client, db_path))
+                continue
+            if row["status"] in {"PROTECTED", "PROTECTED_NO_TP"} and not signal_pending:
+                if not position_snapshot_available:
+                    outcomes.append({
+                        "status": "RECONCILE_ERROR", "signal_id": row["signal_id"],
+                        "reason": "BINANCE_POSITION_SNAPSHOT_UNAVAILABLE",
+                    })
+                    continue
+                if str(row["symbol"]).upper() in open_position_symbols:
+                    outcomes.append({
+                        "status": "AWAITING_BINANCE_CLOSE", "signal_id": row["signal_id"],
+                    })
+                    continue
                 outcomes.append(_cleanup_protective_orders(row, client, db_path))
                 continue
             if row["status"] == "PROTECTED":
@@ -1453,7 +1765,36 @@ def _reconcile_live_executions_unlocked(
             if row["status"] == "PROTECTED_NO_TP":
                 outcomes.append(_retry_missing_take_profits(row, client, config, db_path))
                 continue
-            order = client.query_order(str(row["symbol"]), str(row["entry_order_id"]))
+            order = None
+            if row["status"] == "SUBMITTING" and not str(row["entry_order_id"] or ""):
+                row_values = dict(row)
+                execution_id = str(row_values.get("execution_id") or "")
+                recovery_client_id = (
+                    client_order_ids(execution_id)["entry"]
+                    if is_id(execution_id, "execution")
+                    else f"apex_e_{row['signal_id']}"
+                )
+                try:
+                    order = client.query_order_by_client_id(
+                        str(row["symbol"]), recovery_client_id,
+                    )
+                except BinanceAPIError as exc:
+                    if exc.code == -2013:
+                        outcomes.append({
+                            "status": "SUBMISSION_UNCONFIRMED",
+                            "signal_id": row["signal_id"],
+                        })
+                        continue
+                    raise
+                recovered_order_id = str(order.get("orderId") or "")
+                if not recovered_order_id:
+                    raise RuntimeError("recovered Binance entry has no order id")
+                _update_execution(
+                    db_path, int(row["signal_id"]), "ENTRY_PENDING",
+                    entry_order_id=recovered_order_id,
+                )
+            if order is None:
+                order = client.query_order(str(row["symbol"]), str(row["entry_order_id"]))
             order_status = str(order.get("status", "")).upper()
             executed = _decimal(order.get("executedQty", "0"))
             if str(row["signal_result"]) != "pending":
@@ -1473,12 +1814,12 @@ def _reconcile_live_executions_unlocked(
                         _plain_decimal(close_quantity), f"apex_x_{row['signal_id']}",
                     )
                     _update_execution(
-                        db_path, int(row["id"]), "EMERGENCY_CLOSED",
+                        db_path, int(row["signal_id"]), "EMERGENCY_CLOSED",
                         quantity=float(close_quantity), last_error="signal expired at entry fill",
                     )
                     outcomes.append({"status": "EMERGENCY_CLOSED", "signal_id": row["signal_id"]})
                 else:
-                    _update_execution(db_path, int(row["id"]), "ENTRY_CANCELLED")
+                    _update_execution(db_path, int(row["signal_id"]), "ENTRY_CANCELLED")
                     outcomes.append({"status": "ENTRY_CANCELLED", "signal_id": row["signal_id"]})
                 continue
             if order_status == "PARTIALLY_FILLED" and executed > 0:
@@ -1488,16 +1829,16 @@ def _reconcile_live_executions_unlocked(
                 filled = executed or _decimal(row["quantity"])
                 outcomes.append(_install_brackets(row, client, config, db_path, filled))
             elif order_status in {"CANCELED", "REJECTED", "EXPIRED"}:
-                _update_execution(db_path, int(row["id"]), "ENTRY_CANCELLED", last_error=order_status)
+                _update_execution(db_path, int(row["signal_id"]), "ENTRY_CANCELLED", last_error=order_status)
                 outcomes.append({"status": "ENTRY_CANCELLED", "signal_id": row["signal_id"]})
         except Exception as exc:
             logging.error("[AutoTrading] reconcile signal %s: %s", row["signal_id"], exc)
             retry_status = (
                 str(row["status"])
-                if row["status"] in {"PROTECTED", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}
+                if row["status"] in {"SUBMITTING", "PROTECTED", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}
                 else "ENTRY_PENDING"
             )
-            _update_execution(db_path, int(row["id"]), retry_status, last_error=str(exc))
+            _update_execution(db_path, int(row["signal_id"]), retry_status, last_error=str(exc))
             outcomes.append({"status": "RECONCILE_ERROR", "signal_id": row["signal_id"]})
     for outcome in outcomes:
         try:
@@ -1573,15 +1914,9 @@ def _live_account_status(client: BinanceFuturesClient) -> dict[str, Any]:
 def _read_balance_cache(db_path: str, now: float | None = None) -> dict[str, Any]:
     """Read the last Binance balance snapshot without network access."""
     current = time.time() if now is None else now
-    ensure_execution_schema(db_path)
-    conn = _connect(db_path)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        """SELECT wallet_balance, available_balance, cross_unrealized_pnl,
-                  fetched_at_epoch, attempted_at_epoch, last_error
-           FROM execution_account_cache WHERE exchange='binance_futures'"""
-    ).fetchone()
-    conn.close()
+    if _ACCOUNT_STATE_FACTORY is None:
+        ensure_execution_schema(db_path)
+    row = _execution_account_repository(db_path).read()
     if row is None:
         return {"available": False, "cached": True}
     fetched_at = float(row["fetched_at_epoch"] or 0)
@@ -1610,43 +1945,11 @@ def _store_balance_attempt(
     balance: Mapping[str, Any] | None = None,
     error: str = "",
 ) -> None:
-    ensure_execution_schema(db_path)
-    conn = _connect(db_path)
-    if balance is not None:
-        conn.execute(
-            """INSERT INTO execution_account_cache
-               (exchange, wallet_balance, available_balance, cross_unrealized_pnl,
-                fetched_at_epoch, attempted_at_epoch, last_error, updated_at)
-               VALUES ('binance_futures', ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
-               ON CONFLICT(exchange) DO UPDATE SET
-                   wallet_balance=excluded.wallet_balance,
-                   available_balance=excluded.available_balance,
-                   cross_unrealized_pnl=excluded.cross_unrealized_pnl,
-                   fetched_at_epoch=excluded.fetched_at_epoch,
-                   attempted_at_epoch=excluded.attempted_at_epoch,
-                   last_error=NULL,
-                   updated_at=CURRENT_TIMESTAMP""",
-            (
-                float(balance.get("wallet_balance", 0) or 0),
-                float(balance.get("available_balance", 0) or 0),
-                float(balance.get("cross_unrealized_pnl", 0) or 0),
-                attempted_at,
-                attempted_at,
-            ),
-        )
-    else:
-        conn.execute(
-            """INSERT INTO execution_account_cache
-               (exchange, attempted_at_epoch, last_error, updated_at)
-               VALUES ('binance_futures', ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(exchange) DO UPDATE SET
-                   attempted_at_epoch=excluded.attempted_at_epoch,
-                   last_error=excluded.last_error,
-                   updated_at=CURRENT_TIMESTAMP""",
-            (attempted_at, str(error)[:300]),
-        )
-    conn.commit()
-    conn.close()
+    if _ACCOUNT_STATE_FACTORY is None:
+        ensure_execution_schema(db_path)
+    _execution_account_repository(db_path).store_attempt(
+        attempted_at=attempted_at, balance=balance, error=error,
+    )
 
 
 def _cached_live_balance_status(
@@ -1712,18 +2015,24 @@ def execution_status(
         summary["request_metrics"] = dict(_binance_request_metrics)
     summary["request_metrics"]["circuit_remaining_seconds"] = int(_binance_circuit_remaining())
     try:
-        ensure_execution_schema(db_path)
-        conn = _connect(db_path)
-        summary["counts"] = dict(conn.execute(
-            "SELECT status, COUNT(*) FROM trade_executions GROUP BY status"
-        ).fetchall())
-        placeholders = ",".join("?" for _ in _LIVE_RECONCILE_STATUSES)
-        summary["live_active_count"] = int(conn.execute(
-            f"""SELECT COUNT(*) FROM trade_executions
-                WHERE mode='live' AND status IN ({placeholders})""",
-            _LIVE_RECONCILE_STATUSES,
-        ).fetchone()[0])
-        conn.close()
+        repository = _execution_state_repository()
+        if repository is not None:
+            state_summary = repository.status_summary(_LIVE_RECONCILE_STATUSES)
+            summary["counts"] = state_summary["counts"]
+            summary["live_active_count"] = state_summary["live_active_count"]
+        else:
+            ensure_execution_schema(db_path)
+            conn = _connect(db_path)
+            summary["counts"] = dict(conn.execute(
+                "SELECT status, COUNT(*) FROM trade_executions GROUP BY status"
+            ).fetchall())
+            placeholders = ",".join("?" for _ in _LIVE_RECONCILE_STATUSES)
+            summary["live_active_count"] = int(conn.execute(
+                f"""SELECT COUNT(*) FROM trade_executions
+                    WHERE mode='live' AND status IN ({placeholders})""",
+                _LIVE_RECONCILE_STATUSES,
+            ).fetchone()[0])
+            conn.close()
         summary["live_reconcile_pending"] = len(_live_reconcile_rows(db_path))
     except Exception as exc:
         summary["error"] = str(exc)

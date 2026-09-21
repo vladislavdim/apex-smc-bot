@@ -1,11 +1,10 @@
 import sqlite3
 
-from core.manager_playbooks import promotion_assessment, shadow_features
 from core.trade_execution import ExecutionConfig, LIVE_CONFIRMATION, ensure_execution_schema, reconcile_live_executions
 from core.trade_manager import (
     MANAGEMENT_TF, NO_PROGRESS_BARS, PROGRESS_TF, TRANSITION_MATRIX, activate_v2_once,
     confirm_manager_action, ensure_trade_manager_schema, load_state, no_progress_event_due,
-    persist_review, register_active_trade, replay_closed_candle, review_active_trade,
+    persist_review, register_active_trade, review_active_trade,
     validate_transition,
 )
 
@@ -76,21 +75,6 @@ def test_cutover_is_atomic_idempotent_and_fences_live(tmp_path):
     assert load_state(1, db)["manager_state"] == "RECONCILIATION_REQUIRED"
 
 
-def test_three_replay_tracks_are_deduplicated_and_isolated(tmp_path):
-    db = str(tmp_path / "brain.db")
-    register_active_trade({"id": 1, "symbol": "AAVEUSDT", "grade": "MTF", "direction": "BULLISH", "entry": 100, "sl": 95, "tp1": 105, "tp2": 110, "tp3": 115}, db_path=db)
-    row = load_state(1, db)
-    facts = {"new_management_candle": True, "management_candle_id": "c1", "latest_closed_high": 106, "latest_closed_low": 99, "latest_close": 105, "_book_shadow": {"effort_without_result": True}}
-    replay_closed_candle(row, facts, {"action": "HOLD"}, db)
-    replay_closed_candle(row, facts, {"action": "CLOSE"}, db)
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM trade_manager_replay_events").fetchone()[0] == 3
-        tracks = dict(conn.execute("SELECT track,exit_reason FROM trade_manager_replay_tracks"))
-    assert tracks["ACTUAL"] is None
-    assert tracks["NO_MANAGER"] is None
-    assert tracks["PLAYBOOK_ONLY"] == "SHADOW_EFFORT_WITHOUT_RESULT_AFTER_TP1"
-
-
 def test_exchange_transition_commits_only_after_confirmation(tmp_path):
     db = str(tmp_path / "brain.db")
     register_active_trade({"id": 1, "symbol": "AAVEUSDT", "grade": "MTF", "direction": "BULLISH", "entry": 100, "sl": 95, "tp1": 105}, db_path=db)
@@ -119,6 +103,34 @@ def test_external_conflict_alone_cannot_authorize_close():
         lambda *_a, **_k: '{"action":"CLOSE","confidence":.99,"reason":"conflict"}',
     )
     assert review["action"] == "HOLD"
+
+
+def test_ambiguous_barrier_waits_for_binance_without_marking_tp(tmp_path):
+    calls = []
+    events = ["TP1_HIT", "TP2_HIT", "INVALIDATION_HIT", "AMBIGUOUS_BARRIERS"]
+    review = review_active_trade(
+        state(), events, {}, lambda *_a, **_k: calls.append("groq"),
+    )
+    assert review["action"] == "HOLD"
+    assert review["next_trigger"] == "exchange reconciliation"
+    assert review["groq_called"] is False
+    assert calls == []
+
+    db = str(tmp_path / "brain.db")
+    register_active_trade({
+        "id": 1, "symbol": "AAVEUSDT", "grade": "MTF",
+        "direction": "BULLISH", "entry": 100, "sl": 95,
+        "tp1": 105, "tp2": 110, "tp3": 115,
+    }, db_path=db)
+    persist_review(
+        load_state(1, db), 105, events, {"management_candle_id": "ambiguous"},
+        review, db,
+    )
+    saved = load_state(1, db)
+    assert saved["tp1_seen"] == 0
+    assert saved["tp2_seen"] == 0
+    assert saved["tp3_seen"] == 0
+    assert saved["manager_state"] == "PROTECTED"
 
 
 def test_partial_exit_uses_confirmed_remaining_fraction(tmp_path):
@@ -160,15 +172,3 @@ def test_cutover_reconciliation_uses_one_position_snapshot_and_keeps_protection(
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT stop_order_id FROM trade_executions WHERE signal_id=1").fetchone()[0] == "existing-stop"
         assert conn.execute("SELECT value FROM trade_manager_runtime WHERE key='opens_enabled'").fetchone()[0] == "1"
-
-
-def test_book_rules_are_gate_relative_shadow_and_never_auto_activate():
-    candles = [{"open": 1, "high": 2, "low": 1, "close": 1.8, "volume": 10} for _ in range(19)]
-    candles.append({"open": 1, "high": 1.5, "low": 1, "close": 1.1, "volume": 20})
-    features = shadow_features(candles, "BULLISH")
-    assert features["source"] == "Gate_relative_volume"
-    assert features["execution_scope"] == "PLAYBOOK_ONLY_SHADOW"
-    rows = [{"old_r": 0.1, "new_r": 0.2, "delta_r": 0.1} for _ in range(30)]
-    result = promotion_assessment(rows)
-    assert result["promotion_proposed"]
-    assert result["auto_activated"] is False

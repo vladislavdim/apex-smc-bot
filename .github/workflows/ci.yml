@@ -1,0 +1,53 @@
+name: APEX CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.db'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Compile project
+        run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+
+      - name: Full test suite
+        run: |
+          python -m pytest -q
+          python -m unittest discover -s tests -q
+
+      - name: Verify workflow syntax and production authority
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in Path('.github/workflows').glob('*.yml'):
+              yaml.safe_load(path.read_text(encoding='utf-8'))
+          PY
+          ! rg -n 'contents:\s*write|git push|requests\.(put|patch|delete)' bot.py .github/workflows --glob '!ci.yml'
+
+      - name: Diff integrity
+        run: git diff --check

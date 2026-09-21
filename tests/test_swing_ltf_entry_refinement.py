@@ -5,7 +5,7 @@ from pathlib import Path
 class SwingLtfEntryRefinementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.s = Path("market.py").read_text(encoding="utf-8")
+        cls.s = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
 
     def test_two_stage_entry_builder_exists(self):
         self.assertIn("def _swing_build_ltf_entry", self.s)

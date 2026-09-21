@@ -12,6 +12,7 @@ import argparse
 import os
 import time
 from typing import Any
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -117,7 +118,43 @@ def check_health(url: str, *, session: Any | None = None, timeout: int = 30) -> 
     return payload
 
 
-def controlled_release(client: RenderReleaseClient, *, commit_sha: str, health_url: str) -> dict[str, Any]:
+def check_worker_ready(
+    url: str,
+    *,
+    commit_sha: str,
+    session: Any | None = None,
+    timeout_seconds: int = 240,
+    interval_seconds: int = 5,
+) -> dict[str, Any]:
+    transport = session or requests.Session()
+    separator = "&" if "?" in url else "?"
+    probe_url = f"{url}{separator}{urlencode({'sha': commit_sha})}"
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
+    last_status = "not_requested"
+    while time.monotonic() < deadline:
+        try:
+            response = transport.get(probe_url, timeout=30)
+            payload = response.json()
+            last_status = str(payload.get("status") or f"HTTP_{response.status_code}")
+            if response.status_code == 200 and payload.get("ready") is True:
+                if str(payload.get("release_sha") or "") != commit_sha[:12]:
+                    raise ReleaseError("worker readiness returned an unexpected release")
+                return payload
+        except ReleaseError:
+            raise
+        except Exception as exc:
+            last_status = type(exc).__name__
+        time.sleep(max(1, int(interval_seconds)))
+    raise ReleaseError(f"worker did not report APEX READY for release: {last_status}")
+
+
+def controlled_release(
+    client: RenderReleaseClient,
+    *,
+    commit_sha: str,
+    health_url: str,
+    worker_ready_url: str = "",
+) -> dict[str, Any]:
     if len(commit_sha) != 40 or any(ch not in "0123456789abcdef" for ch in commit_sha.lower()):
         raise ReleaseError("release SHA must be a full 40-character hexadecimal commit")
 
@@ -131,12 +168,17 @@ def controlled_release(client: RenderReleaseClient, *, commit_sha: str, health_u
     worker_id = EXPECTED_SERVICES["worker"][0]
     worker_deploy = client.trigger(worker_id, commit_sha)
     client.wait_live(worker_id, str(worker_deploy["id"]))
+    if not worker_ready_url:
+        parsed = urlparse(health_url)
+        worker_ready_url = f"{parsed.scheme}://{parsed.netloc}/health/worker"
+    worker_health = check_worker_ready(worker_ready_url, commit_sha=commit_sha)
     return {
         "commit_sha": commit_sha,
         "auto_deploy": "disabled",
         "web_deploy_id": web_deploy["id"],
         "worker_deploy_id": worker_deploy["id"],
         "health": health,
+        "worker_health": worker_health,
     }
 
 
@@ -162,6 +204,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sha", required=True)
     parser.add_argument("--health-url", default="https://apex-strategy-stats-web.onrender.com/health")
+    parser.add_argument("--worker-ready-url", default="https://apex-strategy-stats-web.onrender.com/health/worker")
     parser.add_argument("--confirmation", default=os.environ.get("APEX_RELEASE_CONFIRMATION", ""))
     parser.add_argument("--disable-only", action="store_true")
     args = parser.parse_args()
@@ -176,6 +219,7 @@ def main() -> int:
         client,
         commit_sha=args.sha.lower(),
         health_url=args.health_url,
+        worker_ready_url=args.worker_ready_url,
     )
     print(
         f"APEX controlled release live: {result['commit_sha'][:8]} "

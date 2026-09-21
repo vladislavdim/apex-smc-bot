@@ -124,7 +124,7 @@ def test_default_strategy_functions_keep_passive_mode_disabled():
 
     root = Path(__file__).resolve().parents[1]
     bot_source = (root / "bot.py").read_text(encoding="utf-8")
-    market_source = (root / "market.py").read_text(encoding="utf-8")
+    market_source = (root / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
     assert 'def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):' in bot_source
     assert 'def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = False)' in market_source
     assert 'if passive_watch and not _mtf_score_bos:' in bot_source

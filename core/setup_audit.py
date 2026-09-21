@@ -10,18 +10,25 @@ from __future__ import annotations
 import functools
 import json
 import logging
-import os
 import queue
+import re
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.state_db import migrate_state as _migrate_state
 import sys
 import threading
 import time
 import uuid
+import copy
 from datetime import datetime, timezone
 from typing import Any, Callable
+from apex.config.settings import ApexConfig
 
-DB_PATH = os.environ.get("APEX_SETUP_AUDIT_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "setup_audit.db"))
-RELEASE_SHA = (os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "").strip()
+_CONFIG = ApexConfig.from_env()
+DB_PATH = _CONFIG.database.state_db_path
+RELEASE_SHA = _CONFIG.runtime.release_sha
+SERVICE_INSTANCE = _CONFIG.runtime.instance_id
+DEPLOY_ID = _CONFIG.runtime.deploy_id
 _MAX_PAYLOAD_CHARS = 60000
 _EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=10000)
 _WORKER_LOCK = threading.Lock()
@@ -125,23 +132,8 @@ def _runtime_scan_context() -> dict[str, Any]:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute("""CREATE TABLE IF NOT EXISTS setup_audit_events (
-        event_key TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        strategy TEXT,
-        symbol TEXT,
-        occurred_at TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        synced INTEGER NOT NULL DEFAULT 0,
-        sync_attempts INTEGER NOT NULL DEFAULT 0,
-        last_sync_error TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_setup_audit_recent ON setup_audit_events(occurred_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_setup_audit_lookup ON setup_audit_events(strategy,symbol,occurred_at DESC)")
+    conn = _connect_compatibility_db(DB_PATH, timeout=10, check_same_thread=False)
+    _migrate_state(conn)
     return conn
 
 
@@ -169,15 +161,15 @@ def _persist_event(event: dict[str, Any]) -> None:
                     (SELECT last_sync_error FROM setup_audit_events WHERE event_key=?))""",
             (event["event_key"], event["kind"], event.get("strategy", ""), event.get("symbol", ""),
              event["occurred_at"], _payload_text(payload), event["event_key"], event["event_key"], event["event_key"]))
-        conn.execute("DELETE FROM setup_audit_events WHERE occurred_at < datetime('now','-90 days')")
         conn.commit(); conn.close()
     except Exception as exc:
         logging.debug("[SetupAudit] local persistence skipped: %s", exc)
 
 
 def _post_events(events: list[dict[str, Any]]) -> bool:
-    url = os.environ.get("APEX_STATS_INGEST_URL", "").strip()
-    token = os.environ.get("APEX_STATS_INGEST_TOKEN", "").strip()
+    integrations = ApexConfig.from_env().integrations
+    url = integrations.stats_ingest_url
+    token = integrations.stats_ingest_token
     if not url or not token or not events:
         return False
     try:
@@ -227,7 +219,8 @@ def _mark_many_synced(events: list[dict[str, Any]]) -> None:
 
 
 def _flush_unsynced(limit: int = 100) -> None:
-    if not os.environ.get("APEX_STATS_INGEST_URL") or not os.environ.get("APEX_STATS_INGEST_TOKEN"):
+    integrations = ApexConfig.from_env().integrations
+    if not integrations.stats_ingest_url or not integrations.stats_ingest_token:
         return
     try:
         conn = _connect()
@@ -302,6 +295,8 @@ def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *
     payload_data = dict(payload) if isinstance(payload, dict) else {}
     if RELEASE_SHA:
         payload_data.setdefault("release_sha", RELEASE_SHA)
+    payload_data.setdefault("service_instance", SERVICE_INSTANCE or "unknown")
+    payload_data.setdefault("deploy_id", DEPLOY_ID)
     event = {"event_key": key, "kind": str(kind), "strategy": str(strategy or "").upper(),
              "symbol": str(symbol or "").upper(), "occurred_at": _utc_now(),
              "payload": payload_data}
@@ -313,7 +308,10 @@ def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *
 
 
 def _new_attempt(strategy: str, subtype: str, fn_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
-    symbol = str(kwargs.get("symbol") or (args[0] if args else "") or "").upper()
+    symbol_value = kwargs.get("symbol") or (args[0] if args else "") or ""
+    if not isinstance(symbol_value, str):
+        symbol_value = getattr(symbol_value, "symbol", "")
+    symbol = str(symbol_value or "").upper()
     timeframe = str(kwargs.get("timeframe") or (args[1] if len(args) > 1 and isinstance(args[1], str) else "") or "")
     runtime = _runtime_scan_context()
     return {"attempt_key": str(uuid.uuid4()), "strategy": str(strategy).upper(), "subtype": str(subtype or "").upper(),
@@ -367,17 +365,17 @@ def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[st
             stop["blocking_check_code"] = payload["checks"][owner_index].get("code")
     for index, check in enumerate(payload["checks"]):
         blocking = owner_index == index
-        label = str(check.get("label", "")).lower()
         check["blocking_stop"] = blocking
-        check["role"] = "HARD_GATE" if blocking else "SOFT_CONTEXT" if "non-blocking" in label or "warning only" in label else "OBSERVED_CHECK"
-    payload["telemetry_schema_version"] = 2
+        check["role"] = _manifest_role(
+            str(payload.get("strategy") or ""), str(payload.get("subtype") or ""),
+            str(check.get("code") or ""), blocking,
+        )
+    payload["telemetry_schema_version"] = 3
+    # V3 migration bridge: expose the just-completed attempt only to the same
+    # calling thread. This is read-only observability and cannot alter the
+    # detector result. A consumer must explicitly take (and thereby clear) it.
+    _TLS.last_completed_attempt = copy.deepcopy(payload)
     emit_event("attempt", context["strategy"], context.get("symbol", ""), payload, event_key=context["attempt_key"])
-    try:
-        from core.live_lab_profile import schedule as _schedule_lab_profile
-        _schedule_lab_profile(context["strategy"], context.get("symbol", ""),
-            attempt_key=context["attempt_key"], live_outcome=outcome)
-    except Exception:
-        pass
 
 
 def audit_observe(key: str, value: Any, *, append: bool = False) -> None:
@@ -412,13 +410,65 @@ def _compact_label(label: str, condition: str = "") -> str:
     return text[:300]
 
 
+def _predicate_evidence(condition: str, predicate: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Capture named operands without evaluating the trading expression again."""
+    operands: dict[str, Any] = {}
+    try:
+        names = tuple(dict.fromkeys(re.findall(r"\b[A-Za-z_]\w*\b", str(condition or ""))))
+        frame = sys._getframe(2)
+        for _ in range(12):
+            module = str(frame.f_globals.get("__name__") or "")
+            if module != __name__:
+                for name in names[:20]:
+                    if name not in frame.f_locals:
+                        continue
+                    value = frame.f_locals[name]
+                    if isinstance(value, (list, tuple, set, frozenset)):
+                        safe = {"type": type(value).__name__, "count": len(value)}
+                    elif isinstance(value, dict):
+                        safe = {
+                            str(key)[:80]: scalar
+                            for key, item in list(value.items())[:12]
+                            if (scalar := _safe_scalar(item)) is not None
+                        }
+                    else:
+                        safe = _safe_scalar(value)
+                    if safe is not None:
+                        operands[name] = safe
+                break
+            if frame.f_back is None:
+                break
+            frame = frame.f_back
+    except Exception:
+        operands = {}
+    return (
+        {"failure_predicate": bool(predicate), "operands": operands},
+        {"failure_predicate": False, "condition": str(condition or "")[:800]},
+    )
+
+
+def _manifest_role(strategy: str, subtype: str, check_id: str, blocking: bool) -> str:
+    if blocking:
+        return "HARD_GATE"
+    try:
+        from apex.strategies.golden_manifest import GOLDEN_GATE_MANIFESTS
+        manifest_key = str(strategy).upper()
+        if manifest_key == "WYCKOFF" and subtype:
+            manifest_key = f"WYCKOFF_{str(subtype).upper()}"
+        return GOLDEN_GATE_MANIFESTS[manifest_key].role_for(str(check_id))
+    except Exception:
+        return "OBSERVED_CHECK"
+
+
 def audit_test(code: str, value: Any, label: str = "", condition: str = "", line: int | None = None) -> Any:
     context = _current()
     if context is not None:
         try:
+            actual_value, required_value = _predicate_evidence(condition, bool(value))
             context["checks"].append({"code": str(code), "label": _compact_label(label, condition),
                 "condition": str(condition)[:800], "line": int(line) if line else None,
-                "state": "FAIL" if bool(value) else "PASS", "predicate": bool(value)})
+                "state": "FAIL" if bool(value) else "PASS", "predicate": bool(value),
+                "actual_value": actual_value, "required_value": required_value})
         except Exception:
             pass
     return value
@@ -465,6 +515,19 @@ def audit_strategy(strategy: str, subtype: str = "") -> Callable[[Callable[..., 
     return decorate
 
 
+def take_last_completed_attempt(*, strategy: str = "", symbol: str = "") -> dict[str, Any] | None:
+    """Return and clear this thread's last completed detector trace."""
+    payload = getattr(_TLS, "last_completed_attempt", None)
+    _TLS.last_completed_attempt = None
+    if not isinstance(payload, dict):
+        return None
+    if strategy and str(payload.get("strategy") or "").upper() != str(strategy).upper():
+        return None
+    if symbol and str(payload.get("symbol") or "").upper() != str(symbol).upper():
+        return None
+    return copy.deepcopy(payload)
+
+
 def _candidate_attempt_key(candidate: dict[str, Any]) -> str:
     return str(candidate.get("_audit_attempt_key") or "") if isinstance(candidate, dict) else ""
 
@@ -493,6 +556,7 @@ def emit_groq_review_event(candidate: dict[str, Any], review: dict[str, Any]) ->
                    "setup_assessment": _safe_value(review.get("setup_assessment") or {}), "context": _safe_value(review.get("context") or {}),
                    "news_context": _safe_value(review.get("news_context") or {}), "market_memory": _safe_value(review.get("market_memory") or {}),
                    "historical_zones": _safe_value(review.get("historical_zones") or {}),
+                   "strategy_check_journal": _safe_value(candidate.get("_v3_strategy_trace") or {}),
                    "closed_loop_learning": _safe_value(review.get("closed_loop_learning") or {})}
         emit_event("groq_review", strategy, str(candidate.get("symbol") or ""), payload)
     except Exception: pass

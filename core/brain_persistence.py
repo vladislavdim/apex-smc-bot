@@ -42,6 +42,7 @@ class BrainPersistence:
         token: str,
         branch: str = "brain-backups",
         *,
+        remote_name: str = "brain.db",
         session: Any | None = None,
         timeout: int = 30,
     ) -> None:
@@ -49,6 +50,9 @@ class BrainPersistence:
         self.repository = (repository or "").strip().strip("/")
         self.token = (token or "").strip()
         self.branch = (branch or "brain-backups").strip() or "brain-backups"
+        self.remote_name = str(remote_name or "brain.db").strip().strip("/")
+        if not self.remote_name or ".." in self.remote_name.split("/"):
+            raise ValueError("invalid remote database name")
         self.timeout = int(timeout)
         if session is None and requests is None:
             raise RuntimeError("requests is required when no GitHub session is injected")
@@ -68,7 +72,7 @@ class BrainPersistence:
 
     @property
     def contents_url(self) -> str:
-        return f"https://api.github.com/repos/{self.repository}/contents/brain.db"
+        return f"https://api.github.com/repos/{self.repository}/contents/{self.remote_name}"
 
     def _headers(self, *, raw: bool = False) -> dict[str, str]:
         return {
@@ -115,7 +119,7 @@ class BrainPersistence:
             raise RuntimeError(f"GitHub metadata HTTP {response.status_code}")
         payload = response.json()
         if not isinstance(payload, dict) or not payload.get("sha"):
-            raise RuntimeError("GitHub metadata has no brain.db blob SHA")
+            raise RuntimeError(f"GitHub metadata has no {self.remote_name} blob SHA")
         return payload, "ok"
 
     def _download_remote(self, ref: str | None = None) -> bytes:
@@ -138,13 +142,13 @@ class BrainPersistence:
             except Exception:
                 pass
         if len(content) < 4096:
-            raise RuntimeError(f"GitHub brain.db is unexpectedly small ({len(content)} bytes)")
+            raise RuntimeError(f"GitHub {self.remote_name} is unexpectedly small ({len(content)} bytes)")
         return content
 
     def _historical_refs(self, limit: int = 8) -> list[str]:
         response = self.session.get(
             f"https://api.github.com/repos/{self.repository}/commits",
-            params={"sha": self.branch, "path": "brain.db", "per_page": limit},
+            params={"sha": self.branch, "path": self.remote_name, "per_page": limit},
             headers=self._headers(),
             timeout=self.timeout,
         )
@@ -245,7 +249,7 @@ class BrainPersistence:
         result: dict[str, int] = {}
         connection = _SQLITE_CONNECT(f"file:{path}?mode=ro", uri=True, timeout=10)
         try:
-            for table in ("knowledge", "self_rules", "web_knowledge"):
+            for table in ("knowledge",):
                 exists = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     (table,),
@@ -266,7 +270,7 @@ class BrainPersistence:
             try:
                 metadata, state = self._remote_metadata()
                 if state != "ok" or metadata is None:
-                    raise RuntimeError(f"brain.db is absent on branch {self.branch}")
+                    raise FileNotFoundError(f"{self.remote_name} is absent on branch {self.branch}")
                 directory = os.path.dirname(self.db_path)
                 os.makedirs(directory, exist_ok=True)
                 selected_ref = ""
@@ -309,7 +313,7 @@ class BrainPersistence:
                             os.unlink(temp_path)
                 if not selected_ref:
                     raise RuntimeError(
-                        f"no valid brain.db in recent backup history ({last_candidate_error})"
+                        f"no valid {self.remote_name} in recent backup history ({last_candidate_error})"
                     )
                 now = datetime.now(timezone.utc).isoformat()
                 self._ready = True
@@ -335,7 +339,94 @@ class BrainPersistence:
             except Exception as exc:
                 self._ready = False
                 self._last_error = str(exc)
-                return {"status": "restore_failed", "ready": False, "error": str(exc)}
+                return {
+                    "status": "restore_failed", "ready": False, "error": str(exc),
+                    "reason": "REMOTE_MISSING" if isinstance(exc, FileNotFoundError) else "RESTORE_INVALID",
+                }
+
+    def initialize(self, reason: str = "initial") -> dict[str, Any]:
+        """Create a missing remote database without overwriting an existing one."""
+        with self._lock:
+            if not self.configured:
+                return {"status": "not_configured", "ready": False}
+            temp_path = ""
+            try:
+                metadata, state = self._remote_metadata()
+                if state == "ok" and metadata is not None:
+                    return {"status": "remote_exists", "ready": False}
+                directory = os.path.dirname(self.db_path)
+                os.makedirs(directory, exist_ok=True)
+                fd, temp_path = tempfile.mkstemp(
+                    dir=directory, prefix="database-initial-", suffix=".db"
+                )
+                os.close(fd)
+                source = _SQLITE_CONNECT(self.db_path, timeout=30, check_same_thread=False)
+                target = _SQLITE_CONNECT(temp_path, timeout=30)
+                try:
+                    source.backup(target)
+                finally:
+                    target.close()
+                    source.close()
+                self._integrity(temp_path)
+                logical_hash = self._logical_hash(temp_path)
+                now = datetime.now(timezone.utc).isoformat()
+                target = _SQLITE_CONNECT(temp_path, timeout=15)
+                try:
+                    self._ensure_meta(target)
+                    target.execute(
+                        f"""UPDATE {_META_TABLE}
+                            SET generation=1,parent_blob_sha='',content_hash=?,
+                                backed_up_at=?,reason=? WHERE id=1""",
+                        (logical_hash, now, str(reason)[:120]),
+                    )
+                    target.commit()
+                finally:
+                    target.close()
+                self._integrity(temp_path)
+                with open(temp_path, "rb") as snapshot:
+                    content = snapshot.read()
+                response = self.session.put(
+                    self.contents_url,
+                    headers=self._headers(),
+                    json={
+                        "message": f"{self.remote_name} initial {now[:16]} [skip ci]",
+                        "content": base64.b64encode(content).decode("ascii"),
+                        "branch": self.branch,
+                    },
+                    timeout=max(self.timeout, 30),
+                )
+                if response.status_code in (409, 422):
+                    return {"status": "concurrent_initialize", "ready": False}
+                if response.status_code not in (200, 201):
+                    category, message = self._github_error(response)
+                    raise RuntimeError(
+                        f"GitHub initialize HTTP {response.status_code} {category} {message}".strip()
+                    )
+                payload = response.json() if hasattr(response, "json") else {}
+                new_sha = str((payload.get("content") or {}).get("sha") or "")
+                if not new_sha:
+                    refreshed, _ = self._remote_metadata()
+                    new_sha = str((refreshed or {}).get("sha") or "")
+                if not new_sha:
+                    raise RuntimeError("GitHub accepted initialize but returned no blob SHA")
+                self._ready = True
+                self._remote_blob_sha = new_sha
+                self._generation = 1
+                self._last_content_hash = logical_hash
+                self._last_restore_at = now
+                self._last_backup_at = now
+                self._last_error = ""
+                return {
+                    "status": "initialized", "ready": True, "saved": True,
+                    "blob_sha": new_sha, "generation": 1, "size": len(content),
+                }
+            except Exception as exc:
+                self._ready = False
+                self._last_error = str(exc)
+                return {"status": "initialize_failed", "ready": False, "error": str(exc)}
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
 
     def backup(self, reason: str = "scheduled") -> dict[str, Any]:
         """Upload one consistent snapshot if data changed and this instance is current."""
@@ -409,7 +500,7 @@ class BrainPersistence:
                 self._integrity(temp_path)
                 snapshot_size = os.path.getsize(temp_path)
                 message = (
-                    f"brain.db backup {now[:16].replace('T', ' ')} "
+                    f"{self.remote_name} backup {now[:16].replace('T', ' ')} "
                     f"g{generation} [{str(reason)[:32]}] [skip ci]"
                 )
                 # GitHub's Contents API requires Base64 inside JSON. Reading a

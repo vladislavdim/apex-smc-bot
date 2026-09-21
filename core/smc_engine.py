@@ -4,6 +4,9 @@ APEX SMC Engine v3 — Умный обход барьеров + самообуч
 import requests, sqlite3, time, logging, json
 from datetime import datetime
 
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.market.snapshot_scope import snapshot_candle_override
+
 try:
     from .data_policy import configured_market_data_providers
 except ImportError:
@@ -67,7 +70,7 @@ if not _os.path.exists(_os.path.dirname(DB_PATH)):
 
 def _init_tables():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect_compatibility_db(DB_PATH)
         conn.execute("""CREATE TABLE IF NOT EXISTS source_reliability (
             source TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0,
             avg_candles REAL DEFAULT 0, last_ok TEXT, last_fail TEXT, notes TEXT DEFAULT '')""")
@@ -87,7 +90,7 @@ def _load_reliability():
     if _reliability_loaded: return
     _init_tables()
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect_compatibility_db(DB_PATH)
         rows = conn.execute("SELECT source, ok, fail FROM source_reliability").fetchall()
         conn.close()
         for src, ok, fail in rows:
@@ -98,7 +101,7 @@ def _load_reliability():
 
 def _record(source, symbol, interval, success, candles=0, error=""):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect_compatibility_db(DB_PATH)
         now = datetime.now().isoformat()
         ex = conn.execute("SELECT ok,fail,avg_candles FROM source_reliability WHERE source=?", (source,)).fetchone()
         if ex:
@@ -123,7 +126,7 @@ def _record(source, symbol, interval, success, candles=0, error=""):
 
 def _learn_fact(fact, context=""):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect_compatibility_db(DB_PATH)
         conn.execute("INSERT INTO source_knowledge (fact,context) VALUES (?,?)", (fact,context))
         conn.commit(); conn.close()
     except: pass
@@ -294,6 +297,17 @@ _FETCHERS = {
 # ═══════════════════════════════════════════════════════════════
 
 def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> dict:
+    requested_limit = max(1, int(limit or 1))
+    snapshot_rows = snapshot_candle_override(symbol, interval, requested_limit)
+    if snapshot_rows is not None:
+        return {
+            "candles": snapshot_rows, "source": "APEX_V3_SNAPSHOT",
+            "attempts": 0,
+            "quality": "high" if snapshot_rows else "none",
+            "is_synthetic": False,
+            "error": "" if snapshot_rows else "snapshot_data_unavailable",
+            "symbol": symbol, "interval": interval,
+        }
     ck = f"{symbol}_{interval}"
     ttl = _CACHE_TTL.get(interval, 300)
     if ck in _candle_cache:
@@ -453,7 +467,7 @@ def multi_tf_analysis(symbol: str, timeframes: list = None) -> dict | None:
 
 def get_source_stats() -> str:
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect_compatibility_db(DB_PATH)
         rows = conn.execute("SELECT source,ok,fail,avg_candles,last_ok FROM source_reliability ORDER BY ok DESC").fetchall()
         barriers = conn.execute("SELECT ts,symbol,source,error FROM barrier_log WHERE success=0 ORDER BY id DESC LIMIT 5").fetchall()
         facts    = conn.execute("SELECT COUNT(*) FROM source_knowledge").fetchone()[0]
@@ -478,7 +492,7 @@ def get_source_stats() -> str:
 
 def get_barrier_summary() -> str:
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect_compatibility_db(DB_PATH)
         total  = conn.execute("SELECT COUNT(*) FROM barrier_log").fetchone()[0]
         fails  = conn.execute("SELECT COUNT(*) FROM barrier_log WHERE success=0").fetchone()[0]
         facts  = conn.execute("SELECT COUNT(*) FROM source_knowledge").fetchone()[0]

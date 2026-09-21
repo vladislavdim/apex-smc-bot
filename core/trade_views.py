@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import html
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from typing import Any
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=10, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")
     return conn

@@ -8,7 +8,7 @@ import stats_server
 class StrategyFunnelCleanupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.market = Path('market.py').read_text(encoding='utf-8')
+        cls.market = Path('apex/compatibility/legacy_market_runtime.py').read_text(encoding='utf-8')
         cls.setup = Path('core/setup_evidence.py').read_text(encoding='utf-8')
         cls.audit = Path('core/setup_audit.py').read_text(encoding='utf-8')
         cls.catalog = Path('core/strategy_catalog.py').read_text(encoding='utf-8')
@@ -33,9 +33,9 @@ class StrategyFunnelCleanupTests(unittest.TestCase):
         self.assertIn('wyckoff_dist_range', self.stats)
 
     def test_release_sha_is_attached_to_telemetry(self):
-        self.assertIn('RENDER_GIT_COMMIT', self.audit)
+        self.assertIn('RELEASE_SHA = _CONFIG.runtime.release_sha', self.audit)
         self.assertIn('payload_data.setdefault("release_sha", RELEASE_SHA)', self.audit)
-        self.assertIn('После последнего deploy', self.stats)
+        self.assertIn('runtime_release_sha', self.stats)
 
     def test_latest_release_filter_and_funnel_are_cohort_safe(self):
         events = [
@@ -61,7 +61,7 @@ class StrategyFunnelCleanupTests(unittest.TestCase):
             },
         ]
         with patch.object(stats_server, '_fetch', return_value=events):
-            data = stats_server.build_dashboard(days=1, release='latest')
+            data = stats_server._build_dashboard_uncached(days=1, release='latest')
         self.assertEqual(data['release_sha'], 'newsha')
         self.assertEqual(data['summary']['attempts'], 1)
         self.assertEqual(data['summary']['candidates'], 0)
@@ -81,7 +81,7 @@ class StrategyFunnelCleanupTests(unittest.TestCase):
                 },
             })
         with patch.object(stats_server, '_fetch', return_value=events):
-            data = stats_server.build_dashboard(days=1, release='latest')
+            data = stats_server._build_dashboard_uncached(days=1, release='latest')
         metric = data['wyckoff_dist_range']
         self.assertEqual(metric['count'], 4)
         self.assertEqual(metric['median'], 27.5)

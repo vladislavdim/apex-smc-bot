@@ -4,10 +4,27 @@ from __future__ import annotations
 
 import html
 import json
-import os
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.repositories.strategy_decisions import StrategyDecisionRepository
 from collections import defaultdict
 from typing import Any
+from apex.config.settings import ApexConfig
+
+
+_STRATEGY_DECISION_STATE_FACTORY = None
+
+
+def configure_dashboard_state(connection_factory=None) -> None:
+    global _STRATEGY_DECISION_STATE_FACTORY
+    _STRATEGY_DECISION_STATE_FACTORY = connection_factory
+
+
+def _decision_repository(db_path: str) -> StrategyDecisionRepository:
+    factory = _STRATEGY_DECISION_STATE_FACTORY or (
+        lambda: _connect_compatibility_db(db_path, timeout=20)
+    )
+    return StrategyDecisionRepository(factory)
 
 
 def _price(value: Any) -> str:
@@ -71,69 +88,11 @@ def format_scanner_dashboard(data: dict[str, Any]) -> str:
             f"SL подряд {int(state.get('consecutive_losses') or 0)} · "
             f"риск ×{float(state.get('live_risk_multiplier') or 0):.1f}"
         )
-    stats_url = os.environ.get("APEX_STATS_URL", "").strip()
+    stats_url = ApexConfig.from_env().integrations.stats_url
     if stats_url:
         safe_url = html.escape(stats_url, quote=True)
         lines.extend(["", f'<a href="{safe_url}">📊 Полная статистика</a>'])
     lines.extend(["", "<i>Панель показывает фактические проходы, а не расписание.</i>"])
-    return "\n".join(lines)[:4000]
-
-
-def format_experience_dashboard(data: dict[str, Any]) -> str:
-    lines = ["🧬 <b>Experience / Shadow</b>", ""]
-    funnel = data.get("funnel", [])
-    if not funnel:
-        lines.extend(["Кандидатов пока нет.",
-                      "<i>Память начнёт наблюдение с первого технического сетапа.</i>"])
-    else:
-        lines.append("<b>Воронка по стратегиям</b>")
-        for row in funnel:
-            lines.append(
-                f"• <b>{html.escape(str(row.get('strategy') or '—'))}</b>: "
-                f"кандидаты {int(row.get('candidates') or 0)} · "
-                f"✅{int(row.get('approve') or 0)} ⏳{int(row.get('wait') or 0)} "
-                f"🚫{int(row.get('reject') or 0)} · shadow активны {int(row.get('active') or 0)} · "
-                f"TP/SL {int(row.get('wins') or 0)}/{int(row.get('losses') or 0)}"
-            )
-    active = data.get("active", [])
-    if active:
-        lines.extend(["", "<b>Виртуально активные</b>"])
-        for row in active[:8]:
-            icon = "🟢" if str(row.get("direction")).upper() == "BULLISH" else "🔴"
-            lines.append(
-                f"{icon} {html.escape(str(row.get('symbol') or '—'))} · "
-                f"{html.escape(str(row.get('strategy') or '—'))} · "
-                f"MFE {float(row.get('mfe_r') or 0):.2f}R / MAE {float(row.get('mae_r') or 0):.2f}R"
-            )
-    rules = data.get("rules", [])
-    if rules:
-        lines.extend(["", "<b>Автоматические гипотезы</b>"])
-        icons = {"OBSERVING": "👁", "PROBATION": "🧪", "ACTIVE": "✅",
-                 "ROLLED_BACK": "↩️", "EXPIRED": "⌛", "HYPOTHESIS": "💭"}
-        for row in rules[:10]:
-            state = str(row.get("state") or "HYPOTHESIS")
-            if state == "PROBATION":
-                progress = f"{int(row.get('probation_samples') or 0)}/20"
-            else:
-                progress = f"{int(row.get('samples') or 0)}/30"
-            lines.append(
-                f"{icons.get(state, '•')} {html.escape(str(row.get('strategy') or '—'))} "
-                f"{html.escape(str(row.get('regime') or 'UNKNOWN'))} · {state} · {progress}"
-            )
-    management = data.get("management", [])
-    management_open = int(data.get("management_open") or 0)
-    if management or management_open:
-        lines.extend(["", "<b>Обучение на решениях менеджера</b>"])
-        lines.append(f"• ожидают объективного исхода: {management_open}")
-        effects = {"HELPED": "✅ помогло", "HARMED": "⚠️ навредило",
-                   "NEUTRAL": "➖ нейтрально", "INCONCLUSIVE": "❔ недостаточно данных"}
-        for row in management[:12]:
-            lines.append(
-                f"• {html.escape(str(row.get('action') or '—'))}: "
-                f"{effects.get(str(row.get('effect') or ''), html.escape(str(row.get('effect') or '—')))} "
-                f"×{int(row.get('count') or 0)}"
-            )
-    lines.extend(["", "<i>Shadow-наблюдение не открывает ордера и не меняет уровни сделок.</i>"])
     return "\n".join(lines)[:4000]
 
 
@@ -191,7 +150,7 @@ def format_setup_evidence_dashboard(data: dict[str, Any]) -> str:
 
 def fetch_watchlist(db_path: str, limit: int = 20) -> list[dict[str, Any]]:
     """Return only persisted candidates; never manufacture future trades."""
-    conn = sqlite3.connect(db_path, timeout=20)
+    conn = _connect_compatibility_db(db_path, timeout=20)
     conn.row_factory = sqlite3.Row
     items: list[dict[str, Any]] = []
     try:
@@ -225,14 +184,7 @@ def fetch_watchlist(db_path: str, limit: int = 20) -> list[dict[str, Any]]:
     except sqlite3.Error:
         pass
     try:
-        groq_waits = conn.execute(
-            """SELECT symbol,direction,timeframe,strategy,evidence_json,created_at
-               FROM strategy_decisions
-               WHERE outcome='WAIT' AND stage='groq_quality_gate'
-                 AND created_at >= datetime('now','-12 hours')
-               ORDER BY created_at DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
+        groq_waits = _decision_repository(db_path).recent_waits(limit)
         existing = {(item["symbol"], item["direction"], item["timeframe"]) for item in items}
         for row in groq_waits:
             try:
@@ -293,44 +245,11 @@ def format_watchlist(items: list[dict[str, Any]]) -> str:
 
 def fetch_groq_rejections(db_path: str, hours: int = 24, limit: int = 30) -> dict[str, Any]:
     """Read recent final Groq REJECT decisions without affecting trading state."""
-    conn = sqlite3.connect(db_path, timeout=20)
-    conn.row_factory = sqlite3.Row
     result: dict[str, Any] = {"hours": hours, "total": 0, "by_strategy": [], "recent": []}
     try:
-        period = f"-{int(hours)} hours"
-        rows = conn.execute(
-            """SELECT symbol,strategy,timeframe,direction,reason,groq_confidence,created_at
-               FROM strategy_decisions
-               WHERE outcome='REJECT' AND stage='groq_quality_gate'
-                 AND created_at >= datetime('now', ?)
-               ORDER BY created_at DESC LIMIT ?""",
-            (period, int(limit)),
-        ).fetchall()
-        result["recent"] = [dict(row) for row in rows]
-        total = conn.execute(
-            """SELECT COUNT(*) FROM strategy_decisions
-               WHERE outcome='REJECT' AND stage='groq_quality_gate'
-                 AND created_at >= datetime('now', ?)""",
-            (period,),
-        ).fetchone()[0]
-        result["total"] = int(total or 0)
-        grouped = conn.execute(
-            """SELECT UPPER(COALESCE(NULLIF(strategy,''),'UNKNOWN')) strategy,
-                      COALESCE(NULLIF(reason,''),'без причины') reason,
-                      COUNT(*) count
-               FROM strategy_decisions
-               WHERE outcome='REJECT' AND stage='groq_quality_gate'
-                 AND created_at >= datetime('now', ?)
-               GROUP BY UPPER(COALESCE(NULLIF(strategy,''),'UNKNOWN')),
-                        COALESCE(NULLIF(reason,''),'без причины')
-               ORDER BY strategy, count DESC""",
-            (period,),
-        ).fetchall()
-        result["by_strategy"] = [dict(row) for row in grouped]
+        result = _decision_repository(db_path).rejection_report(hours, limit)
     except sqlite3.Error:
         pass
-    finally:
-        conn.close()
     return result
 
 
@@ -383,7 +302,7 @@ def format_groq_rejections(data: dict[str, Any]) -> str:
 
 def fetch_strategy_stats(db_path: str) -> list[dict[str, Any]]:
     """Count only objectively resolved, activated/legacy-active signals."""
-    conn = sqlite3.connect(db_path, timeout=20)
+    conn = _connect_compatibility_db(db_path, timeout=20)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -438,7 +357,7 @@ def format_strategy_stats(rows: list[dict[str, Any]], min_samples: int = 30) -> 
 
 
 def fetch_system_health(db_path: str) -> dict[str, Any]:
-    conn = sqlite3.connect(db_path, timeout=20)
+    conn = _connect_compatibility_db(db_path, timeout=20)
     result = {"gate_total": 0, "gate_candles": 0, "open_errors": 0,
               "groq_24h": 0, "groq_last": None}
     try:
@@ -465,12 +384,7 @@ def fetch_system_health(db_path: str) -> dict[str, Any]:
     except sqlite3.Error:
         # Compatibility with databases created before ai_signal_reviews existed.
         try:
-            row = conn.execute(
-                """SELECT COUNT(*),MAX(created_at) FROM strategy_decisions
-                   WHERE stage='groq_quality_gate'
-                     AND created_at >= datetime('now','-24 hours')"""
-            ).fetchone()
-            result["groq_24h"], result["groq_last"] = row[0], row[1]
+            result["groq_24h"], result["groq_last"] = _decision_repository(db_path).groq_count(24)
         except sqlite3.Error:
             pass
     finally:

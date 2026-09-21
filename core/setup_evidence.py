@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -316,7 +317,7 @@ def candidate_key(candidate: dict[str, Any]) -> str:
 
 
 def ensure_setup_evidence_schema(db_path: str) -> None:
-    with sqlite3.connect(db_path, timeout=20) as conn:
+    with _connect_compatibility_db(db_path, timeout=20) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS setup_assessments (
@@ -351,7 +352,7 @@ def persist_assessment(candidate: dict[str, Any], assessment: dict[str, Any], st
     try:
         ensure_setup_evidence_schema(db_path)
         now = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(db_path, timeout=20) as conn:
+        with _connect_compatibility_db(db_path, timeout=20) as conn:
             conn.execute(
                 """INSERT INTO setup_assessments
                    (candidate_key,stage,symbol,strategy,direction,timeframe,state,thesis,assessment_json,created_at,updated_at)
@@ -374,7 +375,7 @@ def bind_assessment_to_signal(candidate: dict[str, Any], signal_id: int, db_path
     if int(signal_id or 0) <= 0:
         return
     ensure_setup_evidence_schema(db_path)
-    with sqlite3.connect(db_path, timeout=20) as conn:
+    with _connect_compatibility_db(db_path, timeout=20) as conn:
         conn.execute(
             "UPDATE setup_assessments SET signal_id=?,updated_at=? WHERE candidate_key=?",
             (int(signal_id), datetime.now(timezone.utc).isoformat(), candidate_key(candidate)),
@@ -383,7 +384,7 @@ def bind_assessment_to_signal(candidate: dict[str, Any], signal_id: int, db_path
 
 def setup_evidence_dashboard(db_path: str, hours: int = 24, limit: int = 12) -> dict[str, Any]:
     ensure_setup_evidence_schema(db_path)
-    with sqlite3.connect(db_path, timeout=20) as conn:
+    with _connect_compatibility_db(db_path, timeout=20) as conn:
         conn.row_factory = sqlite3.Row
         summary = conn.execute(
             """SELECT strategy,state,COUNT(*) count FROM setup_assessments

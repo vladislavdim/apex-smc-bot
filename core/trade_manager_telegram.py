@@ -3,14 +3,30 @@ from __future__ import annotations
 
 import html
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.repositories.manager import ManagerRepository
 from datetime import datetime
 from typing import Any
 
 from core.trade_manager import ensure_trade_manager_schema
 
 
+_MANAGER_DASHBOARD_STATE_FACTORY = None
+
+
+def configure_manager_dashboard_state(connection_factory=None) -> None:
+    global _MANAGER_DASHBOARD_STATE_FACTORY
+    _MANAGER_DASHBOARD_STATE_FACTORY = connection_factory
+
+
+def _state_repository() -> ManagerRepository:
+    if _MANAGER_DASHBOARD_STATE_FACTORY is None:
+        raise RuntimeError("manager_dashboard_state_not_configured")
+    return ManagerRepository(_MANAGER_DASHBOARD_STATE_FACTORY)
+
+
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
@@ -50,6 +66,15 @@ def _duration(created_at: Any, closed_at: Any) -> str:
 
 
 def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
+    if _MANAGER_DASHBOARD_STATE_FACTORY is not None:
+        rows = _state_repository().recent(limit=limit)
+        for row in rows:
+            row["manager_protect_level"] = row.get("confirmed_protect_level")
+            row["signal_result"] = (
+                "pending" if str(row.get("status") or "ACTIVE").upper() == "ACTIVE"
+                else str(row.get("close_result") or "closed")
+            )
+        return rows
     ensure_trade_manager_schema(db_path)
     conn = _connect(db_path)
     try:
@@ -77,6 +102,17 @@ def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
 
 
 def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> dict[str, Any] | None:
+    if _MANAGER_DASHBOARD_STATE_FACTORY is not None:
+        repository = _state_repository()
+        state = repository.get(signal_id)
+        if state is None:
+            return None
+        state["manager_protect_level"] = state.get("confirmed_protect_level")
+        events = repository.events(signal_id, limit=event_limit)
+        for event in events:
+            event["manager_protect_level"] = event.get("confirmed_protect_level")
+            event["reason"] = event.get("summary")
+        return {"state": state, "events": events}
     ensure_trade_manager_schema(db_path)
     conn = _connect(db_path)
     try:
@@ -97,14 +133,7 @@ def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> 
             """,
             (int(signal_id), max(1, int(event_limit))),
         ).fetchall()
-        tracks = conn.execute(
-            """SELECT track,gross_r,net_r,mfe_r,mae_r,giveback_r,fees_slippage_r,
-                      exit_reason,targets_reached,closed_at
-                 FROM trade_manager_replay_tracks WHERE signal_id=? ORDER BY track""",
-            (int(signal_id),),
-        ).fetchall()
-        return {"state": dict(state), "events": [dict(row) for row in events],
-                "replay_tracks": [dict(row) for row in tracks]}
+        return {"state": dict(state), "events": [dict(row) for row in events]}
     finally:
         conn.close()
 
@@ -164,7 +193,6 @@ def manager_trade_buttons(items: list[dict[str, Any]]) -> list[tuple[str, str]]:
 def format_manager_trade_detail(payload: dict[str, Any]) -> str:
     state = payload["state"]
     events = payload.get("events") or []
-    tracks = payload.get("replay_tracks") or []
     confidence = state.get("last_confidence")
     confidence_text = f"{float(confidence) * 100:.0f}%" if confidence is not None else "—"
     lines = [
@@ -209,19 +237,6 @@ def format_manager_trade_detail(payload: dict[str, Any]) -> str:
             lines.append(f"• <code>{ts}</code> {event_type} → <b>{action}</b> · {r_value:+.2f}R · {conf_text}")
             if reason:
                 lines.append(f"  {reason}")
-    if tracks:
-        by_name = {str(row.get("track")): row for row in tracks}
-        lines += ["", "<b>Независимый replay:</b>"]
-        for name in ("ACTUAL", "NO_MANAGER", "PLAYBOOK_ONLY"):
-            row = by_name.get(name) or {}
-            value = row.get("net_r")
-            value_text = f"{float(value):+.2f}R" if value is not None else "в процессе"
-            lines.append(f"• {name}: <b>{value_text}</b> · MFE {float(row.get('mfe_r') or 0):+.2f}R · MAE {float(row.get('mae_r') or 0):+.2f}R")
-        if all((by_name.get(name) or {}).get("net_r") is not None for name in ("ACTUAL", "NO_MANAGER", "PLAYBOOK_ONLY")):
-            actual = float(by_name["ACTUAL"]["net_r"])
-            no_manager = float(by_name["NO_MANAGER"]["net_r"])
-            playbook = float(by_name["PLAYBOOK_ONLY"]["net_r"])
-            lines.append(f"Groq edge: <b>{actual-no_manager:+.2f}R</b> · vs rules {actual-playbook:+.2f}R · Playbook edge {playbook-no_manager:+.2f}R")
     lines += ["", "<i>История read-only: исходные Entry/SL/TP/RR не переписываются.</i>"]
     return "\n".join(lines)[:4000]
 

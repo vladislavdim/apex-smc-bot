@@ -50,11 +50,12 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-test.txt
 
       - name: Full release verification
         run: |
           set -euo pipefail
+          python scripts/verify_v3_completion.py --pre-deploy
           python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
           python -m pytest -q
           python -m unittest discover -s tests -q

@@ -6,28 +6,23 @@ or edits entry, stop, targets, direction, or strategy confirmation rules.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from apex.config.settings import ApexConfig
 from core.setup_audit import emit_event as _emit_stats_event, emit_scan_event as _emit_setup_audit_scan
 
 
-DB_PATH = os.environ.get(
-    "APEX_DB_PATH",
-    os.environ.get(
-        "APEX_BRAIN_DB_PATH",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"),
-    ),
-)
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
 _STRATEGIES = ("MTF", "SWING", "ZONE", "FAST", "WYCKOFF")
 
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
@@ -188,35 +183,6 @@ def ensure_control_schema(db_path: str = DB_PATH) -> None:
     coverage_columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_coverage_pairs)")}
     if "last_run_id" not in coverage_columns:
         conn.execute("ALTER TABLE scan_coverage_pairs ADD COLUMN last_run_id INTEGER")
-    # A fresh database historically received two incompatible error_patterns
-    # definitions.  Keep both operational and trade-pattern columns together.
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS error_patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            error_type TEXT,
-            pattern TEXT,
-            symbol TEXT,
-            timeframe TEXT,
-            conditions TEXT,
-            sl_count INTEGER DEFAULT 1,
-            count INTEGER DEFAULT 1,
-            rule_added TEXT,
-            last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
-            active INTEGER DEFAULT 1
-        )"""
-    )
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(error_patterns)")}
-    additions = {
-        "id": "INTEGER", "error_type": "TEXT", "pattern": "TEXT",
-        "symbol": "TEXT", "timeframe": "TEXT", "conditions": "TEXT",
-        "sl_count": "INTEGER DEFAULT 1", "count": "INTEGER DEFAULT 1",
-        "rule_added": "TEXT", "last_seen": "TEXT", "active": "INTEGER DEFAULT 1",
-    }
-    for name, definition in additions.items():
-        if name not in columns and name != "id":
-            conn.execute(f"ALTER TABLE error_patterns ADD COLUMN {name} {definition}")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_error_patterns_trade ON error_patterns(symbol, pattern)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_error_patterns_error ON error_patterns(error_type)")
     conn.commit()
     conn.close()
 
@@ -689,16 +655,17 @@ def rebuild_strategy_risk_states(db_path: str = DB_PATH) -> dict[str, dict[str, 
             except (TypeError, ValueError):
                 last_ts = now
         recent_sequence = bool(last_ts and now - last_ts < 86400)
-        mode = (
-            "PAUSED" if losses >= 5 and recent_sequence
-            else "CAUTION" if losses >= 3 and recent_sequence
-            else "NORMAL"
-        )
-        confidence = 0.75 if mode in {"CAUTION", "PAUSED"} else 0.65
-        multiplier = 0.0 if mode == "PAUSED" else 0.5 if mode == "CAUTION" else 1.0
-        paused_until = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(last_ts + 86400)) if mode == "PAUSED" else None
+        # V3 learning observes real streaks but has no authority to pause a
+        # strategy, raise the Groq threshold or change production risk.
+        mode = "NORMAL"
+        confidence = 0.65
+        multiplier = 1.0
+        paused_until = None
         last = history[0] if history else None
-        reason = f"{losses} consecutive activated SL" if losses else "normal objective sequence"
+        reason = (
+            f"ADVISORY_ONLY:{losses}_consecutive_activated_sl"
+            if losses else "ADVISORY_ONLY:normal_objective_sequence"
+        )
         conn.execute(
             """INSERT INTO strategy_risk_state
                (strategy,consecutive_losses,consecutive_wins,mode,groq_min_confidence,

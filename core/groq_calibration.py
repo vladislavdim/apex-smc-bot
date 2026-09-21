@@ -7,24 +7,19 @@ outcome is retained as ``PENDING`` rather than treated as a win or loss.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from collections import defaultdict
 from statistics import mean
 from typing import Any, Iterable, Mapping
+from apex.config.settings import ApexConfig
 
 
-DB_PATH = os.environ.get(
-    "APEX_DB_PATH",
-    os.environ.get(
-        "APEX_BRAIN_DB_PATH",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"),
-    ),
-)
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
@@ -40,7 +35,9 @@ def ensure_groq_calibration_schema(db_path: str = DB_PATH) -> None:
             symbol TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, confidence REAL,
             model TEXT, prompt_version TEXT, context_hash TEXT, outcome_label REAL,
             reward_r REAL, outcome_reason TEXT, latency_ms REAL,
-            shadow_only INTEGER NOT NULL DEFAULT 1, predicted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            shadow_only INTEGER NOT NULL DEFAULT 0,
+            evidence_scope TEXT NOT NULL DEFAULT 'CONFIRMED_LIVE_ONLY',
+            predicted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             resolved_at TEXT, payload_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX IF NOT EXISTS idx_apex_v2_groq_calibration_lookup
@@ -52,6 +49,13 @@ def ensure_groq_calibration_schema(db_path: str = DB_PATH) -> None:
         conn.execute("ALTER TABLE apex_v2_groq_calibration ADD COLUMN prediction_target TEXT NOT NULL DEFAULT 'UNSPECIFIED'")
     if "context_version" not in columns:
         conn.execute("ALTER TABLE apex_v2_groq_calibration ADD COLUMN context_version TEXT NOT NULL DEFAULT 'v1'")
+    if "evidence_scope" not in columns:
+        # Existing rows predate V3 provenance and must never be silently mixed
+        # into live-only calibration.
+        conn.execute(
+            "ALTER TABLE apex_v2_groq_calibration ADD COLUMN evidence_scope "
+            "TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'"
+        )
     conn.commit()
     conn.close()
 
@@ -75,8 +79,8 @@ def record_prediction(
     changed = conn.execute(
         """INSERT OR IGNORE INTO apex_v2_groq_calibration
            (action_id,signal_id,strategy,symbol,action,confidence,model,prompt_version,context_hash,
-            prediction_target,context_version,payload_json)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            prediction_target,context_version,payload_json,shadow_only,evidence_scope)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,'CONFIRMED_LIVE_ONLY')""",
         (str(action_id), signal_id, str(strategy).upper(), str(symbol).upper(), str(action).upper(), score,
          model, prompt_version, context_hash, str(prediction_target or "UNSPECIFIED").upper(),
          str(context_version or "v1"), json.dumps(payload or {}, ensure_ascii=False, default=str)),
@@ -100,7 +104,8 @@ def record_outcome(
     conn = _connect(db_path)
     changed = conn.execute(
         """UPDATE apex_v2_groq_calibration SET outcome_label=?,reward_r=?,outcome_reason=?,latency_ms=?,
-                  resolved_at=CURRENT_TIMESTAMP WHERE action_id=?""",
+                  resolved_at=CURRENT_TIMESTAMP
+            WHERE action_id=? AND evidence_scope='CONFIRMED_LIVE_ONLY'""",
         (label, reward_r, reason, latency_ms, str(action_id)),
     ).rowcount
     conn.commit()
@@ -132,7 +137,8 @@ def resolve_signal(
                reward_r=COALESCE(?, reward_r), outcome_reason=COALESCE(?, outcome_reason),
                resolved_at=COALESCE(resolved_at,CURRENT_TIMESTAMP)
            WHERE signal_id=? AND outcome_label IS NULL
-             AND prediction_target='TRADE_TERMINAL_OUTCOME'""",
+             AND prediction_target='TRADE_TERMINAL_OUTCOME'
+             AND evidence_scope='CONFIRMED_LIVE_ONLY'""",
         (label, reward_r, reason, int(signal_id)),
     ).rowcount
     conn.commit(); conn.close()
@@ -150,8 +156,10 @@ def calibration_summary(db_path: str = DB_PATH, limit: int = 2000) -> dict[str, 
     ensure_groq_calibration_schema(db_path)
     conn = _connect(db_path)
     rows = conn.execute(
-        """SELECT action,confidence,outcome_label,reward_r,strategy,prediction_target FROM apex_v2_groq_calibration
-           ORDER BY predicted_at DESC LIMIT ?""", (max(1, int(limit)),)
+        """SELECT action,confidence,outcome_label,reward_r,strategy,prediction_target
+             FROM apex_v2_groq_calibration
+            WHERE evidence_scope='CONFIRMED_LIVE_ONLY' AND shadow_only=0
+            ORDER BY predicted_at DESC LIMIT ?""", (max(1, int(limit)),)
     ).fetchall()
     conn.close()
     buckets: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -186,7 +194,7 @@ def calibration_summary(db_path: str = DB_PATH, limit: int = 2000) -> dict[str, 
         })
     resolved_pairs = [(float(row[1]), float(row[2])) for row in rows if row[1] is not None and row[2] is not None]
     return {
-        "scope": "SHADOW_DIAGNOSTICS", "calls": len(rows), "resolved": len(resolved_pairs),
+        "scope": "CONFIRMED_LIVE_ONLY", "calls": len(rows), "resolved": len(resolved_pairs),
         "target_contract": "versioned_prediction_target; action decisions are not labelled with whole-trade outcome",
         "brier": round(mean((p - y) ** 2 for p, y in resolved_pairs), 6) if resolved_pairs else None,
         "mean_reward_r": round(mean(rewards), 6) if rewards else None,

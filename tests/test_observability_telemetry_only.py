@@ -7,8 +7,9 @@ import stats_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MARKET = (ROOT / "market.py").read_text(encoding="utf-8")
+MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
 STATS = (ROOT / "stats_server.py").read_text(encoding="utf-8")
+DASHBOARD = (ROOT / "apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 
 
 class TelemetryOnlyInvariantTests(unittest.TestCase):
@@ -39,8 +40,8 @@ class TelemetryOnlyInvariantTests(unittest.TestCase):
     def test_dashboard_exposes_only_observability_fields(self):
         self.assertIn('"bos_choch_age":bos_age_stats', STATS)
         self.assertIn('"wyckoff_box_width":wy_box_range', STATS)
-        self.assertIn('BOS/CHoCH age telemetry', STATS)
-        self.assertIn('WYCKOFF Distribution width telemetry', STATS)
+        self.assertIn('Dashboard только показывает production-факты', DASHBOARD)
+        self.assertIn('Он не меняет Entry, SL, TP, RR', DASHBOARD)
 
     def test_live_decision_path_preserves_recorded_order(self):
         row = {
@@ -62,7 +63,7 @@ class TelemetryOnlyInvariantTests(unittest.TestCase):
 
     def test_live_decision_path_is_dashboard_only(self):
         self.assertIn('"source": "LIVE_AUDIT_ORDER"', STATS)
-        self.assertIn('[ACTUAL LIVE EXECUTION ORDER]', STATS)
+        self.assertIn('path.steps||x.checks', DASHBOARD)
         self.assertNotIn("_live_decision_path", MARKET)
 
     def test_observer_does_not_change_decorated_return_value(self):

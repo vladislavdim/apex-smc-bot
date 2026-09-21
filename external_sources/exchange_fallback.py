@@ -116,9 +116,40 @@ def normalize(result: dict) -> dict:
 
     gate_buy = depth_notional(gate_depth.get("bids", []))
     gate_sell = depth_notional(gate_depth.get("asks", []))
+    gate_bids = gate_depth.get("bids", []) if isinstance(gate_depth.get("bids"), list) else []
+    gate_asks = gate_depth.get("asks", []) if isinstance(gate_depth.get("asks"), list) else []
+
+    def best_price(rows, *, bid):
+        prices = []
+        for row in rows:
+            if isinstance(row, dict):
+                price = number(row.get("p", row.get("price")))
+            elif isinstance(row, (list, tuple)) and row:
+                price = number(row[0])
+            else:
+                price = None
+            if price is not None and price > 0:
+                prices.append(price)
+        return (max(prices) if bid else min(prices)) if prices else None
+
+    best_bid = best_price(gate_bids, bid=True)
+    best_ask = best_price(gate_asks, bid=False)
+    mid = (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else None
+    depth_total = gate_buy + gate_sell
     gate_multiplier = number(gate_info.get("quanto_multiplier")) or 0
     gate_mark = number(gate_info.get("mark_price")) or 0
     liquidation_multiplier = gate_multiplier * gate_mark
+    long_liq_size = number(gate.get("long_liq_size"))
+    short_liq_size = number(gate.get("short_liq_size"))
+    long_liq_usd = number(gate.get("long_liq_usd_new", gate.get("long_liq_usd")))
+    short_liq_usd = number(gate.get("short_liq_usd_new", gate.get("short_liq_usd")))
+
+    def ratio(explicit, long_value, short_value):
+        direct = number(explicit)
+        if direct is not None:
+            return direct
+        numerator, denominator = number(long_value), number(short_value)
+        return numerator / denominator if numerator is not None and denominator else None
     bybit_oi = number(bybit.get("openInterestValue"))
     return {**result, "normalized": {
         "oi": gate_oi if gate_oi is not None else (oi if oi is not None else bybit_oi),
@@ -126,8 +157,28 @@ def normalize(result: dict) -> dict:
         "oi_4h": gate_change_4h if gate_change_4h is not None else c4,
         "funding": number(gate_info.get("funding_rate")) if gate_info else (number(premium.get("lastFundingRate")) if premium else number(bybit.get("fundingRate"))),
         "buy": gate_buy or buy or None, "sell": gate_sell or sell or None,
-        "long_liq": (number(gate.get("long_liq_size")) or 0) * liquidation_multiplier,
-        "short_liq": (number(gate.get("short_liq_size")) or 0) * liquidation_multiplier,
+        "long_liq": long_liq_usd if long_liq_usd is not None else (
+            long_liq_size * liquidation_multiplier if long_liq_size is not None and liquidation_multiplier else None
+        ),
+        "short_liq": short_liq_usd if short_liq_usd is not None else (
+            short_liq_size * liquidation_multiplier if short_liq_size is not None and liquidation_multiplier else None
+        ),
+        "long_short_ratio": {
+            "accounts": ratio(gate.get("lsr_account"), gate.get("long_users"), gate.get("short_users")),
+            "takers": ratio(gate.get("lsr_taker"), gate.get("long_taker_size"), gate.get("short_taker_size")),
+            "top_accounts": ratio(gate.get("top_lsr_account"), gate.get("top_long_account"), gate.get("top_short_account")),
+            "top_positions": ratio(gate.get("top_lsr_size"), gate.get("top_long_size"), gate.get("top_short_size")),
+        },
+        "microstructure": {
+            "source": "gate_rest", "status": "FRESH_REST_SNAPSHOT",
+            "sequence_status": "SNAPSHOT_ONLY", "availability": "FORWARD_ONLY",
+            "liquidity_kind": "VISIBLE_ORDERBOOK_LIQUIDITY",
+            "hidden_stops_claimed": False, "execution_authority": False,
+            "best_bid": best_bid, "best_ask": best_ask,
+            "spread_bps": ((best_ask - best_bid) / mid * 10000) if mid and best_ask >= best_bid else None,
+            "bid_depth_usd": gate_buy or None, "ask_depth_usd": gate_sell or None,
+            "depth_imbalance": ((gate_buy - gate_sell) / depth_total) if depth_total else None,
+        },
         "order_flow_method": "top20_orderbook_depth_proxy",
         "liquidation_method": "gate_contract_size_x_multiplier_x_mark",
     }}

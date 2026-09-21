@@ -5,7 +5,7 @@ from pathlib import Path
 class GroqGptOssOutputTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.market = Path("market.py").read_text(encoding="utf-8")
+        cls.market = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
 
     def test_gpt_oss_requests_final_content_not_reasoning_budget(self):
         self.assertIn('str(model).startswith("openai/gpt-oss-")', self.market)

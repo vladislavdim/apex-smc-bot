@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
+from apex.config.settings import ApexConfig
 
 from .cache import cache
 from .http_client import http_client
@@ -19,7 +19,7 @@ _METRICS = ("AdrActCnt", "TxCnt", "FeeTotNtv", "TxTfrValAdjUSD")
 def _asset(symbol: str) -> str:
     base = symbol.upper().replace("/", "").removesuffix("USDT").lower()
     try:
-        mapping = json.loads(os.environ.get("COINMETRICS_ASSET_MAP_JSON", "{}"))
+        mapping = json.loads(ApexConfig.from_env().integrations.coinmetrics_asset_map_json)
     except (TypeError, ValueError, json.JSONDecodeError):
         mapping = {}
     return str(mapping.get(symbol.upper().replace("/", ""), base)) if isinstance(mapping, dict) else base

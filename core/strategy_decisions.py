@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.repositories.strategy_decisions import StrategyDecisionRepository
 from typing import Any
+from apex.config.settings import ApexConfig
 from core.setup_audit import emit_decision_event as _emit_setup_audit_decision
 
-DB_PATH = os.environ.get(
-    "APEX_DB_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"),
-)
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
+_STATE_FACTORY = None
+
+
+def configure_strategy_decision_state(connection_factory=None) -> None:
+    global _STATE_FACTORY
+    _STATE_FACTORY = connection_factory
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS strategy_decisions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,29 +61,21 @@ def record_strategy_decision(
     review = review if isinstance(review, dict) else {}
     payload = evidence if isinstance(evidence, dict) else {}
     try:
-        conn = _connect(db_path)
-        conn.execute(
-            """INSERT INTO strategy_decisions
-               (symbol,strategy,timeframe,direction,structure_direction,structure_event,
-                outcome,stage,reason,groq_decision,groq_confidence,evidence_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                str(candidate.get("symbol", "UNKNOWN")),
-                str(candidate.get("grade") or candidate.get("strategy") or "UNKNOWN"),
-                str(candidate.get("timeframe", "")), str(candidate.get("direction", "")),
-                str(structure.get("direction") or candidate.get("structure_direction") or ""),
-                str(structure.get("event") or candidate.get("structure_event") or ""),
-                str(outcome).upper(), str(stage), str(reason)[:1000],
-                str(review.get("decision", "")),
-                float(review.get("confidence", 0) or 0),
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)[:8000],
-            ),
-        )
-        # Bounded retention: detailed decisions are operational telemetry, not
-        # permanent training truth. Closed outcomes live in their own tables.
-        conn.execute("DELETE FROM strategy_decisions WHERE created_at < datetime('now', '-90 days')")
-        conn.commit()
-        conn.close()
+        if _STATE_FACTORY is None:
+            conn = _connect(db_path)
+            conn.close()
+        repository = StrategyDecisionRepository(_STATE_FACTORY or (lambda: _connect(db_path)))
+        repository.record({
+            "symbol": candidate.get("symbol", "UNKNOWN"),
+            "strategy": candidate.get("grade") or candidate.get("strategy") or "UNKNOWN",
+            "timeframe": candidate.get("timeframe", ""),
+            "direction": candidate.get("direction", ""),
+            "structure_direction": structure.get("direction") or candidate.get("structure_direction") or "",
+            "structure_event": structure.get("event") or candidate.get("structure_event") or "",
+            "outcome": outcome, "stage": stage, "reason": reason,
+            "groq_decision": review.get("decision", ""),
+            "groq_confidence": review.get("confidence", 0),
+            "evidence": payload,
+        })
     except Exception:
         return
-

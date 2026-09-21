@@ -39,6 +39,25 @@ class FakeClient:
         return {"id": deploy_id, "status": "live"}
 
 
+class ReadySession:
+    def __init__(self, payload, status=200):
+        self.payload = payload
+        self.status = status
+        self.urls = []
+
+    def get(self, url, timeout):
+        self.urls.append((url, timeout))
+        payload, status = self.payload, self.status
+
+        class Response:
+            status_code = status
+
+            def json(self):
+                return payload
+
+        return Response()
+
+
 class ControlledRenderReleaseTests(unittest.TestCase):
     def test_disable_only_never_triggers_a_deploy(self):
         client = FakeClient()
@@ -61,7 +80,9 @@ class ControlledRenderReleaseTests(unittest.TestCase):
 
     def test_web_is_live_and_healthy_before_worker_trigger(self):
         client = FakeClient()
-        with patch.object(release, "check_health", return_value={"ok": True}):
+        with patch.object(release, "check_health", return_value={"ok": True}), patch.object(
+            release, "check_worker_ready", return_value={"ready": True, "release_sha": "a" * 12},
+        ) as worker_ready:
             result = release.controlled_release(client, commit_sha="a" * 40,
                                                 health_url="https://example.invalid/health")
         web_id = release.EXPECTED_SERVICES["web"][0]
@@ -69,6 +90,9 @@ class ControlledRenderReleaseTests(unittest.TestCase):
         self.assertLess(client.events.index(("live", web_id, f"deploy-{web_id}")),
                         client.events.index(("trigger", worker_id, "a" * 40)))
         self.assertEqual(result["auto_deploy"], "disabled")
+        worker_ready.assert_called_once_with(
+            "https://example.invalid/health/worker", commit_sha="a" * 40,
+        )
         self.assertNotIn("srv-d6qp98paae7s739kubcg", repr(client.events))
 
     def test_invalid_sha_causes_no_mutation(self):
@@ -76,6 +100,23 @@ class ControlledRenderReleaseTests(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.controlled_release(client, commit_sha="short", health_url="x")
         self.assertEqual(client.events, [])
+
+    def test_worker_readiness_requires_exact_release(self):
+        session = ReadySession({"ready": True, "status": "READY", "release_sha": "b" * 12})
+        with self.assertRaisesRegex(release.ReleaseError, "unexpected release"):
+            release.check_worker_ready(
+                "https://example.invalid/health/worker", commit_sha="a" * 40,
+                session=session, timeout_seconds=1,
+            )
+
+    def test_worker_readiness_accepts_exact_ready_heartbeat(self):
+        session = ReadySession({"ready": True, "status": "READY", "release_sha": "a" * 12})
+        result = release.check_worker_ready(
+            "https://example.invalid/health/worker", commit_sha="a" * 40,
+            session=session, timeout_seconds=1,
+        )
+        self.assertTrue(result["ready"])
+        self.assertIn("sha=" + "a" * 40, session.urls[0][0])
 
 
 if __name__ == "__main__":

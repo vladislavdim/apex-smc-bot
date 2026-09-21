@@ -8,8 +8,8 @@ deterministic execution after a candidate passes every quality gate.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
+from apex.config.settings import ApexConfig
 
 
 DEFAULT_MARKET_DATA_PROVIDERS = ("gate",)
@@ -19,11 +19,9 @@ _ALLOWED_MARKET_DATA_PROVIDERS = {"gate"}
 def configured_market_data_providers(
     environ: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    source = os.environ if environ is None else environ
-    raw = str(source.get("APEX_MARKET_DATA_PROVIDERS", "gate"))
+    configured = ApexConfig.from_env(environ).operational.market_data_providers
     providers: list[str] = []
-    for item in raw.split(","):
-        provider = item.strip().lower()
+    for provider in configured:
         # Ignore stale/accidental environment configuration that would
         # otherwise fan scans out across exchanges. Binance is execution-only.
         if provider in _ALLOWED_MARKET_DATA_PROVIDERS and provider not in providers:

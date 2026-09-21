@@ -7,12 +7,14 @@ hour allocation prevents scans from exhausting the whole day early.
 from __future__ import annotations
 
 import math
-import os
 import sqlite3
 import time
 from dataclasses import dataclass, asdict
 from contextlib import closing
 from urllib.parse import urlsplit
+
+from apex.config.settings import ApexConfig
+from apex.db.connection import connect_compatibility
 
 
 @dataclass(frozen=True)
@@ -25,8 +27,8 @@ class Policy:
 
 POLICIES = {
     "gate": Policy(480, 12000, 288000),
-    "coinalyze": Policy(24, 1200, 28800, "shadow"),
-    "hyperliquid": Policy(60, 1200, 28800, "shadow"),
+    "coinalyze": Policy(24, 1200, 28800, "live_context"),
+    "hyperliquid": Policy(60, 1200, 28800, "live_context"),
     "coinmetrics": Policy(20, 400, 9600),
     "defillama": Policy(12, 60, 1440),
     "deribit": Policy(12, 120, 2880),
@@ -78,8 +80,8 @@ class SourceBudget:
         self.policies = policies or POLICIES
 
     def _connect(self):
-        path = self.db_path or os.getenv("APEX_DB_PATH") or os.getenv("APEX_BRAIN_DB_PATH") or os.path.join(os.path.dirname(os.path.dirname(__file__)), "brain.db")
-        conn = sqlite3.connect(path, timeout=2)
+        path = self.db_path or ApexConfig.from_env().database.compatibility_db_path
+        conn = connect_compatibility(path, timeout=2)
         conn.row_factory = sqlite3.Row
         conn.execute("CREATE TABLE IF NOT EXISTS external_api_usage (source TEXT, slot INTEGER, units INTEGER NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(source,slot))")
         conn.execute("CREATE TABLE IF NOT EXISTS external_api_health (source TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, blocked_until REAL NOT NULL DEFAULT 0, rate_limits INTEGER NOT NULL DEFAULT 0, denied INTEGER NOT NULL DEFAULT 0)")
@@ -150,7 +152,7 @@ def plan_daily_load(
     ``plans`` maps a budget key to ``symbols``, ``endpoints``,
     ``interval_seconds`` and optional ``units_per_symbol``/``retry_reserve``.
     The result is diagnostic only; it never raises and never reserves traffic.
-    This lets a release prove that optional shadow/context polling fits the
+    This lets a release prove that optional live-context polling fits the
     local minute/hour/day envelopes and leaves retries visible.
     """
     active = policies or POLICIES

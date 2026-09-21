@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 from typing import Any
 
+from apex.config.settings import ApexConfig
+from apex.db.connection import connect_compatibility
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
+
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
 
 def persist_news_context(context: dict[str, Any], strategy: str, decision: str | None) -> None:
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
+        conn = connect_compatibility(DB_PATH, timeout=20)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS news_market_context (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

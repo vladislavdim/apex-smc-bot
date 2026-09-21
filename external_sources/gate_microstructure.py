@@ -1,4 +1,4 @@
-"""Gate WebSocket microstructure reducer (shadow/context only).
+"""Gate WebSocket microstructure reducer (LIVE_CONTEXT only).
 
 This module consumes already-received Gate order-book and trade messages.  It
 does not open a socket and it never changes a strategy decision.  A sequence
@@ -138,7 +138,7 @@ def summarize_order_book(
             "spread_bps": None, "mid_price": None, "microprice": None,
             "bid_depth": 0.0, "ask_depth": 0.0, "depth_imbalance": None,
             "bid_depth_usd": 0.0, "ask_depth_usd": 0.0,
-            "levels": 0, "scope": "SHADOW_CONTEXT", "institutional_intent": False,
+            "levels": 0, "scope": "LIVE_CONTEXT", "institutional_intent": False,
         }
     bid, ask = bid_rows[0][0], ask_rows[0][0]
     bid_depth = sum(size for _, size in bid_rows)
@@ -157,7 +157,7 @@ def summarize_order_book(
         "bid_depth": bid_depth, "ask_depth": ask_depth,
         "bid_depth_usd": bid_depth_usd, "ask_depth_usd": ask_depth_usd,
         "depth_imbalance": (bid_depth_usd - ask_depth_usd) / total_usd if total_usd else ((bid_depth - ask_depth) / total if total else None),
-        "levels": min(len(bid_rows), len(ask_rows)), "scope": "SHADOW_CONTEXT",
+        "levels": min(len(bid_rows), len(ask_rows)), "scope": "LIVE_CONTEXT",
         "institutional_intent": False, "venue_normalized": True,
     }
 
@@ -189,7 +189,7 @@ class TradeFlow:
             "source": SOURCE, "buy_volume": self.buy_volume,
             "sell_volume": self.sell_volume, "trades": self.trades,
             "taker_imbalance": (self.buy_volume - self.sell_volume) / total if total else None,
-            "scope": "SHADOW_CONTEXT", "institutional_intent": False,
+            "scope": "LIVE_CONTEXT", "institutional_intent": False,
         }
 
 

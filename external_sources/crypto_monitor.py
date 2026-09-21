@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import asyncio
 from typing import Any
+from apex.config.settings import ApexConfig
 
 from .cache import cache
 from .http_client import http_client
@@ -15,14 +15,14 @@ SOURCE = "crypto_monitor"
 
 
 def _base_url() -> str | None:
-    return os.getenv("CRYPTO_MONITOR_API_URL", "").rstrip("/") or None
+    return ApexConfig.from_env().integrations.crypto_monitor_api_url or None
 
 
 async def collect(symbol: str) -> dict[str, Any]:
     base = _base_url()
     if not base:
         return {"source": SOURCE, "status": "not_configured", "symbol": symbol}
-    key = os.getenv("CRYPTO_MONITOR_API_KEY")
+    key = ApexConfig.from_env().integrations.crypto_monitor_api_key
     headers = {"X-API-Key": key} if key else None
 
     upstream_symbol = symbol[:-4] if symbol.endswith("USDT") else symbol

@@ -151,12 +151,15 @@ class SetupEvidenceGateTests(unittest.IsolatedAsyncioTestCase):
         with patch("core.signal_quality_gate.collect_external_context", new=AsyncMock(return_value=empty_context("BTCUSDT"))), \
              patch("core.signal_quality_gate.collect_news_context", new=AsyncMock(return_value=news)), \
              patch("core.signal_quality_gate.build_zone_context", return_value={"available": False, "zones": []}), \
-             patch("core.signal_quality_gate.build_learning_context", return_value={"available": False}), \
              patch("core.signal_quality_gate.persist_context"), patch("core.signal_quality_gate.persist_news_context"), \
+             patch("core.signal_quality_gate.persist_live_context"), \
              patch("core.signal_quality_gate.persist_assessment"), patch("core.signal_quality_gate._persist_review"):
             review = await review_signal_candidate(
                 candidate,
-                lambda *_: json.dumps({"valid": True, "decision": "APPROVE", "confidence": 0.99}),
+                lambda *_: json.dumps({
+                    "decision": "APPROVE", "confidence": 0.99,
+                    "reason_codes": ["CONTEXT_OK"], "short_summary": "ready",
+                }),
             )
         self.assertEqual(review["decision"], "WAIT")
         self.assertEqual(review["setup_assessment"]["state"], "DEVELOPING")

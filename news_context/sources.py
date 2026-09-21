@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import random
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -15,12 +14,10 @@ from urllib.error import HTTPError
 from external_sources.budget import BudgetDenied, budget, request_scope
 
 from external_sources.cache import cache
+from apex.config.settings import ApexConfig
 
 
-CALENDAR_URL = os.environ.get(
-    "MACRO_CALENDAR_URL",
-    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-)
+CALENDAR_URL = ApexConfig.from_env().integrations.macro_calendar_url
 RSS_SOURCES = (
     ("https://cointelegraph.com/rss", "CoinTelegraph"),
     ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),

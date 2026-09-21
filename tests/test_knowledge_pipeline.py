@@ -1,49 +1,55 @@
-import os
-import sqlite3
-import tempfile
 import unittest
-from unittest import mock
+from pathlib import Path
 
 
 class KnowledgePipelineTests(unittest.TestCase):
-    def test_core_seed_has_no_legacy_pseudo_statistics(self):
-        text = Path('core/learning.py').read_text()
-        block = text[text.index('def _seed_smc_knowledge():'):text.index('\ndef save_signal(', text.index('def _seed_smc_knowledge():'))]
-        self.assertIn("source='core_seed_v2'", block)
-        self.assertIn("source='smc_seed' AND active=1", block)
-        self.assertNotIn('70-80%', block)
-        self.assertNotIn('выше на 30%', block)
-        self.assertNotIn('манипуляция гарантирована', block)
+    def test_legacy_autonomous_modules_are_physically_removed(self):
+        for name in (
+            "brain_builder.py",
+            "brain_router.py",
+            "web_learner.py",
+            "apex_autopilot.py",
+            "core/learning.py",
+            "core/trade_baseline_reset.py",
+            "groq_extensions.py",
+        ):
+            self.assertFalse(Path(name).exists(), name)
 
-    def test_web_research_does_not_activate_self_rules(self):
-        text = Path('web_learner.py').read_text()
-        self.assertIn('CREATE TABLE IF NOT EXISTS knowledge_candidates', text)
-        self.assertIn("'candidate'", text)
-        research = text[text.index('def groq_research_topic'):text.index('def run_web_learning_cycle')]
-        self.assertNotIn('INSERT OR IGNORE INTO self_rules', research)
+    def test_startup_never_resets_trade_statistics(self):
+        source = Path("bot.py").read_text()
+        self.assertNotIn("_apply_trade_learning_baseline_reset", source)
+        self.assertNotIn("trade_baseline_reset", source)
 
-    def test_default_web_learning_sources_are_balanced(self):
-        text = Path('web_learner.py').read_text()
-        self.assertIn('DEFAULT_LEARNING_SOURCES = (', text)
-        for name in ('CoinDesk', 'TheBlock', 'Decrypt', 'Glassnode_blog', 'Messari', 'IntoTheBlock', 'CryptoQuant_blog', 'DeFiLlama_news'):
-            self.assertIn(f'"{name}"', text)
-        self.assertNotIn('dict(list(RSS_SOURCES.items())[:8])', text)
-
-    def test_brain_screen_hides_macro_summary_but_keeps_learning_status(self):
+    def test_telegram_exposes_live_learning_without_legacy_mutation_buttons(self):
         text = Path('bot.py').read_text()
-        block = text[text.index('elif data == "menu_brain"'):text.index('elif data == "brain_sources"')]
-        self.assertNotIn('{macro_block}', block)
-        self.assertIn('Последний WebLearner', block)
-        self.assertIn('{execution_block}', block)
+        self.assertIn('callback_data="menu_live_learning"', text)
+        self.assertIn('_format_live_learning', text)
+        for callback in ('menu_brain', 'brain_run_analysis', 'brain_web_learn_now',
+                         'brain_strategy_refresh', 'brain_router_strategy_refresh'):
+            self.assertNotIn(f'callback_data="{callback}"', text)
 
-    def test_polling_mode_schedules_web_learning(self):
-        text = Path('bot.py').read_text()
-        polling = text[text.index('async def polling_main():'):]
-        self.assertIn('scheduler.add_job(_polling_web_learner, "interval", hours=1', polling)
-        self.assertIn('scheduler.add_job(run_brain_builder_async, "interval", hours=1', polling)
+    def test_polling_mode_does_not_schedule_rule_mutating_learning(self):
+        bootstrap = Path('apex/app/bootstrap.py').read_text()
+        registry = Path('apex/app/job_registry.py').read_text()
+        runtime = bootstrap + registry
+        self.assertIn('async def _run_polling(', bootstrap)
+        self.assertNotIn('_polling_web_learner', runtime)
+        self.assertNotIn('run_brain_builder_async', runtime)
+        self.assertNotIn('autonomous_learning_cycle', runtime)
 
-
-from pathlib import Path
-
+    def test_strategies_do_not_call_removed_adaptive_learning_hooks(self):
+        source = Path("apex/compatibility/legacy_market_runtime.py").read_text()
+        for hook in (
+            "_LEARNING_OK",
+            "_learn_should_skip",
+            "_learn_patterns",
+            "_learn_save_pattern",
+            "_brain_router",
+            "_autopilot_on_close",
+            "get_relevant_rules(",
+            "get_recent_errors(",
+            "calc_size_multiplier(",
+        ):
+            self.assertNotIn(hook, source)
 if __name__ == '__main__':
     unittest.main()

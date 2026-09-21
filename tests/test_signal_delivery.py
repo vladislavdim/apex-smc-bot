@@ -6,12 +6,22 @@ from pathlib import Path
 
 from core.signal_delivery import (
     claim_signal_delivery,
+    confirm_signal_delivery,
     release_signal_delivery_claim,
     signal_delivery_key,
 )
+from apex.db.state_db import migrate_state
 
 
 class SignalDeliveryTests(unittest.TestCase):
+    @staticmethod
+    def _state_db(temp_dir: str) -> str:
+        path = str(Path(temp_dir) / "state.db")
+        conn = sqlite3.connect(path)
+        migrate_state(conn)
+        conn.close()
+        return path
+
     def test_delivery_key_ignores_display_grade(self):
         base = {
             "symbol": "aaveusdt",
@@ -27,7 +37,7 @@ class SignalDeliveryTests(unittest.TestCase):
 
     def test_only_one_concurrent_delivery_claim_wins(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = str(Path(temp_dir) / "brain.db")
+            db_path = self._state_db(temp_dir)
             key = "AAVEUSDT:ZONE:BULLISH:4h"
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 results = list(pool.map(
@@ -39,7 +49,7 @@ class SignalDeliveryTests(unittest.TestCase):
 
     def test_failed_delivery_releases_only_its_own_claim(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = str(Path(temp_dir) / "brain.db")
+            db_path = self._state_db(temp_dir)
             key = "AAVEUSDT:ZONE:BULLISH:4h"
             self.assertTrue(claim_signal_delivery(db_path, key, 1000.0, 4 * 3600))
             release_signal_delivery_claim(db_path, key, 999.0)
@@ -48,8 +58,21 @@ class SignalDeliveryTests(unittest.TestCase):
             self.assertTrue(claim_signal_delivery(db_path, key, 1002.0, 4 * 3600))
             with sqlite3.connect(db_path) as conn:
                 self.assertEqual(conn.execute(
-                    "SELECT sent_at FROM signal_cooldown WHERE cache_key=?", (key,)
+                    "SELECT claimed_at FROM delivery_claims WHERE cache_key=?", (key,)
                 ).fetchone(), (1002.0,))
+
+    def test_confirmed_delivery_keeps_restart_safe_cooldown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = self._state_db(temp_dir)
+            key = "AAVEUSDT:ZONE:BULLISH:4h"
+            self.assertTrue(claim_signal_delivery(db_path, key, 1000.0, 3600))
+            self.assertTrue(confirm_signal_delivery(db_path, key, 1000.0, 1001.0))
+            release_signal_delivery_claim(db_path, key, 1000.0)
+            self.assertFalse(claim_signal_delivery(db_path, key, 1002.0, 3600))
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT delivered_at FROM delivery_claims WHERE cache_key=?", (key,)
+                ).fetchone(), (1001.0,))
 
 
 if __name__ == "__main__":

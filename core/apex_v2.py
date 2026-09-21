@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
+from apex.config.settings import ApexConfig
 
 
 APEX_VERSION = "2.0"
@@ -26,13 +27,7 @@ MATERIAL_MANAGER_EVENTS = {
     "EXTERNAL_CONFLICT", "NO_PROGRESS", "MARKET_DATA_DEGRADED",
     "EXCHANGE_FILL", "RECONCILIATION_REQUIRED", "VOLATILITY_SHOCK",
 }
-DB_PATH = os.environ.get(
-    "APEX_DB_PATH",
-    os.environ.get(
-        "APEX_BRAIN_DB_PATH",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"),
-    ),
-)
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
 
 def _utc_now() -> str:
@@ -55,7 +50,7 @@ def _float(value: Any, default: float | None = None) -> float | None:
 
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
@@ -191,16 +186,16 @@ def ensure_apex_v2_schema(db_path: str = DB_PATH) -> None:
 
 
 def version_manifest(env: Mapping[str, str] | None = None) -> dict[str, Any]:
-    source = os.environ if env is None else env
+    config = ApexConfig.from_env(env)
     return {
         "apex_version": APEX_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "release_sha": str(source.get("RENDER_GIT_COMMIT") or source.get("GIT_COMMIT") or "unknown"),
+        "release_sha": config.runtime.release_sha,
         "manager_version": 2,
-        "strategy_version": str(source.get("APEX_STRATEGY_VERSION") or "existing-production"),
-        "prompt_version": str(source.get("APEX_GROQ_PROMPT_VERSION") or "manager-v2"),
-        "playbook_version": str(source.get("APEX_PLAYBOOK_VERSION") or "v2-shadow-books"),
-        "groq_model": str(source.get("GROQ_MODEL") or "configured-runtime"),
+        "strategy_version": config.strategies.manifest_hash(),
+        "prompt_version": "legacy-parity-v1",
+        "playbook_version": "v3-live-manager",
+        "groq_model": config.integrations.groq_model or "configured-runtime",
     }
 
 
@@ -423,60 +418,6 @@ def material_events(events: Iterable[Any]) -> list[str]:
     return result
 
 
-def similar_scenarios(
-    state: Mapping[str, Any], *, limit: int = 5, db_path: str = DB_PATH,
-) -> list[dict[str, Any]]:
-    """Return compact completed analogues; never reuse another trade's state."""
-    ensure_apex_v2_schema(db_path)
-    strategy = str(state.get("strategy") or "").upper()
-    direction = str(state.get("direction") or "").upper()
-    symbol = str(state.get("symbol") or "").upper()
-    current_signal = int(state.get("signal_id") or 0)
-    conn = _connect(db_path)
-    has_replays = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_manager_replay_tracks'"
-    ).fetchone()
-    if not has_replays:
-        conn.close(); return []
-    rows = conn.execute(
-        """SELECT t.signal_id,t.strategy,t.symbol,t.direction,t.snapshot_json,
-                  r.net_r,r.mfe_r,r.mae_r,r.giveback_r,r.exit_reason,r.targets_reached
-           FROM apex_v2_theses t JOIN trade_manager_replay_tracks r
-             ON r.signal_id=t.signal_id AND r.track='ACTUAL'
-           WHERE r.closed_at IS NOT NULL AND t.signal_id!=?
-           ORDER BY r.closed_at DESC LIMIT 200""",
-        (current_signal,),
-    ).fetchall()
-    conn.close()
-    ranked = []
-    for row in rows:
-        try:
-            thesis = json.loads(row[4] or "{}")
-        except (TypeError, json.JSONDecodeError):
-            thesis = {}
-        score = 3.0 * (str(row[1]).upper() == strategy)
-        score += 2.0 * (str(row[3]).upper() == direction)
-        score += 0.5 * (str(row[2]).upper() == symbol)
-        score += 1.0 * bool(
-            state.get("market_regime") and
-            str(state.get("market_regime")).upper() == str(thesis.get("market_regime") or "").upper()
-        )
-        if score <= 0:
-            continue
-        try:
-            targets = json.loads(row[10] or "[]")
-        except (TypeError, json.JSONDecodeError):
-            targets = []
-        ranked.append({
-            "signal_id": int(row[0]), "strategy": row[1], "symbol": row[2],
-            "direction": row[3], "similarity": score, "net_r": row[5],
-            "mfe_r": row[6], "mae_r": row[7], "giveback_r": row[8],
-            "exit_reason": row[9], "targets_reached": targets,
-        })
-    ranked.sort(key=lambda item: (-float(item["similarity"]), -int(item["signal_id"])))
-    return ranked[:max(1, min(int(limit), 10))]
-
-
 def confidence_calibration(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Measure whether stated confidence agrees with resolved outcomes."""
     buckets = {(0.0, 0.6): [], (0.6, 0.8): [], (0.8, 1.01): []}
@@ -562,7 +503,7 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     try:
         from external_sources.budget import SourceBudget
         result["api_budget"] = SourceBudget(db_path).snapshot()
-        raw_plan = os.environ.get("APEX_EXTERNAL_SOURCE_PLAN_JSON")
+        raw_plan = ApexConfig.from_env().integrations.external_source_plan_json
         if raw_plan:
             try:
                 from external_sources.budget import plan_daily_load
@@ -607,12 +548,6 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     table_names = {str(row[0]) for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
-    result["shadow_sources"] = [dict(row) for row in conn.execute(
-        "SELECT source,symbol,payload_json,updated_at FROM external_shadow_snapshots ORDER BY updated_at DESC LIMIT 20"
-    ).fetchall()] if "external_shadow_snapshots" in table_names else []
-    result["gate_microstructure"] = [dict(row) for row in conn.execute(
-        "SELECT symbol,update_id,payload_json,created_at FROM gate_microstructure_shadow ORDER BY created_at DESC LIMIT 20"
-    ).fetchall()] if "gate_microstructure_shadow" in table_names else []
     if "trade_manager_state" in table_names:
         historical_states = {str(row[0]): int(row[1]) for row in conn.execute(
             "SELECT manager_state,COUNT(*) FROM trade_manager_state GROUP BY manager_state"
@@ -637,59 +572,19 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
         }
     else:
         result["manager_db"] = {"states": {}, "trades": []}
-    replay_rows = []
-    if "trade_manager_replay_tracks" in table_names:
-        raw_tracks = conn.execute(
-            """SELECT signal_id,track,net_r,gross_r,mfe_r,mae_r,giveback_r,exit_reason,
-                      targets_reached,closed_at
-               FROM trade_manager_replay_tracks ORDER BY signal_id DESC"""
-        ).fetchall()
-        grouped: dict[int, dict[str, Any]] = {}
-        for row in raw_tracks:
-            grouped.setdefault(int(row[0]), {})[str(row[1])] = dict(row)
-        for signal_id, tracks in grouped.items():
-            actual, no_manager, playbook = (
-                tracks.get("ACTUAL", {}), tracks.get("NO_MANAGER", {}), tracks.get("PLAYBOOK_ONLY", {})
-            )
-            actual_r, no_r, playbook_r = _float(actual.get("net_r")), _float(no_manager.get("net_r")), _float(playbook.get("net_r"))
-            replay_rows.append({
-                "signal_id": signal_id, "tracks": tracks,
-                "groq_edge_r": round(actual_r-no_r, 4) if actual_r is not None and no_r is not None else None,
-                "groq_vs_rules_r": round(actual_r-playbook_r, 4) if actual_r is not None and playbook_r is not None else None,
-                "playbook_edge_r": round(playbook_r-no_r, 4) if playbook_r is not None and no_r is not None else None,
-            })
-    shadow_rows = []
-    if "trade_manager_shadow_stats" in table_names:
-        shadow_rows = [dict(row) for row in conn.execute(
-            "SELECT * FROM trade_manager_shadow_stats ORDER BY strategy,rule_id"
-        ).fetchall()]
-    result["learning"] = {"replay": replay_rows[:100], "shadow_rules": shadow_rows}
-    # New learning/diagnostic stores are additive.  A missing or corrupt
-    # optional table must never make the dashboard or manager unavailable.
-    try:
-        from core.replay_lab import replay_dashboard_summary
-        result["replay_v2"] = replay_dashboard_summary(db_path, limit=100)
-    except Exception:
-        result["replay_v2"] = []
+    result["learning"] = {"scope": "CONFIRMED_LIVE_ONLY"}
     try:
         from core.groq_calibration import calibration_summary
         result["groq_calibration"] = calibration_summary(db_path)
     except Exception:
-        result["groq_calibration"] = {"calls": 0, "resolved": 0, "scope": "SHADOW_DIAGNOSTICS"}
+        result["groq_calibration"] = {"calls": 0, "resolved": 0, "scope": "CONFIRMED_LIVE_ONLY"}
     try:
         from core.portfolio_dependency import latest_dependency_snapshot
         result["portfolio_dependency"] = latest_dependency_snapshot(db_path)
     except Exception:
         result["portfolio_dependency"] = {}
-    try:
-        from core.shadow_evidence import load_shadow_evaluations
-        result["shadow_evaluations"] = load_shadow_evaluations(db_path)
-    except Exception:
-        result["shadow_evaluations"] = []
     result["learning"].update({
-        "replay_v2": result.get("replay_v2", []),
         "groq_calibration": result.get("groq_calibration", {}),
-        "shadow_evaluations": result.get("shadow_evaluations", []),
     })
     if "trade_executions" in table_names:
         execution_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
@@ -707,13 +602,14 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     else:
         result["execution_health"] = {"statuses": {}, "recent": []}
     conn.close()
-    live_mode = str(os.environ.get("AUTO_TRADING_MODE") or "paper").lower()
-    enabled = str(os.environ.get("AUTO_TRADING_ENABLED") or "").lower() in {"1", "true", "yes", "on"}
-    confirmed = os.environ.get("AUTO_TRADING_LIVE_CONFIRM") == "ENABLE_LIVE_BINANCE_FUTURES"
+    config = ApexConfig.from_env()
+    live_mode = config.execution.mode
+    enabled = config.execution.enabled
+    confirmed = config.execution.live_confirmation == "ENABLE_LIVE_BINANCE_FUTURES"
     result["execution_mode"] = {
         "mode": live_mode, "enabled": enabled,
         "live_armed": bool(enabled and live_mode == "live" and confirmed),
-        "kill_switch": str(os.environ.get("AUTO_TRADING_KILL_SWITCH") or "").lower() in {"1", "true", "yes", "on"},
+        "kill_switch": config.execution.kill_switch,
     }
     return result
 

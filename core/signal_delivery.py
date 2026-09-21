@@ -9,7 +9,8 @@ the immediate durable brain checkpoint.
 
 from __future__ import annotations
 
-import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.repositories.deliveries import DeliveryClaimRepository
 
 
 def signal_delivery_key(candidate: dict, strategy: str) -> str:
@@ -28,42 +29,25 @@ def claim_signal_delivery(
     now_ts: float,
     cooldown_seconds: float,
 ) -> bool:
-    """Atomically reserve a signal delivery in the existing cooldown table."""
-    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""CREATE TABLE IF NOT EXISTS signal_cooldown (
-            cache_key TEXT PRIMARY KEY,
-            sent_at REAL
-        )""")
-        row = conn.execute(
-            "SELECT sent_at FROM signal_cooldown WHERE cache_key=?",
-            (cache_key,),
-        ).fetchone()
-        last_sent = float(row[0] or 0) if row else 0.0
-        if last_sent > 0 and now_ts - last_sent < cooldown_seconds:
-            conn.rollback()
-            return False
-        conn.execute(
-            "INSERT OR REPLACE INTO signal_cooldown (cache_key, sent_at) VALUES (?, ?)",
-            (cache_key, float(now_ts)),
-        )
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    """Atomically reserve delivery in the production State DB."""
+    repository = DeliveryClaimRepository(
+        lambda: _connect_compatibility_db(db_path, timeout=30)
+    )
+    return repository.claim(cache_key, now_ts, cooldown_seconds)
 
 
 def release_signal_delivery_claim(db_path: str, cache_key: str, claim_ts: float) -> None:
     """Release only this attempt's claim after a confirmed delivery failure."""
-    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        conn.execute(
-            "DELETE FROM signal_cooldown WHERE cache_key=? AND sent_at=?",
-            (cache_key, float(claim_ts)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    repository = DeliveryClaimRepository(
+        lambda: _connect_compatibility_db(db_path, timeout=30)
+    )
+    repository.release(cache_key, claim_ts)
+
+
+def confirm_signal_delivery(
+    db_path: str, cache_key: str, claim_ts: float, delivered_at: float,
+) -> bool:
+    repository = DeliveryClaimRepository(
+        lambda: _connect_compatibility_db(db_path, timeout=30)
+    )
+    return repository.confirm(cache_key, claim_ts, delivered_at)

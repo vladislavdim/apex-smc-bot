@@ -50,8 +50,12 @@ def test_strategy_risk_is_separate_and_uses_only_activated_outcomes(tmp_path):
     conn.commit(); conn.close()
 
     states = rebuild_strategy_risk_states(path)
-    assert states["FAST"]["mode"] == "PAUSED"
-    assert states["FAST"]["live_risk_multiplier"] == 0.0
+    # V3 learning is advisory-only: objective losses are observed but may not
+    # pause a strategy or mutate production risk.
+    assert states["FAST"]["mode"] == "NORMAL"
+    assert states["FAST"]["live_risk_multiplier"] == 1.0
+    assert states["FAST"]["consecutive_losses"] == 5
+    assert states["FAST"]["reason"].startswith("ADVISORY_ONLY:")
     assert states["SWING"]["mode"] == "NORMAL"
     assert states["SWING"]["consecutive_wins"] == 0
 
