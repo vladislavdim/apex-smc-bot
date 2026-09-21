@@ -65,7 +65,7 @@ _MANIFESTS = {
         post_candidate_review=frozenset({"FAST_DETECT_FAST_DEAL_G9449"}),
     ),
     "MTF": LegacyGateManifest(
-        "bot.py",
+        "apex/compatibility/legacy_bot_runtime.py",
         "full_scan_raw",
         (
             "MTF_FULL_SCAN_RAW_G4558",

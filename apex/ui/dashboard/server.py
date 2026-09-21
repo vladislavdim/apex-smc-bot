@@ -908,8 +908,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
 
 
 def _runtime_release_sha() -> str:
-    import os
-    return str(os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "").strip()
+    return _SETTINGS.release_sha
 
 
 def _cache_key(strategy: str, symbol: str, outcome: str, groq: str,

@@ -141,7 +141,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_worker_restart_guard_uses_durable_v3_state(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         with open(os.path.join(root, "apex", "app", "cutover.py"), encoding="utf-8") as source:
             cutover_source = source.read()
@@ -172,7 +172,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_worker_compatibility_db_path_comes_from_typed_config(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         with open(os.path.join(root, "apex", "compatibility", "legacy_market_runtime.py"), encoding="utf-8") as source:
             market_source = source.read()
@@ -184,7 +184,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_state_projections_are_ready_before_manager_registration_and_reconcile(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         startup = bot_source[
             bot_source.index("async def _initialize_production_runtime"):
@@ -223,7 +223,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_legacy_scheduler_no_longer_runs_non_production_learning(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         forbidden_registrations = (
             "add_job(shadow_experience_job",
@@ -249,7 +249,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_unregistered_legacy_timing_queue_runtime_is_removed(self):
         sources = [
-            Path("bot.py").read_text(encoding="utf-8"),
+            Path("apex", "compatibility", "legacy_bot_runtime.py").read_text(encoding="utf-8"),
             Path("apex", "compatibility", "legacy_market_runtime.py").read_text(encoding="utf-8"),
             Path("apex", "compatibility", "market_strategy.py").read_text(
                 encoding="utf-8"
@@ -264,9 +264,9 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_legacy_research_shadow_and_backtest_are_not_request_reachable(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
-        with open(os.path.join(root, "stats_server.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "ui", "dashboard", "server.py"), encoding="utf-8") as source:
             dashboard_source = source.read()
         for forbidden in (
             'Command("backtest")', 'Command("think")', 'callback_data="menu_experience"',
@@ -330,7 +330,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_fast_scheduler_uses_the_single_v3_strategy_registry(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertNotIn("asyncio.to_thread(detect_fast_deal, symbol)", bot_source)
         self.assertIn('asyncio.to_thread(_v3_strategy_candidate, "FAST", symbol)', bot_source)
@@ -343,7 +343,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_every_mtf_entry_path_uses_the_single_v3_registry(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertNotIn("register_raw_scan_handler(full_scan_raw)", bot_source)
         self.assertNotIn("sig_data = full_scan_raw(symbol, timeframe, auto=True)", bot_source)
@@ -357,7 +357,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_swing_and_zone_schedulers_use_the_single_v3_registry(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertNotIn("asyncio.to_thread(detect_swing_setup, symbol", bot_source)
         self.assertNotIn("asyncio.to_thread(detect_zone_setup, symbol", bot_source)
@@ -366,7 +366,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_wyckoff_runs_all_subtypes_through_the_registry(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn("_v3_snapshot_symbol_detector(detect_wyckoff_spring)", bot_source)
         self.assertIn("_v3_snapshot_symbol_detector(detect_wyckoff_distribution)", bot_source)
@@ -417,7 +417,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
         self.assertIn("connect_compatibility as _connect_compatibility_db", market_source)
 
     def test_launcher_has_an_explicit_market_compatibility_contract(self):
-        source = Path("bot.py").read_text(encoding="utf-8")
+        source = Path("apex", "compatibility", "legacy_bot_runtime.py").read_text(encoding="utf-8")
         self.assertNotIn("from market import *", source)
         self.assertNotIn("from market import (", source)
         for boundary in (
@@ -590,7 +590,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
     def test_runtime_db_access_uses_the_canonical_connection_layer(self):
         root = os.path.dirname(os.path.dirname(__file__))
         runtime_files = [
-            os.path.join(root, "bot.py"), os.path.join(root, "market.py"),
+            os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), os.path.join(root, "market.py"),
             os.path.join(root, "apex", "compatibility", "legacy_market_runtime.py"),
         ]
         runtime_files.extend(
@@ -655,7 +655,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_runtime_heartbeat_persists_full_sha_for_release_verification(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_bot_runtime.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn('public["release_sha"] = _V3_RUNTIME.snapshot()["release_sha"]', bot_source)
 

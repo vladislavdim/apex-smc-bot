@@ -51,7 +51,7 @@ class TelegramRouterTests(unittest.TestCase):
         self.assertEqual(dispatcher.chat_member.calls, [(handlers.chat_member,)])
 
     def test_launcher_has_no_import_time_handler_decorators(self):
-        source = Path("bot.py").read_text(encoding="utf-8")
+        source = Path("apex", "compatibility", "legacy_bot_runtime.py").read_text(encoding="utf-8")
 
         self.assertNotIn("@dp.message", source)
         self.assertNotIn("@dp.callback_query", source)
