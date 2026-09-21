@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import stats_server
+from apex.ui.dashboard import server as stats_server
 
 
 class StrategyFunnelCleanupTests(unittest.TestCase):

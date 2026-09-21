@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest import mock
 
 from core import setup_audit
-import stats_server
+from apex.ui.dashboard import server as stats_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
