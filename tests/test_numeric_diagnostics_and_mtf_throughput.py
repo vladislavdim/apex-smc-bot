@@ -3,9 +3,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
+BOT = (ROOT / "apex" / "compatibility" / "legacy_bot_runtime.py").read_text(encoding="utf-8")
 MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
-STATS = (ROOT / "stats_server.py").read_text(encoding="utf-8")
+STATS = (ROOT / "apex" / "ui" / "dashboard" / "server.py").read_text(encoding="utf-8")
 
 
 class NumericDiagnosticsAndMtfThroughputTests(unittest.TestCase):
