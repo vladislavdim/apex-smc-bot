@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from scripts.verify_v3_completion import (
-    CompletionError, verify_completion, verify_corpus, verify_verdict,
+    CompletionError, verify_completion, verify_corpus, verify_predeployment,
+    verify_verdict,
 )
 
 
@@ -35,6 +36,29 @@ class CompletionGateTests(unittest.TestCase):
             "| 111 | last | DONE | yes |\n"
         )
         self.assertEqual(verify_completion(path), ("1–3", "111"))
+
+    def test_predeployment_allows_only_acceptance_row_to_remain_partial(self):
+        path = self.write(
+            "| IDs | Workstream | Status | Evidence |\n"
+            "|---|---|---|---|\n"
+            "| 1–3 | first | DONE | yes |\n"
+            "| 110 | pipeline | DONE | yes |\n"
+            "| 111 | acceptance | PARTIAL | deploy and observe |\n"
+        )
+        self.assertEqual(
+            verify_predeployment(path), ("1–3", "110", "111"),
+        )
+
+    def test_predeployment_rejects_unfinished_code_workstream(self):
+        path = self.write(
+            "| IDs | Workstream | Status | Evidence |\n"
+            "|---|---|---|---|\n"
+            "| 1–3 | first | DONE | yes |\n"
+            "| 110 | pipeline | PARTIAL | no |\n"
+            "| 111 | acceptance | PARTIAL | no |\n"
+        )
+        with self.assertRaisesRegex(CompletionError, "v3_workstreams_not_done:110"):
+            verify_predeployment(path)
 
     def test_missing_boundary_rows_fail(self):
         path = self.write(
