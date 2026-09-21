@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from apex.domain.enums import Strategy
 from apex.domain.models import MarketRegime, MarketSnapshot
+from apex.market.snapshot_scope import use_market_snapshot
 
 from .base import StrategyAdapter
 from .parity import ParityReport, compare_traces
@@ -279,7 +280,14 @@ def evaluate_activation_corpus(
         if not callable(evaluator):
             reasons.append(f"snapshot_adapter_missing:{case.strategy.value}")
             continue
-        legacy_traces = left.evaluate(case.snapshot.symbol, **dict(case.kwargs))
+        # Both interfaces must see the exact same frozen point-in-time market.
+        # The legacy symbol entry point is intentionally exercised, but its
+        # candle boundary is fenced so an offline proof can never drift with
+        # current Gate/cache state.
+        with use_market_snapshot(case.snapshot):
+            legacy_traces = left.evaluate(
+                case.snapshot.symbol, **dict(case.kwargs)
+            )
         replacement_traces = evaluator(case.snapshot, **dict(case.kwargs))
         report = compare_traces(case.case_id, legacy_traces, replacement_traces)
         reports.append(report)

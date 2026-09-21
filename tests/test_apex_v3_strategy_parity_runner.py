@@ -14,6 +14,7 @@ from apex.strategies.capture import capture_gate_corpus
 from apex.strategies.parity_corpus import load_corpus_directory
 from apex.strategies.parity_runner import load_activation_verdict, run_corpus
 from apex.strategies.registry import StrategyRegistry
+from apex.market.snapshot_scope import snapshot_candle_override
 from tests.test_apex_v3_strategy_capture import NOW, snapshot_build
 
 
@@ -33,6 +34,14 @@ class StaticAdapter:
 
     def evaluate_snapshot(self, snapshot, **kwargs):
         return self._trace(snapshot.symbol, self.snapshot_outcome)
+
+
+class SnapshotBoundaryAdapter(StaticAdapter):
+    def evaluate(self, symbol: str, **kwargs):
+        rows = snapshot_candle_override(symbol, "1h", 2)
+        if rows is None:
+            raise AssertionError("legacy parity escaped frozen snapshot")
+        return self._trace(symbol, "FILTERED")
 
 
 def registry(*, mismatch: Strategy | None = None) -> StrategyRegistry:
@@ -71,6 +80,19 @@ class StrategyParityRunnerTests(unittest.TestCase):
         self.assertTrue(payload["ready"])
         self.assertEqual(digest, hashlib.sha256(encoded).hexdigest())
         self.assertEqual(len(payload["cases"]), 5)
+
+    def test_legacy_interface_is_fenced_to_the_frozen_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus = self.corpus(root)
+            adapters = {
+                strategy: SnapshotBoundaryAdapter(strategy)
+                for strategy in Strategy
+            }
+            result = run_corpus(
+                corpus, root / "verdict.json", StrategyRegistry(adapters),
+            )
+        self.assertTrue(result.ready)
 
     def test_mismatch_creates_blocked_verdict_and_never_claims_ready(self):
         with tempfile.TemporaryDirectory() as directory:
