@@ -80,7 +80,7 @@ class InstanceLeaseClient:
         release_sha: str,
         *,
         ttl_seconds: int = 60,
-        timeout: float = 5.0,
+        timeout: float = 2.0,
         post_json: PostJson = _post_json,
     ) -> None:
         self.url = str(url or "").strip()
