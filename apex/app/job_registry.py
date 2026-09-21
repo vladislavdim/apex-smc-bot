@@ -33,7 +33,7 @@ PRODUCTION_JOBS = (
     JobDefinition("market_swing", "cron:20,50", 240, JobPriority.STRATEGY_SCANNER, False),
     JobDefinition("market_wyckoff", "cron:40", 300, JobPriority.STRATEGY_SCANNER, False),
     JobDefinition("market_ltf_watch", "cron:6,16,26,36,46,56", 180, JobPriority.STRATEGY_SCANNER, False),
-    JobDefinition("runtime_watchdog", "interval:15s", 5, JobPriority.BINANCE_PROTECTION, True),
+    JobDefinition("runtime_watchdog", "interval:15s", 12, JobPriority.BINANCE_PROTECTION, True),
     JobDefinition("keepalive", "interval:10m", 30, JobPriority.TELEMETRY, False),
     JobDefinition("alerts", "interval:5m", 60, JobPriority.TELEGRAM, False),
     JobDefinition("dashboard_telemetry", "interval:10m", 60, JobPriority.TELEMETRY, False),

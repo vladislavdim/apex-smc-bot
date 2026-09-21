@@ -184,7 +184,7 @@ class StrategySettings:
 
     minimum_rr: float
     versions: tuple[tuple[str, str], ...]
-    snapshot_activation_requested: bool = False
+    snapshot_activation_requested: bool = True
     parity_corpus_path: str = ""
     parity_verdict_path: str = ""
 
@@ -400,7 +400,7 @@ class ApexConfig:
                 minimum_rr=_float(source, "APEX_MINIMUM_RR", 2.0),
                 versions=tuple(sorted(STRATEGY_VERSIONS.items())),
                 snapshot_activation_requested=_bool(
-                    source, "APEX_SNAPSHOT_STRATEGIES_ENABLED", False,
+                    source, "APEX_SNAPSHOT_STRATEGIES_ENABLED", True,
                 ),
                 parity_corpus_path=str(source.get(
                     "APEX_STRATEGY_PARITY_CORPUS",

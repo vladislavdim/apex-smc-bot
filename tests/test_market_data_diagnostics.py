@@ -71,6 +71,8 @@ def test_rendered_dashboard_contains_operational_blocks():
     assert "APEX V3 · Production" in rendered
     assert "Gate freshness" in rendered
     assert "LIVE_CONTEXT" in rendered
+    assert "VISIBLE_ORDERBOOK_LIQUIDITY" in rendered
+    assert "CVD 60s" in rendered
     assert "Статистика реальных сделок" in rendered
     assert "Research" not in rendered
 

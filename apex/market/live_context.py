@@ -71,10 +71,15 @@ def fetch_live_context(client: GateMarketClient, symbol: str, *, as_of: int) -> 
             int(float(row.get("create_time", row.get("time", 0))) or 0)
             for row in trade_rows
         ]
+        event_time = max(event_times) if event_times else None
+        cvd = real_cvd(trade_rows, source="gate_rest_trades")
         microstructure["cvd_real"] = {
-            **real_cvd(trade_rows, source="gate_rest_trades"),
+            **cvd,
             "received_at": trades.received_at,
-            "event_time": max(event_times) if event_times else None,
+            "event_time": event_time,
+            "age_seconds": max(0, int(as_of) - int(event_time)) if event_time else None,
+            "status": "FRESH" if cvd.get("available") else "UNAVAILABLE",
+            "freshness_status": "FRESH" if cvd.get("available") else "UNAVAILABLE",
             "point_in_time": True,
         }
     except Exception as exc:

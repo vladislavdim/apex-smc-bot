@@ -111,7 +111,7 @@ def ingest_gate(message: dict[str, Any]) -> None:
                 _gate_depth_last_persist[symbol] = now
                 try:
                     from .storage import persist_gate_microstructure
-                    persist_gate_microstructure(symbol, reducer.features(now=now), _DB_PATH)
+                    persist_gate_microstructure(symbol, _book_payload(reducer, now), _DB_PATH)
                 except Exception:
                     pass
 
@@ -180,14 +180,9 @@ def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
         "bias": "bullish" if buy > sell * 1.25 else "bearish" if sell > buy * 1.25 else "neutral" if buy + sell else "unknown",
         "age_seconds": max((v["age_seconds"] for v in sources.values()), default=None)}
 
-def order_book_snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
-    """Return the sequence-verified Gate book and a bounded heatmap ladder."""
-    reducer = _gate_books.get(symbol.upper())
-    if reducer is None:
-        return {"source": "gate_ws", "status": "UNAVAILABLE",
-                "freshness_status": "UNKNOWN", "heatmap_levels": [],
-                "availability": "FORWARD_ONLY", "execution_authority": False}
-    value = reducer.features(now=now or time.time())
+def _book_payload(reducer: OrderBookReducer, now: float) -> dict[str, Any]:
+    """Return visible Gate depth plus a bounded heatmap ladder."""
+    value = reducer.features(now=now)
     value["heatmap_levels"] = [
         {"side": "BID", "price": price, "size": size}
         for price, size in sorted(reducer.bids.items(), reverse=True)[:50]
@@ -195,8 +190,48 @@ def order_book_snapshot(symbol: str, now: float | None = None) -> dict[str, Any]
         {"side": "ASK", "price": price, "size": size}
         for price, size in sorted(reducer.asks.items())[:50]
     ]
-    value.update({"availability": "FORWARD_ONLY", "execution_authority": False})
+    value.update({
+        "availability": "FORWARD_ONLY",
+        "execution_authority": False,
+        "liquidity_kind": "VISIBLE_ORDERBOOK_LIQUIDITY",
+        "hidden_stops_claimed": False,
+    })
     return value
+
+
+def order_book_snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
+    """Return the sequence-verified Gate book and a bounded heatmap ladder."""
+    reducer = _gate_books.get(symbol.upper())
+    if reducer is None:
+        return {"source": "gate_ws", "status": "UNAVAILABLE",
+                "freshness_status": "UNKNOWN", "heatmap_levels": [],
+                "availability": "FORWARD_ONLY", "execution_authority": False,
+                "liquidity_kind": "VISIBLE_ORDERBOOK_LIQUIDITY",
+                "hidden_stops_claimed": False}
+    return _book_payload(reducer, now or time.time())
+
+
+def telemetry_snapshot(limit: int = 20) -> list[dict[str, Any]]:
+    """Expose bounded in-process LIVE_CONTEXT without adding market requests."""
+    now = time.time()
+    rows: list[dict[str, Any]] = []
+    for symbol in _configured_symbols[:max(1, min(int(limit), 50))]:
+        data = snapshot(symbol, now=now)
+        rows.append({
+            "symbol": symbol,
+            "source": SOURCE,
+            "status": "FRESH" if data.get("sources") else "WARMING_UP",
+            "age_seconds": data.get("age_seconds"),
+            "buy_usd_60s": data.get("buy_usd_60s"),
+            "sell_usd_60s": data.get("sell_usd_60s"),
+            "cvd_real_delta_usd_60s": data.get("cvd_real_delta_usd_60s"),
+            "trade_count_60s": data.get("trade_count_60s"),
+            "long_liq_usd_300s": data.get("long_liq_usd_300s"),
+            "short_liq_usd_300s": data.get("short_liq_usd_300s"),
+            "gate": dict((data.get("sources") or {}).get("gate") or {}),
+            "orderbook": order_book_snapshot(symbol, now=now),
+        })
+    return rows
 
 def _persist_snapshot(data: dict[str, Any], db_path: str = _DB_PATH) -> None:
     try:

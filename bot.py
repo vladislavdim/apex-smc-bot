@@ -298,6 +298,7 @@ from apex.strategies.wyckoff import WyckoffStrategy as _V3_WYCKOFF_STRATEGY
 from apex.strategies.zone import ZoneStrategy as _V3_ZONE_STRATEGY
 from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT
 from apex.market.provider import GateSnapshotProvider as _V3_GATE_SNAPSHOT_PROVIDER
+from apex.market.context_memory import persist_live_context as _v3_persist_live_context
 from apex.ops.resource_guard import memory_snapshot as _v3_memory_snapshot
 from apex.ops.restart_guard import record_shutdown as _v3_record_shutdown, record_start as _v3_record_start
 from apex.ops.watchdog import EventLoopLagMonitor as _V3EventLoopLagMonitor, ProcessCpuMonitor as _V3ProcessCpuMonitor
@@ -1849,7 +1850,8 @@ def _get_v3_strategy_snapshot_provider():
             _V3_GATE_MARKET_CLIENT(
                 base_url=_V3_CONFIG.integrations.gate_api_base,
                 timeout=_V3_CONFIG.operational.gate_timeout_seconds,
-            )
+            ),
+            context_publisher=_v3_persist_live_context,
         )
     return _v3_strategy_snapshot_provider
 
@@ -3558,7 +3560,9 @@ async def _v3_maintenance_and_backup(reason="safety_30m"):
     backup = await backup_db_to_github(reason)
     if _STATE_PERSISTENCE.configured and state_backup.get("status") not in {"saved", "unchanged"}:
         raise RuntimeError(f"state_backup_{state_backup.get('status') or 'failed'}")
-    if _BRAIN_PERSISTENCE.configured and backup.get("status") not in {"saved", "unchanged"}:
+    if _BRAIN_PERSISTENCE.configured and backup.get("status") not in {
+        "saved", "unchanged", "concurrent_update",
+    }:
         raise RuntimeError(f"compatibility_backup_{backup.get('status') or 'failed'}")
     if _MEMORY_PERSISTENCE.configured and memory_backup.get("status") not in {
         "saved", "unchanged", "skipped_memory_pressure",
