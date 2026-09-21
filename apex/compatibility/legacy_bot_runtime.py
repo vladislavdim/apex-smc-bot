@@ -177,7 +177,7 @@ from core.telegram_dashboard import (
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
 try:
-    from core.signal_quality_gate import review_signal_candidate as _review_signal_candidate
+    from apex.quality.groq_gate import review_signal_candidate as _review_signal_candidate
     _SIGNAL_QUALITY_GATE_OK = True
 except Exception as _quality_gate_import_error:
     _SIGNAL_QUALITY_GATE_OK = False
@@ -283,7 +283,7 @@ from apex.db.repositories.manager import ManagerRepository as _V3ManagerReposito
 from apex.db.maintenance import maintain_memory as _v3_maintain_memory, maintain_state as _v3_maintain_state
 from apex.domain.enums import ComponentState as _V3_COMPONENT_STATE, RuntimeStatus as _V3_RUNTIME_STATUS, Strategy as _V3_STRATEGY
 from apex.learning.live_bridge import LiveLearningBridge as _V3LiveLearningBridge
-from core.execution_ledger import configure_execution_ledger_state as _configure_execution_ledger_state
+from apex.execution.ledger import configure_execution_ledger_state as _configure_execution_ledger_state
 from apex.strategies.base import trace_payload as _v3_strategy_trace_payload
 from apex.strategies.activation import (
     SnapshotEvaluationBlocked as _V3_SNAPSHOT_EVALUATION_BLOCKED,
@@ -386,7 +386,7 @@ _memory_backup_async_lock = None
 
 def _v3_confirmed_accounting(signal_id: int):
     """Load authoritative Binance fill accounting for Live Memory."""
-    from core.execution_ledger import ExecutionSnapshot, actual_result
+    from apex.execution.ledger import ExecutionSnapshot, actual_result
 
     try:
         snapshot = ExecutionSnapshot.from_mapping(
