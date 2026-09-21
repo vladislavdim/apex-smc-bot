@@ -8,6 +8,7 @@ from apex.market.btc_correlation import BtcCorrelationProvider
 from apex.market.runtime_cache import get_global_candles, update_global_candles
 from apex.market.session_liquidity import SessionLiquidityProvider
 from apex.market.snapshot_scope import snapshot_candle_override, use_market_snapshot
+from core.smc_engine import get_candles_smart
 
 
 def _rows(count: int, *, volume: float = 10.0):
@@ -31,6 +32,18 @@ def _snapshot(rows):
 def test_snapshot_scope_blocks_shared_candles_for_other_symbols():
     update_global_candles("BTCUSDT", "4h", list(_rows(30)))
     assert get_global_candles("BTCUSDT", "4h")
+
+
+def test_core_smc_engine_reads_the_snapshot_without_external_sources():
+    rows = _rows(30)
+    with use_market_snapshot(_snapshot(rows)):
+        result = get_candles_smart("ETHUSDT", "4h", 20)
+        missing = get_candles_smart("BTCUSDT", "4h", 20)
+    assert result["source"] == "APEX_V3_SNAPSHOT"
+    assert result["attempts"] == 0
+    assert result["candles"] == list(rows[-20:])
+    assert missing["candles"] == []
+    assert missing["error"] == "snapshot_data_unavailable"
     with use_market_snapshot(_snapshot(_rows(30))):
         assert get_global_candles("BTCUSDT", "4h") == []
         assert get_global_candles("ETHUSDT", "4h") == list(_rows(30))

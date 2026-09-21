@@ -5,6 +5,7 @@ import requests, sqlite3, time, logging, json
 from datetime import datetime
 
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.market.snapshot_scope import snapshot_candle_override
 
 try:
     from .data_policy import configured_market_data_providers
@@ -296,6 +297,17 @@ _FETCHERS = {
 # ═══════════════════════════════════════════════════════════════
 
 def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> dict:
+    requested_limit = max(1, int(limit or 1))
+    snapshot_rows = snapshot_candle_override(symbol, interval, requested_limit)
+    if snapshot_rows is not None:
+        return {
+            "candles": snapshot_rows, "source": "APEX_V3_SNAPSHOT",
+            "attempts": 0,
+            "quality": "high" if snapshot_rows else "none",
+            "is_synthetic": False,
+            "error": "" if snapshot_rows else "snapshot_data_unavailable",
+            "symbol": symbol, "interval": interval,
+        }
     ck = f"{symbol}_{interval}"
     ttl = _CACHE_TTL.get(interval, 300)
     if ck in _candle_cache:

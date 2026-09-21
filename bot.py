@@ -660,7 +660,7 @@ async def handle_callback(callback: CallbackQuery):
 
     if await _v3_state_callback_handlers.handle(callback):
         return
-    if await _v3_market_navigation_callbacks.handle(callback):
+    if await _get_v3_market_navigation_callbacks().handle(callback):
         return
 
 async def cmd_pump(message: types.Message):
@@ -731,38 +731,46 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
 )
 
 
-_v3_market_navigation_callbacks = _V3MarketNavigationCallbacks(
-    _V3MarketNavigationDependencies(
-        edit_message=_edit_message,
-        edit_markup=_edit_message_markup,
-        pairs_keyboard=pairs_keyboard,
-        timeframe_keyboard=tf_keyboard,
-        live_timeframe_keyboard=live_tf_keyboard,
-        live_position_analysis=live_position_analysis,
-        get_top_pairs=get_top_pairs,
-        full_scan=full_scan_raw,
-        scan_diagnostics=scan_diagnostics,
-        get_user_memory=get_user_memory,
-        calculate_risk=calc_risk,
-        get_crypto_news=get_crypto_news,
-        get_market_news=get_market_impact_news,
-        format_news=format_news,
-        ask_groq=ask_groq,
-        save_news=save_news,
-        detect_accumulation=detect_accumulation,
-        scan_all_deals=scan_all_for_deals,
-        get_fear_greed=get_fear_greed,
-        get_dxy_signal=get_dxy_signal,
-        get_market_regime=get_market_regime,
-        get_upcoming_events=get_upcoming_events,
-        get_candles=get_candles,
-        universe_size=DEFAULT_UNIVERSE_SIZE,
-        user_states=user_states,
-        timeframe_labels=TF_LABELS,
-        button=InlineKeyboardButton,
-        markup=InlineKeyboardMarkup,
-    )
-)
+_v3_market_navigation_callbacks = None
+
+
+def _get_v3_market_navigation_callbacks():
+    """Build callback dependencies lazily after scanner definitions exist."""
+    global _v3_market_navigation_callbacks
+    if _v3_market_navigation_callbacks is None:
+        _v3_market_navigation_callbacks = _V3MarketNavigationCallbacks(
+            _V3MarketNavigationDependencies(
+                edit_message=_edit_message,
+                edit_markup=_edit_message_markup,
+                pairs_keyboard=pairs_keyboard,
+                timeframe_keyboard=tf_keyboard,
+                live_timeframe_keyboard=live_tf_keyboard,
+                live_position_analysis=live_position_analysis,
+                get_top_pairs=get_top_pairs,
+                full_scan=full_scan_raw,
+                scan_diagnostics=scan_diagnostics,
+                get_user_memory=get_user_memory,
+                calculate_risk=calc_risk,
+                get_crypto_news=get_crypto_news,
+                get_market_news=get_market_impact_news,
+                format_news=format_news,
+                ask_groq=ask_groq,
+                save_news=save_news,
+                detect_accumulation=detect_accumulation,
+                scan_all_deals=scan_all_for_deals,
+                get_fear_greed=get_fear_greed,
+                get_dxy_signal=get_dxy_signal,
+                get_market_regime=get_market_regime,
+                get_upcoming_events=get_upcoming_events,
+                get_candles=get_candles,
+                universe_size=DEFAULT_UNIVERSE_SIZE,
+                user_states=user_states,
+                timeframe_labels=TF_LABELS,
+                button=InlineKeyboardButton,
+                markup=InlineKeyboardMarkup,
+            )
+        )
+    return _v3_market_navigation_callbacks
 
 
 _v3_chat_handlers = _V3TelegramChatHandlers(
