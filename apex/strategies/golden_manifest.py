@@ -48,7 +48,6 @@ _MANIFESTS = {
             "FAST_LTF_CONTEXT_STRUCTURE",
             "FAST_HTF_SUPPORT",
             "FAST_BTC_HARD_CONFLICT",
-            "FAST_DETECT_FAST_DEAL_G9172",
             "FAST_DETECT_FAST_DEAL_G9192",
             "FAST_DETECT_FAST_DEAL_G9242",
             "FAST_IMPULSE_VOLUME_CONTEXT",
@@ -63,7 +62,6 @@ _MANIFESTS = {
             "FAST_DETECT_FAST_DEAL_G9449",
         ),
         context_only=frozenset({"FAST_IMPULSE_VOLUME_CONTEXT"}),
-        legacy_authority=frozenset({"FAST_DETECT_FAST_DEAL_G9172"}),
         post_candidate_review=frozenset({"FAST_DETECT_FAST_DEAL_G9449"}),
     ),
     "MTF": LegacyGateManifest(
@@ -72,7 +70,6 @@ _MANIFESTS = {
         (
             "MTF_FULL_SCAN_RAW_G4558",
             "MTF_FULL_SCAN_RAW_G4564",
-            "MTF_FULL_SCAN_RAW_G4573",
             "MTF_FULL_SCAN_RAW_G4585",
             "MTF_FULL_SCAN_RAW_G4587",
             "MTF_FULL_SCAN_RAW_G4592",
@@ -104,7 +101,6 @@ _MANIFESTS = {
             "SWING_DETECT_SWING_SETUP_G7123",
             "SWING_DETECT_SWING_SETUP_G7142",
             "SWING_DETECT_SWING_SETUP_G7336",
-            "SWING_DETECT_SWING_SETUP_G7341",
             "SWING_DETECT_SWING_SETUP_G7350",
             "SWING_4H_STRUCTURE_CONTEXT",
             "SWING_DETECT_SWING_SETUP_G7411",
@@ -131,7 +127,6 @@ _MANIFESTS = {
             "SWING_DETECT_SWING_SETUP_G7741",
         ),
         context_only=frozenset({"SWING_4H_STRUCTURE_CONTEXT"}),
-        legacy_authority=frozenset({"SWING_DETECT_SWING_SETUP_G7341"}),
     ),
     "ZONE": LegacyGateManifest(
         "market.py",
@@ -163,16 +158,14 @@ _MANIFESTS = {
         "detect_wyckoff_spring",
         tuple(
             f"WYCKOFF_DETECT_WYCKOFF_SPRING_G{gate}"
-            for gate in (8367, 8375, 8377, 8387, 8424, 8466, 8469, 8483, 8496, 8513, 8518, 8540, 8626, 8639)
+            for gate in (8375, 8377, 8387, 8424, 8466, 8469, 8483, 8496, 8513, 8518, 8540, 8626, 8639)
         ),
-        legacy_authority=frozenset({"WYCKOFF_DETECT_WYCKOFF_SPRING_G8367"}),
         post_candidate_review=frozenset({"WYCKOFF_DETECT_WYCKOFF_SPRING_G8626"}),
     ),
     "WYCKOFF_DISTRIBUTION": LegacyGateManifest(
         "market.py",
         "detect_wyckoff_distribution",
         (
-            "WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8675",
             "WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8683",
             "WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8685",
             "WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8695",
@@ -182,7 +175,6 @@ _MANIFESTS = {
                 for gate in (8730, 8766, 8769, 8782, 8790, 8805, 8810, 8832, 8913, 8926)
             ),
         ),
-        legacy_authority=frozenset({"WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8675"}),
         post_candidate_review=frozenset({"WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8913"}),
     ),
     "WYCKOFF_REACCUMULATION": LegacyGateManifest(
@@ -190,9 +182,8 @@ _MANIFESTS = {
         "detect_wyckoff_reaccumulation",
         tuple(
             f"WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G{gate}"
-            for gate in (8961, 8968, 8969, 8977, 8985, 8995, 9002, 9018, 9023, 9034, 9089, 9096, 9099)
+            for gate in (8968, 8969, 8977, 8985, 8995, 9002, 9018, 9023, 9034, 9089, 9096, 9099)
         ),
-        legacy_authority=frozenset({"WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G8961"}),
         post_candidate_review=frozenset({"WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G9089"}),
     ),
 }

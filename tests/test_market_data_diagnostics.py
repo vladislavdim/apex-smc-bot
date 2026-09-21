@@ -77,13 +77,15 @@ def test_rendered_dashboard_contains_operational_blocks():
 
 def test_gate_adapter_error_is_exposed_to_health_telemetry():
     captured = []
-    with patch.dict(market.candle_cache, {}, clear=True), \
-         patch.object(market, "get_global_candles", return_value=[]), \
-         patch.object(market, "_ROUTER_OK", False), \
-         patch.object(market, "_SMC_ENGINE_OK", True), \
-         patch.object(market, "get_candles_smart", return_value={"candles": [], "error": "gate_io:Gate HTTP 503"}), \
-         patch.object(market, "_record_market_data", side_effect=lambda *args, **kwargs: captured.append((args, kwargs))):
-        assert market.get_candles("AAVEUSDT", "15m", 120) == []
+    from apex.market.candle_router import GateCandleRouter
+    router = GateCandleRouter(
+        cache={}, get_shared=lambda *_: [], update_shared=lambda *_: None,
+        fetch_gate=lambda *_: {"candles": [], "error": "gate_io:Gate HTTP 503"},
+        gate_available=lambda: True,
+        record_health=lambda *args, **kwargs: captured.append((args, kwargs)),
+        last_closed_at=lambda _rows: None,
+    )
+    assert router.get_candles("AAVEUSDT", "15m", 120) == []
 
     assert captured[-1][1]["reason"] == "SMC adapter: gate_io:Gate HTTP 503"
 
@@ -115,7 +117,9 @@ def test_operational_telemetry_survives_strategy_filter():
     with patch.object(stats_server, "_connect", return_value=Connection()):
         stats_server._fetch(1, "FAST", "")
 
-    assert "(strategy=%s OR kind='market_data')" in executed["query"]
+    assert "(strategy=%s OR kind IN" in executed["query"]
+    assert "'market_data'" in executed["query"]
+    assert "'incident_snapshot'" in executed["query"]
     assert "FAST" in executed["params"]
 
 

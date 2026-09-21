@@ -332,9 +332,10 @@ class MarketNavigationCallbacks:
             summary_lines.append(
                 f"{fire} {icon} {signal['symbol'].replace('USDT', '')} — {direction}"
             )
+        summary_text = "\n".join(summary_lines)
         header = (
             f"⏱ <b>Скан {label}</b> | найдено: {len(signals)}\n"
-            f"{'━' * 22}\n\n{'\n'.join(summary_lines)}\n\n{'━' * 22}\n"
+            f"{'━' * 22}\n\n{summary_text}\n\n{'━' * 22}\n"
             f"<b>Лучший сигнал:</b>\n\n{signals[0]['text']}"
         )
         if len(header) > 4000:

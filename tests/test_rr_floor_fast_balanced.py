@@ -11,6 +11,7 @@ class RRFloorFastBalancedTests(unittest.TestCase):
         cls.market = Path("market.py").read_text(encoding="utf-8")
         cls.bot = Path("bot.py").read_text(encoding="utf-8")
         cls.evidence = Path("core/setup_evidence.py").read_text(encoding="utf-8")
+        cls.structural_levels = Path("apex/market/structural_levels.py").read_text(encoding="utf-8")
 
     def test_rr_above_four_is_valid_for_every_strategy_integrity(self):
         for strategy in ("MTF", "SWING", "ZONE", "FAST", "WYCKOFF"):
@@ -43,7 +44,7 @@ class RRFloorFastBalancedTests(unittest.TestCase):
             self.assertNotIn(text, self.bot)
         self.assertNotIn("not 2.0 <= _rr_val <= 4.0", self.bot)
         self.assertIn("(_rr_val < 2.0)", self.bot)
-        self.assertIn("max_rr=None", self.market)
+        self.assertIn("max_rr=None", self.structural_levels)
 
     def test_fast_is_ltf_primary_balanced_context(self):
         self.assertIn('FAST: one fresh 15m BOS/CHoCH direction', self.market)

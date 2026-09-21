@@ -92,7 +92,7 @@ class ApexV3StrategyTests(unittest.TestCase):
         self.assertFalse(check["required_value"]["failure_predicate"])
         self.assertEqual(check["required_value"]["condition"], "rr_value < 2.0")
 
-    def test_manifest_separates_hard_gates_from_context_and_legacy_authority(self):
+    def test_manifest_separates_hard_gates_from_context_and_removed_legacy_authority(self):
         @audit_strategy("FAST")
         def detector(symbol):
             audit_test("FAST_LTF_CONTEXT_DATA", False, "closed data", "not data_ok")
@@ -104,7 +104,7 @@ class ApexV3StrategyTests(unittest.TestCase):
         roles = {check.code: check.role for check in trace.checks}
         self.assertEqual(roles["FAST_LTF_CONTEXT_DATA"], "HARD_GATE")
         self.assertEqual(roles["FAST_IMPULSE_VOLUME_CONTEXT"], "LIVE_CONTEXT")
-        self.assertEqual(roles["FAST_DETECT_FAST_DEAL_G9172"], "LEGACY_AUTHORITY")
+        self.assertEqual(roles["FAST_DETECT_FAST_DEAL_G9172"], "OBSERVED_CHECK")
 
     def test_adapter_arguments_match_existing_live_calls(self):
         mtf_calls, swing_calls, zone_calls = [], [], []
