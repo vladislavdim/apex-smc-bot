@@ -39,6 +39,48 @@ class DashboardSingleFlightTests(unittest.TestCase):
                     stats_server.build_dashboard()
             self.assertLess(time.monotonic() - started, 0.2)
 
+    def test_fetch_is_bounded_for_free_tier_memory(self):
+        executed = {}
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, query, params):
+                executed["query"] = query
+                executed["params"] = params
+
+            def fetchall(self):
+                return []
+
+        class Connection:
+            def cursor(self, **_kwargs):
+                return Cursor()
+
+            def close(self):
+                pass
+
+        with patch.object(stats_server, "_connect", return_value=Connection()):
+            stats_server._fetch(30, "", "")
+
+        self.assertIn("LIMIT %s", executed["query"])
+        self.assertEqual(executed["params"][-1], stats_server._DASHBOARD_EVENT_LIMIT)
+        self.assertLessEqual(stats_server._DASHBOARD_EVENT_LIMIT, 5_000)
+
+    def test_main_does_not_eagerly_warm_dashboard(self):
+        with patch.object(type(stats_server._SETTINGS), "validate_startup"), \
+             patch.object(stats_server, "ensure_schema"), \
+             patch.object(stats_server, "build_dashboard") as build, \
+             patch.object(stats_server, "APEXStatsServer") as server:
+            server.return_value.serve_forever.side_effect = RuntimeError("stop")
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                stats_server.main()
+
+        build.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
