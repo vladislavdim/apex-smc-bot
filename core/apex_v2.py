@@ -501,6 +501,17 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     except Exception:
         result["source_registry"] = []
     try:
+        from apex.telemetry.market_context import market_context_snapshot
+        result["live_context"] = market_context_snapshot()
+        result["gate_microstructure"] = [
+            {"symbol": row.get("symbol"), **dict(row.get("orderbook") or {})}
+            for row in result["live_context"]
+            if isinstance(row, dict) and isinstance(row.get("orderbook"), dict)
+        ]
+    except Exception:
+        result["live_context"] = []
+        result["gate_microstructure"] = []
+    try:
         from external_sources.budget import SourceBudget
         result["api_budget"] = SourceBudget(db_path).snapshot()
         raw_plan = ApexConfig.from_env().integrations.external_source_plan_json
