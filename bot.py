@@ -3558,7 +3558,9 @@ async def _v3_maintenance_and_backup(reason="safety_30m"):
     backup = await backup_db_to_github(reason)
     if _STATE_PERSISTENCE.configured and state_backup.get("status") not in {"saved", "unchanged"}:
         raise RuntimeError(f"state_backup_{state_backup.get('status') or 'failed'}")
-    if _BRAIN_PERSISTENCE.configured and backup.get("status") not in {"saved", "unchanged"}:
+    if _BRAIN_PERSISTENCE.configured and backup.get("status") not in {
+        "saved", "unchanged", "concurrent_update",
+    }:
         raise RuntimeError(f"compatibility_backup_{backup.get('status') or 'failed'}")
     if _MEMORY_PERSISTENCE.configured and memory_backup.get("status") not in {
         "saved", "unchanged", "skipped_memory_pressure",
