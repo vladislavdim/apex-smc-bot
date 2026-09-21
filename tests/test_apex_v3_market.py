@@ -65,6 +65,12 @@ class ApexV3MarketTests(unittest.TestCase):
         self.assertEqual(result.status, "STALE")
         self.assertEqual(result.reason_code, "GATE_STALE_1H")
 
+    def test_weekly_gate_rows_are_closed_and_fresh_in_canonical_time(self):
+        week = 7 * 86400
+        rows = confirmed_candles([candle(0), candle(week)], "1w", as_of=2 * week)
+        self.assertEqual([row["close_time"] for row in rows], [week, 2 * week])
+        self.assertEqual(assess_candles("1w", rows, as_of=2 * week).status, "FRESH")
+
     def test_snapshot_uses_one_as_of_and_reports_missing_required_tf(self):
         result = build_snapshot(
             symbol="BTCUSDT",

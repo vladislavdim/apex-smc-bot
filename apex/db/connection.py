@@ -30,7 +30,15 @@ def _connect(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     if not read_only:
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            # A concurrent opener may already be negotiating the same durable
+            # mode.  That transient lock must not reject an otherwise valid
+            # connection; transaction-level locking remains fail-closed.
+            if "locked" not in str(exc).lower():
+                conn.close()
+                raise
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
     return conn
