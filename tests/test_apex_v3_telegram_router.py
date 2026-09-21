@@ -79,7 +79,7 @@ class TelegramRouterTests(unittest.TestCase):
             "async def cmd_pump", 1
         )[0]
         self.assertIn("_v3_state_callback_handlers.handle", callback_body)
-        self.assertIn("_v3_market_navigation_callbacks.handle", callback_body)
+        self.assertIn("_get_v3_market_navigation_callbacks().handle", callback_body)
         self.assertNotIn("callback.data", callback_body)
         self.assertNotIn('data == "menu_', callback_body)
 

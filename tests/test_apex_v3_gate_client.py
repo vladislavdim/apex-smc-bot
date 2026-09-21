@@ -94,6 +94,18 @@ class GateClientTests(unittest.TestCase):
         limits = {name: params["limit"] for name, params, _ in fake.calls}
         self.assertEqual(limits, {"candlesticks": 2000, "contract_stats": 100, "funding_rate": 1000, "trades": 1000, "order_book": 100})
 
+    def test_client_translates_canonical_long_intervals_at_gate_boundary(self):
+        fake = FakeGate()
+        client = GateMarketClient(get_json=fake, clock=lambda: 1100)
+        client.candles("BTCUSDT", "1w", limit=100)
+        client.candles("BTCUSDT", "1M", limit=100)
+        intervals = [
+            params["interval"]
+            for endpoint, params, _ in fake.calls
+            if endpoint == "candlesticks"
+        ]
+        self.assertEqual(intervals, ["7d", "30d"])
+
     def test_client_singleflights_same_request_and_reuses_bounded_cache(self):
         calls = 0
         guard = Lock()

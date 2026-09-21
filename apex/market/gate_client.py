@@ -15,6 +15,7 @@ from .source_registry import authorize
 
 
 GATE_API_BASE = "https://api.gateio.ws/api/v4"
+GATE_INTERVALS = {"1w": "7d", "1M": "30d"}
 
 
 class GateTransportError(RuntimeError):
@@ -132,9 +133,10 @@ class GateMarketClient:
             self._cache.clear()
 
     def candles(self, symbol: str, interval: str, *, limit: int = 1000) -> GateResponse:
+        gate_interval = GATE_INTERVALS.get(str(interval), str(interval))
         return self._get(
             "/futures/usdt/candlesticks",
-            {"contract": gate_contract(symbol), "interval": interval, "limit": min(2000, max(2, int(limit)))},
+            {"contract": gate_contract(symbol), "interval": gate_interval, "limit": min(2000, max(2, int(limit)))},
             purpose="candles",
         )
 
@@ -168,6 +170,6 @@ class GateMarketClient:
 
 
 __all__ = [
-    "GATE_API_BASE", "GateMarketClient", "GateResponse", "GateTransportError",
+    "GATE_API_BASE", "GATE_INTERVALS", "GateMarketClient", "GateResponse", "GateTransportError",
     "gate_contract", "normalize_gate_candles",
 ]
