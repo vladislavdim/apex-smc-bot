@@ -1,30 +1,11 @@
-import ast
-import logging
-import os
 import unittest
 
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from apex.market import structural_levels
 
 
 def _load_level_functions():
-    """Load only the pure level functions without importing Telegram/Groq."""
-    path = os.path.join(ROOT, "market.py")
-    with open(path, "r", encoding="utf-8") as source:
-        tree = ast.parse(source.read(), filename=path)
-    wanted = {
-        "average_true_range",
-        "select_structural_targets",
-        "smart_round",
-        "calc_smart_levels",
-    }
-    nodes = [
-        node for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted
-    ]
-    namespace = {"logging": logging}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), path, "exec"), namespace)
-    return namespace
+    """Expose the pure module through the legacy mutable test namespace."""
+    return structural_levels.__dict__
 
 
 def _candles(count=50):

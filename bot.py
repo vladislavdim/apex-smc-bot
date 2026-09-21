@@ -5,46 +5,22 @@ bot.py — Telegram хендлеры, команды, scheduler, запуск AP
 # APEX_STRATEGY_STATS_V1
 from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
 import asyncio
+import functools
 import logging
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
 import os
 import sqlite3
+import threading
 import time
 import json
 import hashlib
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# EMERGENCY PATCHES - исправление критических ошибок
-try:
-    from emergency_fix import apply_all_patches
-    patches = apply_all_patches()
-    logging.info("🎯 Emergency patches applied successfully")
-    
-except ImportError as e:
-    logging.warning(f"⚠️ Emergency fix module not found: {e}")
-    patches = {}
-
-# WAL патч — решает "database is locked"
-import sqlite3 as _sq
-if not getattr(_sq, "_wal_patched", False):
-    _orig_sq_connect = _sq.connect
-    def _wal_sq_connect(db, timeout=60, **kw):
-        kw.setdefault("check_same_thread", False)
-        conn = _orig_sq_connect(db, timeout=timeout, **kw)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA synchronous=NORMAL")
-        except Exception:
-            pass
-        return conn
-    _sq.connect = _wal_sq_connect
-    _sq._wal_patched = True
-
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 from core.control_loop import (
@@ -65,46 +41,90 @@ from core.control_loop import (
     strategy_risk_state as _strategy_risk_state,
     scanner_dashboard as _scanner_dashboard,
 )
-from core.experience_memory import (
-    ensure_experience_schema as _ensure_experience_schema,
-    capture_candidate as _capture_experience_candidate,
-    record_decision as _record_experience_decision,
-    refresh_shadow_positions as _refresh_shadow_positions,
-    active_rule_evidence as _active_experience_rules,
-    experience_dashboard as _experience_dashboard,
-    bind_candidate_to_signal as _bind_experience_to_signal,
-)
-# Патч edit_text и edit_reply_markup — подавляем "message is not modified"
-import aiogram.types.message as _msg_module
-_orig_edit_text = _msg_module.Message.edit_text
-_orig_edit_markup = _msg_module.Message.edit_reply_markup
-async def _safe_edit_text(self, *args, **kwargs):
+async def _edit_message(message: types.Message, *args, **kwargs):
+    """Edit one message without mutating aiogram's global Message class."""
     try:
-        return await _orig_edit_text(self, *args, **kwargs)
-    except Exception as e:
-        if "message is not modified" in str(e):
+        return await message.edit_text(*args, **kwargs)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
             return None
         raise
-async def _safe_edit_markup(self, *args, **kwargs):
-    try:
-        return await _orig_edit_markup(self, *args, **kwargs)
-    except Exception as e:
-        if "message is not modified" in str(e):
-            return None
-        raise
-_msg_module.Message.edit_text = _safe_edit_text
-_msg_module.Message.edit_reply_markup = _safe_edit_markup
-from aiohttp import web
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ── Импортируем всю рыночную логику из market.py ──
-from market import *
-from market import get_recent_errors as _market_recent_errors
-from market import get_relevant_rules as _market_relevant_rules
+
+async def _edit_message_markup(message: types.Message, *args, **kwargs):
+    """Edit one reply markup while preserving unrelated Telegram errors."""
+    try:
+        return await message.edit_reply_markup(*args, **kwargs)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return None
+        raise
+
+
+from aiohttp import web
+
+# Bounded compatibility adapters while implementations are physically migrated.
+from apex.compatibility.market_transport import (
+    ADMIN_ID,
+    ADMIN_IDS,
+    DEFAULT_UNIVERSE_SIZE,
+    FAST_DEAL_THREAD_ID,
+    FAST_PAIRS,
+    SIGNAL_CHANNEL_MAIN,
+    SIGNAL_CHANNEL_SWING,
+    SWING_THREAD_ID,
+    SYMBOL_ALIASES,
+    TF_CATEGORIES,
+    TF_LABELS,
+    bot,
+    dp,
+    init_db,
+    run_server,
+    start_db_writer,
+)
+from apex.compatibility.market_user_services import (
+    _GROQ_DAILY_LIMIT,
+    _tokens_available,
+    analyze_trade_type,
+    ask_ai,
+    ask_groq,
+    calc_risk,
+    detect_accumulation,
+    extract_and_save_profile,
+    format_accumulation,
+    format_news,
+    get_crypto_news,
+    get_market_impact_news,
+    get_user_memory,
+    groq_tokens_used,
+    live_position_analysis,
+    save_chat_log,
+    save_news,
+    update_user_memory,
+)
+from apex.compatibility.market_data import (
+    calculate_vwap, ema_value, fetch_candles_batch, find_fvg, find_ob,
+    find_swings, get_adaptive_params, get_all_market_pairs,
+    get_bos_choch_event, get_candles, get_confirmed_candles, get_dxy_signal,
+    get_estimated_time, get_fear_greed, get_funding_rate, get_liquidity_heatmap,
+    get_live_prices, get_market_regime, get_orderbook,
+    get_precomputed_indicators, get_top_pairs, get_upcoming_events,
+    multi_tf_analysis, smart_price_fmt, smc_on_tf, update_global_candles,
+)
+from apex.compatibility.market_strategy import (
+    calc_smart_levels, check_alerts, check_entry_timing, check_pending_signals,
+    check_session_liquidity, detect_breaker_block, detect_fast_deal,
+    detect_market_regime_v2, detect_mm_accumulation,
+    detect_rsi_macd_divergence, detect_swing_setup,
+    detect_wyckoff_distribution, detect_wyckoff_reaccumulation,
+    detect_wyckoff_spring, detect_zone_setup,
+    legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
+)
 from core.session_clock import fast_session
 from core.trade_views import fetch_trades as _fetch_trade_view_rows
 from core.trade_views import format_trade_view as _format_trade_view
 from core.trade_manager_telegram import (
+    configure_manager_dashboard_state as _configure_manager_dashboard_state,
     fetch_manager_trades as _fetch_manager_trades,
     fetch_manager_trade as _fetch_manager_trade,
     format_manager_dashboard as _format_manager_dashboard,
@@ -113,14 +133,14 @@ from core.trade_manager_telegram import (
     manager_trade_buttons as _manager_trade_buttons,
 )
 from core.trade_manager import (
-    ensure_trade_manager_schema as _ensure_trade_manager_schema,
     register_pending_signals as _register_pending_manager_signals,
     manager_cycle as _trade_manager_cycle,
     load_active_states as _load_active_manager_states,
-    finalize_manager_trade as _finalize_manager_trade,
     reconcile_manager_states_from_signals as _reconcile_manager_states_from_signals,
     load_manager_message as _load_manager_message,
     store_manager_message as _store_manager_message,
+    configure_manager_message_state as _configure_manager_message_state,
+    configure_manager_state as _configure_manager_state,
     telegram_content_hash as _telegram_content_hash,
 )
 from core.apex_v2 import (
@@ -132,6 +152,7 @@ from core.apex_v2 import (
 )
 from core.setup_audit import emit_event as _emit_stats_event
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
+from core.strategy_decisions import configure_strategy_decision_state as _configure_strategy_decision_state
 from core.setup_evidence import (
     assess_candidate as _assess_setup_candidate,
     ensure_setup_evidence_schema as _ensure_setup_evidence_schema,
@@ -149,8 +170,8 @@ from core.telegram_dashboard import (
     format_watchlist as _format_watchlist,
     format_groq_rejections as _format_groq_rejections,
     format_scanner_dashboard as _format_scanner_dashboard,
-    format_experience_dashboard as _format_experience_dashboard,
     format_setup_evidence_dashboard as _format_setup_evidence_dashboard,
+    configure_dashboard_state as _configure_dashboard_state,
 )
 
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
@@ -163,12 +184,11 @@ except Exception as _quality_gate_import_error:
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
 
 try:
-    from core.outcome_learning import capture_signal_evidence as _capture_signal_evidence
     from core.market_intelligence import (refresh_market_intelligence as _refresh_market_intelligence,
         start_market_intelligence as _start_market_intelligence, stop_market_intelligence as _stop_market_intelligence)
     _MARKET_INTELLIGENCE_OK = True
 except Exception as _market_intelligence_import_error:
-    _capture_signal_evidence=lambda *args,**kwargs:None;_refresh_market_intelligence=None;_start_market_intelligence=None;_stop_market_intelligence=None;_MARKET_INTELLIGENCE_OK=False
+    _refresh_market_intelligence=None;_start_market_intelligence=None;_stop_market_intelligence=None;_MARKET_INTELLIGENCE_OK=False
     logging.warning("Market intelligence unavailable: %s", _market_intelligence_import_error)
 
 try:
@@ -180,11 +200,13 @@ except Exception as _signal_integrity_import_error:
 
 try:
     from core.trade_execution import (
-        ensure_execution_schema as _ensure_execution_schema,
+        BinanceFuturesClient as _BinanceFuturesClient,
+        ExecutionConfig as _ExecutionConfig,
         execute_approved_candidate as _execute_approved_candidate,
         execution_status as _execution_status,
         reconcile_live_executions as _reconcile_live_executions,
         cached_execution_snapshot as _cached_execution_snapshot,
+        configure_execution_state as _configure_execution_state,
         execute_manager_review as _execute_manager_review,
     )
     _TRADE_EXECUTION_OK = True
@@ -192,24 +214,292 @@ except Exception as _trade_execution_import_error:
     _TRADE_EXECUTION_OK = False
     logging.error("Optional trade execution unavailable: %s", _trade_execution_import_error)
 
-# Путь к базе данных
-import os as _os_bot
-DB_PATH = _os_bot.path.join(_os_bot.path.dirname(_os_bot.path.abspath(__file__)), "brain.db")
-
 # Render filesystem is ephemeral.  The dedicated backup branch is the durable
 # source of truth; main must never provide a competing, stale brain.db.
 from core.brain_persistence import BrainPersistence as _BrainPersistence
+from apex.app.runtime import runtime_supervisor as _V3_RUNTIME
+from apex.app.bootstrap import ProductionDependencies as _V3_PRODUCTION_DEPENDENCIES, run_production as _v3_run_production
+from apex.app.cutover import (
+    CutoverSpec as _V3_CUTOVER_SPEC,
+    refresh_cutover as _v3_refresh_cutover,
+    sync_cutover as _v3_sync_cutover,
+)
+from apex.app.scheduler import SchedulerCallbacks as _V3SchedulerCallbacks, build_production_scheduler as _v3_build_production_scheduler
+from apex.config.settings import ApexConfig as _V3_ApexConfig
+from apex.config.validation import validate_config as _v3_validate_config
+from apex.db.connection import (
+    connect_compatibility as _v3_connect_compatibility,
+    connect_memory as _v3_connect_memory,
+    connect_state as _v3_connect_state,
+)
+from apex.ui.telegram.learning import format_live_learning as _format_live_learning
+from apex.ui.telegram.incidents import format_incidents as _format_incidents
+from apex.ui.telegram.router import (
+    TelegramHandlers as _V3TelegramHandlers,
+    register_telegram_handlers as _v3_register_telegram_handlers,
+)
+from apex.ui.telegram.commands import (
+    CommandDependencies as _V3CommandDependencies,
+    CompatibilityCommandDependencies as _V3CompatibilityCommandDependencies,
+    CompatibilityCommandHandlers as _V3CompatibilityCommandHandlers,
+    MarketCommandDependencies as _V3MarketCommandDependencies,
+    MarketCommandHandlers as _V3MarketCommandHandlers,
+    TelegramCommandHandlers as _V3TelegramCommandHandlers,
+)
+from apex.ui.telegram.chat import (
+    ChatDependencies as _V3ChatDependencies,
+    TelegramChatHandlers as _V3TelegramChatHandlers,
+)
+from apex.ui.telegram.callbacks import (
+    StateCallbackDependencies as _V3StateCallbackDependencies,
+    StateCallbackHandlers as _V3StateCallbackHandlers,
+)
+from apex.ui.telegram.market_callbacks import (
+    MarketNavigationCallbacks as _V3MarketNavigationCallbacks,
+    MarketNavigationDependencies as _V3MarketNavigationDependencies,
+)
+from apex.db.memory_db import migrate_memory as _v3_migrate_memory
+from apex.db.state_db import migrate_state as _v3_migrate_state
+from apex.db.ownership import assert_schema_ownership as _v3_assert_schema_ownership
+from apex.db.manager_migration import (
+    import_legacy_manager as _v3_import_legacy_manager,
+    manager_parity_report as _v3_manager_parity_report,
+)
+from apex.db.execution_migration import (
+    import_legacy_executions as _v3_import_legacy_executions,
+    execution_parity_report as _v3_execution_parity_report,
+)
+from apex.db.execution_ledger_migration import (
+    import_legacy_execution_ledger as _v3_import_legacy_execution_ledger,
+    execution_ledger_parity_report as _v3_execution_ledger_parity_report,
+)
+from apex.db.signal_lifecycle_migration import (
+    import_legacy_signal_lifecycle as _v3_import_legacy_signal_lifecycle,
+    signal_lifecycle_parity_report as _v3_signal_lifecycle_parity_report,
+)
+from apex.db.repositories.runtime import RuntimeRepository as _V3RuntimeRepository
+from apex.db.repositories.manager import ManagerRepository as _V3ManagerRepository
+from apex.db.maintenance import maintain_memory as _v3_maintain_memory, maintain_state as _v3_maintain_state
+from apex.domain.enums import ComponentState as _V3_COMPONENT_STATE, RuntimeStatus as _V3_RUNTIME_STATUS, Strategy as _V3_STRATEGY
+from apex.learning.live_bridge import LiveLearningBridge as _V3LiveLearningBridge
+from core.execution_ledger import configure_execution_ledger_state as _configure_execution_ledger_state
+from apex.strategies.base import trace_payload as _v3_strategy_trace_payload
+from apex.strategies.activation import (
+    SnapshotEvaluationBlocked as _V3_SNAPSHOT_EVALUATION_BLOCKED,
+    StrategyActivationSwitch as _V3_STRATEGY_ACTIVATION_SWITCH,
+)
+from apex.strategies.fast import FastStrategy as _V3_FAST_STRATEGY
+from apex.strategies.legacy_bridge import snapshot_symbol_detector as _v3_snapshot_symbol_detector
+from apex.strategies.mtf import MtfStrategy as _V3_MTF_STRATEGY
+from apex.strategies.registry import StrategyRegistry as _V3_STRATEGY_REGISTRY_CLASS
+from apex.strategies.swing import SwingStrategy as _V3_SWING_STRATEGY
+from apex.strategies.wyckoff import WyckoffStrategy as _V3_WYCKOFF_STRATEGY
+from apex.strategies.zone import ZoneStrategy as _V3_ZONE_STRATEGY
+from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT
+from apex.market.provider import GateSnapshotProvider as _V3_GATE_SNAPSHOT_PROVIDER
+from apex.ops.resource_guard import memory_snapshot as _v3_memory_snapshot
+from apex.ops.restart_guard import record_shutdown as _v3_record_shutdown, record_start as _v3_record_start
+from apex.ops.watchdog import EventLoopLagMonitor as _V3EventLoopLagMonitor, ProcessCpuMonitor as _V3ProcessCpuMonitor
+from apex.ops.instance_fencing import InstanceLeaseClient as _V3InstanceLeaseClient, derive_lease_url as _v3_derive_lease_url
+from apex.ops.release_manifest import build_release_manifest as _v3_build_release_manifest, persist_release_manifest as _v3_persist_release_manifest
+from apex.telemetry.incidents import (
+    configure_incidents as _v3_configure_incidents,
+    current_incidents as _v3_current_incidents,
+    mark_notification_delivered as _v3_mark_incident_delivered,
+    pending_notifications as _v3_pending_incident_notifications,
+    recover_incident as _v3_recover_incident,
+    report_incident as _v3_report_incident,
+)
+from apex.telemetry.job_metrics import configure_job_metrics as _v3_configure_job_metrics
+_V3_CONFIG = _V3_ApexConfig.from_env()
+DB_PATH = _V3_CONFIG.database.compatibility_db_path
+_V3_MANAGER_CUTOVER = _V3_CUTOVER_SPEC(
+    label="Manager", inhibit_code="STATE_DB_MANAGER_MIRROR_FAILED",
+    parity_error="manager_state_parity_failed",
+    importer=_v3_import_legacy_manager, parity_report=_v3_manager_parity_report,
+    parity_counts=("positions", "events"),
+)
+_V3_EXECUTION_CUTOVER = _V3_CUTOVER_SPEC(
+    label="Execution", inhibit_code="STATE_DB_EXECUTION_MIRROR_FAILED",
+    parity_error="execution_state_parity_failed",
+    importer=_v3_import_legacy_executions, parity_report=_v3_execution_parity_report,
+    parity_counts=("executions", "actions"),
+)
+_V3_LEDGER_CUTOVER = _V3_CUTOVER_SPEC(
+    label="Execution ledger", inhibit_code="STATE_DB_EXECUTION_LEDGER_FAILED",
+    parity_error="execution_ledger_parity_failed",
+    importer=_v3_import_legacy_execution_ledger,
+    parity_report=_v3_execution_ledger_parity_report,
+)
+_V3_LIFECYCLE_CUTOVER = _V3_CUTOVER_SPEC(
+    label="Signal lifecycle", inhibit_code="STATE_DB_SIGNAL_LIFECYCLE_FAILED",
+    parity_error="signal_lifecycle_parity_failed",
+    importer=_v3_import_legacy_signal_lifecycle,
+    parity_report=_v3_signal_lifecycle_parity_report,
+    parity_counts=("signals",),
+)
+if _TRADE_EXECUTION_OK:
+    _configure_execution_state(lambda: _v3_connect_state(_V3_CONFIG))
+_configure_execution_ledger_state(lambda: _v3_connect_state(_V3_CONFIG))
+_configure_manager_message_state(lambda: _v3_connect_state(_V3_CONFIG))
+_configure_manager_state(lambda: _v3_connect_state(_V3_CONFIG))
+_configure_strategy_decision_state(lambda: _v3_connect_state(_V3_CONFIG))
+_configure_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
+_configure_manager_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
+_v3_configure_incidents(lambda: _v3_connect_state(_V3_CONFIG))
+_v3_configure_job_metrics(lambda: _v3_connect_state(_V3_CONFIG))
+_V3_LIVE_BRIDGE = _V3LiveLearningBridge(
+    _V3_CONFIG,
+    compatibility_db_path=DB_PATH,
+    state_factory=lambda: _v3_connect_state(_V3_CONFIG),
+    memory_factory=lambda: _v3_connect_memory(_V3_CONFIG),
+)
+_V3_CPU_MONITOR = _V3ProcessCpuMonitor()
+_V3_LAG_MONITOR = _V3EventLoopLagMonitor(sla_ms=_V3_CONFIG.operational.event_loop_lag_sla_ms)
+_V3_LEASE_CLIENT = None
 _BRAIN_PERSISTENCE = _BrainPersistence(
     DB_PATH,
-    os.environ.get("GITHUB_REPO", ""),
-    os.environ.get("GITHUB_TOKEN", ""),
-    os.environ.get("BRAIN_BACKUP_BRANCH", "brain-backups"),
+    _V3_CONFIG.integrations.github_repo,
+    _V3_CONFIG.integrations.github_token,
+    _V3_CONFIG.integrations.backup_branch,
+)
+_STATE_PERSISTENCE = _BrainPersistence(
+    _V3_CONFIG.database.state_db_path,
+    _V3_CONFIG.integrations.github_repo,
+    _V3_CONFIG.integrations.github_token,
+    _V3_CONFIG.integrations.backup_branch,
+    remote_name="apex_state.db",
+)
+_MEMORY_PERSISTENCE = _BrainPersistence(
+    _V3_CONFIG.database.memory_db_path,
+    _V3_CONFIG.integrations.github_repo,
+    _V3_CONFIG.integrations.github_token,
+    _V3_CONFIG.integrations.backup_branch,
+    remote_name="apex_memory.db",
 )
 _brain_backup_async_lock = None
+_state_backup_async_lock = None
+_memory_backup_async_lock = None
+
+
+def _v3_confirmed_accounting(signal_id: int):
+    """Load authoritative Binance fill accounting for Live Memory."""
+    from core.execution_ledger import ExecutionSnapshot, actual_result
+
+    try:
+        snapshot = ExecutionSnapshot.from_mapping(
+            _V3_LIVE_BRIDGE.execution_accounting_snapshot(signal_id)
+        )
+    except Exception:
+        return {"status": "UNVERIFIED_EXECUTION"}
+    accounting = actual_result(DB_PATH, snapshot, authoritative_snapshot=True)
+    if str(accounting.get("status") or "").upper() in {"CLOSED", "FEES_UNRESOLVED"}:
+        repository = _V3ManagerRepository(lambda: _v3_connect_state(_V3_CONFIG))
+        result = str(accounting.get("exit_reason") or "filled").lower()
+        if accounting.get("exit_price") is not None and accounting.get("exit_time") is not None:
+            repository.mark_exchange_closed(signal_id, accounting, result=result)
+        if accounting.get("accounting_basis") == "confirmed_fills_after_commissions_and_funding":
+            repository.close_from_accounting(signal_id, accounting, result=result)
+    return accounting
+
+
+def _v3_sync_live_learning():
+    positions = _V3_LIVE_BRIDGE.sync_confirmed_positions()
+    outcomes = _V3_LIVE_BRIDGE.sync_confirmed_outcomes(_v3_confirmed_accounting)
+    return {"positions": len(positions), "outcomes": len(outcomes)}
+
+
+def _v3_prepare_databases():
+    """Migrate both V3 stores and persist exact production release identity."""
+    state = _v3_connect_state(_V3_CONFIG)
+    memory = _v3_connect_memory(_V3_CONFIG)
+    try:
+        state_migrations = _v3_migrate_state(state)
+        memory_migrations = _v3_migrate_memory(memory)
+        ownership = _v3_assert_schema_ownership(state, memory)
+        manifest = _v3_build_release_manifest(_V3_CONFIG)
+        if manifest.production_valid:
+            _v3_persist_release_manifest(state, manifest)
+        return {
+            "state_migrations": state_migrations,
+            "memory_migrations": memory_migrations,
+            "release_sha": manifest.release_sha,
+            "config_hash": manifest.config_hash,
+            "strategy_config_hash": manifest.strategy_config_hash,
+            "state_tables": len(ownership.state_tables),
+            "memory_tables": len(ownership.memory_tables),
+        }
+    finally:
+        state.close()
+        memory.close()
+
+
+def _v3_sync_manager_state():
+    return _v3_sync_cutover(
+        _V3_MANAGER_CUTOVER,
+        lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+        lambda: _v3_connect_state(_V3_CONFIG),
+    )
+
+
+async def _v3_refresh_manager_state_mirror():
+    return await _v3_refresh_cutover(
+        _V3_MANAGER_CUTOVER, _v3_sync_manager_state,
+        runtime=_V3_RUNTIME, failed_state=_V3_COMPONENT_STATE.FAILED,
+        report_incident=_v3_report_incident, recover_incident=_v3_recover_incident,
+    )
+
+
+def _v3_sync_execution_state():
+    return _v3_sync_cutover(
+        _V3_EXECUTION_CUTOVER,
+        lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+        lambda: _v3_connect_state(_V3_CONFIG),
+    )
+
+
+async def _v3_refresh_execution_state_mirror():
+    return await _v3_refresh_cutover(
+        _V3_EXECUTION_CUTOVER, _v3_sync_execution_state,
+        runtime=_V3_RUNTIME, failed_state=_V3_COMPONENT_STATE.FAILED,
+        report_incident=_v3_report_incident, recover_incident=_v3_recover_incident,
+    )
+
+
+def _v3_sync_execution_ledger_state():
+    return _v3_sync_cutover(
+        _V3_LEDGER_CUTOVER,
+        lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+        lambda: _v3_connect_state(_V3_CONFIG),
+    )
+
+
+async def _v3_refresh_execution_ledger_mirror():
+    return await _v3_refresh_cutover(
+        _V3_LEDGER_CUTOVER, _v3_sync_execution_ledger_state,
+        runtime=_V3_RUNTIME, failed_state=_V3_COMPONENT_STATE.FAILED,
+        report_incident=_v3_report_incident, recover_incident=_v3_recover_incident,
+    )
+
+
+def _v3_sync_signal_lifecycle():
+    return _v3_sync_cutover(
+        _V3_LIFECYCLE_CUTOVER,
+        lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+        lambda: _v3_connect_state(_V3_CONFIG),
+    )
+
+
+async def _v3_refresh_signal_lifecycle_mirror():
+    return await _v3_refresh_cutover(
+        _V3_LIFECYCLE_CUTOVER, _v3_sync_signal_lifecycle,
+        runtime=_V3_RUNTIME, failed_state=_V3_COMPONENT_STATE.FAILED,
+        report_incident=_v3_report_incident, recover_incident=_v3_recover_incident,
+    )
 
 # ── Trailing stop columns migration ──
 try:
-    _mig_conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    _mig_conn = _v3_connect_compatibility(DB_PATH, timeout=30, check_same_thread=False)
     for _col, _type in [("tp1_hit", "INTEGER DEFAULT 0"),
                          ("trailing_sl", "REAL DEFAULT 0"),
                          ("best_price", "REAL DEFAULT 0")]:
@@ -222,31 +512,6 @@ try:
 except Exception:
     pass
 
-# Fallback флаги — на случай если market.py не экспортировал их
-try: _LEARNING_OK
-except NameError: _LEARNING_OK = False
-try: _SMC_ENGINE_OK
-except NameError: _SMC_ENGINE_OK = False
-try: _EXT_OK
-except NameError: _EXT_OK = False
-try: _ROUTER_OK
-except NameError: _ROUTER_OK = False
-try: _AUTOPILOT_OK
-except NameError: _AUTOPILOT_OK = False
-try: _WEB_LEARNER_OK
-except NameError: _WEB_LEARNER_OK = False
-try: _brain_router
-except NameError:
-    class _DummyRouter:
-        def __getattr__(self, n): return lambda *a, **k: ""
-    _brain_router = _DummyRouter()
-
-# Groq токены — определяются в market.py, fallback на случай если не экспортировались
-try: _GROQ_DAILY_LIMIT
-except NameError: _GROQ_DAILY_LIMIT = 480_000
-try: _groq_tokens_used
-except NameError: _groq_tokens_used = 0
-
 # ===== DATABASE HELPERS =====
 
 # ===== KEYBOARDS =====
@@ -258,11 +523,11 @@ def main_menu():
         [InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
-         InlineKeyboardButton(text="📚 Знания APEX", callback_data="menu_brain")],
+         InlineKeyboardButton(text="📚 Live Learning", callback_data="menu_live_learning")],
+        [InlineKeyboardButton(text="⚠️ Инциденты", callback_data="menu_incidents")],
         [InlineKeyboardButton(text="📡 Радар стратегий", callback_data="menu_scanners")],
         [InlineKeyboardButton(text="🧭 Качество сетапов", callback_data="menu_setup_evidence")],
-        [InlineKeyboardButton(text="🛠 Менеджер сделок", callback_data="menu_trade_manager")],
-        [InlineKeyboardButton(text="🧬 Experience / Shadow", callback_data="menu_experience")]
+        [InlineKeyboardButton(text="🛠 Менеджер сделок", callback_data="menu_trade_manager")]
     ])
 
 def tf_keyboard():
@@ -311,20 +576,12 @@ def pairs_keyboard(action="scan", page=0):
     buttons.append([InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def backtest_tf_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="15 мин", callback_data="bt_15m"),
-         InlineKeyboardButton(text="1 час", callback_data="bt_1h"),
-         InlineKeyboardButton(text="4 часа", callback_data="bt_4h")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]
-    ])
-
 def live_tf_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="15м — где мы?", callback_data="live_15m"),
          InlineKeyboardButton(text="1ч — где мы?",  callback_data="live_1h"),
          InlineKeyboardButton(text="4ч — где мы?",  callback_data="live_4h")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
     ])
 
 # Хранилище состояний пользователей
@@ -332,496 +589,19 @@ user_states = {}
 
 # ===== HANDLERS =====
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    user_id = message.from_user.id
-    name = message.from_user.first_name or "трейдер"
-    update_user_memory(user_id, name=name)
-    mem = get_user_memory(user_id)
-    greeting = f"С возвращением, {name}! 👊" if mem["messages"] > 1 else f"Привет, {name}!"
-    await message.answer(
-        f"⚡️ <b>APEX — AI трейдер по SMC</b>\n\n{greeting}\n\nВыбирай что нужно 👇",
-        parse_mode="HTML",
-        reply_markup=main_menu()
-    )
-
-@dp.message(Command("menu"))
-async def cmd_menu(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Главное меню 👇", reply_markup=main_menu())
-
-@dp.message(Command("scan"))
-async def cmd_scan(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await message.answer("Выбери монету для скана:", reply_markup=pairs_keyboard("scan"))
-
-@dp.message(Command("backtest"))
-async def cmd_backtest(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    args = message.text.split()
-    if len(args) == 3:
-        symbol = args[1].upper()
-        tf = args[2].lower()
-        await run_backtest(message, symbol, tf)
-    else:
-        await message.answer(
-            "Выбери таймфрейм для бектеста:\n(монета выбирается на следующем шаге)",
-            reply_markup=backtest_tf_keyboard()
-        )
-
-@dp.message(Command("risk"))
-async def cmd_risk(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    args = message.text.split()
-    mem = get_user_memory(message.from_user.id)
-    if len(args) == 2:
-        try:
-            deposit = float(args[1])
-            update_user_memory(message.from_user.id, deposit=deposit)
-            await message.answer(
-                f"✅ Депозит сохранён: <b>${deposit:,.2f}</b>\n\n"
-                f"Теперь при каждом сигнале я буду считать размер позиции.\n"
-                f"Риск на сделку: {mem['risk']}%\n\n"
-                f"Изменить риск: /setrisk 2",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await message.answer(f"Ошибка депозита: {e}")
-    else:
-        deposit = mem["deposit"]
-        if deposit > 0:
-            await message.answer(
-                f"💰 <b>Риск калькулятор</b>\n\n"
-                f"Твой депозит: <b>${deposit:,.2f}</b>\n"
-                f"Риск на сделку: <b>{mem['risk']}%</b>\n"
-                f"Риск в $: <b>${deposit * mem['risk'] / 100:.2f}</b>\n\n"
-                f"Изменить депозит: /risk 5000\n"
-                f"Изменить риск %: /setrisk 2",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer(
-                "💰 <b>Риск калькулятор</b>\n\nУкажи свой депозит:\n/risk 1000",
-                parse_mode="HTML"
-            )
-
-@dp.message(Command("setrisk"))
-async def cmd_setrisk(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    args = message.text.split()
-    if len(args) == 2:
-        try:
-            risk = float(args[1])
-            if 0.1 <= risk <= 10:
-                update_user_memory(message.from_user.id, risk=risk)
-                await message.answer(f"✅ Риск на сделку: <b>{risk}%</b>", parse_mode="HTML")
-            else:
-                await message.answer("Риск должен быть от 0.1% до 10%")
-        except Exception as e:
-            await message.answer(f"Ошибка риска: {e}")
-
-@dp.message(Command("alert"))
 async def cmd_alert(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    args = message.text.split()
-    if len(args) == 3:
-        symbol = args[1].upper()
-        try:
-            level = float(args[2])
-            prices = get_live_prices()
-            if not prices or not isinstance(prices, dict):
-                await message.answer("Ошибка получения цен")
-                return
-            current = prices.get(symbol, {}).get("price", 0)
-            direction = "above" if level > current else "below"
-            
-            # Retry логика для базы данных
-            for retry in range(3):
-                try:
-                    conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute("PRAGMA busy_timeout=30000")
-                    conn.execute(
-                        "INSERT INTO alerts VALUES (NULL,?,?,?,?,0,CURRENT_TIMESTAMP)",
-                        (message.from_user.id, symbol, level, direction)
-                    )
-                    conn.commit()
-                    conn.close()
-                    break
-                except Exception as db_error:
-                    if retry < 2:
-                        logging.warning(f"DB retry {retry+1}: {db_error}")
-                        await asyncio.sleep(1)
-                        continue
-                    else:
-                        raise db_error
-            arrow = "⬆️" if direction == "above" else "⬇️"
-            await message.answer(
-                f"🔔 Алерт установлен!\n{arrow} <b>{symbol}</b> → <code>{level}</code>\nТекущая цена: <code>{current:.4f}</code>",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await message.answer(f"Ошибка алерта: {e}")
-    else:
-        await message.answer(
-            "🔔 <b>Алерты на пробой уровня</b>\n\nКогда цена достигает твоего уровня — пишу сразу.\n\nУстановить: /alert BTCUSDT 70000",
-            parse_mode="HTML"
-        )
+    await _v3_compatibility_commands.alert(message)
 
-@dp.message(Command("journal"))
+
 async def cmd_journal(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    args = message.text.split(maxsplit=1)
-    user_id = message.from_user.id
+    await _v3_compatibility_commands.journal(message)
 
-    if len(args) == 1:
-        # Показываем дневник
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        rows = conn.execute(
-            "SELECT symbol, direction, entry, exit_price, result, pnl_percent, note, created_at FROM journal WHERE user_id=? ORDER BY id DESC LIMIT 10",
-            (user_id,)
-        ).fetchall()
-        conn.close()
-
-        if not rows:
-            await message.answer(
-                "📓 <b>Дневник сделок</b>\n\nПусто. Добавь сделку:\n/journal BTC LONG 65000 67000 win\n\n"
-                "Формат: /journal МОНЕТА НАПРАВЛЕНИЕ ВХОД ВЫХОД win/loss",
-                parse_mode="HTML"
-            )
-            return
-
-        total = len(rows)
-        wins = sum(1 for r in rows if r[4] == "win")
-        wr = round(wins / total * 100, 1) if total > 0 else 0
-
-        text = f"📓 <b>Дневник сделок</b> (последние 10)\nWin Rate: {wr}%\n\n"
-        for r in rows:
-            emoji = "✅" if r[4] == "win" else "❌"
-            text += f"{emoji} {r[0]} {r[1]}: {r[2]} → {r[3]} ({r[5]:+.1f}%)\n"
-
-        # AI анализ ошибок
-        if len(rows) >= 3:
-            losses = [r for r in rows if r[4] == "loss"]
-            if losses:
-                loss_text = "\n".join([f"{r[0]} {r[1]} вход:{r[2]} выход:{r[3]}" for r in losses[:3]])
-                analysis = ask_groq(
-                    f"Проанализируй проигрышные сделки трейдера и дай 2-3 конкретных совета:\n{loss_text}",
-                    max_tokens=300
-                )
-                if analysis:
-                    text += f"\n🧠 <b>Анализ ошибок:</b>\n{analysis}"
-
-        await message.answer(text, parse_mode="HTML")
-
-    else:
-        # Добавляем сделку
-        try:
-            parts = args[1].split()
-            if len(parts) < 5:
-                await message.answer("Использование: /journal BTC LONG 65000 68000 win взял на OB")
-                return
-            symbol = parts[0].upper()
-            direction = parts[1].upper()
-            entry = float(parts[2])
-            exit_price = float(parts[3])
-            result = parts[4].lower()
-            note = " ".join(parts[5:]) if len(parts) > 5 else ""
-
-            pnl = (exit_price - entry) / entry * 100
-            if direction == "SHORT":
-                pnl = -pnl
-
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            conn.execute(
-                "INSERT INTO journal VALUES (NULL,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-                (user_id, symbol, direction, entry, exit_price, result, note, round(pnl, 2))
-            )
-            conn.commit()
-            conn.close()
-
-            emoji = "✅" if result == "win" else "❌"
-            await message.answer(
-                f"{emoji} Сделка добавлена в дневник\n"
-                f"{symbol} {direction}: {entry} → {exit_price} ({pnl:+.2f}%)",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            import logging
-            logging.error(e)
-            await message.answer(
-                "Формат: /journal BTC LONG 65000 67000 win [заметка]\n"
-                "Пример: /journal ETH SHORT 3200 3050 win взял на OB"
-            )
-
-@dp.message(Command("improve"))
-async def cmd_improve(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    """
-    /improve <запрос> — Groq пишет улучшение в groq_extensions.py и деплоит.
-    Только для ADMIN_ID.
-    """
-    user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
-        await message.answer("⛔️ Только для администратора.")
-        return
-
-    text = message.text.replace("/improve", "").strip()
-    if not text:
-        await message.answer(
-            "✏️ <b>Команда улучшения APEX</b>\n\n"
-            "Напиши что изменить:\n"
-            "<code>/improve добавь фильтр — не торговать XRP при объёме ниже среднего</code>\n"
-            "<code>/improve убери фильтр мемкоинов</code>\n"
-            "<code>/improve повысь порог confluence до 60 в боковике</code>\n\n"
-            "Groq напишет код, протестирует и задеплоит автоматически.",
-            parse_mode="HTML"
-        )
-        return
-
-    await message.answer(f"🧠 <b>Groq анализирует запрос...</b>\n\n<i>{text}</i>", parse_mode="HTML")
-
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _groq_write_extension, text, message)
-
-    if result.get("success"):
-        await message.answer(
-            f"✅ <b>Улучшение применено!</b>\n\n"
-            f"📝 <b>Что сделано:</b> {result['description']}\n"
-            f"🔧 <b>Изменено:</b> {result['what_changed']}\n"
-            f"🚀 Деплой на Render через ~2 минуты",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(
-            f"❌ <b>Ошибка:</b> {result.get('error', 'неизвестно')}\n\n"
-            f"Попробуй переформулировать запрос.",
-            parse_mode="HTML"
-        )
-
-
-def _groq_write_extension(user_request: str, message=None) -> dict:
-    """
-    Groq читает groq_extensions.py → понимает структуру →
-    пишет изменение → проверяет синтаксис → пушит на GitHub.
-    """
-    try:
-        import base64, ast
-
-        # 1. Читаем текущий groq_extensions.py из GitHub
-        if not GITHUB_TOKEN or not GITHUB_REPO:
-            return {"success": False, "error": "GitHub не настроен"}
-
-        r = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/groq_extensions.py",
-            headers={"Authorization": f"token {GITHUB_TOKEN}",
-                     "Accept": "application/vnd.github.v3+json"},
-            timeout=15
-        )
-        if r.status_code != 200:
-            return {"success": False, "error": f"GitHub read error: {r.status_code}"}
-
-        data = r.json()
-        current_code = base64.b64decode(data["content"]).decode("utf-8")
-        sha = data["sha"]
-
-        # 2. Groq анализирует запрос и пишет изменение
-        prompt = f"""Ты — AI разработчик торгового бота APEX. Тебе нужно изменить файл groq_extensions.py.
-
-ЗАПРОС ПОЛЬЗОВАТЕЛЯ: {user_request}
-
-ТЕКУЩИЙ КОД groq_extensions.py:
-```python
-{current_code[:4000]}
-```
-
-ПРАВИЛА:
-1. Верни ТОЛЬКО полный обновлённый Python файл — без markdown, без объяснений
-2. Сохрани всю существующую структуру и функции
-3. Добавь запись в GROQ_CHANGELOG с датой {datetime.now().strftime('%Y-%m-%d')}, version увеличь на 0.0.1, author="Groq"
-4. Если добавляешь новый фильтр — добавь его функцию И добавь в список ACTIVE_FILTERS
-5. Если добавляешь новый буст — добавь функцию И в CONFLUENCE_BOOSTERS
-6. Если удаляешь — убери из списка (функцию можно оставить закомментированной)
-7. Код должен быть рабочим Python 3.11
-8. description_of_change: первая строка комментария = краткое описание что сделал
-
-ВАЖНО: верни только Python код, начиная с первой строки файла."""
-
-        new_code = ask_groq(prompt, max_tokens=3000)
-        if not new_code:
-            return {"success": False, "error": "Groq не ответил"}
-
-        # Убираем markdown если Groq добавил
-        new_code = new_code.strip()
-        if new_code.startswith("```python"):
-            new_code = new_code[9:]
-        if new_code.startswith("```"):
-            new_code = new_code[3:]
-        if new_code.endswith("```"):
-            new_code = new_code[:-3]
-        new_code = new_code.strip()
-
-        # 3. Проверяем синтаксис — если сломан, не деплоим
-        try:
-            ast.parse(new_code)
-        except SyntaxError as se:
-            return {"success": False, "error": f"Синтаксическая ошибка в коде Groq: {se}"}
-
-        # 4. Извлекаем описание из changelog
-        description = user_request[:80]
-        what_changed = "groq_extensions.py"
-        try:
-            # Ищем последнюю запись changelog в новом коде
-            for line in new_code.split("\n"):
-                if '"changes":' in line and "Groq" not in line.split('"changes":')[0]:
-                    description = line.split('"changes":')[1].strip().strip('"').strip("'").rstrip('",')
-                    break
-        except Exception as e:
-            import logging
-            logging.error(e)
-            pass
-
-        # 5. Пушим на GitHub
-        encoded = base64.b64encode(new_code.encode("utf-8")).decode("utf-8")
-        r2 = requests.put(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/groq_extensions.py",
-            headers={"Authorization": f"token {GITHUB_TOKEN}",
-                     "Accept": "application/vnd.github.v3+json"},
-            json={
-                "message": f"🧠 Groq extension: {user_request[:60]}",
-                "content": encoded,
-                "sha": sha
-            },
-            timeout=20
-        )
-
-        if r2.status_code in (200, 201):
-            logging.info(f"[Extensions] ✅ Groq задеплоил изменение: {user_request[:60]}")
-            return {
-                "success": True,
-                "description": description,
-                "what_changed": what_changed,
-                "commit": r2.json().get("commit", {}).get("sha", "")[:7]
-            }
-        else:
-            return {"success": False, "error": f"GitHub push error: {r2.status_code}"}
-
-    except Exception as e:
-        logging.error(f"_groq_write_extension: {e}")
-        return {"success": False, "error": str(e)}
-
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    user_id = message.from_user.id
-    mem = get_user_memory(user_id)
-    try:
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        total = (conn.execute("SELECT COUNT(*) FROM signals").fetchone() or [0])[0]
-        wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
-        losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone() or [0])[0]
-        pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
-        top = conn.execute(
-            "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
-        ).fetchall()
-        # Статистика по стратегиям
-        strategy_rows = conn.execute(
-            "SELECT signal_type, COUNT(*), SUM(CASE WHEN result LIKE 'tp%' THEN 1 ELSE 0 END) FROM signals WHERE signal_type IS NOT NULL GROUP BY signal_type"
-        ).fetchall()
-        conn.close()
-    except:
-        total = wins = losses = pending = 0
-        top = []
-        strategy_rows = []
-
-    wr = round(wins / total * 100, 1) if total > 0 else 0
-    top_text = "\n".join([f"• {r[0]}: {r[1]:.0f}% WR, avg {r[3]:.0f}ч ({r[2]} сигн.)" for r in top]) or "Нет данных"
-
-    # Формируем текст по стратегиям
-    strategy_icons = {"MTF": "📐", "SWING": "🔄", "WYCKOFF": "🌊", "FAST": "⚡", "ZONE": "📦"}
-    strategy_lines = []
-    for stype, s_total, s_wins in strategy_rows:
-        s_wr = round(s_wins / s_total * 100, 1) if s_total > 0 else 0
-        icon = strategy_icons.get((stype or "").upper(), "📊")
-        strategy_lines.append(f"{icon} {stype}: {s_total} сигн. | WR {s_wr}%")
-    strategy_text = "\n".join(strategy_lines) or "Нет данных"
-
-    profile_text = ""
-    if mem["profile"]:
-        profile_text = f"\n\n👤 <b>Что я о тебе знаю:</b>\n{mem['profile']}"
-        if mem["coins"]:
-            profile_text += f"\n💎 Монеты: {mem['coins']}"
-        if mem["deposit"] > 0:
-            profile_text += f"\n💰 Депозит: ${mem['deposit']:,.0f} | Риск: {mem['risk']}%"
-
-    await message.answer(
-        f"📈 <b>Статистика APEX</b>\n\n"
-        f"Сигналов: {total} | ✅ {wins} | ❌ {losses} | ⏳ {pending}\n"
-        f"🎯 Win Rate: <b>{wr}%</b>\n\n"
-        f"📊 <b>По стратегиям:</b>\n{strategy_text}\n\n"
-        f"🏆 <b>Топ монеты:</b>\n{top_text}"
-        f"{profile_text}",
-        parse_mode="HTML"
-    )
-
-@dp.message(Command("news"))
 async def cmd_news(message: types.Message):
-    await message.answer("📰 Собираю свежие новости...")
-    now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    crypto_news = await asyncio.get_running_loop().run_in_executor(None, get_crypto_news)
-    macro_news = await asyncio.get_running_loop().run_in_executor(None, get_market_impact_news)
-    crypto_text = format_news(crypto_news[:5])
-    macro_text = format_news(macro_news[:3])
-    all_titles = "\n".join([item["title"] for item in (crypto_news + macro_news)[:10]])
-    analysis = ask_groq(
-        f"Оцени эти новости для трейдера — что важно прямо сейчас? (3 пункта кратко):\n{all_titles}",
-        max_tokens=250
-    )
-    save_news("crypto news", all_titles[:500])
-    msg = (
-        f"📰 <b>Новости крипторынка</b>\n"
-        f"🕐 {now_str}\n{'━'*24}\n\n"
-        f"<b>🔥 Крипто:</b>\n{crypto_text}\n\n"
-        f"<b>🌍 Макро:</b>\n{macro_text}\n\n"
-        f"<b>⚡️ APEX:</b>\n{analysis or 'Анализирую...'}"
-    )
-    await message.answer(msg[:4000], parse_mode="HTML")
+    await _v3_market_commands.news(message)
 
-async def run_backtest(target, symbol, timeframe):
-    """Запуск бектеста"""
-    send = target.message.answer if hasattr(target, "message") else target.answer
-    await send(f"🔬 Запускаю бектест {symbol} {TF_LABELS.get(timeframe, timeframe)}...")
-    result = backtest(symbol, timeframe)
-    if not result:
-        await send("Недостаточно данных для бектеста")
-        return
-
-    grade = "🔥 Отличная" if result["win_rate"] >= 60 else "✅ Рабочая" if result["win_rate"] >= 50 else "⚠️ Слабая"
-    await send(
-        f"🔬 <b>Бектест {symbol} [{TF_LABELS.get(timeframe, timeframe)}]</b>\n\n"
-        f"Сигналов: {result['total']}\n"
-        f"✅ Выигрыши: {result['wins']}\n"
-        f"❌ Проигрыши: {result['losses']}\n"
-        f"🎯 Win Rate: <b>{result['win_rate']}%</b>\n"
-        f"Оценка: {grade}\n\n"
-        f"_На основе {result['periods']} свечей_",
-        parse_mode="HTML"
-    )
 
 def scan_diagnostics(symbol):
-    """Объясняет почему нет сигнала — что именно не прошло"""
+    """Explain which market conditions prevented a manual signal."""
     try:
         lines = [f"😴 <b>{symbol} — сигнал не найден</b>\n"]
 
@@ -872,2080 +652,197 @@ def scan_diagnostics(symbol):
 
 # ===== CALLBACK HANDLERS =====
 
-@dp.callback_query()
 async def handle_callback(callback: CallbackQuery):
-    data = callback.data
-    user_id = callback.from_user.id
-    # Обновляем флаги и функции из market модуля напрямую
-    global _ROUTER_OK, _LEARNING_OK, _AUTOPILOT_OK, _WEB_LEARNER_OK
-    global _learn_grade_text, _learn_trade_analysis, _learn_self_diag
-    global _learn_latest_diag, _learn_get_strategy, _learn_build_strategy
-    global _brain_router, _autopilot_status
-    import market as _market_module
-    _ROUTER_OK = getattr(_market_module, '_ROUTER_OK', False)
-    _LEARNING_OK = getattr(_market_module, '_LEARNING_OK', False)
-    _AUTOPILOT_OK = getattr(_market_module, '_AUTOPILOT_OK', False)
-    _WEB_LEARNER_OK = getattr(_market_module, '_WEB_LEARNER_OK', False)
-    if _LEARNING_OK:
-        _learn_grade_text = getattr(_market_module, '_learn_grade_text', lambda: "")
-        _learn_trade_analysis = getattr(_market_module, '_learn_trade_analysis', lambda n=5: "")
-        _learn_self_diag = getattr(_market_module, '_learn_self_diag', lambda: "")
-        _learn_latest_diag = getattr(_market_module, '_learn_latest_diag', lambda: "")
-        _learn_get_strategy = getattr(_market_module, '_learn_get_strategy', lambda: "")
-        _learn_build_strategy = getattr(_market_module, '_learn_build_strategy', lambda: "")
-    if _ROUTER_OK:
-        _brain_router = getattr(_market_module, '_brain_router', _brain_router)
-    if _AUTOPILOT_OK:
-        _autopilot_status = getattr(_market_module, '_autopilot_status', lambda: "")
-    # Обновляем EXT флаг
-    global _EXT_OK, _ext_summary, _ext_session
-    _EXT_OK = getattr(_market_module, '_EXT_OK', False)
-    if _EXT_OK:
-        _ext_summary = getattr(_market_module, '_ext_summary', lambda: {})
-        _ext_session = getattr(_market_module, '_ext_session', lambda: {})
-    # Обновляем WEB LEARNER функции
-    global _web_knowledge_summary, _web_learn_cycle, _web_groq_agenda, _web_self_improve
-    _WEB_LEARNER_OK = getattr(_market_module, '_WEB_LEARNER_OK', False)
-    if _WEB_LEARNER_OK:
-        _web_knowledge_summary = getattr(_market_module, '_web_knowledge_summary', lambda: "")
-        _web_learn_cycle = getattr(_market_module, '_web_learn_cycle', lambda: [])
-        _web_groq_agenda = getattr(_market_module, '_web_groq_agenda', lambda: [])
-        _web_self_improve = getattr(_market_module, '_web_self_improve', lambda: [])
     try:
         await callback.answer()
     except Exception:
         pass
 
-    if data == "menu_back":
-        await callback.message.edit_text("Главное меню 👇", reply_markup=main_menu())
-
-    elif data == "menu_trade_manager":
-        try:
-            items = await asyncio.to_thread(_fetch_manager_trades, DB_PATH, 12)
-            text = _format_manager_dashboard(items)
-            rows = []
-            for label, callback_data in _manager_trade_buttons(items):
-                rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
-            rows.append([
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_trade_manager"),
-                InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),
-            ])
-            markup = InlineKeyboardMarkup(inline_keyboard=rows)
-        except Exception as exc:
-            logging.error("Telegram Trade Manager dashboard: %s", exc)
-            text = "⚠️ Не удалось прочитать состояние менеджера сделок. Сканер продолжает работать."
-            markup = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_trade_manager"),
-                InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back"),
-            ]])
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
-
-    elif data.startswith("manager_trade_"):
-        try:
-            signal_id = int(data.rsplit("_", 1)[-1])
-            payload = await asyncio.to_thread(_fetch_manager_trade, DB_PATH, signal_id, 12)
-            if payload:
-                text = _format_manager_trade_detail(payload)
-            else:
-                text = "⚠️ Сделка больше не найдена в памяти Trade Manager."
-        except Exception as exc:
-            logging.error("Telegram Trade Manager trade detail: %s", exc)
-            text = "⚠️ Не удалось прочитать историю этой сделки."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],
-                [InlineKeyboardButton(text="🔙 К менеджеру", callback_data="menu_trade_manager"),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data == "menu_trades":
-        await callback.message.edit_text(
-            "📊 <b>Сделки APEX</b>\n\nВыберите состояние сделки:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades")],
-                [InlineKeyboardButton(text="✅ Закрыты по тейку", callback_data="menu_take_closed")],
-                [InlineKeyboardButton(text="🛑 Закрыты по стопу", callback_data="menu_stop_closed")],
-                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:
-        category = {
-            "menu_active_trades": "active",
-            "menu_take_closed": "take",
-            "menu_stop_closed": "stop",
-        }[data]
-        try:
-            rows = await asyncio.to_thread(_fetch_trade_view_rows, DB_PATH, category, 12)
-            text = _format_trade_view(category, rows)
-        except Exception as exc:
-            logging.error("Telegram trade view %s: %s", category, exc)
-            text = "⚠️ Не удалось прочитать историю сделок. Сканер продолжает работать."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📍 Активные", callback_data="menu_active_trades"),
-                 InlineKeyboardButton(text="✅ Тейки", callback_data="menu_take_closed"),
-                 InlineKeyboardButton(text="🛑 Стопы", callback_data="menu_stop_closed")],
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data),
-                 InlineKeyboardButton(text="🔙 Сделки", callback_data="menu_trades")],
-            ]),
-        )
-
-    elif data == "menu_watchlist":
-        try:
-            items = await asyncio.to_thread(_fetch_watchlist, DB_PATH, 20)
-            text = _format_watchlist(items)
-        except Exception as exc:
-            logging.error("Telegram watchlist: %s", exc)
-            text = "⚠️ Не удалось прочитать наблюдаемые сделки. Сканер продолжает работать."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚫 Отказы Groq", callback_data="menu_groq_rejections")],
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_watchlist"),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data == "menu_scanners":
-        try:
-            await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
-            dashboard = await asyncio.to_thread(_scanner_dashboard, DB_PATH)
-            text = _format_scanner_dashboard(dashboard)
-        except Exception as exc:
-            logging.error("Telegram scanner dashboard: %s", exc)
-            text = "⚠️ Не удалось прочитать состояние сканеров."
-        _scanner_buttons = []
-        _stats_url = os.environ.get("APEX_STATS_URL", "").strip()
-        if _stats_url:
-            _scanner_buttons.append([InlineKeyboardButton(text="📊 Полная статистика", url=_stats_url)])
-        _scanner_buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_scanners"), InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")])
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=_scanner_buttons))
-
-    elif data == "menu_experience":
-        try:
-            experience = await asyncio.to_thread(_experience_dashboard, DB_PATH)
-            text = _format_experience_dashboard(experience)
-        except Exception as exc:
-            logging.error("Telegram experience dashboard: %s", exc)
-            text = "⚠️ Не удалось прочитать Experience Memory."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_experience"),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data == "menu_setup_evidence":
-        try:
-            setup_data = await asyncio.to_thread(_setup_evidence_dashboard, DB_PATH, 24, 12)
-            text = _format_setup_evidence_dashboard(setup_data)
-        except Exception as exc:
-            logging.error("Telegram setup evidence dashboard: %s", exc)
-            text = "⚠️ Не удалось прочитать журнал качества сетапов."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_setup_evidence"),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data == "menu_groq_rejections":
-        try:
-            rejection_data = await asyncio.to_thread(_fetch_groq_rejections, DB_PATH, 24, 30)
-            text = _format_groq_rejections(rejection_data)
-        except Exception as exc:
-            logging.error("Telegram Groq rejection view: %s", exc)
-            text = "⚠️ Не удалось прочитать журнал отказов Groq. Сканер продолжает работать."
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_groq_rejections"),
-                 InlineKeyboardButton(text="👀 Наблюдаемые", callback_data="menu_watchlist")],
-                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data == "menu_scan":
-        try:
-            await callback.message.edit_text(
-                "🔍 <b>Выбери монету</b> (топ-60 по объёму):",
-                parse_mode="HTML",
-                reply_markup=pairs_keyboard("scan", 0)
-            )
-        except Exception:
-            await callback.message.answer(
-                "🔍 <b>Выбери монету</b> (топ-60 по объёму):",
-                parse_mode="HTML",
-                reply_markup=pairs_keyboard("scan", 0)
-            )
-
-    elif data.startswith("pairs_"):
-        # Пагинация: pairs_scan_0, pairs_scan_1 ...
-        parts = data.split("_")
-        action = parts[1]
-        page = int(parts[2]) if len(parts) > 2 else 0
-        try:
-            await callback.message.edit_reply_markup(reply_markup=pairs_keyboard(action, page))
-        except Exception as e:
-            import logging
-            logging.error(e)
-            pass
-
-    elif data == "noop":
-        pass  # Кнопка номера страницы — ничего не делаем
-
-    elif data.startswith("patch_apply_"):
-        patch_id = data.replace("patch_apply_", "")
-        await callback.message.edit_text("⏳ Применяю патч и пушу в GitHub...")
-        success, result = await apply_patch(patch_id)
-        if success:
-            ok_text = "✅ <b>Патч применён!</b>\n\n" + "Commit: <code>" + str(result) + "</code>\n" + "Render сейчас задеплоит новую версию автоматически.\n\n⏳ 1-3 мин."
-            await callback.message.edit_text(ok_text, parse_mode="HTML")
-        else:
-            err_text = "❌ <b>Ошибка при пуше в GitHub:</b>\n<code>" + str(result) + "</code>"
-            await callback.message.edit_text(err_text, parse_mode="HTML")
-
-    elif data.startswith("patch_cancel_"):
-        patch_id = data.replace("patch_cancel_", "")
-        if patch_id in pending_patches:
-            del pending_patches[patch_id]
-        await callback.message.edit_text("❌ Патч отменён. Код не изменён.")
-
-    elif data == "menu_market":
-        await callback.message.edit_text("📊 Собираю данные рынка...")
-        fg = get_fear_greed()
-        dxy = get_dxy_signal()
-        regime_btc = get_market_regime("BTCUSDT")
-        econ = get_upcoming_events()
-
-        # Блок настроения
-        sentiment_block = ""
-        if fg:
-            fg_bar = "█" * (fg["value"] // 10) + "░" * (10 - fg["value"] // 10)
-            fg_emoji = "😱" if fg["value"] < 25 else "😨" if fg["value"] < 45 else "😐" if fg["value"] < 55 else "😊" if fg["value"] < 75 else "🤑"
-            sentiment_block += f"{fg_emoji} <b>Fear & Greed:</b> {fg['value']} [{fg_bar}] {fg['label']}\n"
-
-        if dxy:
-            dxy_emoji = "📈" if dxy["signal"] == "STRONG" else "📉" if dxy["signal"] == "WEAK" else "➡️"
-            warn = " ⚠️ давит на крипту" if dxy["signal"] == "STRONG" else " ✅ хорошо для крипты" if dxy["signal"] == "WEAK" else ""
-            sentiment_block += f"{dxy_emoji} <b>DXY:</b> {dxy['value']} ({dxy['change']:+.2f}%){warn}\n"
-
-        if regime_btc:
-            regime_emoji = "🔥" if regime_btc["mode"] == "TRENDING" else "😴" if regime_btc["mode"] == "SIDEWAYS" else "⚡️"
-            sentiment_block += f"{regime_emoji} <b>Режим BTC:</b> {regime_btc['mode']} {regime_btc['direction']}\n"
-
-        if econ:
-            sentiment_block += f"\n⚠️ <b>Макро:</b> {econ}\n"
-
-        # Тепловая карта накоплений топ-монет
-        accum_block = ""
-        try:
-            top_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "TONUSDT", "AVAXUSDT", "LINKUSDT"]
-            accum_lines = []
-            for sym in top_syms:
-                acc = detect_accumulation(sym)
-                if acc and acc.get("score", 0) >= 50:
-                    score = acc["score"]
-                    bar_len = min(10, score // 10)
-                    bar = "█" * bar_len + "░" * (10 - bar_len)
-                    phase = acc.get("phase", "")
-                    emoji = "🔥" if score >= 70 else "🟡"
-                    accum_lines.append(f"{emoji} <b>{sym.replace('USDT','')}</b> [{bar}] {score}/100 {phase}")
-            if accum_lines:
-                accum_block = "\n🗺 <b>Тепловая карта накоплений:</b>\n" + "\n".join(accum_lines[:5]) + "\n"
-        except Exception as _e:
-            import logging
-            logging.error(_e)
-
-        # Крупная ликвидность — зоны перед пампом
-        liq_block = ""
-        try:
-            liq_lines = []
-            for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
-                candles = get_candles(sym, "4h", 100)
-                if candles and len(candles) > 20:
-                    highs = [c["high"] for c in candles[-50:]]
-                    lows = [c["low"] for c in candles[-50:]]
-                    vols = [c.get("volume", 0) for c in candles[-50:]]
-                    avg_vol = sum(vols) / len(vols) if vols else 0
-                    # Свечи с аномальным объёмом — кит
-                    whale_candles = [(c, v) for c, v in zip(candles[-10:], vols[-10:]) if avg_vol > 0 and v > avg_vol * 2]
-                    if whale_candles:
-                        last_whale = whale_candles[-1]
-                        direction_whale = "🟢 Накопление" if last_whale[0]["close"] > last_whale[0]["open"] else "🔴 Сброс"
-                        liq_lines.append(f"🐋 <b>{sym.replace('USDT','')}</b>: {direction_whale} (объём ×{last_whale[1]/avg_vol:.1f})")
-            if liq_lines:
-                liq_block = "\n🐋 <b>Крупная ликвидность (4h):</b>\n" + "\n".join(liq_lines) + "\n"
-        except Exception as _e:
-            import logging
-            logging.error(_e)
-
-        # Groq анализ рынка с учётом накоплений
-        comment = ask_groq(
-            f"3 предложения по рынку для трейдера. F&G:{fg}, DXY:{dxy}, BTC режим:{regime_btc}. "
-            f"Учти накопления и ликвидность. Дай конкретный совет — что делать сейчас.",
-            max_tokens=150
-        )
-
-        await callback.message.edit_text(
-            f"📊 <b>Рынок сейчас</b>\n{'━'*24}\n\n"
-            f"{sentiment_block}"
-            f"{accum_block}"
-            f"{liq_block}"
-            f"\n💬 <i>{comment or ''}</i>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_market"),
-                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data == "menu_tf":
-        await callback.message.edit_text(
-            "⏱ <b>Выбери таймфрейм для анализа</b>\n\nПосле выбора бот просканирует все монеты на этом ТФ:",
-            parse_mode="HTML", reply_markup=tf_keyboard()
-        )
-
-    elif data.startswith("tf_"):
-        tf = data.replace("tf_", "")
-        pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
-        await callback.message.edit_text(
-            f"🔍 Сканирую {DEFAULT_UNIVERSE_SIZE} пар на {TF_LABELS.get(tf, tf)}...\n⏳ это может занять несколько минут"
-        )
-        signals = []
-        for symbol in pairs:
-            try:
-                sig = await asyncio.get_running_loop().run_in_executor(
-                    None, full_scan_raw, symbol, tf
-                )
-                if sig:
-                    signals.append(sig)
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                import logging
-                logging.error(e)
-                pass
-
-        if not signals:
-            text = f"😴 На {TF_LABELS.get(tf, tf)} чётких сетапов нет.\nПопробуй другой таймфрейм."
-            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_tf")]
-            ]))
-            return
-
-        # Сортируем: МЕГА ТОП первые
-        grade_order = {"МЕГА ТОП": 0, "ТОП СДЕЛКА": 1, "ХОРОШАЯ": 2}
-        signals.sort(key=lambda x: grade_order.get(x.get("grade", ""), 3))
-
-        # Отправляем первый сигнал в текущее сообщение
-        top = signals[0]
-        direction = top.get("direction", "")
-        emoji = "🟢" if direction == "BULLISH" else "🔴"
-
-        # Показываем краткую сводку всех + полный топ сигнал
-        summary_lines = []
-        for s in signals[:8]:
-            d = s.get("direction", "")
-            ic = "🟢" if d == "BULLISH" else "🔴"
-            grade_short = s.get("grade", "")
-            fire = "🔥🔥🔥" if grade_short == "МЕГА ТОП" else "🔥🔥" if grade_short == "ТОП СДЕЛКА" else "✅"
-            summary_lines.append(f"{fire} {ic} {s['symbol'].replace('USDT','')} — {d}")
-
-        summary = "\n".join(summary_lines)
-        header = (
-            f"⏱ <b>Скан {TF_LABELS.get(tf, tf)}</b> | найдено: {len(signals)}\n"
-            f"{'━'*22}\n\n"
-            f"{summary}\n\n"
-            f"{'━'*22}\n"
-            f"<b>Лучший сигнал:</b>\n\n"
-            + top["text"]
-        )
-
-        if len(header) > 4000:
-            header = header[:3990] + "..."
-
-        await callback.message.edit_text(
-            header,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data=data)],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_tf")]
-            ])
-        )
-
-    elif data.startswith("scan_"):
-        symbol = data.replace("scan_", "")
-        await callback.message.edit_text(f"🔍 Анализирую {symbol}...")
-        sig = await asyncio.get_running_loop().run_in_executor(
-            None, full_scan_raw, symbol, "1h", False
-        )
-
-        mem = get_user_memory(user_id)
-        risk_text = ""
-        if mem["deposit"] > 0 and sig:
-            rc = calc_risk(
-                mem["deposit"], mem["risk"], sig.get("entry"), sig.get("sl")
-            )
-            if rc:
-                risk_text = (
-                    f"\n\n💰 <b>Риск-менеджмент:</b>\n"
-                    f"Риск в $: <b>${rc['risk_amount']}</b>\n"
-                    f"Размер позиции: <b>${rc['position_size']:.0f}</b>\n"
-                    f"Рекомендуемое плечо: <b>x{rc['leverage']}</b>"
-                )
-
-        if sig:
-            await callback.message.edit_text(
-                sig["text"] + risk_text,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 К монетам", callback_data="menu_scan")]
-                ])
-            )
-        else:
-            # Диагностика — объясняем почему нет сигнала
-            diag = await asyncio.get_running_loop().run_in_executor(None, scan_diagnostics, symbol)
-            await callback.message.edit_text(
-                diag,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Повторить", callback_data=f"scan_{symbol}"),
-                     InlineKeyboardButton(text="🔙 К монетам", callback_data="menu_scan")]
-                ])
-            )
-
-    elif data == "menu_backtest":
-        await callback.message.edit_text(
-            "🔬 <b>Анализ монеты</b>\n\n"
-            "• <b>Бектест</b> — историческая точность стратегии\n"
-            "• <b>Где мы сейчас</b> — живой анализ: OB, FVG, уровни, что делать",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔬 Бектест (история)", callback_data="menu_bt_select")],
-                [InlineKeyboardButton(text="📍 Где мы сейчас (live)", callback_data="menu_live_select")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
-            ])
-        )
-
-    elif data == "menu_bt_select":
-        await callback.message.edit_text(
-            "🔬 <b>Бектест</b>\n\nВыбери таймфрейм:",
-            parse_mode="HTML", reply_markup=backtest_tf_keyboard()
-        )
-
-    elif data == "menu_live_select":
-        await callback.message.edit_text(
-            "📍 <b>Живой анализ — где мы сейчас?</b>\n\nВыбери таймфрейм:",
-            parse_mode="HTML", reply_markup=live_tf_keyboard()
-        )
-
-    elif data.startswith("live_"):
-        parts = data.split("_")
-        # live_15m / live_1h / live_4h — выбор таймфрейма, дальше просят монету
-        if len(parts) == 2:
-            tf = parts[1]
-            user_states[user_id] = {"action": "live_analysis", "tf": tf}
-            await callback.message.edit_text(
-                f"📍 Анализ на {TF_LABELS.get(tf, tf)} — напиши монету (BTC, SOL, ETHUSDT...):"
-            )
-        # live_now_BTCUSDT_1h или live_refresh_BTCUSDT_1h — прямой показ
-        elif len(parts) >= 4:
-            symbol = parts[2]; tf = parts[3]
-            await callback.message.edit_text(f"📍 Обновляю {symbol} {TF_LABELS.get(tf,tf)}...")
-            result = await asyncio.get_running_loop().run_in_executor(None, live_position_analysis, symbol, tf)
-            if result:
-                await callback.message.edit_text(result, parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"live_refresh_{symbol}_{tf}")],
-                        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-                    ]))
-            else:
-                await callback.message.edit_text(f"Нет данных по {symbol}",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_backtest")]]))
-
-    elif data.startswith("bt_"):
-        tf = data.replace("bt_", "")
-        user_states[user_id] = {"action": "backtest", "tf": tf}
-        await callback.message.edit_text(
-            f"Бектест на {TF_LABELS.get(tf, tf)}.\n\nНапиши название монеты (например: BTC или ETHUSDT):"
-        )
-
-    elif data == "menu_risk":
-        mem = get_user_memory(user_id)
-        if mem["deposit"] > 0:
-            text = (f"💰 <b>Риск калькулятор</b>\n\n"
-                    f"Депозит: <b>${mem['deposit']:,.2f}</b>\n"
-                    f"Риск на сделку: <b>{mem['risk']}%</b>\n"
-                    f"Макс риск в $: <b>${mem['deposit'] * mem['risk'] / 100:.2f}</b>\n\n"
-                    f"Изменить: /risk 5000 или /setrisk 2")
-        else:
-            text = "💰 <b>Риск калькулятор</b>\n\nУкажи депозит командой:\n/risk 1000"
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-        ]))
-
-    elif data == "menu_journal":
-        await callback.message.edit_text(
-            "📓 <b>Дневник сделок</b>\n\n"
-            "/journal — посмотреть историю + анализ ошибок\n\n"
-            "Добавить сделку:\n/journal BTC LONG 65000 67000 win",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data == "menu_alerts":
-        await callback.message.edit_text(
-            "🔔 <b>Алерты на пробой уровня</b>\n\n"
-            "Установить:\n/alert BTCUSDT 70000\n\n"
-            "Как только цена достигнет уровня — пришлю сразу ⚡️",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data == "menu_stats":
-        try:
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            # Считаем только реально отправленные сигналы (не pending из очереди)
-            total = (conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending' OR result IS NULL").fetchone() or [0])[0]
-            # Добавляем pending которые реально в работе (не в timing_queue)
-            real_pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
-            total = total + real_pending  # Все записи в signals — это уже отправленные
-            wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
-            losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='sl'").fetchone() or [0])[0]
-            pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
-            # Наблюдение — пары в очереди тайминга
-            try:
-                watchlist = (conn.execute("SELECT COUNT(*) FROM timing_queue WHERE status='waiting'").fetchone() or [0])[0]
-            except Exception:
-                watchlist = 0
-            top = conn.execute(
-                "SELECT symbol, win_rate, total, avg_hours_to_tp FROM signal_learning ORDER BY win_rate DESC LIMIT 5"
-            ).fetchall()
-            errors_count = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
-            patterns = conn.execute(
-                "SELECT error_type, count FROM error_patterns ORDER BY count DESC LIMIT 3"
-            ).fetchall()
-            conn.close()
-        except Exception as e:
-            import logging
-            logging.error(e)
-            total = wins = losses = pending = errors_count = watchlist = 0
-            top = []
-            patterns = []
-
-        resolved = wins + losses
-        wr = round(wins / resolved * 100, 1) if resolved > 0 else 0
-        top_text = "\n".join([f"  {r[0]}: {r[1]:.0f}% WR за {r[2]} сигн." for r in top]) or "  Нет данных"
-
-        err_text = ""
-        if errors_count > 0:
-            err_text = f"\n\n⚠️ <b>Открытых ошибок:</b> {errors_count}"
-            if patterns:
-                err_text += "\n" + "\n".join([f"  • {ERROR_TYPES.get(p[0], p[0])}: {p[1]}x" for p in patterns])
-
-        await callback.message.edit_text(
-            f"📈 <b>Статистика APEX</b>\n\n"
-            f"Всего сигналов: <b>{total}</b>\n"
-            f"✅ Прибыльных: <b>{wins}</b>\n"
-            f"❌ Убыточных: <b>{losses}</b>\n"
-            f"⏳ В работе: <b>{pending}</b>\n"
-            f"🎯 Win Rate: <b>{wr}%</b>\n\n"
-            f"🏆 <b>Лучшие монеты:</b>\n{top_text}"
-            f"{err_text}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📊 По стратегиям", callback_data="menu_strategies"),
-                 InlineKeyboardButton(text="🔍 Ошибки", callback_data="menu_errors")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data == "menu_system":
-        try:
-            health = await asyncio.to_thread(_fetch_system_health, DB_PATH)
-            execution = await asyncio.to_thread(
-                _execution_status, DB_PATH, refresh_balance=True
-            ) if _TRADE_EXECUTION_OK else {}
-            mode = str(execution.get("mode", "OFF")).upper() if execution.get("enabled") else "OFF"
-            live = "готова" if execution.get("live_armed") else "не активна"
-            active_live = int(execution.get("live_active_count", 0) or 0)
-            if not execution.get("live_armed"):
-                binance_state = "не активна"
-            elif active_live:
-                binance_state = f"сопровождает LIVE-ордера: {active_live}"
-            else:
-                binance_state = "баланс по запросу · ордера только готовые"
-            account = execution.get("account", {})
-            if account.get("available"):
-                balance_label = f"${float(account.get('wallet_balance', 0) or 0):.4f}"
-                if account.get("stale"):
-                    balance_label += " · сохранённый"
-            else:
-                balance_label = "временно недоступен"
-            external_state = "модуль загружен" if _MARKET_INTELLIGENCE_OK else "недоступен"
-            quality_state = "модуль загружен" if _SIGNAL_QUALITY_GATE_OK else "недоступен"
-            integrity_state = "модуль загружен" if _SIGNAL_INTEGRITY_OK else "недоступен"
-            text = (
-                "🛡 <b>Состояние APEX</b>\n\n"
-                f"Процесс Telegram: <b>работает</b>\n"
-                f"Проверка уровней: <b>{integrity_state}</b>\n"
-                f"Groq Quality Gate: <b>{quality_state}</b>\n"
-                f"Внешний контекст: <b>{external_state}</b>\n\n"
-                f"Gate — пары: <b>{health.get('gate_total', 0)}</b> · проверены свечами: "
-                f"<b>{health.get('gate_candles', 0)}</b>\n"
-                f"Решений Groq за 24ч: <b>{health.get('groq_24h', 0)}</b>\n"
-                f"Открытых ошибок: <b>{health.get('open_errors', 0)}</b>\n\n"
-                f"Автоторговля: <b>{mode}</b> · LIVE {live}\n"
-                f"Futures-баланс: <b>{balance_label}</b>\n"
-                f"Binance: <b>{binance_state}</b>\n"
-                f"Риск: <b>{execution.get('risk_pct', 0)}%</b> · плечо "
-                f"<b>x{execution.get('leverage', 1)}</b>\n\n"
-                "<i>Новости работают автоматически внутри Groq-фильтра и не требуют отдельной кнопки.</i>"
-            )
-        except Exception as exc:
-            logging.error("Telegram system status: %s", exc)
-            text = "⚠️ Не удалось собрать состояние системы. Сам сканер продолжает работать."
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_system"),
-                 InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
-
-    elif data == "menu_brain":
-        try:
-            # Данные из основной БД
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE active=1").fetchone() or [0])[0]
-            core_rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE active=1 AND source='core_seed_v2'").fetchone() or [0])[0]
-            trade_rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE active=1 AND source='groq_trade_analysis'").fetchone() or [0])[0]
-            other_rule_count = max(0, rule_count - core_rule_count - trade_rule_count)
-            top_rules = conn.execute(
-                "SELECT category, rule, confidence FROM self_rules WHERE active=1 ORDER BY confidence DESC LIMIT 5"
-            ).fetchall()
-            obs_count = (conn.execute("SELECT COUNT(*) FROM observations").fetchone() or [0])[0]
-            model_count = (conn.execute("SELECT COUNT(*) FROM market_model").fetchone() or [0])[0]
-            avoid_count = (conn.execute(
-                "SELECT COUNT(*) FROM self_rules WHERE active=1 AND (rule_type='avoid' OR category='avoid')"
-            ).fetchone() or [0])[0]
-            knowledge_count = (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
-            try:
-                web_knowledge_count = (conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone() or [0])[0]
-                web_24h = (conn.execute("SELECT COUNT(*) FROM web_knowledge WHERE created_at >= datetime('now','-24 hours')").fetchone() or [0])[0]
-                last_web = (conn.execute("SELECT MAX(created_at) FROM web_knowledge").fetchone() or [None])[0]
-            except Exception:
-                web_knowledge_count = web_24h = 0
-                last_web = None
-            try:
-                candidate_count = (conn.execute("SELECT COUNT(*) FROM knowledge_candidates WHERE status='candidate'").fetchone() or [0])[0]
-            except Exception:
-                candidate_count = 0
-            try:
-                pending_topics = (conn.execute("SELECT COUNT(*) FROM learning_agenda WHERE status='pending'").fetchone() or [0])[0]
-            except Exception:
-                pending_topics = 0
-            try:
-                pattern_count = (conn.execute("SELECT COUNT(*) FROM pattern_memory").fetchone() or [0])[0]
-            except Exception:
-                pattern_count = 0
-            try:
-                coin_count = (conn.execute(
-                    "SELECT COUNT(DISTINCT symbol) FROM signal_log WHERE symbol IS NOT NULL AND result IN ('tp1','tp2','tp3','sl')"
-                ).fetchone() or [0])[0]
-            except Exception:
-                coin_count = 0
-            try:
-                last_trade_learning = (conn.execute("SELECT MAX(created_at) FROM brain_log WHERE event_type='trade_analysis'").fetchone() or [None])[0]
-            except Exception:
-                last_trade_learning = None
-            conn.close()
-
-            # Данные из brain_builder (если доступен)
-            brain = (get_brain_summary() or {}) if BRAIN_BUILDER_AVAILABLE else {}
-            if brain.get("knowledge_count", 0) > knowledge_count:
-                knowledge_count = brain.get("knowledge_count", 0)
-            if brain.get("pattern_count", 0) > pattern_count:
-                pattern_count = brain.get("pattern_count", 0)
-            macro_summary = brain.get("macro_summary", "")[:200]
-            macro_time = brain.get("macro_time", "")
-            bb_rules = brain.get("top_rules", "")
-        except Exception as e:
-            import logging
-            logging.error(e)
-            rule_count = core_rule_count = trade_rule_count = other_rule_count = 0
-            obs_count = model_count = avoid_count = 0
-            knowledge_count = web_knowledge_count = web_24h = candidate_count = pending_topics = 0
-            pattern_count = coin_count = 0
-            last_web = last_trade_learning = None
-            top_rules = []
-            macro_summary = bb_rules = macro_time = ""
-
-        macro_block = (
-            f"\n📰 <b>Последняя макро-сводка</b> ({macro_time}):\n"
-            f"<i>{macro_summary}</i>\n"
-        ) if macro_summary else ""
-        if _TRADE_EXECUTION_OK:
-            try:
-                _exec_state = await asyncio.to_thread(
-                    _execution_status, DB_PATH, refresh_balance=True
-                )
-                _exec_mode = str(_exec_state.get("mode", "paper")).upper()
-                _exec_enabled = bool(_exec_state.get("enabled"))
-                _exec_live = bool(_exec_state.get("live_armed"))
-                if not _exec_enabled:
-                    _exec_label = "выключена (без ордеров)"
-                elif _exec_mode == "PAPER":
-                    _exec_label = "paper — виртуальные позиции"
-                elif _exec_live:
-                    _exec_label = "LIVE включена"
-                else:
-                    _exec_label = "LIVE не подтверждена"
-                _active_live = int(_exec_state.get("live_active_count", 0) or 0)
-                if not _exec_live:
-                    _binance_label = "не активна"
-                elif _active_live:
-                    _binance_label = f"сопровождает LIVE-ордера: {_active_live}"
-                else:
-                    _binance_label = "баланс по запросу · ордера только готовые"
-                _account = _exec_state.get("account", {})
-                if _account.get("available"):
-                    _balance_label = (
-                        f"${float(_account.get('wallet_balance', 0) or 0):.4f} · свободно "
-                        f"${float(_account.get('available_balance', 0) or 0):.4f}"
-                    )
-                    if _account.get("stale"):
-                        _balance_label += " · сохранённый"
-                else:
-                    _balance_label = "временно недоступен"
-                execution_block = (
-                    f"\n⚙️ Автоторговля: <b>{_exec_label}</b>\n"
-                    f"🛡 Риск: <b>{_exec_state.get('risk_pct', 0)}%</b> · "
-                    f"плечо: <b>x{_exec_state.get('leverage', 1)}</b>\n"
-                    f"💰 Futures-баланс: <b>{_balance_label}</b>\n"
-                    f"🔒 Binance: <b>{_binance_label}</b>\n"
-                )
-            except Exception:
-                execution_block = "\n⚙️ Автоторговля: <b>статус недоступен</b>\n"
-        else:
-            execution_block = "\n⚙️ Автоторговля: <b>модуль недоступен</b>\n"
-
-        _memory_state = _BRAIN_PERSISTENCE.status()
-        if _memory_state.get("ready"):
-            _memory_label = (
-                f"восстановлена · g{_memory_state.get('generation', 0)} · "
-                f"SHA {str(_memory_state.get('remote_blob_sha', ''))[:8]}"
-            )
-            if _memory_state.get("last_backup_at"):
-                _memory_label += f" · backup {_memory_state['last_backup_at'][:16].replace('T', ' ')} UTC"
-        elif not _memory_state.get("configured"):
-            _memory_label = "локальный режим"
-        else:
-            _memory_label = "защищена от записи · восстановление недоступно"
-        persistence_block = f"\n💾 Память: <b>{_memory_label}</b>\n"
-
-        await callback.message.edit_text(
-            f"📚 <b>Знания APEX</b>\n"
-            f"{'━'*24}\n\n"
-            f"📚 База знаний: <b>{knowledge_count + web_knowledge_count}</b>\n"
-            f"🌐 Web Research: <b>{web_knowledge_count}</b> · за 24ч <b>{web_24h}</b>\n"
-            f"🧠 Базовые core-правила: <b>{core_rule_count}</b>\n"
-            f"📈 Правила из сделок: <b>{trade_rule_count}</b>\n"
-            f"📌 Другие активные правила: <b>{other_rule_count}</b> · всего <b>{rule_count}</b>\n"
-            f"🧪 Кандидатов из исследований: <b>{candidate_count}</b>\n"
-            f"⏳ Тем на исследование: <b>{pending_topics}</b>\n"
-            f"📊 Паттернов из истории: <b>{pattern_count}</b>\n"
-            f"⛔️ Антипаттернов: <b>{avoid_count}</b>\n"
-            f"👁 Наблюдений рынка: <b>{obs_count}</b>\n"
-            f"🗂 Моделей монет: <b>{model_count}</b>\n"
-            f"🪙 Пар с закрытой историей: <b>{coin_count}</b>\n"
-            f"🕐 Последний WebLearner: <b>{last_web or '—'}</b>\n"
-            f"🎓 Последнее обучение по сделке: <b>{last_trade_learning or '—'}</b>\n"
-            f"{execution_block}"
-            f"{persistence_block}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🏅 Качество сигналов", callback_data="brain_grade_accuracy"),
-                 InlineKeyboardButton(text="📋 Разбор сделок", callback_data="brain_trade_analysis")],
-                [InlineKeyboardButton(text="📚 История обновлений", callback_data="menu_evolution"),
-                 InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_brain")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
-            ])
-        )
-
-    elif data == "brain_sources":
-        await callback.message.edit_text("📡 Загружаю статистику источников...")
-        try:
-            if _SMC_ENGINE_OK:
-                stats_text = get_source_stats()
-                barrier_text = get_barrier_summary()
-                full_text = stats_text + (f"\n\n{barrier_text}" if barrier_text else "")
-            else:
-                full_text = (
-                    "📡 <b>Статус источников данных</b>\n\n"
-                    "<b>Свечи и пары:</b> Gate.io Futures — ✅ основной и единственный рынок сканеров\n"
-                    "<b>Binance:</b> 🔒 только исполнение готовых LIVE-ордеров\n"
-                    "<b>Новости:</b> CoinTelegraph, CoinDesk, Decrypt, Reuters RSS\n\n"
-                    "<i>ℹ️ smc_engine.py не в корне — используется встроенный SMC движок бота.</i>"
-                )
-        except Exception as e:
-            full_text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            full_text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_self_analysis":
-        # Последний самоанализ точности
-        await callback.message.edit_text("📊 Загружаю самоанализ...")
-        try:
-            if _LEARNING_OK:
-                analysis_text = _learn_self_analysis_text()
-                stats_text = _learn_all_stats()
-                full = analysis_text
-                if stats_text:
-                    full += "\n\n" + stats_text
-            else:
-                # learning.py нет — показываем статистику из brain.db напрямую
-                try:
-                    conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-                    total_sig = (conn.execute("SELECT COUNT(*) FROM signals").fetchone() or [0])[0]
-                    wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='win'").fetchone() or [0])[0]
-                    losses = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='loss'").fetchone() or [0])[0]
-                    pending = (conn.execute("SELECT COUNT(*) FROM signals WHERE result='pending'").fetchone() or [0])[0]
-                    conn.close()
-                    wr = round(wins/(wins+losses)*100) if (wins+losses) > 0 else 0
-                    full = (
-                        f"📊 <b>Статистика сигналов</b>\n\n"
-                        f"Всего сигналов: {total_sig}\n"
-                        f"✅ Победы: {wins} | ❌ Потери: {losses} | ⏳ Открыты: {pending}\n"
-                        f"Win Rate: {wr}%\n\n"
-                        f"<i>Для расширенного самоанализа добавь learning.py в корень репо.</i>"
-                    )
-                except Exception as db_e:
-                    full = f"Нет данных: {db_e}"
-        except Exception as e:
-            full = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            full or "Данных пока нет", parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Запустить анализ", callback_data="brain_run_analysis")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_grade_accuracy":
-        try:
-            grade_text = _learn_grade_text() if _LEARNING_OK else "learning.py не загружен"
-        except Exception as e:
-            grade_text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            grade_text or "Данных пока нет — нужно больше закрытых сигналов",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_run_analysis":
-        await callback.message.edit_text("🧠 Запускаю самоанализ...")
-        try:
-            if _LEARNING_OK:
-                import asyncio as _a
-                await _a.get_event_loop().run_in_executor(None, _learn_self_analysis)
-                text = _learn_self_analysis_text()
-            else:
-                text = "learning.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text or "Нет данных", parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="brain_self_analysis")]
-            ])
-        )
-
-    elif data == "brain_api_status":
-        await callback.message.edit_text(
-            get_api_status_text(), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_self_diagnose":
-        await callback.message.edit_text("🔬 Запускаю самодиагностику...")
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self_diagnose_and_grow)
-            await loop.run_in_executor(None, auto_fill_knowledge_gaps)
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            priority_row = conn.execute(
-                "SELECT content FROM knowledge WHERE topic='priority_action' ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            new_rules = (conn.execute(
-                "SELECT COUNT(*) FROM self_rules WHERE category='self_improve'"
-            ).fetchone() or [0])[0]
-            suggested = (conn.execute(
-                "SELECT COUNT(*) FROM knowledge WHERE topic='suggested_api'"
-            ).fetchone() or [0])[0]
-            conn.close()
-            priority_txt = priority_row[0][:200] if priority_row else "нет"
-            result_text = (
-                "<b>Самодиагностика завершена</b>\n\n"
-                f"Правил самоулучшения: {new_rules}\n"
-                f"Предложено новых API: {suggested}\n\n"
-                f"<b>Приоритет:</b> <i>{priority_txt}</i>"
-            )
-        except Exception as e:
-            result_text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            result_text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔑 Статус API", callback_data="brain_api_status")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_trade_analysis":
-        await callback.message.edit_text("📋 Загружаю анализ сделок от Groq...")
-        try:
-            if _LEARNING_OK:
-                loop = asyncio.get_running_loop()
-                text = await loop.run_in_executor(None, _learn_trade_analysis, 7)
-            else:
-                text = "learning.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text or "Анализов пока нет — нужно закрыть несколько сделок",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_strategy":
-        await callback.message.edit_text("📈 Загружаю стратегию...")
-        try:
-            if _LEARNING_OK:
-                loop = asyncio.get_running_loop()
-                # Сначала показываем текущую, потом обновляем
-                text = await loop.run_in_executor(None, _learn_get_strategy)
-                if "не сформирована" in text:
-                    text = await loop.run_in_executor(None, _learn_build_strategy)
-                    if not text:
-                        text = "Недостаточно данных (нужно минимум 10 закрытых сделок)"
-            else:
-                text = "learning.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text or "Стратегия пока не сформирована",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить стратегию", callback_data="brain_strategy_refresh")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_strategy_refresh":
-        await callback.message.edit_text("⏳ Groq анализирует паттерны и формулирует стратегию...")
-        try:
-            if _LEARNING_OK:
-                loop = asyncio.get_running_loop()
-                text = await loop.run_in_executor(None, _learn_build_strategy)
-                if not text:
-                    text = "Недостаточно данных (нужно минимум 10 закрытых сделок)"
-            else:
-                text = "learning.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text or "Не удалось сформировать стратегию",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_diagnosis":
-        await callback.message.edit_text("🔍 Groq анализирует ошибки и паттерны потерь...")
-        try:
-            if _LEARNING_OK:
-                loop = asyncio.get_running_loop()
-                # Пробуем получить последний или запустить новый
-                text = await loop.run_in_executor(None, _learn_latest_diag)
-                if "не запускалась" in text:
-                    text = await loop.run_in_executor(None, _learn_self_diag)
-                    if not text:
-                        text = "Недостаточно потерь для анализа (нужно минимум 3)"
-            else:
-                text = "learning.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text or "Диагноз недоступен",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Запустить диагноз", callback_data="brain_diagnosis_run")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_logs":
-        await callback.message.edit_text("📊 Анализирую последние логи через Groq...")
-        try:
-            await groq_analyze_logs()
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            row = conn.execute(
-                "SELECT title, description, created_at FROM brain_log "
-                "WHERE event_type='log_analysis' ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            candle_fails = get_candle_failures()
-            conn.close()
-            if row:
-                text = "\U0001f4ca <b>\u0410\u043d\u0430\u043b\u0438\u0437 \u043b\u043e\u0433\u043e\u0432</b> (" + row[2][:16] + ")\n\n"
-                text += "<b>" + str(row[0]) + "</b>\n\n" + str(row[1])
-                if candle_fails:
-                    text += "\n\n<b>\u041c\u043e\u043d\u0435\u0442\u044b \u0431\u0435\u0437 \u0441\u0432\u0435\u0447\u0435\u0439:</b>\n"
-                    text += "\n".join(["\u2022 " + k + ": " + str(v) + "x" for k, v in list(candle_fails.items())[:5]])
-            else:
-                text = "\u0410\u043d\u0430\u043b\u0438\u0437 \u0435\u0449\u0451 \u043d\u0435 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u043b\u0441\u044f"
-        except Exception as e:
-            text = "\u041e\u0448\u0438\u0431\u043a\u0430: " + str(e)
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="\U0001f504 \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c", callback_data="brain_logs")],
-                [InlineKeyboardButton(text="\U0001f519 \u041d\u0430\u0437\u0430\u0434", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_router_sources":
-        await callback.message.edit_text("📡 Загружаю статистику источников роутера...")
-        try:
-            text = _brain_router.source_stats() if _ROUTER_OK else "brain_router.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="brain_router_sources")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_router_insights":
-        await callback.message.edit_text("🧩 Загружаю инсайты роутера...")
-        try:
-            text = _brain_router.insights() if _ROUTER_OK else "brain_router.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="brain_router_insights")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_router_strategy":
-        await callback.message.edit_text("📅 Загружаю стратегию роутера...")
-        try:
-            if _ROUTER_OK:
-                text = _brain_router.strategy()
-                if not text or "не сформирована" in text:
-                    text = ("📅 <b>Стратегия роутера</b>\n\n"
-                            "Стратегия формируется после накопления истории сделок.\n"
-                            "Groq анализирует паттерны ежедневно в 05:00 UTC.\n\n"
-                            "Данных пока недостаточно — дайте боту поработать.")
-                else:
-                    text = f"📅 <b>Стратегия роутера</b>\n\n{text}"
-            else:
-                text = "brain_router.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Пересчитать", callback_data="brain_router_strategy_refresh")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_router_strategy_refresh":
-        await callback.message.edit_text("🔄 Groq пересчитывает стратегию...")
-        try:
-            if _ROUTER_OK:
-                import threading
-                threading.Thread(target=_brain_router.daily_review, daemon=True).start()
-                text = "✅ Стратегия запущена на пересчёт. Вернитесь через 1-2 минуты."
-            else:
-                text = "brain_router.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📅 Посмотреть стратегию", callback_data="brain_router_strategy")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_web_knowledge":
-        await callback.message.edit_text("🌐 Загружаю веб-знания...")
-        try:
-            summary = _web_knowledge_summary()
-        except Exception as e:
-            summary = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            f"🌐 <b>Знания из интернета</b>\n\n{summary}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔍 Изучить сейчас", callback_data="brain_web_learn_now")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_autopilot":
-        await callback.message.edit_text("🤖 Загружаю статус автопилота...")
-        try:
-            status = _autopilot_status() if _AUTOPILOT_OK else "❌ apex_autopilot.py не загружен"
-        except Exception as e:
-            status = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            status,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_extensions":
-        await callback.message.edit_text("🔌 Загружаю плагин...")
-        try:
-            if _EXT_OK:
-                s = _ext_summary()
-                session = _ext_session()
-                changelog_text = ""
-                for ch in reversed(s.get("changelog", [])):
-                    changelog_text += f"\n• <b>v{ch.get('version','?')}</b> [{ch.get('date','?')}] — {ch.get('changes','?')[:80]}"
-
-                text = (
-                    f"🔌 <b>Плагин Groq Extensions</b>\n"
-                    f"{'━'*24}\n\n"
-                    f"📦 Версия: <b>{s.get('version','?')}</b>\n"
-                    f"🔧 Фильтров активно: <b>{s.get('filters', 0)}</b>\n"
-                    f"⚡️ Бустеров confluence: <b>{s.get('boosters', 0)}</b>\n"
-                    f"✏️ Последнее изменение: <b>{s.get('last_change','—')}</b>\n"
-                    f"👤 Автор: <b>{s.get('last_author','—')}</b>\n\n"
-                    f"📋 <b>История изменений:</b>{changelog_text or ' нет'}\n\n"
-                    f"⏰ Сейчас: <b>{session.get('session','?')}</b> {session.get('note','')}\n\n"
-                    f"<i>Используй /improve &lt;запрос&gt; чтобы Groq внёс изменение</i>\n"
-                    f"<i>Пример: /improve не торговать SHIB в выходные</i>"
-                )
-            else:
-                text = (
-                    "🔌 <b>Плагин Groq Extensions</b>\n\n"
-                    "❌ groq_extensions.py не найден в репо.\n\n"
-                    "Загрузи файл groq_extensions.py в корень репозитория."
-                )
-        except Exception as e:
-            text = f"Ошибка: {e}"
-
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_web_learn_now":
-        await callback.message.edit_text("🔍 Groq составляет агенду и начинает поиск...")
-        try:
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(None, _web_learn_cycle)
-            text = f"✅ Изучено тем: {len(results)}\n"
-            for r in results[:3]:
-                text += f"\n• {r['topic']}: {str(r.get('result',{}).get('summary',''))[:100]}"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="brain_web_knowledge")]
-            ]))
-
-    elif data == "brain_diagnosis_run":
-        await callback.message.edit_text("⏳ Groq проводит глубокий самоанализ ошибок...")
-        try:
-            if _LEARNING_OK:
-                loop = asyncio.get_running_loop()
-                text = await loop.run_in_executor(None, _learn_self_diag)
-                if not text:
-                    text = "Недостаточно потерь для анализа (нужно минимум 3 sl)"
-            else:
-                text = "learning.py не загружен"
-        except Exception as e:
-            text = f"Ошибка: {e}"
-        await callback.message.edit_text(
-            text or "Не удалось запустить диагноз",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-            ])
-        )
-
-    elif data == "brain_macro":
-        await callback.message.edit_text("🌍 Запрашиваю макро анализ...")
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: __import__('brain_builder').learn_macro_trends())
-            brain = (get_brain_summary() or {}) if callable(get_brain_summary) else {}
-            macro = brain.get("macro_summary", "Нет данных")[:500]
-            macro_time = brain.get("macro_time", "")
-            await callback.message.edit_text(
-                f"🌍 <b>Макро анализ</b> ({macro_time})\n{'━'*24}\n\n{macro}",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-                ])
-            )
-        except Exception as e:
-            await callback.message.edit_text(
-                f"❌ Ошибка макро анализа: {e}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_brain")]
-                ])
-            )
-
-    elif data == "brain_learn_now":
-        await callback.message.edit_text(
-            "🧠 Запускаю полное обучение...\n"
-            "⏳ Groq анализирует: макро + новости + SMC + история сделок\n"
-            "Займёт ~30 секунд"
-        )
-        await run_brain_builder_async()
-        await autonomous_learning_cycle()
-        brain = (get_brain_summary() or {}) if BRAIN_BUILDER_AVAILABLE else {}
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        rule_count = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
-        conn.close()
-        await callback.message.edit_text(
-            f"✅ <b>Обучение завершено</b>\n\n"
-            f"📌 Торговых правил: <b>{rule_count}</b>\n"
-            f"📚 Знаний Groq: <b>{brain.get('knowledge_count', 0)}</b>\n"
-            f"🪙 Правил по монетам: <b>{brain.get('coin_count', 0)}</b>\n"
-            f"📈 SMC паттернов: <b>{brain.get('pattern_count', 0)}</b>\n\n"
-            f"<i>База сохранена в GitHub — знания не пропадут при рестарте</i>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🧠 Открыть мозг", callback_data="menu_brain")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-
-    elif data == "menu_evolution":
-        try:
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            history      = conn.execute("SELECT title, description, after_value, impact_score, created_at FROM learning_history ORDER BY id DESC LIMIT 20").fetchall()
-            total_events = (conn.execute("SELECT COUNT(*) FROM learning_history").fetchone() or [0])[0]
-            rules_total  = (conn.execute("SELECT COUNT(*) FROM self_rules").fetchone() or [0])[0]
-            rules_strong = (conn.execute("SELECT COUNT(*) FROM self_rules WHERE confidence >= 0.7").fetchone() or [0])[0]
-            errors_fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
-            knowledge_cnt= (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
-            conn.close()
-        except:
-            history = []; total_events = rules_total = rules_strong = errors_fixed = knowledge_cnt = 0
-
-        if not history:
-            evo_text = ("📚 <b>Эволюция APEX</b>\n" + "━"*26 + "\n\n🆕 История пуста.\n\n<i>Нажми «Запустить обучение» чтобы бот начал читать интернет и накапливать знания</i>")
-        else:
-            lines_evo = [
-                "📚 <b>Эволюция APEX</b>", "━"*26,
-                f"📊 Событий: <b>{total_events}</b>  |  📌 Правил: <b>{rules_total}</b>  |  💪 Сильных: <b>{rules_strong}</b>",
-                f"🔧 Исправлено ошибок: <b>{errors_fixed}</b>  |  📖 Знаний: <b>{knowledge_cnt}</b>",
-                "━"*26, "<b>Хронология:</b>", "",
-            ]
-            for title, desc, after, score, created in history[:15]:
-                ts  = (created or "")[:16]
-                bar = "█" * int((score or 0.5) * 5)
-                lines_evo += [
-                    f"<b>{title}</b>  <code>{ts}</code>",
-                    f"  {(desc or '')[:90]}",
-                    *([ f"  → {after[:60]}" ] if after else []),
-                    f"  {bar} {int((score or 0.5)*100)}%",
-                    "",
-                ]
-            evo_text = "\n".join(lines_evo)
-
-        if len(evo_text) > 4000:
-            evo_text = evo_text[:4000] + "\n\n<i>...показаны последние события</i>"
-
-        await callback.message.edit_text(evo_text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_evolution")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
-            ])
-        )
-
-    elif data == "menu_strategies":
-        try:
-            strategy_rows = await asyncio.to_thread(_fetch_strategy_stats, DB_PATH)
-            strategies_text = _format_strategy_stats(strategy_rows)
-        except Exception as exc:
-            logging.error("Telegram strategy stats: %s", exc)
-            strategies_text = "⚠️ Не удалось рассчитать статистику стратегий."
-        await callback.message.edit_text(
-            strategies_text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_strategies")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_stats")]
-            ])
-        )
-
-    elif data == "menu_wins":
-        try:
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            wins_list = conn.execute(
-                """SELECT symbol, direction, entry, tp1, result, grade, timeframe,
-                   created_at, closed_at,
-                   ROUND((julianday(closed_at) - julianday(created_at)) * 24, 1) as hours
-                   FROM signals WHERE result LIKE 'tp%'
-                   ORDER BY closed_at DESC LIMIT 15"""
-            ).fetchall()
-            total_wins = (conn.execute("SELECT COUNT(*) FROM signals WHERE result LIKE 'tp%'").fetchone() or [0])[0]
-            total_sigs = (conn.execute("SELECT COUNT(*) FROM signals WHERE result != 'pending'").fetchone() or [0])[0]
-            avg_hours = (conn.execute(
-                "SELECT AVG((julianday(closed_at)-julianday(created_at))*24) FROM signals WHERE result LIKE 'tp%'"
-            ).fetchone() or [0])[0] or 0
-            best = conn.execute(
-                "SELECT symbol, win_rate FROM signal_learning ORDER BY win_rate DESC LIMIT 3"
-            ).fetchall()
-            conn.close()
-        except Exception as e:
-            wins_list = []
-            total_wins = total_sigs = 0
-            avg_hours = 0
-            best = []
-
-        wr = round(total_wins / total_sigs * 100, 1) if total_sigs > 0 else 0
-
-        if not wins_list:
-            text = (
-                "🏆 <b>Удачные сделки</b>\n\n"
-                "Пока нет закрытых прибыльных сделок.\n\n"
-                "<i>Сигналы отслеживаются автоматически — как только сработает TP, сделка появится здесь.</i>"
-            )
-        else:
-            lines = []
-            tp_emoji = {"tp1": "🥉", "tp2": "🥈", "tp3": "🥇"}
-            for w in wins_list:
-                symbol, direction, entry, tp1, result, grade, tf, created, closed, hours = w
-                emoji = "🟢" if direction == "BULLISH" else "🔴"
-                tp_icon = tp_emoji.get(result, "✅")
-                hours_str = f"{hours:.0f}ч" if hours and hours < 48 else f"{hours/24:.1f}дн" if hours else "?"
-                date_str = closed[:10] if closed else created[:10]
-                lines.append(
-                    f"{tp_icon} <b>{symbol}</b> {emoji} {result.upper()} | {grade or '-'}\n"
-                    f"   Вход: {entry:.4f} → TP: {tp1:.4f} | {hours_str} | {date_str}"
-                )
-
-            best_text = " | ".join([f"{b[0]} {b[1]:.0f}%" for b in best]) if best else "—"
-
-            text = (
-                f"🏆 <b>Удачные сделки APEX</b>\n"
-                f"{'━'*24}\n\n"
-                f"✅ Всего побед: <b>{total_wins}</b> из {total_sigs}\n"
-                f"🎯 Win Rate: <b>{wr}%</b>\n"
-                f"⏱ Среднее время: <b>{avg_hours:.1f}ч</b>\n"
-                f"🌟 Лучшие: {best_text}\n"
-                f"{'━'*24}\n\n"
-                + "\n\n".join(lines[:10])
-            )
-
-        await callback.message.edit_text(
-            text[:4000],
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_wins"),
-                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data == "menu_errors":
-        try:
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            total_err = (conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone() or [0])[0]
-            unfixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
-            fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
-            errors = conn.execute(
-                """SELECT id, symbol, direction, error_type, result, fixed, created_at
-                   FROM bot_errors ORDER BY id DESC LIMIT 8"""
-            ).fetchall()
-            patterns = conn.execute(
-                "SELECT error_type, count, rule_added FROM error_patterns ORDER BY count DESC LIMIT 5"
-            ).fetchall()
-            conn.close()
-        except:
-            total_err = unfixed = fixed = 0
-            errors = []
-            patterns = []
-
-        errors_text = ""
-        for e in errors:
-            status = "✅" if e[5] else "❌"
-            errors_text += f"{status} #{e[0]} <b>{e[1]}</b> {e[2]} — {ERROR_TYPES.get(e[3], e[3])} [{e[6][:10]}]\n"
-
-        patterns_text = ""
-        for p in patterns:
-            rule_icon = "📌" if p[2] else "⚠️"
-            patterns_text += f"{rule_icon} {ERROR_TYPES.get(p[0], p[0])}: {p[1]}x\n"
-            if p[2]:
-                patterns_text += f"   → {p[2][:60]}\n"
-
-        await callback.message.edit_text(
-            f"🔍 <b>Ошибки бота APEX</b>\n"
-            f"{'━'*24}\n\n"
-            f"Всего: {total_err} | ❌ Открыто: {unfixed} | ✅ Исправлено: {fixed}\n\n"
-            f"<b>Последние ошибки:</b>\n{errors_text or 'Нет ошибок'}\n"
-            f"<b>Паттерны:</b>\n{patterns_text or 'Нет повторений'}\n"
-            f"{'━'*24}\n"
-            f"<i>/errors [id] — детальный разбор\n"
-            f"/errors fix [id] — отметить как исправленное</i>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_errors"),
-                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data == "menu_news":
-        await callback.message.edit_text("📰 Собираю свежие новости...")
-        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
-        # Крипто новости
-        crypto_news = await asyncio.get_running_loop().run_in_executor(None, get_crypto_news)
-        # Макро новости
-        macro_news = await asyncio.get_running_loop().run_in_executor(None, get_market_impact_news)
-
-        crypto_text = format_news(crypto_news[:6])
-        macro_text = format_news(macro_news[:4])
-
-        # AI анализ влияния на рынок
-        all_titles = "\n".join([item["title"] for item in (crypto_news + macro_news)[:10]])
-        analysis = ask_groq(
-            f"Ты крипто трейдер. Оцени эти новости — что важно для рынка прямо сейчас? (3-4 пункта, дерзко и кратко):\n{all_titles}",
-            max_tokens=300
-        )
-        save_news("crypto news", all_titles[:500])
-
-        msg = (
-            f"📰 <b>Новости крипторынка</b>\n"
-            f"🕐 Обновлено: {now_str}\n"
-            f"{'━'*24}\n\n"
-            f"<b>🔥 Крипто:</b>\n{crypto_text}\n\n"
-            f"{'━'*24}\n"
-            f"<b>🌍 Макро (влияет на рынок):</b>\n{macro_text}\n\n"
-            f"{'━'*24}\n"
-            f"<b>⚡️ APEX анализ:</b>\n{analysis or 'Анализирую...'}"
-        )
-
-        # Telegram лимит 4096 символов
-        if len(msg) > 4000:
-            msg = msg[:3990] + "..."
-
-        await callback.message.edit_text(
-            msg,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_news"),
-                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-    elif data in ("menu_find_deals", "menu_find_deals_refresh"):
-        await callback.message.edit_text(
-            "🎯 <b>Ищу сделки...</b>\n\n"
-            "⏳ Сканирую топ-40 пар по SMC: OB, FVG, мультитаймфрейм\n"
-            "<i>~20-30 секунд</i>",
-            parse_mode="HTML"
-        )
-        signals = await asyncio.get_running_loop().run_in_executor(None, scan_all_for_deals, 40)
-
-        if not signals:
-            await callback.message.edit_text(
-                "🎯 <b>Сделок нет</b>\n\n"
-                "😴 Прошёлся по топ-40 монетам — чётких сетапов не нашёл.\n"
-                "Рынок в боковике или сигналы ещё не сформировались.\n\n"
-                "<i>Обычно сигналы появляются после пробоя уровней или выхода новостей</i>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="menu_find_deals_refresh")],
-                    [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-                ])
-            )
-            return
-
-        grade_icons = {"🔥🔥🔥 МЕГА ТОП": "🔥🔥🔥", "🔥🔥 ТОП СДЕЛКА": "🔥🔥", "✅ ХОРОШАЯ": "✅"}
-        lines = [f"🎯 <b>Найдено сделок: {len(signals)}</b>", "━"*24, ""]
-        for s in signals:
-            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
-            icon  = grade_icons.get(s["grade"], "✅")
-            lines.append(f"{icon} {emoji} <b>{s['symbol'].replace('USDT','')}</b> — {s['direction']}")
-        lines += ["", "<i>Выбери монету для полного сигнала 👇</i>"]
-
-        buttons = []
-        row = []
-        for s in signals[:12]:
-            emoji = "🟢" if s["direction"] == "BULLISH" else "🔴"
-            fire  = "🔥" if "ТОП" in s["grade"] else ""
-            row.append(InlineKeyboardButton(
-                text=f"{fire}{emoji} {s['symbol'].replace('USDT','')}",
-                callback_data=f"deal_open_{s['symbol']}"
-            ))
-            if len(row) == 3:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-        buttons.append([
-            InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_find_deals_refresh"),
-            InlineKeyboardButton(text="🔙 Меню",     callback_data="menu_back"),
-        ])
-        await callback.message.edit_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
-
-    elif data.startswith("deal_open_"):
-        symbol = data.replace("deal_open_", "")
-        await callback.message.edit_text(f"📊 Загружаю сигнал по <b>{symbol}</b>...", parse_mode="HTML")
-        result = await asyncio.get_running_loop().run_in_executor(None, full_scan_raw, symbol, "1h")
-        if result:
-            mem = get_user_memory(user_id)
-            risk_block = ""
-            if mem["deposit"] > 0:
-                try:
-                    rc = calc_risk(mem["deposit"], mem["risk"], result.get("entry", 0), result.get("sl", 0))
-                    if rc:
-                        risk_block = (
-                            f"\n💰 <b>Риск-менеджмент:</b>\n"
-                            f"Размер позиции: <b>{rc['position_size']:.2f}</b> USDT\n"
-                            f"Риск в $: <b>${rc['risk_amount']:.2f}</b> ({mem['risk']}%)\n"
-                        )
-                except:
-                    pass
-            await callback.message.edit_text(
-                result["text"] + risk_block,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить сигнал", callback_data=data)],
-                    [InlineKeyboardButton(text="🔙 К списку сделок", callback_data="menu_find_deals")],
-                ])
-            )
-        else:
-            await callback.message.edit_text(
-                f"😴 <b>{symbol}</b> — сигнал пропал.\n<i>Рынок изменился пока ты смотрел список</i>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 К списку сделок", callback_data="menu_find_deals")],
-                ])
-            )
-
-    elif data.startswith("menu_trade_") or data.startswith("trade_scalp_") or data.startswith("trade_swing_") or data.startswith("trade_long_"):
-        # Старые хендлеры — редиректим на новый
-        await callback.message.edit_text("🔄", parse_mode="HTML")
-        await asyncio.sleep(0.1)
-        # Имитируем нажатие menu_find_deals
-        signals = await asyncio.get_running_loop().run_in_executor(None, scan_all_for_deals, 40)
-        await callback.message.edit_text(
-            f"🎯 Найдено сделок: {len(signals)}" if signals else "😴 Сигналов нет",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎯 Найти сделки", callback_data="menu_find_deals")],
-                [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-            ])
-        )
-
-    elif data == "menu_pump":
-        await callback.message.edit_text("📦 Сканирую топ-60 на накопление перед пампом...\n⏳ ~30 секунд")
-        pairs = await asyncio.get_running_loop().run_in_executor(None, get_top_pairs, 50)
-        found = []
-        for symbol in pairs:
-            try:
-                acc = await asyncio.get_running_loop().run_in_executor(None, detect_accumulation, symbol)
-                if acc and acc["score"] >= 50:
-                    found.append(acc)
-            except:
-                pass
-
-        found.sort(key=lambda x: x["score"], reverse=True)
-
-        if not found:
-            await callback.message.edit_text(
-                "📦 Накоплений не найдено.\nРынок в движении — боковиков нет.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_pump"),
-                     InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-                ])
-            )
-            return
-
-        summary = f"📦 <b>Накопления перед пампом</b>\nНайдено: {len(found)} монет\n{'━'*24}\n\n"
-        for acc in found[:3]:
-            p = acc["price"]
-            ps = f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
-            bar = "█" * (acc["score"] // 10) + "░" * (10 - acc["score"] // 10)
-            summary += (
-                f"📦 <b>{acc['symbol']}</b> | {ps}\n"
-                f"Скор: [{bar}] {acc['score']}/100\n"
-                f"{acc['signals'][0] if acc['signals'] else ''}\n\n"
-            )
-
-        summary += f"<i>Полный разбор каждой — команда /pump BTCUSDT</i>"
-
-        await callback.message.edit_text(
-            summary,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_pump"),
-                 InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-            ])
-        )
-
-@dp.message(Command("patch"))
-async def cmd_patch(message: types.Message):
-    """Ручной запуск авто-патча — /patch [описание ошибки]"""
-    if message.from_user.id not in ADMIN_IDS:
+    if await _v3_state_callback_handlers.handle(callback):
         return
-    args = message.text.split(maxsplit=1)
-    error_text = args[1].strip() if len(args) > 1 else "manual patch request"
-    await message.answer("🔧 Запускаю анализ кода через Groq...")
-    await analyze_and_patch(error_text, "manual")
+    if await _v3_market_navigation_callbacks.handle(callback):
+        return
 
-
-@dp.message(Command("pump"))
 async def cmd_pump(message: types.Message):
-    args = message.text.split()
-    if len(args) == 2:
-        symbol = args[1].upper().replace("USDT","") + "USDT"
-        await message.answer(f"📦 Анализирую накопление {symbol}...")
-        acc = await asyncio.get_running_loop().run_in_executor(None, detect_accumulation, symbol)
-        if acc:
-            await message.answer(format_accumulation(acc), parse_mode="HTML")
-        else:
-            await message.answer(f"😴 {symbol} — накоплений не обнаружено.")
-    else:
-        await message.answer("📦 Сканирую топ-20 на накопление...")
-        pairs = get_top_pairs(20)
-        found = []
-        for symbol in pairs:
-            acc = detect_accumulation(symbol)
-            if acc and acc["score"] >= 50:
-                found.append(acc)
-            time.sleep(0.2)
-        found.sort(key=lambda x: x["score"], reverse=True)
-        if not found:
-            await message.answer("😴 Накоплений не найдено.")
-            return
-        await message.answer(f"📦 Найдено накоплений: {len(found)}")
-        for acc in found[:3]:
-            await message.answer(format_accumulation(acc), parse_mode="HTML")
-            await asyncio.sleep(0.5)
+    await _v3_market_commands.pump(message)
 
-
-@dp.message(Command("trade"))
 async def cmd_trade(message: types.Message):
-    """
-    /trade BTC          — все типы сделок (скальп + свинг + долгосрок)
-    /trade BTC scalp    — только скальп
-    /trade BTC swing    — только свинг
-    /trade BTC long     — только долгосрок
-    """
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer(
-            "📊 <b>Анализ по типу сделки</b>\n\n"
-            "Использование:\n"
-            "/trade BTC — все типы\n"
-            "/trade BTC scalp — скальп (1m/5m/15m)\n"
-            "/trade BTC swing — свинг (1h/4h)\n"
-            "/trade BTC long — долгосрок (1d/1w/1M)\n\n"
-            "<i>Примеры: /trade TON, /trade ETH swing, /trade SOL long</i>",
-            parse_mode="HTML"
-        )
-        return
+    await _v3_market_commands.trade(message)
 
-    # Распознаём символ через алиасы
-    raw = args[1].lower()
-    symbol = SYMBOL_ALIASES.get(raw, raw.upper())
-    if not symbol.endswith("USDT"):
-        symbol = symbol.upper() + "USDT"
-
-    trade_type = args[2].lower() if len(args) >= 3 else "all"
-    valid_types = {"scalp", "swing", "long", "all"}
-    if trade_type not in valid_types:
-        trade_type = "all"
-
-    types_to_run = ["scalp", "swing", "long"] if trade_type == "all" else [trade_type]
-
-    type_labels = {"scalp": "⚡️ Скальп", "swing": "🔄 Свинг", "long": "📈 Долгосрок"}
-    await message.answer(
-        f"🔍 Анализирую <b>{symbol}</b>\n"
-        f"Типы: {' | '.join([type_labels[t] for t in types_to_run])}\n"
-        f"⏳ Подожди...",
-        parse_mode="HTML"
-    )
-
-    found_any = False
-    for tt in types_to_run:
-        result = await asyncio.get_running_loop().run_in_executor(
-            None, analyze_trade_type, symbol, tt
-        )
-        if result:
-            found_any = True
-            await message.answer(result["text"], parse_mode="HTML")
-            await asyncio.sleep(0.5)
-        else:
-            await message.answer(
-                f"{type_labels[tt]}: нет чёткого сигнала по {symbol} на таймфреймах {', '.join(TF_CATEGORIES[tt])}"
-            )
-
-    if not found_any:
-        await message.answer(
-            f"😴 <b>{symbol}</b> — нет сигналов ни по одному типу сделки.\n"
-            f"Рынок, возможно, в боковике или данных недостаточно.",
-            parse_mode="HTML"
-        )
-
-@dp.message(Command("think"))
-async def cmd_think(message: types.Message):
-    """Бот думает вслух — глубокий ресёрч по теме"""
-    args = message.text.split(maxsplit=1)
-    topic = args[1].strip() if len(args) > 1 else "bitcoin market analysis"
-    await message.answer(f"🧠 Думаю над темой: <b>{topic}</b>...\n⏳ Ищу в интернете, анализирую...", parse_mode="HTML")
-    result = await asyncio.get_running_loop().run_in_executor(None, deep_research, topic)
-    if result:
-        await message.answer(
-            f"🧠 <b>Глубокий анализ: {topic}</b>\n\n{result}",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer("Не удалось найти достаточно данных.")
-
-@dp.message(Command("brain"))
 async def cmd_brain(message: types.Message):
-    """Показываем что бот знает — его база знаний"""
-    try:
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        total_k = (conn.execute("SELECT COUNT(*) FROM knowledge").fetchone() or [0])[0]
-        sources = conn.execute(
-            "SELECT source, COUNT(*) as cnt FROM knowledge GROUP BY source ORDER BY cnt DESC LIMIT 8"
-        ).fetchall()
-        recent = conn.execute(
-            "SELECT topic, source, created_at FROM knowledge ORDER BY id DESC LIMIT 5"
-        ).fetchall()
-        reflections = (conn.execute(
-            "SELECT COUNT(*) FROM knowledge WHERE source='self-reflection'"
-        ).fetchone() or [0])[0]
-        comparisons = (conn.execute(
-            "SELECT COUNT(*) FROM knowledge WHERE source='self-compare'"
-        ).fetchone() or [0])[0]
-        conn.close()
+    await _v3_compatibility_commands.brain(message)
 
-        sources_text = "\n".join([f"• {r[0]}: {r[1]} записей" for r in sources])
-        recent_text = "\n".join([f"• [{r[2][:10]}] {r[0][:40]} ({r[1]})" for r in recent])
-
-        await message.answer(
-            f"🧠 <b>Мозг APEX</b>\n\n"
-            f"📚 Всего знаний: <b>{total_k}</b>\n"
-            f"🔄 Само-рефлексий: <b>{reflections}</b>\n"
-            f"📊 Сравнений прогнозов: <b>{comparisons}</b>\n\n"
-            f"<b>Источники знаний:</b>\n{sources_text}\n\n"
-            f"<b>Последние 5 знаний:</b>\n{recent_text}\n\n"
-            f"<i>Используй /think [тема] — заставить думать над конкретным вопросом</i>",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
-
-@dp.message(Command("errors"))
-async def cmd_errors(message: types.Message):
-    """Раздел ошибок бота — просмотр, анализ, исправления"""
-    args = message.text.split()
-
-    # /errors fix <id> — отметить ошибку как исправленную
-    if len(args) == 3 and args[1] == "fix":
-        try:
-            error_id = int(args[2])
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            row = conn.execute(
-                "SELECT symbol, error_type, ai_next_time FROM bot_errors WHERE id=?",
-                (error_id,)
-            ).fetchone()
-
-            if not row:
-                await message.answer(f"Ошибка #{error_id} не найдена.")
-                conn.close()
-                return
-
-            # AI формулирует что именно исправлено
-            fix_prompt = f"""Ошибка типа "{ERROR_TYPES.get(row[1], row[1])}" по монете {row[0]} отмечена как исправленная.
-Правило было: {row[2]}
-
-Напиши 1-2 предложения:
-1. Что именно было исправлено в стратегии
-2. Как бот будет поступать теперь"""
-
-            fix_desc = ask_groq(fix_prompt, max_tokens=150)
-
-            conn.execute(
-                "UPDATE bot_errors SET fixed=1, fix_description=?, fixed_at=CURRENT_TIMESTAMP WHERE id=?",
-                (fix_desc or "Исправлено вручную", error_id)
-            )
-            conn.commit()
-            conn.close()
-
-            await message.answer(
-                f"✅ <b>Ошибка #{error_id} отмечена как исправленная</b>\n\n"
-                f"<b>{row[0]}</b> | {ERROR_TYPES.get(row[1], row[1])}\n\n"
-                f"📌 <b>Что изменено:</b>\n{fix_desc or 'Исправлено'}",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
-        return
-
-    # /errors <id> — детальный просмотр конкретной ошибки
-    if len(args) == 2:
-        try:
-            error_id = int(args[1])
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            row = conn.execute(
-                """SELECT id, symbol, direction, entry, sl, result, error_type,
-                   error_description, ai_analysis, ai_lesson, ai_next_time,
-                   fixed, fix_description, hours_in_trade, market_context, created_at
-                   FROM bot_errors WHERE id=?""",
-                (error_id,)
-            ).fetchone()
-            conn.close()
-
-            if not row:
-                await message.answer(f"Ошибка #{error_id} не найдена.")
-                return
-
-            fixed_block = ""
-            if row[11]:  # fixed == 1
-                fixed_block = f"\n\n✅ <b>ИСПРАВЛЕНО:</b>\n{row[12]}"
-            else:
-                fixed_block = f"\n\n❌ Ещё не исправлено\n/errors fix {error_id} — отметить как исправленное"
-
-            await message.answer(
-                f"🔍 <b>Разбор ошибки #{row[0]}</b>\n"
-                f"{'━'*24}\n\n"
-                f"📊 <b>Сделка:</b> {row[1]} {row[2]}\n"
-                f"💰 Вход: <code>{row[3]}</code> | Стоп: <code>{row[4]}</code>\n"
-                f"❌ Результат: {row[5]} за {row[13]}ч\n"
-                f"🏷 Тип ошибки: <b>{ERROR_TYPES.get(row[6], row[6])}</b>\n"
-                f"📅 {row[15][:16]}\n\n"
-                f"📋 <b>Рыночный контекст:</b>\n{row[14]}\n\n"
-                f"🧠 <b>Анализ:</b>\n{row[8]}\n\n"
-                f"📚 <b>Урок:</b>\n{row[9]}\n\n"
-                f"📌 <b>В следующий раз:</b>\n{row[10]}"
-                f"{fixed_block}",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
-        return
-
-    # /errors — список всех ошибок
-    try:
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        total = (conn.execute("SELECT COUNT(*) FROM bot_errors").fetchone() or [0])[0]
-        unfixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=0").fetchone() or [0])[0]
-        fixed = (conn.execute("SELECT COUNT(*) FROM bot_errors WHERE fixed=1").fetchone() or [0])[0]
-
-        # Последние 10 ошибок
-        errors = conn.execute(
-            """SELECT id, symbol, direction, error_type, result, fixed, created_at
-               FROM bot_errors ORDER BY id DESC LIMIT 10"""
-        ).fetchall()
-
-        # Паттерны — повторяющиеся ошибки
-        patterns = conn.execute(
-            "SELECT error_type, count, rule_added FROM error_patterns ORDER BY count DESC LIMIT 5"
-        ).fetchall()
-        conn.close()
-
-        errors_text = ""
-        for e in errors:
-            status = "✅" if e[5] else "❌"
-            errors_text += f"{status} #{e[0]} <b>{e[1]}</b> {e[2]} — {ERROR_TYPES.get(e[3], e[3])} ({e[4]}) [{e[6][:10]}]\n"
-
-        patterns_text = ""
-        for p in patterns:
-            rule_icon = "📌" if p[2] else "⚠️"
-            patterns_text += f"{rule_icon} {ERROR_TYPES.get(p[0], p[0])}: {p[1]}x"
-            if p[2]:
-                patterns_text += f" → правило: {p[2][:60]}"
-            patterns_text += "\n"
-
-        await message.answer(
-            f"🔍 <b>Ошибки бота APEX</b>\n"
-            f"{'━'*24}\n\n"
-            f"Всего: {total} | ❌ Открыто: {unfixed} | ✅ Исправлено: {fixed}\n\n"
-            f"<b>Последние ошибки:</b>\n{errors_text}\n"
-            f"<b>Паттерны (повторяющиеся):</b>\n{patterns_text}\n"
-            f"{'━'*24}\n"
-            f"<i>/errors [id] — детальный разбор\n"
-            f"/errors fix [id] — отметить как исправленное</i>",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
-
-@dp.chat_member()
 async def on_new_member(event: ChatMemberUpdated):
-    """Приветствие новых участников канала"""
-    try:
-        old_status = event.old_chat_member.status if event.old_chat_member else "left"
-        new_status = event.new_chat_member.status if event.new_chat_member else "left"
-        # Только новые участники (было left/kicked → стало member/administrator)
-        if old_status in ("left", "kicked", "restricted") and new_status in ("member", "administrator"):
-            user = event.new_chat_member.user
-            name = user.first_name or "трейдер"
-            # Groq генерирует уникальное приветствие
-            greeting = None
-            try:
-                groq_prompt = (
-                    f"Придумай короткое креативное приветствие для нового подписчика "
-                    f"трейдингового канала. Имя: {name}. Упомяни профитные сделки и удачу. "
-                    f"Максимум 2 предложения. Только на русском."
-                )
-                groq_resp = ask_groq(groq_prompt, max_tokens=80)
-                if groq_resp and len(groq_resp.strip()) > 10:
-                    greeting = groq_resp.strip()
-            except Exception:
-                pass
-            if not greeting:
-                greeting = f"Привет {name}! Рады видеть тебя — профитных сделок и зелёных свечей! 🚀"
-            await bot.send_message(event.chat.id, greeting)
-            logging.info(f"[Welcome] {name} (id={user.id}) joined chat {event.chat.id}")
-    except Exception as e:
-        logging.debug(f"on_new_member error: {e}")
+    await _v3_chat_handlers.member(event)
 
-
-@dp.message()
 async def handle_text(message: types.Message):
-    user_id = message.from_user.id
-    user_name = message.from_user.first_name or "трейдер"
-    text = message.text
-    if not text:
-        return
+    await _v3_chat_handlers.text(message)
 
-    # Проверяем состояние (ожидаем ввод монеты)
-    if user_id in user_states:
-        state = user_states.pop(user_id)
+def _v3_live_analysis_markup(symbol: str, timeframe: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔄 Обновить",
+            callback_data=f"live_refresh_{symbol}_{timeframe}",
+        )],
+        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
+    ])
 
-        if state.get("action") == "live_analysis":
-            symbol = text.upper().replace("USDT", "") + "USDT"
-            tf = state.get("tf", "1h")
-            thinking = await message.answer(f"📍 Анализирую {symbol} {TF_LABELS.get(tf, tf)}...")
-            result = await asyncio.get_running_loop().run_in_executor(None, live_position_analysis, symbol, tf)
-            try: await thinking.delete()
-            except: pass
-            if result:
-                await message.answer(result, parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"live_refresh_{symbol}_{tf}")],
-                        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-                    ]))
-            else:
-                await message.answer(f"Нет данных по {symbol}. Попробуй: BTC, ETH, SOL, BNB")
-            return
 
-        if state.get("action") == "backtest":
-            symbol = text.upper().replace("USDT", "") + "USDT"
-            tf = state.get("tf", "1h")
-            thinking = await message.answer(f"🔬 Запускаю бектест {symbol} {TF_LABELS.get(tf, tf)}...")
-            result = await asyncio.get_running_loop().run_in_executor(None, backtest, symbol, tf)
-            try: await thinking.delete()
-            except: pass
-            if result:
-                grade = "🔥 Отличная" if result["win_rate"] >= 60 else "✅ Рабочая" if result["win_rate"] >= 50 else "⚠️ Слабая"
-                await message.answer(
-                    f"🔬 <b>Бектест {symbol} [{TF_LABELS.get(tf, tf)}]</b>\n\n"
-                    f"Сигналов: {result['total']}\n"
-                    f"✅ Выигрыши: {result['wins']}\n"
-                    f"❌ Проигрыши: {result['losses']}\n"
-                    f"🎯 Win Rate: <b>{result['win_rate']}%</b>\n"
-                    f"Оценка: {grade}",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="📍 Где мы сейчас?", callback_data=f"live_now_{symbol}_{tf}")],
-                        [InlineKeyboardButton(text="🔙 Меню", callback_data="menu_back")],
-                    ])
-                )
-            else:
-                await message.answer("Недостаточно данных для бектеста")
-            return
+_v3_state_callback_handlers = _V3StateCallbackHandlers(
+    _V3StateCallbackDependencies(
+        edit_message=_edit_message,
+        main_menu=main_menu,
+        fetch_manager_trades=lambda limit: _fetch_manager_trades(DB_PATH, limit),
+        fetch_manager_trade=lambda signal_id, limit: _fetch_manager_trade(
+            DB_PATH, signal_id, limit
+        ),
+        format_manager_dashboard=_format_manager_dashboard,
+        format_manager_trade_detail=_format_manager_trade_detail,
+        manager_trade_buttons=_manager_trade_buttons,
+        fetch_trade_rows=lambda category, limit: _fetch_trade_view_rows(
+            DB_PATH, category, limit
+        ),
+        format_trade_view=_format_trade_view,
+        fetch_watchlist=lambda limit: _fetch_watchlist(DB_PATH, limit),
+        format_watchlist=_format_watchlist,
+        rebuild_strategy_risk=lambda: _rebuild_strategy_risk_states(DB_PATH),
+        scanner_dashboard=lambda: _scanner_dashboard(DB_PATH),
+        format_scanner_dashboard=_format_scanner_dashboard,
+        setup_evidence_dashboard=lambda hours, limit: _setup_evidence_dashboard(
+            DB_PATH, hours, limit
+        ),
+        format_setup_evidence_dashboard=_format_setup_evidence_dashboard,
+        fetch_groq_rejections=lambda hours, limit: _fetch_groq_rejections(
+            DB_PATH, hours, limit
+        ),
+        format_groq_rejections=_format_groq_rejections,
+        get_user_memory=get_user_memory,
+        live_learning=lambda: _format_live_learning(
+            lambda: _v3_connect_memory(_V3_CONFIG)
+        ),
+        current_incidents=_v3_current_incidents,
+        format_incidents=_format_incidents,
+        fetch_strategy_stats=lambda: _fetch_strategy_stats(DB_PATH),
+        format_strategy_stats=_format_strategy_stats,
+        stats_url=_V3_CONFIG.integrations.stats_url,
+        button=InlineKeyboardButton,
+        markup=InlineKeyboardMarkup,
+    )
+)
 
-    save_chat_log(user_id, "user", text)
-    thinking = await message.answer("⚡️")
-    # ✅ ФИКС: run_in_executor — ask_ai не блокирует event loop
-    reply = await asyncio.get_running_loop().run_in_executor(None, ask_ai, user_id, user_name, text)
-    try:
-        await thinking.delete()
-    except:
-        pass
-    if reply:
-        save_chat_log(user_id, "assistant", reply)
-        await message.answer(reply)
-        asyncio.create_task(
-            asyncio.to_thread(extract_and_save_profile, user_id, user_name, text, reply)
-        )
-    else:
-        await message.answer("⚡️ Перегружен, попробуй через минуту.")
+
+_v3_market_navigation_callbacks = _V3MarketNavigationCallbacks(
+    _V3MarketNavigationDependencies(
+        edit_message=_edit_message,
+        edit_markup=_edit_message_markup,
+        pairs_keyboard=pairs_keyboard,
+        timeframe_keyboard=tf_keyboard,
+        live_timeframe_keyboard=live_tf_keyboard,
+        live_position_analysis=live_position_analysis,
+        get_top_pairs=get_top_pairs,
+        full_scan=full_scan_raw,
+        scan_diagnostics=scan_diagnostics,
+        get_user_memory=get_user_memory,
+        calculate_risk=calc_risk,
+        get_crypto_news=get_crypto_news,
+        get_market_news=get_market_impact_news,
+        format_news=format_news,
+        ask_groq=ask_groq,
+        save_news=save_news,
+        detect_accumulation=detect_accumulation,
+        scan_all_deals=scan_all_for_deals,
+        get_fear_greed=get_fear_greed,
+        get_dxy_signal=get_dxy_signal,
+        get_market_regime=get_market_regime,
+        get_upcoming_events=get_upcoming_events,
+        get_candles=get_candles,
+        universe_size=DEFAULT_UNIVERSE_SIZE,
+        user_states=user_states,
+        timeframe_labels=TF_LABELS,
+        button=InlineKeyboardButton,
+        markup=InlineKeyboardMarkup,
+    )
+)
+
+
+_v3_chat_handlers = _V3TelegramChatHandlers(
+    _V3ChatDependencies(
+        user_states=user_states,
+        timeframe_labels=TF_LABELS,
+        live_position_analysis=live_position_analysis,
+        live_markup=_v3_live_analysis_markup,
+        save_chat_log=save_chat_log,
+        ask_ai=ask_ai,
+        extract_profile=extract_and_save_profile,
+        ask_groq=ask_groq,
+        send_message=bot.send_message,
+    )
+)
+
+_v3_market_commands = _V3MarketCommandHandlers(
+    _V3MarketCommandDependencies(
+        get_crypto_news=get_crypto_news,
+        get_market_impact_news=get_market_impact_news,
+        format_news=format_news,
+        ask_groq=ask_groq,
+        save_news=save_news,
+        detect_accumulation=detect_accumulation,
+        format_accumulation=format_accumulation,
+        get_top_pairs=get_top_pairs,
+        analyze_trade_type=analyze_trade_type,
+        symbol_aliases=SYMBOL_ALIASES,
+        timeframe_categories=TF_CATEGORIES,
+    )
+)
+
+_v3_compatibility_commands = _V3CompatibilityCommandHandlers(
+    _V3CompatibilityCommandDependencies(
+        admin_ids=frozenset(ADMIN_IDS),
+        connect=lambda: _v3_connect_compatibility(
+            DB_PATH, timeout=30, check_same_thread=False
+        ),
+        get_live_prices=get_live_prices,
+        ask_groq=ask_groq,
+    )
+)
+
+_v3_command_handlers = _V3TelegramCommandHandlers(
+    _V3CommandDependencies(
+        admin_ids=frozenset(ADMIN_IDS),
+        get_user_memory=get_user_memory,
+        update_user_memory=update_user_memory,
+        main_menu=main_menu,
+        pairs_keyboard=pairs_keyboard,
+        live_stats=lambda: _format_live_learning(
+            lambda: _v3_connect_memory(_V3_CONFIG)
+        ),
+    )
+)
+
+_v3_register_telegram_handlers(
+    dp,
+    _V3TelegramHandlers(
+        start=_v3_command_handlers.start,
+        menu=_v3_command_handlers.menu,
+        scan=_v3_command_handlers.scan,
+        risk=_v3_command_handlers.risk,
+        setrisk=_v3_command_handlers.setrisk,
+        alert=cmd_alert,
+        journal=cmd_journal,
+        improve=_v3_command_handlers.improve,
+        stats=_v3_command_handlers.stats,
+        news=cmd_news,
+        pump=cmd_pump,
+        trade=cmd_trade,
+        brain=cmd_brain,
+        callback=handle_callback,
+        chat_member=on_new_member,
+        text=handle_text,
+    ),
+    Command,
+)
 
 # ===== AUTO TASKS =====
-
-async def auto_research():
-    topics = ["bitcoin analysis today", "crypto market today", "altcoins 2025"]
-    for topic in topics:
-        try:
-            result = await asyncio.to_thread(tavily_search, topic, max_results=3)
-            summary = await asyncio.to_thread(
-                ask_groq,
-                f"Вывод для трейдера (2 предложения):\n{result[:600]}",
-                max_tokens=150,
-            )
-            if summary:
-                save_knowledge(topic, summary, "auto")
-                save_news(topic, summary)
-            await asyncio.sleep(15)
-        except:
-            pass
 
 async def deep_market_scan(limit=200):
     """
@@ -3191,6 +1088,17 @@ def _persist_delivered_signal(sd: dict):
     if signal_id:
         sd["_signal_persisted"] = True
         sd["_signal_id"] = signal_id
+        try:
+            sd["_v3_candidate_id"] = _V3_LIVE_BRIDGE.register_signal(
+                int(signal_id),
+                groq=sd.get("_external_quality_review"),
+                risk=sd.get("_strategy_risk_state"),
+                snapshot_id=sd.get("_scan_run_id") or None,
+            )
+        except Exception as exc:
+            # Learning/correlation is advisory and must never turn a delivered
+            # deterministic signal into a second execution attempt.
+            logging.error("[LiveMemory] candidate registration failed safely: %s", exc)
     else:
         logging.error("[SignalLifecycle] Telegram delivered but persistence failed: %s", sd.get("symbol"))
     return signal_id
@@ -3201,7 +1109,7 @@ def _has_pending_signal_for_symbol(symbol: str) -> bool:
     if not symbol:
         return False
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
+        conn = _v3_connect_compatibility(DB_PATH, timeout=10, check_same_thread=False)
         row = conn.execute(
             "SELECT id FROM signals WHERE symbol=? AND result='pending' LIMIT 1",
             (symbol,),
@@ -3215,48 +1123,15 @@ def _has_pending_signal_for_symbol(symbol: str) -> bool:
 
 from core.signal_delivery import (
     claim_signal_delivery as _claim_signal_delivery,
+    confirm_signal_delivery as _confirm_signal_delivery,
     release_signal_delivery_claim as _release_signal_delivery_claim,
     signal_delivery_key as _signal_delivery_key,
 )
 
 
-def _attach_learning_evidence(sd: dict) -> None:
-    """Give the single final Groq gate factual rules/errors without changing levels."""
-    strategy = _signal_type_from_candidate(sd)
-    evidence = dict(sd.get("technical_evidence") or {})
-    try:
-        evidence["self_rules"] = (
-            _market_relevant_rules(sd.get("symbol", ""), sd.get("direction", ""), strategy).strip()
-            or "no_relevant_self_rules"
-        )[:2000]
-    except Exception:
-        evidence["self_rules"] = "self_rules_unavailable"
-    try:
-        evidence["recent_bot_errors"] = (
-            _market_recent_errors(sd.get("symbol", ""), limit=5).strip()
-            or "no_recent_bot_errors"
-        )[:2000]
-    except Exception:
-        evidence["recent_bot_errors"] = "bot_errors_unavailable"
-    try:
-        evidence["validated_experience_rules"] = _active_experience_rules(
-            strategy, str(sd.get("regime") or ""), DB_PATH
-        )[:2000]
-    except Exception:
-        evidence["validated_experience_rules"] = "experience_rules_unavailable"
-    sd["technical_evidence"] = evidence
-
-
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
-    await asyncio.to_thread(_capture_experience_candidate, sd, DB_PATH)
-
-    async def _remember(decision, reason="", review=None):
-        await asyncio.to_thread(
-            _record_experience_decision, sd, decision, reason, review, DB_PATH
-        )
-
     _run_id = sd.get("_scan_run_id") or _active_scan_run_id
     _strategy = _signal_type_from_candidate(sd)
     if _run_id:
@@ -3268,7 +1143,6 @@ async def _send_signal(sd):
     sd["_strategy_risk_state"] = risk_state
     if risk_state.get("mode") == "PAUSED":
         reason = f"{_strategy} LIVE paused after {risk_state.get('consecutive_losses', 0)} consecutive SL"
-        await _remember("WAIT", reason)
         _record_strategy_decision(sd, "WAIT", "strategy_risk", reason, db_path=DB_PATH)
         if _run_id:
             await asyncio.to_thread(
@@ -3279,7 +1153,6 @@ async def _send_signal(sd):
     if not _SIGNAL_INTEGRITY_OK:
         logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
         _record_strategy_decision(sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
-        await _remember("REJECT", "integrity validator unavailable")
         return False
     try:
         _integrity_prices = get_live_prices()
@@ -3293,7 +1166,6 @@ async def _send_signal(sd):
             sd.get("symbol"), sd.get("direction"), integrity.get("errors"),
         )
         _record_strategy_decision(sd, "REJECT", "integrity", "; ".join(integrity.get("errors", [])), db_path=DB_PATH)
-        await _remember("REJECT", "; ".join(integrity.get("errors", [])))
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
@@ -3303,9 +1175,7 @@ async def _send_signal(sd):
             sd.get("symbol"),
         )
         _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
-        await _remember("WAIT", "existing pending thesis owns pair")
         return False
-    _attach_learning_evidence(sd)
     setup_assessment = _assess_setup_candidate(sd)
     sd["setup_assessment"] = setup_assessment
     await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "TECHNICAL", DB_PATH)
@@ -3315,7 +1185,6 @@ async def _send_signal(sd):
         reason = str(setup_assessment.get("thesis") or f"setup evidence {setup_state}")
         _record_strategy_decision(sd, decision, "setup_evidence", reason, evidence=setup_assessment, db_path=DB_PATH)
         await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "FINAL", DB_PATH)
-        await _remember(decision, reason)
         if _run_id:
             await asyncio.to_thread(
                 _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -3327,7 +1196,6 @@ async def _send_signal(sd):
         reason = "quality gate unavailable; final Groq confirmation required"
         logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
         _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
-        await _remember("WAIT", reason)
         if _run_id:
             await asyncio.to_thread(
                 _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -3369,7 +1237,6 @@ async def _send_signal(sd):
                     "candidate": {key: sd.get(key) for key in ("entry", "sl", "tp1", "tp2")},
                 }, db_path=DB_PATH,
             )
-            await _remember(decision, "; ".join(review.get("reasons", [])), review)
             return False
         if _run_id:
             await asyncio.to_thread(
@@ -3377,22 +1244,18 @@ async def _send_signal(sd):
                 "GROQ", "GROQ_APPROVE", "QUALITY_GATE",
                 {"confidence": review.get("confidence")}, DB_PATH,
             )
-        await _remember("APPROVE", "; ".join(review.get("reasons", [])), review)
     else:
         existing_review = sd.get("_external_quality_review")
         if not isinstance(existing_review, dict):
             reason = "quality review missing; final Groq confirmation required"
             logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
             _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
-            await _remember("WAIT", reason)
             return False
         existing_decision = str(existing_review.get("decision") or "WAIT").upper()
         if existing_decision != "APPROVE":
             reason = "; ".join(existing_review.get("reasons", [])) or f"existing quality review={existing_decision}"
             _record_strategy_decision(sd, existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
-            await _remember(existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", reason, existing_review)
             return False
-        await _remember("APPROVE", "; ".join(existing_review.get("reasons", [])), existing_review)
     setup_state = str((sd.get("setup_assessment") or {}).get("state") or "")
     if setup_state in {"VALID", "STRONG", "EXCEPTIONAL"} and sd.get("text"):
         setup_line = f"\n🧭 Класс сетапа: <b>{setup_state}</b>"
@@ -3402,27 +1265,29 @@ async def _send_signal(sd):
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
-        await _remember("APPROVE", "approved but Telegram ADMIN_IDS empty")
         return False
     now_ts = time.time()
     cache_key = _signal_delivery_key(sd, _strategy)
+    delivery_db_path = _V3_CONFIG.database.state_db_path
     try:
         claimed = await asyncio.to_thread(
-            _claim_signal_delivery, DB_PATH, cache_key, now_ts,
+            _claim_signal_delivery, delivery_db_path, cache_key, now_ts,
             _SIGNAL_COOLDOWN_HOURS * 3600,
         )
+        _V3_RUNTIME.clear_inhibit("STATE_DB_DELIVERY_UNAVAILABLE")
+        _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
         if not claimed:
             logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
             _record_strategy_decision(sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
-            await _remember("WAIT", "duplicate signal cooldown")
             return False
     except Exception as _cde:
-        logging.warning(f"[_send_signal] atomic cooldown claim DB ошибка: {_cde}")
-        last_sent = _sent_signal_cache.get(cache_key, 0)
-        if now_ts - last_sent < _SIGNAL_COOLDOWN_HOURS * 3600:
-            logging.info(f"[_send_signal] cooldown cache: {sd.get('symbol')} — пропускаем")
-            await _remember("WAIT", "duplicate signal cooldown cache")
-            return False
+        logging.error("[_send_signal] State DB delivery claim failed closed: %s", _cde)
+        _V3_RUNTIME.inhibit_entries("STATE_DB_DELIVERY_UNAVAILABLE")
+        _v3_report_incident(
+            "DELIVERY_STATE_UNAVAILABLE", "state_db", "CRITICAL",
+            {"error_type": type(_cde).__name__},
+        )
+        return False
     _sent_signal_cache[cache_key] = now_ts
     delivered = False
     try:
@@ -3470,36 +1335,57 @@ async def _send_signal(sd):
             if swing_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except asyncio.CancelledError:
-        await asyncio.to_thread(_release_signal_delivery_claim, DB_PATH, cache_key, now_ts)
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
         if _sent_signal_cache.get(cache_key) == now_ts:
             _sent_signal_cache.pop(cache_key, None)
         raise
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
-        await asyncio.to_thread(_release_signal_delivery_claim, DB_PATH, cache_key, now_ts)
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
         if _sent_signal_cache.get(cache_key) == now_ts:
             _sent_signal_cache.pop(cache_key, None)
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
         _record_strategy_decision(sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
-        await _remember("APPROVE", "approved; Telegram delivery failed")
         return False
+    try:
+        confirmed = await asyncio.to_thread(
+            _confirm_signal_delivery, delivery_db_path, cache_key, now_ts, time.time(),
+        )
+        if not confirmed:
+            raise RuntimeError("delivery_claim_not_current")
+        _v3_recover_incident("DELIVERY_CONFIRMATION_PENDING", "telegram")
+    except Exception as exc:
+        # Telegram has already accepted at least one destination. Keep the
+        # original claim (and therefore the cooldown) and surface reconciliation.
+        logging.error("[_send_signal] delivery confirmation requires reconcile: %s", exc)
+        _v3_report_incident(
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            {"cache_key": cache_key, "error_type": type(exc).__name__},
+        )
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
     if signal_id:
-        try: await asyncio.to_thread(_capture_signal_evidence, signal_id, sd, DB_PATH)
-        except Exception as exc: logging.warning("[ClosedLoop] capture signal %s: %s", signal_id, exc)
         try: await asyncio.to_thread(_bind_setup_assessment_to_signal, sd, signal_id, DB_PATH)
         except Exception as exc: logging.warning("[SetupEvidence] bind signal %s: %s", signal_id, exc)
-        try: await asyncio.to_thread(_bind_experience_to_signal, sd, signal_id, DB_PATH)
-        except Exception as exc: logging.warning("[Experience] bind signal %s: %s", signal_id, exc)
+        try:
+            await _v3_refresh_signal_lifecycle_mirror()
+        except Exception as exc:
+            logging.error("[APEX V3] signal lifecycle requires reconcile: %s", exc)
     if signal_id and _TRADE_EXECUTION_OK:
         execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
         logging.info(
             "[AutoTrading] signal=%s symbol=%s status=%s",
             signal_id, sd.get("symbol"), execution.get("status"),
         )
+        try:
+            await asyncio.to_thread(_V3_LIVE_BRIDGE.sync_execution, int(signal_id))
+        except Exception as exc:
+            logging.warning("[LiveMemory] execution correlation deferred: %s", exc)
+        try:
+            await _v3_refresh_execution_state_mirror()
+        except Exception as exc:
+            logging.error("[APEX V3] execution State mirror requires reconcile: %s", exc)
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
-    await _remember("APPROVE", "signal delivered", sd.get("_external_quality_review"))
     if _run_id:
         await asyncio.to_thread(
             _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -3519,7 +1405,7 @@ async def _scan_tf(timeframe: str, pairs_limit: int = 50):
     logging.info(f"[_scan_tf] Начинаем скан {timeframe}, пар: {len(pairs)}")
     for symbol in pairs:
         try:
-            sig_data = full_scan_raw(symbol, timeframe, auto=True)
+            sig_data = _v3_strategy_candidate("MTF", symbol, timeframe=timeframe, auto=True)
             if sig_data:
                 sig_data["timeframe"] = timeframe
                 signals.append(sig_data)
@@ -3569,6 +1455,7 @@ async def auto_scan_job():
     """Каждые 10 мин: проверка закрытых сделок"""
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
     closed = await asyncio.to_thread(check_pending_signals)
+    await _v3_refresh_signal_lifecycle_mirror()
     if closed:
         await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
     for c in closed:
@@ -3577,16 +1464,13 @@ async def auto_scan_job():
             # its next Gate-backed pass. Avoid a separate Telegram message.
             logging.info("[TradeManager] TP1 queued for compact card signal=%s", c.get("signal_id"))
             continue
-        state = await asyncio.to_thread(
-            _finalize_manager_trade,
-            int(c.get("signal_id") or 0), str(c.get("result") or "closed"),
-            float(c.get("exit_price") or c.get("entry") or 0),
-            db_path=DB_PATH,
+        # Signal outcome is analytics only. Production Manager closure and its
+        # final card are owned by Binance reconciliation + fill accounting;
+        # an OHLC result must never become a second execution source.
+        logging.info(
+            "[TradeManager] signal=%s analytical result=%s awaits Binance reconciliation",
+            c.get("signal_id"), c.get("result"),
         )
-        if state:
-            await _upsert_manager_card(
-                int(c["signal_id"]), _format_final_trade_card(state), is_final=True,
-            )
 
     # 5m и 15m убраны — используем только 1h, 4h, 1d, 1w
     pass
@@ -3602,7 +1486,7 @@ _active_scan_run_id = None
 
 def _auto_trade_reconcile_seconds():
     try:
-        value = int(os.environ.get("AUTO_TRADING_RECONCILE_SECONDS", "30"))
+        value = _V3_CONFIG.operational.execution_reconcile_seconds
     except (TypeError, ValueError):
         value = 30
     return max(15, min(value, 300))
@@ -3697,6 +1581,17 @@ async def _run_auto_trade_reconcile_once():
                 "[AutoTrading] reconcile signal=%s status=%s",
                 outcome.get("signal_id"), outcome.get("status"),
             )
+            try:
+                await asyncio.to_thread(
+                    _V3_LIVE_BRIDGE.sync_execution, int(outcome.get("signal_id") or 0)
+                )
+            except Exception as exc:
+                logging.warning("[LiveMemory] reconcile correlation deferred: %s", exc)
+        await _v3_refresh_execution_ledger_mirror()
+        learned = await asyncio.to_thread(_V3_LIVE_BRIDGE.sync_confirmed_outcomes, _v3_confirmed_accounting)
+        if learned:
+            logging.info("[LiveMemory] confirmed outcomes recorded=%s", len(learned))
+        await _v3_refresh_execution_state_mirror()
     except Exception as exc:
         # Exchange failures must never stop scanners or Telegram handlers.
         logging.error("[AutoTrading] reconciliation failed safely: %s", exc)
@@ -3714,10 +1609,15 @@ async def auto_trade_reconcile_job():
 async def _run_trade_manager_once():
     """Manage activated analytics trades using Gate data, outside the scan lock."""
     try:
+        await _v3_refresh_signal_lifecycle_mirror()
+        if _TRADE_EXECUTION_OK:
+            await _v3_refresh_execution_state_mirror()
+        await _v3_refresh_manager_state_mirror()
         await asyncio.to_thread(_reconcile_manager_states_from_signals, DB_PATH)
         await asyncio.to_thread(_register_pending_manager_signals, DB_PATH)
+        await _v3_refresh_manager_state_mirror()
         manager_states = await asyncio.to_thread(_load_active_manager_states, DB_PATH)
-        configured_trade_risk = float(os.environ.get("AUTO_TRADING_RISK_PCT", "0.5") or 0.5)
+        configured_trade_risk = _V3_CONFIG.risk.risk_pct
         actual_active_states = [
             state for state in manager_states
             if str(state.get("status") or "ACTIVE").upper() == "ACTIVE"
@@ -3731,22 +1631,29 @@ async def _run_trade_manager_once():
                 "protected": str(state.get("manager_state") or "").upper()
                     not in {"OPENING", "RECONCILIATION_REQUIRED"},
             } for state in actual_active_states),
-            max_positions=int(os.environ.get("AUTO_TRADING_MAX_OPEN_POSITIONS", "3") or 3),
-            max_total_risk_pct=float(os.environ.get("APEX_MAX_TOTAL_RISK_PCT", "3.0") or 3.0),
-            max_same_side_risk_pct=float(os.environ.get("APEX_MAX_SAME_SIDE_RISK_PCT", "2.0") or 2.0),
-            max_daily_loss_pct=float(os.environ.get("AUTO_TRADING_MAX_DAILY_LOSS_PCT", "2.0") or 2.0),
+            max_positions=_V3_CONFIG.risk.max_open_positions,
+            max_total_risk_pct=_V3_CONFIG.risk.max_total_risk_pct,
+            max_same_side_risk_pct=_V3_CONFIG.risk.max_same_side_risk_pct,
+            max_daily_loss_pct=_V3_CONFIG.risk.max_daily_loss_pct,
         )
         await asyncio.to_thread(_store_apex_portfolio_snapshot, portfolio_snapshot, DB_PATH)
-        pairs = sorted({
-            (str(state.get("symbol") or "").upper(), str(state.get("direction") or "").upper())
+        context_keys = sorted({
+            (
+                str(state.get("symbol") or "").upper(),
+                str(state.get("direction") or "").upper(),
+                str(state.get("strategy") or "").upper(),
+            )
             for state in manager_states if state.get("symbol")
         })
         external_results = await asyncio.gather(
-            *(_collect_external_context(symbol, direction) for symbol, direction in pairs),
+            *(
+                _collect_external_context(symbol, direction, strategy=strategy)
+                for symbol, direction, strategy in context_keys
+            ),
             return_exceptions=True,
         )
         external_by_trade = {
-            pair: result for pair, result in zip(pairs, external_results)
+            key: result for key, result in zip(context_keys, external_results)
             if isinstance(result, dict)
         }
         updates = await asyncio.to_thread(
@@ -3754,8 +1661,11 @@ async def _run_trade_manager_once():
             get_live_prices,
             get_candles,
             ask_groq,
-            external_context=lambda symbol, direction: external_by_trade.get(
-                (str(symbol).upper(), str(direction).upper()), {}
+            external_context=lambda symbol, direction, strategy: external_by_trade.get(
+                (
+                    str(symbol).upper(), str(direction).upper(),
+                    str(strategy).upper(),
+                ), {}
             ),
             execution_context=(
                 (lambda signal_id: _cached_execution_snapshot(signal_id, DB_PATH))
@@ -3785,15 +1695,10 @@ async def _run_trade_manager_once():
                         f"⚙️ Binance: <b>{execution.get('status')}</b>"
                     )[:4000]
                 if execution.get("status") == "EXECUTED" and execution.get("action") == "EXIT":
-                    exit_price = float((update.get("facts") or {}).get("current_price") or 0)
-                    final_state = await asyncio.to_thread(
-                        _finalize_manager_trade, int(update.get("signal_id") or 0),
-                        "manager_exit", exit_price, db_path=DB_PATH,
+                    logging.info(
+                        "[TradeManager] signal=%s exit filled; final card awaits ledger accounting",
+                        update.get("signal_id"),
                     )
-                    if final_state:
-                        await _upsert_manager_card(
-                            int(update["signal_id"]), _format_final_trade_card(final_state), is_final=True,
-                        )
             try:
                 event_payload = {
                     "signal_id": update.get("signal_id"),
@@ -3821,6 +1726,10 @@ async def _run_trade_manager_once():
                 "[TradeManager] %s durable event(s) committed; next scheduled/SIGTERM snapshot will persist them",
                 durable_events,
             )
+        if _TRADE_EXECUTION_OK:
+            await _v3_refresh_execution_state_mirror()
+        await _v3_refresh_signal_lifecycle_mirror()
+        await _v3_refresh_manager_state_mirror()
     except asyncio.CancelledError:
         logging.info("[TradeManager] cycle stopped during process shutdown")
     except Exception as exc:
@@ -3868,6 +1777,151 @@ def pick_best_signal(signals: list) -> dict | None:
     )[0]
 
 
+_v3_live_strategy_registry = None
+_v3_strategy_activation = None
+_v3_strategy_snapshot_provider = None
+
+
+def _get_v3_live_strategy_registry():
+    """Build the one migration registry used by manual and scheduled scans."""
+    global _v3_live_strategy_registry
+    if _v3_live_strategy_registry is None:
+        _v3_live_strategy_registry = _V3_STRATEGY_REGISTRY_CLASS({
+            _V3_STRATEGY.FAST: _V3_FAST_STRATEGY(
+                detect_fast_deal,
+                _v3_snapshot_symbol_detector(detect_fast_deal),
+            ),
+            _V3_STRATEGY.MTF: _V3_MTF_STRATEGY(
+                full_scan_raw,
+                _v3_snapshot_symbol_detector(full_scan_raw),
+            ),
+            _V3_STRATEGY.SWING: _V3_SWING_STRATEGY(
+                detect_swing_setup,
+                _v3_snapshot_symbol_detector(detect_swing_setup),
+            ),
+            _V3_STRATEGY.ZONE: _V3_ZONE_STRATEGY(
+                detect_zone_setup,
+                _v3_snapshot_symbol_detector(detect_zone_setup),
+            ),
+            _V3_STRATEGY.WYCKOFF: _V3_WYCKOFF_STRATEGY((
+                detect_wyckoff_spring,
+                detect_wyckoff_distribution,
+                detect_wyckoff_reaccumulation,
+            ), (
+                _v3_snapshot_symbol_detector(detect_wyckoff_spring),
+                _v3_snapshot_symbol_detector(detect_wyckoff_distribution),
+                _v3_snapshot_symbol_detector(detect_wyckoff_reaccumulation),
+            )),
+        })
+    return _v3_live_strategy_registry
+
+
+def _get_v3_strategy_activation():
+    global _v3_strategy_activation
+    if _v3_strategy_activation is None:
+        settings = _V3_CONFIG.strategies
+        _v3_strategy_activation = _V3_STRATEGY_ACTIVATION_SWITCH.from_proof(
+            requested=settings.snapshot_activation_requested,
+            corpus_directory=settings.parity_corpus_path,
+            verdict_path=settings.parity_verdict_path,
+        )
+        logging.info(
+            "[APEX V3] strategy snapshot activation active=%s reason=%s",
+            _v3_strategy_activation.active, _v3_strategy_activation.reason,
+        )
+    return _v3_strategy_activation
+
+
+def _get_v3_strategy_snapshot_provider():
+    global _v3_strategy_snapshot_provider
+    if _v3_strategy_snapshot_provider is None:
+        _v3_strategy_snapshot_provider = _V3_GATE_SNAPSHOT_PROVIDER(
+            _V3_GATE_MARKET_CLIENT(
+                base_url=_V3_CONFIG.integrations.gate_api_base,
+                timeout=_V3_CONFIG.operational.gate_timeout_seconds,
+            )
+        )
+    return _v3_strategy_snapshot_provider
+
+
+def _v3_publish_strategy_activation_health():
+    activation = _get_v3_strategy_activation()
+    requested = _V3_CONFIG.strategies.snapshot_activation_requested
+    if requested and not activation.active:
+        _V3_RUNTIME.mark_component(
+            "strategy_activation", _V3_COMPONENT_STATE.FAILED,
+            activation.reason, required=True,
+        )
+        _V3_RUNTIME.inhibit_entries("SNAPSHOT_STRATEGY_PROOF_INVALID")
+        _v3_report_incident(
+            "SNAPSHOT_STRATEGY_PROOF_INVALID", "strategy_activation", "CRITICAL",
+            {"reason": activation.reason},
+        )
+    else:
+        detail = (
+            f"snapshot READY verdict={activation.verdict_sha256[:12]}"
+            if activation.active else "legacy path; snapshot activation not requested"
+        )
+        _V3_RUNTIME.mark_component(
+            "strategy_activation", _V3_COMPONENT_STATE.READY,
+            detail, required=requested,
+        )
+        _V3_RUNTIME.clear_inhibit("SNAPSHOT_STRATEGY_PROOF_INVALID")
+        _v3_recover_incident(
+            "SNAPSHOT_STRATEGY_PROOF_INVALID", "strategy_activation",
+        )
+    return activation
+
+
+def _v3_strategy_candidate(strategy, symbol, **kwargs):
+    """Return the exact legacy candidate while retaining the V3 trace."""
+    candidates = _v3_strategy_candidates(strategy, symbol, **kwargs)
+    return candidates[0] if candidates else None
+
+
+def _v3_strategy_candidates(strategy, symbol, **kwargs):
+    """Return all subtype results through the proof-gated evaluation path."""
+    registry = _get_v3_live_strategy_registry()
+    activation = _get_v3_strategy_activation()
+    if activation.active:
+        try:
+            traces = activation.evaluate(
+                registry, _get_v3_strategy_snapshot_provider(),
+                strategy, symbol, **kwargs,
+            )
+        except _V3_SNAPSHOT_EVALUATION_BLOCKED as exc:
+            reason = str(exc)[:300]
+            _V3_RUNTIME.mark_component(
+                "strategy_activation", _V3_COMPONENT_STATE.STALE,
+                reason, required=True,
+            )
+            _V3_RUNTIME.inhibit_entries("SNAPSHOT_STRATEGY_DATA_NOT_READY")
+            _v3_report_incident(
+                "SNAPSHOT_STRATEGY_DATA_NOT_READY", "strategy_activation", "HIGH",
+                {"strategy": str(strategy), "symbol": str(symbol), "reason": reason},
+            )
+            raise
+        _V3_RUNTIME.mark_component(
+            "strategy_activation", _V3_COMPONENT_STATE.READY,
+            f"snapshot READY verdict={activation.verdict_sha256[:12]}",
+            required=True,
+        )
+        _V3_RUNTIME.clear_inhibit("SNAPSHOT_STRATEGY_DATA_NOT_READY")
+        _v3_recover_incident(
+            "SNAPSHOT_STRATEGY_DATA_NOT_READY", "strategy_activation",
+        )
+    else:
+        traces = registry.evaluate(strategy, symbol, **kwargs)
+    candidates = []
+    for trace in traces:
+        if trace.raw_result is None:
+            continue
+        candidate = dict(trace.raw_result)
+        candidate["_v3_strategy_trace"] = _v3_strategy_trace_payload(trace)
+        candidates.append(candidate)
+    return candidates
+
+
 async def auto_scan_1h():
     """Раз в час после закрытия свечи: главный MTF-скан на 1h."""
     try:
@@ -3903,7 +1957,10 @@ async def _auto_scan_1h_impl():
 
             # MTF — если включён для этого режима
             if "MTF" in enabled:
-                sig = await asyncio.to_thread(full_scan_raw, symbol, "1h", True, True)
+                sig = await asyncio.to_thread(
+                    _v3_strategy_candidate, "MTF", symbol,
+                    timeframe="1h", auto=True, passive_watch=True,
+                )
                 if sig and sig.get("_pending_ltf"):
                     await asyncio.to_thread(
                         _upsert_ltf_watch, "MTF", symbol, sig.get("direction", ""),
@@ -3980,7 +2037,9 @@ async def _auto_scan_swing_impl():
                 blocked += 1
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
-            r = await asyncio.to_thread(detect_swing_setup, symbol, "4h")
+            r = await asyncio.to_thread(
+                _v3_strategy_candidate, "SWING", symbol, timeframe="4h",
+            )
             if r:
                 found.append(r)
                 logging.info(f"[auto_scan_swing] {symbol} НАЙДЕН: {r.get('direction')} RR={r.get('rr')}")
@@ -4056,8 +2115,7 @@ async def _auto_scan_swing_impl():
 
             # Блокируем если сделка уже открыта в БД
             try:
-                import sqlite3 as _sq3
-                _chk = _sq3.connect("brain.db", timeout=10)
+                _chk = _v3_connect_compatibility(DB_PATH, timeout=10)
                 _open = _chk.execute(
                     "SELECT id FROM signals WHERE symbol=? AND direction=? AND result='pending' LIMIT 1",
                     (symbol, direction)
@@ -4138,7 +2196,10 @@ async def _auto_zone_scan_impl():
             if not _liq_z["ok"]:
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
-            r = await asyncio.to_thread(detect_zone_setup, symbol, "4h", True)
+            r = await asyncio.to_thread(
+                _v3_strategy_candidate, "ZONE", symbol,
+                timeframe="4h", passive_watch=True,
+            )
             if r and r.get("_pending_ltf"):
                 await asyncio.to_thread(
                     _upsert_ltf_watch, "ZONE", symbol, r.get("direction", ""),
@@ -4174,8 +2235,7 @@ async def _auto_zone_scan_impl():
                 continue
 
             try:
-                import sqlite3 as _sq3
-                _chk = _sq3.connect("brain.db", timeout=10)
+                _chk = _v3_connect_compatibility(DB_PATH, timeout=10)
                 _open = _chk.execute(
                     "SELECT id FROM signals WHERE symbol=? AND direction=? AND result='pending' LIMIT 1",
                     (symbol, direction)
@@ -4326,19 +2386,11 @@ async def _auto_wyckoff_scan_impl():
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 logging.debug(f"[WYCKOFF] {symbol}: низкая ликвидность ({_liq_w['ratio']}x) — пропускаем")
                 continue
-            # LONG — Accumulation Spring
-            r = await asyncio.to_thread(detect_wyckoff_spring, symbol)
-            if r:
-                found.append(r)
-            # SHORT — Distribution UTAD
-            r2 = await asyncio.to_thread(detect_wyckoff_distribution, symbol)
-            if r2:
-                found.append(r2)
-            # Re-accumulation (чаще чем классический Wyckoff)
-            r_reac = await asyncio.to_thread(detect_wyckoff_reaccumulation, symbol)
-            if r_reac:
-                found.append({**r_reac, "scan_type": "wyckoff"})
-            if not any((r, r2, r_reac)):
+            subtype_results = await asyncio.to_thread(
+                _v3_strategy_candidates, "WYCKOFF", symbol,
+            )
+            found.extend({**result, "scan_type": "wyckoff"} for result in subtype_results)
+            if not subtype_results:
                 await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -4401,8 +2453,7 @@ async def _auto_wyckoff_scan_impl():
 
             # Блокируем если сделка уже открыта
             try:
-                import sqlite3 as _sq3
-                _chk = _sq3.connect("brain.db", timeout=10)
+                _chk = _v3_connect_compatibility(DB_PATH, timeout=10)
                 _open = _chk.execute(
                     "SELECT id FROM signals WHERE symbol=? AND direction=? AND result=\'pending\' LIMIT 1",
                     (symbol, direction)
@@ -4485,7 +2536,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     await _control_scan_round(batch["round_id"])
     await _control_scan_scope(pairs, batch["target"])
     try:
-        _fast_concurrency = max(1, min(8, int(os.environ.get("APEX_FAST_CONCURRENCY", "6"))))
+        _fast_concurrency = _V3_CONFIG.operational.fast_concurrency
     except (TypeError, ValueError):
         _fast_concurrency = 6
     _fast_slots = asyncio.Semaphore(_fast_concurrency)
@@ -4502,7 +2553,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
                         symbol, _liq_fast.get("ratio"),
                     )
                     return None
-                result = await asyncio.to_thread(detect_fast_deal, symbol)
+                result = await asyncio.to_thread(_v3_strategy_candidate, "FAST", symbol)
                 if not result:
                     await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
                 return result
@@ -4564,8 +2615,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
 
             # Блокируем если сделка уже открыта
             try:
-                import sqlite3 as _sq3
-                _chk = _sq3.connect("brain.db", timeout=10)
+                _chk = _v3_connect_compatibility(DB_PATH, timeout=10)
                 _open = _chk.execute(
                     "SELECT id FROM signals WHERE symbol=? AND direction=? AND result=\'pending\' AND signal_type=\'FAST\' LIMIT 1",
                     (symbol, direction)
@@ -4578,7 +2628,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
 
             # Cooldown: не отправляем если недавно уже был FAST сигнал по этому символу
             try:
-                _cdc = _sq3.connect("brain.db", timeout=10)
+                _cdc = _v3_connect_compatibility(DB_PATH, timeout=10)
                 _cdrow = _cdc.execute(
                     "SELECT 1 FROM signals WHERE symbol=? AND signal_type='FAST' AND created_at > datetime('now', '-30 minutes') LIMIT 1",
                     (symbol,)
@@ -4641,7 +2691,10 @@ async def _auto_ltf_watch_scan_impl():
             if strategy == "MTF":
                 result = await asyncio.to_thread(full_scan_raw, symbol, "1h", True, True)
             elif strategy == "ZONE":
-                result = await asyncio.to_thread(detect_zone_setup, symbol, "4h", True)
+                result = await asyncio.to_thread(
+                    _v3_strategy_candidate, "ZONE", symbol,
+                    timeframe="4h", passive_watch=True,
+                )
             else:
                 await asyncio.to_thread(
                     _touch_ltf_watch, strategy, symbol, "unsupported passive strategy", False, DB_PATH
@@ -4736,7 +2789,7 @@ def scan_all_for_deals(limit=40):
 
     def scan_one(symbol):
         try:
-            return full_scan_raw(symbol, "1h")
+            return _v3_strategy_candidate("MTF", symbol, timeframe="1h")
         except:
             return None
 
@@ -4759,7 +2812,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
     try:
         # Проверяем есть ли уже открытый сигнал по этому символу в БД
         try:
-            with sqlite3.connect(DB_PATH) as _chk:
+            with _v3_connect_compatibility(DB_PATH) as _chk:
                 _row = _chk.execute(
                     "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result=\'pending\' LIMIT 1",
                     (symbol, timeframe)
@@ -4774,16 +2827,6 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             return _audit_fail('MTF_FULL_SCAN_RAW_R4565', 'not mtf', locals(), 'not mtf', 4565)
 
         direction = mtf["direction"]
-
-        # После повторных стопов на одной паре разными стратегиями не
-        # пытаемся сразу открыть ещё одну сделку в том же направлении.
-        try:
-            _skip_symbol, _skip_reason = should_skip_symbol(symbol, direction)
-            if _audit_test('MTF_FULL_SCAN_RAW_G4573', (_skip_symbol), 'пытаемся сразу открыть ещё одну сделку в том же направлении.', '_skip_symbol', 4573):
-                logging.info(f"[MTF] {symbol} {direction} — блок обучения: {_skip_reason}")
-                return _audit_fail('MTF_FULL_SCAN_RAW_R4575', 'пытаемся сразу открыть ещё одну сделку в том же направлении.', locals(), '_skip_symbol', 4575)
-        except Exception:
-            pass
 
         # Фильтр BTC тренда — не шортим если BTC растёт, не лонгуем если BTC падает
         if symbol != 'BTCUSDT':
@@ -5127,19 +3170,8 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             _vol_str = f"Vol: {_vol_last:.0f} vs avg: {_vol_avg:.0f}" if _vol_avg > 0 else ""
 
             conf_short = "\n".join(confluence[:5]) if confluence else "нет данных"
-            # Pattern history для Groq
             _pat_str = ""
-            try:
-                _pat = get_similar_patterns(symbol, direction, timeframe,
-                                            regime_val, conf_score)
-                if _pat.get("found") and _pat.get("samples", 0) >= 3:
-                    _pat_str = (f"\nИстория похожих: {_pat['samples']} сделок, "
-                                f"WR: {_pat['win_rate']:.0f}%, avg RR: {_pat['avg_rr']:.1f}, "
-                                f"вердикт: {_pat.get('verdict', '?')}")
-            except Exception:
-                pass
             _sl_pct_mtf = round(abs(entry - sl) / entry * 100, 1) if entry > 0 else 0
-            _self_rules = get_relevant_rules(symbol, direction, "MTF")
             groq_prompt = (
                 "Ты профессиональный SMC трейдер с 10-летним стажем. "
                 "Торгуешь только лучшие сетапы — лучше пропустить 10 хороших чем взять 1 плохой. "
@@ -5170,7 +3202,6 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
                 f"{_vol_str}\n"
                 f"Confluence:\n{conf_short}"
                 f"{_pat_str}"
-                f"{_self_rules}"
             )
             groq_response = ask_groq(groq_prompt, max_tokens=100) if legacy_strategy_groq_enabled() else None
             if groq_response and len(groq_response) > 5:
@@ -5351,288 +3382,22 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         return _audit_fail('MTF_FULL_SCAN_RAW_R5118', 'detector returned None', locals(), '', 5118)
 
 
-# Conversational and button-triggered scans must use this same canonical MTF
-# candidate builder; market.py keeps only a callback to avoid circular imports.
-register_raw_scan_handler(full_scan_raw)
+# Conversational, button-triggered and scheduled scans enter the same V3
+# registry. The migration adapter still delegates to this exact full_scan_raw
+# implementation, so strategy predicates and geometry remain unchanged.
+def _canonical_mtf_scan_handler(symbol, timeframe="1h", auto=False, passive_watch=False):
+    return _v3_strategy_candidate(
+        "MTF", symbol, timeframe=timeframe, auto=auto,
+        passive_watch=passive_watch,
+    )
 
 
-# ===== АВТО-ПАТЧ GITHUB =====
-# Бот сам чинит код: ловит ошибку → анализирует → спрашивает разрешения → пушит коммит
+register_raw_scan_handler(_canonical_mtf_scan_handler)
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")   # например: vladislavdim/apex-smc-bot
-GITHUB_FILE = os.environ.get("GITHUB_FILE", "bot.py")
-
-# Очередь ожидающих патчей: patch_id -> {code, description, error}
-pending_patches = {}
-patch_counter = 0
 
 # Кэш отправленных сигналов — symbol:direction -> timestamp (не спамим одним сигналом)
 _sent_signal_cache: dict = {}
 _SIGNAL_COOLDOWN_HOURS = 4  # один и тот же сигнал не чаще раз в 4 часа
-
-def github_get_file():
-    """Читаем текущий bot.py прямо из GitHub"""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return None, None
-    try:
-        r = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
-            headers={
-                "Authorization": f"token {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github.v3+json"
-            },
-            timeout=15
-        )
-        data = r.json()
-        if "content" in data:
-            import base64
-            code = base64.b64decode(data["content"]).decode("utf-8")
-            sha = data["sha"]
-            return code, sha
-        return None, None
-    except Exception as e:
-        logging.error(f"GitHub get file: {e}")
-        return None, None
-
-
-def github_push_patch(new_code, sha, commit_message):
-    """Пушим исправленный код в GitHub"""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return False, "GITHUB_TOKEN или GITHUB_REPO не заданы"
-    try:
-        import base64
-        encoded = base64.b64encode(new_code.encode("utf-8")).decode("utf-8")
-        r = requests.put(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}",
-            headers={
-                "Authorization": f"token {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github.v3+json"
-            },
-            json={
-                "message": commit_message,
-                "content": encoded,
-                "sha": sha
-            },
-            timeout=20
-        )
-        if r.status_code in (200, 201):
-            return True, r.json().get("commit", {}).get("sha", "")[:7]
-        return False, f"GitHub API error: {r.status_code} — {r.text[:200]}"
-    except Exception as e:
-        return False, str(e)
-
-
-async def analyze_and_patch(error_text, error_source="runtime"):
-    """
-    Анализирует ошибку и записывает вывод в мозги бота.
-    Авто-деплой ОТКЛЮЧЁН — только обучение.
-    """
-    try:
-        prompt = f"""Ты senior Python разработчик. В боте произошла ошибка.
-
-ОШИБКА:
-{error_text[:600]}
-
-Кратко (1-2 предложения): что пошло не так и как это можно исправить вручную?"""
-
-        response = ask_groq(prompt, max_tokens=300)
-        if not response:
-            return
-
-        # Записываем в мозги как наблюдение
-        try:
-            with sqlite3.connect(DB_PATH, timeout=10) as conn:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute(
-                    "INSERT OR IGNORE INTO observations (category, content, source, created_at) VALUES (?,?,?,?)",
-                    ("error_analysis", f"[{error_source}] {error_text[:200]}\n→ {response}", "auto_analyze", datetime.now().isoformat())
-                )
-                conn.commit()
-            logging.info(f"analyze_and_patch: ошибка записана в мозги ({error_source})")
-        except Exception as db_e:
-            logging.error(f"analyze_and_patch DB: {db_e}")
-
-    except Exception as e:
-        logging.error(f"analyze_and_patch error: {e}")
-
-async def apply_patch(patch_id):
-    """Применяем патч — пушим в GitHub"""
-    patch = pending_patches.get(patch_id)
-    if not patch:
-        return False, "Патч не найден или устарел"
-
-    success, result = github_push_patch(
-        patch["new_code"],
-        patch["sha"],
-        f"🤖 APEX auto-fix: {patch['description'][:60]}"
-    )
-
-    del pending_patches[patch_id]
-    return success, result
-
-
-# Обработчик глобальных ошибок — ловим всё что падает в боте
-last_error_time = {}
-error_cooldown = 300  # 5 минут между одинаковыми ошибками
-
-# ─── Буфер логов для Groq-анализа ───────────────────────────────────────────
-_log_buffer = []          # последние N строк логов
-_log_buffer_max = 200     # размер буфера
-
-class LogBufferHandler(logging.Handler):
-    """Записывает все WARNING/ERROR логи в буфер для Groq-анализа"""
-    def emit(self, record):
-        if record.levelno >= logging.WARNING:
-            msg = self.format(record)
-            _log_buffer.append(msg)
-            if len(_log_buffer) > _log_buffer_max:
-                _log_buffer.pop(0)
-
-def get_recent_errors(limit=30) -> list:
-    """Возвращает последние ошибки из буфера"""
-    errors = [l for l in _log_buffer if "ERROR" in l or "WARNING" in l]
-    return errors[-limit:]
-
-def get_candle_failures() -> dict:
-    """Считает сколько раз каждая монета/интервал не получила свечи"""
-    failures = {}
-    for line in _log_buffer:
-        if "нет свечей для" in line.lower():
-            parts = line.lower().split("нет свечей для ")
-            if len(parts) > 1:
-                key = parts[1].strip()[:20]
-                failures[key] = failures.get(key, 0) + 1
-    return dict(sorted(failures.items(), key=lambda x: x[1], reverse=True)[:10])
-
-async def groq_analyze_logs():
-    """
-    Groq читает буфер логов каждые 30 минут и:
-    1. Выявляет паттерны ошибок
-    2. Предлагает исправления
-    3. Применяет патчи к коду для WARNING уровня
-    4. Уведомляет о критических проблемах
-    """
-    if not _log_buffer:
-        return
-
-    errors = get_recent_errors(50)
-    if not errors:
-        return
-
-    candle_fails = get_candle_failures()
-
-    prompt = f"""Ты DevOps-инженер и Python-разработчик. Проанализируй логи торгового бота APEX.
-
-ПОСЛЕДНИЕ ОШИБКИ И ПРЕДУПРЕЖДЕНИЯ (последние 30 минут):
-{chr(10).join(errors[-30:])}
-
-МОНЕТЫ БЕЗ СВЕЧЕЙ (топ проблемных):
-{candle_fails}
-
-Ответь JSON без markdown:
-{{
-  "summary": "краткое описание главной проблемы",
-  "root_cause": "корневая причина (1-2 предложения)",
-  "candle_fix": "конкретный способ получить свечи для проблемных монет (какой API использовать)",
-  "severity": "low/medium/high/critical",
-  "auto_fixable": true/false,
-  "action": "что бот должен сделать прямо сейчас"
-}}"""
-
-    try:
-        response = ask_groq(prompt, max_tokens=400)
-        if not response:
-            return
-
-        import json as _j, re as _re
-        clean = _re.sub(r'```json|```', '', response).strip()
-        data = _j.loads(clean)
-
-        summary = data.get("summary", "")
-        severity = data.get("severity", "low")
-        candle_fix = data.get("candle_fix", "")
-        root_cause = data.get("root_cause", "")
-        action = data.get("action", "")
-
-        # Сохраняем анализ в brain.db
-        conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-        desc = "Причина: " + root_cause + "\nИсправление свечей: " + candle_fix + "\nДействие: " + action
-        conn.execute(
-            "INSERT INTO brain_log (event_type, title, description, source) VALUES (?,?,?,?)",
-            ("log_analysis", "[" + severity.upper() + "] " + summary, desc, "groq_log_analyzer")
-        )
-        conn.commit()
-        conn.close()
-
-        logging.info(f"[LogAnalyzer] {severity}: {summary[:80]}")
-
-        # Критические ошибки — уведомляем сразу
-        if severity in ("high", "critical") and ADMIN_ID:
-            msg = (
-                "\u26a0\ufe0f <b>APEX LogAnalyzer [" + severity.upper() + "]</b>\n\n"
-                "<b>\u041f\u0440\u043e\u0431\u043b\u0435\u043c\u0430:</b> " + summary + "\n"
-                "<b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> " + root_cause + "\n"
-                "<b>\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435:</b> " + action
-            )
-            await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
-    except Exception as e:
-        logging.debug(f"groq_analyze_logs: {e}")
-
-
-class ErrorCapture(logging.Handler):
-    """Перехватывает ERROR логи и запускает авто-патч — только реальные ошибки кода"""
-
-    # Эти сообщения — не ошибки кода, игнорируем
-    IGNORE_PATTERNS = [
-        "нет свечей", "no candles", "свечей для", "klines",
-        "bybit klines", "binance futures", "binance spot", "coingecko",
-        "cryptocompare candles", "yahoo finance", "messari",
-        "tavily", "rss parse", "pump detector",
-        "накопление", "accumulation detect",
-    ]
-
-    def emit(self, record):
-        if record.levelno >= logging.ERROR:
-            error_text = self.format(record)
-            error_lower = error_text.lower()
-
-            # Игнорируем не-ошибки (проблемы с внешними API — это нормально)
-            if any(pattern in error_lower for pattern in self.IGNORE_PATTERNS):
-                return
-
-            # Только реальные ошибки Python — Traceback, Exception
-            if not any(kw in error_text for kw in ["Traceback", "Exception", "Error:", "raise ", "line "]):
-                return
-
-            # Дедупликация — не спамим одной ошибкой
-            error_key = error_text[:100]
-            now = time.time()
-            if now - last_error_time.get(error_key, 0) < error_cooldown:
-                return
-            last_error_time[error_key] = now
-
-            # Запускаем авто-патч асинхронно
-            try:
-                loop = asyncio.get_running_loop()
-                if loop.is_running():
-                    loop.create_task(analyze_and_patch(error_text, "runtime"))
-            except:
-                pass
-
-
-def setup_error_capture():
-    """Подключаем перехватчики ошибок"""
-    # Буфер логов для Groq-анализа
-    log_buf = LogBufferHandler()
-    log_buf.setLevel(logging.WARNING)
-    logging.getLogger().addHandler(log_buf)
-    # Авто-патч критических ошибок
-    handler = ErrorCapture()
-    handler.setLevel(logging.ERROR)
-    logging.getLogger().addHandler(handler)
-    logging.info("ErrorCapture + LogBuffer активированы — авто-патч и анализ логов включены")
-
 
 # ===== MAIN =====
 
@@ -5656,9 +3421,9 @@ async def restore_db_from_github():
             if result.get("recovered_from") else ""
         )
         logging.warning(
-            "[BrainPersistence] restored g%s sha=%s knowledge=%s rules=%s size=%sKB%s",
+            "[BrainPersistence] restored g%s sha=%s knowledge=%s size=%sKB%s",
             result.get("generation", 0), str(result.get("blob_sha", ""))[:12],
-            counts.get("knowledge", 0), counts.get("self_rules", 0),
+            counts.get("knowledge", 0),
             int(result.get("size", 0)) // 1024, recovery,
         )
     else:
@@ -5680,9 +3445,9 @@ async def backup_db_to_github(reason="scheduled"):
     if result.get("saved"):
         counts = result.get("counts", {})
         logging.warning(
-            "[BrainPersistence] saved g%s sha=%s knowledge=%s rules=%s size=%sKB reason=%s",
+            "[BrainPersistence] saved g%s sha=%s knowledge=%s size=%sKB reason=%s",
             result.get("generation", 0), str(result.get("blob_sha", ""))[:12],
-            counts.get("knowledge", 0), counts.get("self_rules", 0),
+            counts.get("knowledge", 0),
             int(result.get("size", 0)) // 1024, reason,
         )
     elif status not in ("unchanged", "not_configured"):
@@ -5693,17 +3458,140 @@ async def backup_db_to_github(reason="scheduled"):
     return result
 
 
+async def restore_state_db_from_github():
+    """Restore V3 critical state, bootstrapping only a proven-missing remote."""
+    result = await asyncio.to_thread(_STATE_PERSISTENCE.restore)
+    if result.get("reason") == "REMOTE_MISSING":
+        # First V3 rollout only: create a valid local schema, then use a
+        # create-without-SHA request that cannot overwrite concurrent state.
+        conn = _v3_connect_state(_V3_CONFIG)
+        try:
+            _v3_migrate_state(conn)
+        finally:
+            conn.close()
+        result = await asyncio.to_thread(_STATE_PERSISTENCE.initialize, "v3_initial_state")
+        if result.get("status") in {"concurrent_initialize", "remote_exists"}:
+            result = await asyncio.to_thread(_STATE_PERSISTENCE.restore)
+    return result
+
+
+async def backup_state_db_to_github(reason="scheduled"):
+    """CAS-back up the small critical State DB independently from brain.db."""
+    global _state_backup_async_lock
+    if _state_backup_async_lock is None:
+        _state_backup_async_lock = asyncio.Lock()
+    async with _state_backup_async_lock:
+        return await asyncio.to_thread(_STATE_PERSISTENCE.backup, reason)
+
+
+async def restore_memory_db_from_github():
+    """Restore optional Live Memory without ever replacing unknown remote state."""
+    result = await asyncio.to_thread(_MEMORY_PERSISTENCE.restore)
+    if result.get("reason") == "REMOTE_MISSING":
+        conn = _v3_connect_memory(_V3_CONFIG)
+        try:
+            _v3_migrate_memory(conn)
+        finally:
+            conn.close()
+        result = await asyncio.to_thread(
+            _MEMORY_PERSISTENCE.initialize, "v3_initial_memory"
+        )
+        if result.get("status") in {"concurrent_initialize", "remote_exists"}:
+            result = await asyncio.to_thread(_MEMORY_PERSISTENCE.restore)
+    return result
+
+
+async def backup_memory_db_to_github(reason="scheduled"):
+    """CAS-back up Live Memory independently and at lower priority."""
+    global _memory_backup_async_lock
+    if _memory_backup_async_lock is None:
+        _memory_backup_async_lock = asyncio.Lock()
+    async with _memory_backup_async_lock:
+        return await asyncio.to_thread(_MEMORY_PERSISTENCE.backup, reason)
+
+
+async def _v3_maintenance_and_backup(reason="safety_30m"):
+    """Maintain bounded V3 stores, then checkpoint compatibility state."""
+    def maintain():
+        state = _v3_connect_state(_V3_CONFIG)
+        try:
+            state_report = _v3_maintain_state(
+                state, _V3_CONFIG.database.state_db_path,
+                telemetry_days=_V3_CONFIG.operational.state_telemetry_retention_days,
+                resolved_incident_days=_V3_CONFIG.operational.resolved_incident_retention_days,
+            )
+        finally:
+            state.close()
+        resource = _v3_memory_snapshot(
+            watch_ratio=_V3_CONFIG.operational.memory_watch_ratio,
+            degraded_ratio=_V3_CONFIG.operational.memory_degraded_ratio,
+            stop_ratio=_V3_CONFIG.operational.memory_stop_ratio,
+            limit_bytes=_V3_CONFIG.operational.memory_limit_bytes,
+        )
+        memory_report = {"status": "SKIPPED_MEMORY_PRESSURE", "resource_state": resource.state}
+        if resource.state not in {"DEGRADED", "NEW_ENTRIES_OFF"}:
+            memory = _v3_connect_memory(_V3_CONFIG)
+            try:
+                memory_report = _v3_maintain_memory(
+                    memory, _V3_CONFIG.database.memory_db_path,
+                    context_days=_V3_CONFIG.operational.memory_context_retention_days,
+                )
+            finally:
+                memory.close()
+        return {"state": state_report, "memory": memory_report}
+
+    maintenance = await asyncio.to_thread(maintain)
+    state_backup = await backup_state_db_to_github(reason)
+    memory_backup = {"status": "skipped_memory_pressure"}
+    if maintenance["memory"].get("status") != "SKIPPED_MEMORY_PRESSURE":
+        memory_backup = await backup_memory_db_to_github(reason)
+    backup = await backup_db_to_github(reason)
+    if _STATE_PERSISTENCE.configured and state_backup.get("status") not in {"saved", "unchanged"}:
+        raise RuntimeError(f"state_backup_{state_backup.get('status') or 'failed'}")
+    if _BRAIN_PERSISTENCE.configured and backup.get("status") not in {"saved", "unchanged"}:
+        raise RuntimeError(f"compatibility_backup_{backup.get('status') or 'failed'}")
+    if _MEMORY_PERSISTENCE.configured and memory_backup.get("status") not in {
+        "saved", "unchanged", "skipped_memory_pressure",
+    }:
+        _V3_RUNTIME.mark_component(
+            "memory_db", _V3_COMPONENT_STATE.DEGRADED,
+            f"memory backup {memory_backup.get('status') or 'failed'}", required=False,
+        )
+        _v3_report_incident(
+            "MEMORY_BACKUP_UNAVAILABLE", "memory_db", "WARNING",
+            {"status": memory_backup.get("status") or "failed"},
+        )
+    elif memory_backup.get("status") in {"saved", "unchanged"}:
+        _v3_recover_incident("MEMORY_BACKUP_UNAVAILABLE", "memory_db")
+    return {
+        "maintenance": maintenance, "state_backup": state_backup,
+        "memory_backup": memory_backup, "compatibility_backup": backup,
+        "items_processed": 4,
+    }
+
+
+async def _v3_state_startup_checkpoint():
+    result = await backup_state_db_to_github("startup_verified")
+    if _STATE_PERSISTENCE.configured and result.get("status") not in {"saved", "unchanged"}:
+        raise RuntimeError(f"state startup checkpoint failed: {result.get('status')}")
+    return result
+
+
+async def _v3_memory_startup_checkpoint():
+    result = await backup_memory_db_to_github("startup_verified")
+    if _MEMORY_PERSISTENCE.configured and result.get("status") not in {
+        "saved", "unchanged",
+    }:
+        _V3_RUNTIME.mark_component(
+            "memory_db", _V3_COMPONENT_STATE.DEGRADED,
+            f"startup backup {result.get('status') or 'failed'}", required=False,
+        )
+    return result
+
+
 async def _brain_rollout_settle():
     """Let the old Render instance finish its SIGTERM snapshot before restore."""
-    default_seconds = 65 if (
-        os.environ.get("RENDER") or os.environ.get("RENDER_INSTANCE_ID")
-    ) else 0
-    try:
-        seconds = max(0, min(120, int(os.environ.get(
-            "BRAIN_ROLLOUT_SETTLE_SECONDS", default_seconds
-        ))))
-    except (TypeError, ValueError):
-        seconds = default_seconds
+    seconds = _V3_CONFIG.runtime.rollout_settle_seconds
     if seconds:
         logging.warning(
             "[BrainPersistence] waiting %ss for previous instance final snapshot",
@@ -5722,123 +3610,232 @@ async def _brain_startup_checkpoint():
     return result
 
 
-async def _apply_trade_learning_baseline_reset():
-    """Apply the one-time post-integrity reset before any scanner starts."""
-    try:
-        from core.trade_baseline_reset import apply_trade_baseline_reset
-
-        result = await asyncio.to_thread(apply_trade_baseline_reset, DB_PATH)
-        if result.get("blocked"):
-            logging.critical(
-                "Trade baseline reset blocked by %s active live execution(s)",
-                result.get("active_live_executions", 0),
-            )
-            return result
-        if result.get("applied"):
-            logging.warning(
-                "Trade/Telegram learning baseline reset applied: removed=%s",
-                sum(result.get("removed", {}).values()),
-            )
-            # Persist both the clean baseline and its migration marker. A
-            # later deploy can then never restore the legacy statistics.
-            try:
-                await asyncio.wait_for(
-                    backup_db_to_github("trade_baseline_reset"), timeout=30
-                )
-            except asyncio.TimeoutError:
-                logging.warning("Trade baseline DB backup timed out; local reset remains active")
-        return result
-    except Exception as exc:
-        # Reset failure must never prevent Telegram or the scanner from
-        # starting. The missing marker causes a safe retry on the next start.
-        logging.exception("Trade baseline reset failed safely: %s", exc)
-        return {"applied": False, "error": str(exc)}
-
-
-# ===== BRAIN BUILDER ИНТЕГРАЦИЯ =====
-try:
-    from brain_builder import (
-        run_brain_builder, get_brain_summary,
-        init_brain_db, DB_PATH as BRAIN_DB_PATH
-    )
-    BRAIN_BUILDER_AVAILABLE = True
-    logging.info("brain_builder.py подключён ✅")
-except Exception as _bbe:
-    BRAIN_BUILDER_AVAILABLE = False
-    logging.warning(f"brain_builder.py не загружен: {_bbe}")
-
-    def run_brain_builder(full=False):
-        return {}
-
-    def get_brain_summary():
+async def _v3_startup_reconcile_and_market_check():
+    """Complete critical startup checks before opening the entry gate."""
+    _V3_RUNTIME.transition(_V3_RUNTIME_STATUS.RECONCILING)
+    execution_ok = bool(_TRADE_EXECUTION_OK)
+    if execution_ok:
         try:
-            conn = sqlite3.connect("brain.db", timeout=30, check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""CREATE TABLE IF NOT EXISTS web_knowledge (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                topic TEXT, content TEXT, source TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS self_rules (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT, rule TEXT, confidence REAL DEFAULT 0.5,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            conn.commit()
-            kc = conn.execute("SELECT COUNT(*) FROM web_knowledge").fetchone()
-            rc = conn.execute("SELECT COUNT(*) FROM self_rules").fetchone()
-            conn.close()
-            return {
-                "knowledge_count": kc[0] if kc else 0,
-                "coin_count": rc[0] if rc else 0,
-                "pattern_count": 0,
-                "macro_summary": "Нет данных",
-                "macro_time": ""
-            }
-        except Exception as e:
-            logging.error(f"get_brain_summary: {e}")
-            return {"knowledge_count": 0, "coin_count": 0, "pattern_count": 0,
-                    "macro_summary": "Нет данных", "macro_time": ""}
-
-
-async def run_brain_builder_async():
-    """Быстрый цикл brain builder (каждый час)"""
-    try:
-        loop = asyncio.get_running_loop()
-        stats = await loop.run_in_executor(None, run_brain_builder, False)
-        if stats:
-            logging.info(f"🧠 Brain Builder (быстрый): знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)}")
-        # Бэкап БД в GitHub после обучения
-        await backup_db_to_github("brain_builder")
-    except Exception as e:
-        logging.error(f"run_brain_builder_async: {e}")
-
-
-async def run_brain_builder_full_async():
-    """Полный цикл brain builder (раз в сутки в 3:00)"""
-    try:
-        loop = asyncio.get_running_loop()
-        stats = await loop.run_in_executor(None, run_brain_builder, True)
-        if stats:
-            logging.info(
-                f"🧠 Brain Builder (полный): "
-                f"знаний={stats.get('knowledge',0)} правил={stats.get('rules',0)} "
-                f"паттернов={stats.get('patterns',0)} монет={stats.get('coins',0)}"
+            _execution_config = _ExecutionConfig.from_env()
+            _execution_client = None
+            _account_detail = "execution disabled or paper"
+            if _execution_config.enabled and _execution_config.mode == "live":
+                if not _execution_config.live_armed:
+                    raise RuntimeError("live execution is configured but not armed")
+                _execution_client = _BinanceFuturesClient(_execution_config)
+                if not await asyncio.to_thread(_execution_client.is_one_way_mode):
+                    raise RuntimeError("Binance account must use One-way Mode")
+                _balance = await asyncio.to_thread(_execution_client.usdt_balance_details)
+                if "wallet_balance" not in _balance:
+                    raise RuntimeError("Binance balance response has no wallet balance")
+                _account_detail = "Binance account and balance endpoint verified"
+            await asyncio.to_thread(
+                _reconcile_live_executions,
+                db_path=DB_PATH,
+                config=_execution_config,
+                client=_execution_client,
             )
-        await backup_db_to_github("brain_builder_full")
-    except Exception as e:
-        logging.error(f"run_brain_builder_full_async: {e}")
+            await asyncio.to_thread(_v3_sync_live_learning)
+            _V3_RUNTIME.mark_component(
+                "binance_reconciliation", _V3_COMPONENT_STATE.READY, _account_detail
+            )
+        except Exception as exc:
+            execution_ok = False
+            _V3_RUNTIME.mark_component(
+                "binance_reconciliation", _V3_COMPONENT_STATE.FAILED, str(exc)
+            )
+    else:
+        _V3_RUNTIME.mark_component(
+            "binance_reconciliation", _V3_COMPONENT_STATE.FAILED,
+            "trade execution module unavailable",
+        )
 
+    try:
+        await asyncio.to_thread(_reconcile_manager_states_from_signals, DB_PATH)
+        await asyncio.to_thread(_register_pending_manager_signals, DB_PATH)
+        await asyncio.to_thread(_load_active_manager_states, DB_PATH)
+        _V3_RUNTIME.mark_component("manager_reconciliation", _V3_COMPONENT_STATE.READY)
+    except Exception as exc:
+        _V3_RUNTIME.mark_component(
+            "manager_reconciliation", _V3_COMPONENT_STATE.FAILED, str(exc)
+        )
+
+    try:
+        pairs = await asyncio.wait_for(
+            asyncio.to_thread(get_top_pairs, 1), timeout=30
+        )
+        if not pairs:
+            raise RuntimeError("Gate returned no production symbols")
+        _V3_RUNTIME.mark_component("gate", _V3_COMPONENT_STATE.FRESH)
+        _V3_RUNTIME.mark_component(
+            "market_data", _V3_COMPONENT_STATE.FRESH,
+            f"Gate universe probe returned {len(pairs)} symbol(s)",
+        )
+        _v3_recover_incident("GATE_UNAVAILABLE", "gate")
+    except Exception as exc:
+        _V3_RUNTIME.mark_component("gate", _V3_COMPONENT_STATE.UNAVAILABLE, str(exc))
+        _V3_RUNTIME.mark_component("market_data", _V3_COMPONENT_STATE.UNAVAILABLE, str(exc))
+        _v3_report_incident(
+            "GATE_UNAVAILABLE", "gate", "ERROR", {"error_type": type(exc).__name__}
+        )
+    return execution_ok
+
+
+async def _v3_runtime_watchdog():
+    """Resource pressure may stop entries, never Manager/reconciliation."""
+    try:
+        snapshot = await asyncio.to_thread(
+            _v3_memory_snapshot,
+            watch_ratio=_V3_CONFIG.operational.memory_watch_ratio,
+            degraded_ratio=_V3_CONFIG.operational.memory_degraded_ratio,
+            stop_ratio=_V3_CONFIG.operational.memory_stop_ratio,
+            limit_bytes=_V3_CONFIG.operational.memory_limit_bytes,
+        )
+        detail = (
+            f"rss={snapshot.rss_bytes} limit={snapshot.limit_bytes} "
+            f"ratio={snapshot.ratio:.3f} state={snapshot.state}"
+        )
+        if snapshot.state in {"DEGRADED", "NEW_ENTRIES_OFF"}:
+            _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.DEGRADED, detail, required=False)
+            _V3_RUNTIME.inhibit_entries(f"RESOURCE_MEMORY_{snapshot.state}")
+            _v3_report_incident(
+                "MEMORY_PRESSURE", "memory", "ERROR" if snapshot.state == "NEW_ENTRIES_OFF" else "WARNING",
+                {"rss_bytes": snapshot.rss_bytes, "limit_bytes": snapshot.limit_bytes, "ratio": snapshot.ratio},
+            )
+        else:
+            _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.READY, detail, required=False)
+            _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_DEGRADED")
+            _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_NEW_ENTRIES_OFF")
+            _v3_recover_incident("MEMORY_PRESSURE", "memory")
+        cpu = _V3_CPU_MONITOR.sample()
+        _V3_RUNTIME.mark_component(
+            "cpu",
+            _V3_COMPONENT_STATE.DEGRADED if cpu.state == "DEGRADED" else _V3_COMPONENT_STATE.READY,
+            f"ratio={cpu.ratio:.3f} state={cpu.state}",
+            required=False,
+        )
+        if cpu.state == "DEGRADED":
+            _v3_report_incident("CPU_PRESSURE", "cpu", "WARNING", {"ratio": cpu.ratio})
+        else:
+            _v3_recover_incident("CPU_PRESSURE", "cpu")
+        lag = await _V3_LAG_MONITOR.sample()
+        if lag.state == "DEGRADED":
+            _V3_RUNTIME.mark_component(
+                "event_loop", _V3_COMPONENT_STATE.DEGRADED,
+                f"current_ms={lag.current_ms:.1f} p95_ms={lag.p95_ms:.1f}", required=False,
+            )
+            _V3_RUNTIME.inhibit_entries("EVENT_LOOP_DEGRADED")
+            _v3_report_incident(
+                "EVENT_LOOP_LAG", "event_loop", "ERROR",
+                {"current_ms": lag.current_ms, "p95_ms": lag.p95_ms},
+            )
+        else:
+            _V3_RUNTIME.mark_component(
+                "event_loop", _V3_COMPONENT_STATE.READY,
+                f"current_ms={lag.current_ms:.1f} p95_ms={lag.p95_ms:.1f}", required=False,
+            )
+            _V3_RUNTIME.clear_inhibit("EVENT_LOOP_DEGRADED")
+            _v3_recover_incident("EVENT_LOOP_LAG", "event_loop")
+        await _v3_refresh_runtime_lease()
+        _V3_RUNTIME.evaluate_readiness()
+        _v3_recover_incident("RUNTIME_WATCHDOG_FAILED", "runtime")
+        public = _V3_RUNTIME.public_snapshot()
+        # The unauthenticated worker endpoint returns only the 12-character
+        # display SHA, but the persisted heartbeat must retain the full value
+        # so a controlled release can prove exact commit identity.
+        public["release_sha"] = _V3_RUNTIME.snapshot()["release_sha"]
+        _emit_stats_event(
+            "runtime_status", "SYSTEM", "", public,
+            event_key=f"runtime-status:{_V3_CONFIG.runtime.instance_id}",
+        )
+        _emit_stats_event(
+            "incident_snapshot", "SYSTEM", "",
+            {
+                "release_sha": _V3_RUNTIME.snapshot()["release_sha"],
+                "instance_id": _V3_CONFIG.runtime.instance_id,
+                "incidents": _v3_current_incidents(),
+            },
+            event_key=f"incident-snapshot:{_V3_CONFIG.runtime.instance_id}",
+        )
+    except Exception as exc:
+        _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.UNKNOWN, str(exc), required=False)
+        _v3_report_incident(
+            "RUNTIME_WATCHDOG_FAILED", "runtime", "ERROR", {"error_type": type(exc).__name__}
+        )
+
+
+def _v3_get_lease_client():
+    global _V3_LEASE_CLIENT
+    if _V3_LEASE_CLIENT is None:
+        runtime = _V3_RUNTIME.snapshot()
+        _V3_LEASE_CLIENT = _V3InstanceLeaseClient(
+            _v3_derive_lease_url(
+                _V3_CONFIG.integrations.runtime_lease_url,
+                _V3_CONFIG.integrations.stats_ingest_url,
+            ),
+            _V3_CONFIG.integrations.stats_ingest_token,
+            str(runtime.get("instance_id") or ""),
+            str(runtime.get("release_sha") or ""),
+            ttl_seconds=_V3_CONFIG.operational.runtime_lease_ttl_seconds,
+        )
+    return _V3_LEASE_CLIENT
+
+
+async def _v3_refresh_runtime_lease(*, acquire: bool = False) -> bool:
+    """Acquire/renew shared fencing; transient errors respect current TTL."""
+    client = _v3_get_lease_client()
+    try:
+        state = await asyncio.to_thread(client.acquire if acquire else client.renew)
+    except Exception as exc:
+        current = client.state
+        if current.valid_at():
+            _V3_RUNTIME.mark_component(
+                "instance_fencing", _V3_COMPONENT_STATE.READY,
+                f"renew_error={type(exc).__name__}; generation={current.generation}",
+            )
+            return True
+        _V3_RUNTIME.clear_instance_lease()
+        _V3_RUNTIME.mark_component("instance_fencing", _V3_COMPONENT_STATE.UNAVAILABLE, str(exc))
+        _V3_RUNTIME.inhibit_entries("INSTANCE_LEASE_UNAVAILABLE")
+        return False
+    if state.granted and state.valid_at():
+        _V3_RUNTIME.set_instance_lease(int(state.generation), str(state.expires_at))
+        _V3_RUNTIME.mark_component(
+            "instance_fencing", _V3_COMPONENT_STATE.READY,
+            f"generation={state.generation}; expires_at={state.expires_at}",
+        )
+        _V3_RUNTIME.clear_inhibit("INSTANCE_LEASE_UNAVAILABLE")
+        _V3_RUNTIME.clear_inhibit("INSTANCE_LEASE_HELD")
+        return True
+    _V3_RUNTIME.mark_component(
+        "instance_fencing", _V3_COMPONENT_STATE.UNAVAILABLE,
+        f"reason={state.reason}; generation={state.generation}",
+    )
+    _V3_RUNTIME.clear_instance_lease()
+    _V3_RUNTIME.inhibit_entries("INSTANCE_LEASE_HELD")
+    return False
+
+
+async def _v3_release_runtime_lease() -> None:
+    client = _V3_LEASE_CLIENT
+    if client is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.to_thread(client.release), timeout=5)
+    except Exception as exc:
+        logging.warning("[APEX V3] runtime lease release failed safely: %s", exc)
+    finally:
+        _V3_RUNTIME.clear_instance_lease()
 
 
 async def keepalive_heartbeat():
     """Каждые 10 минут — не даёт Render усыплять сервис"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("CREATE TABLE IF NOT EXISTS heartbeat (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT CURRENT_TIMESTAMP)")
-        conn.execute("INSERT INTO heartbeat (ts) VALUES (CURRENT_TIMESTAMP)")
-        conn.execute("DELETE FROM heartbeat WHERE id NOT IN (SELECT id FROM heartbeat ORDER BY id DESC LIMIT 100)")
-        conn.commit()
-        conn.close()
+        await asyncio.to_thread(
+            _V3RuntimeRepository(lambda: _v3_connect_state(_V3_CONFIG)).heartbeat,
+            _V3_CONFIG.runtime.instance_id,
+            _V3_CONFIG.runtime.release_sha,
+        )
     except Exception as e:
         logging.error(f"Heartbeat: {e}")
 
@@ -5879,334 +3876,212 @@ async def _start_market_intelligence_background():
         logging.warning("[MarketIntelligence] startup failed safely: %s", exc)
 
 
-async def shadow_experience_job():
-    """Hourly passive replay; historical candles make higher frequency unnecessary."""
-    async def refresh():
-        result = await asyncio.to_thread(_refresh_shadow_positions, get_candles, DB_PATH)
-        logging.info("[ExperienceMemory] shadow refresh: %s", result)
-        if any(result.get(key, 0) for key in ("activated", "closed", "expired")):
-            await backup_db_to_github("experience_transition")
+async def _v3_alerts_job():
+    """Send durable incident transitions once, alongside legacy price alerts."""
+    alert_error = None
     try:
-        await _run_market_scan_exclusive("experience_shadow", refresh, 60)
-    except asyncio.TimeoutError:
-        logging.warning("[ExperienceMemory] shadow refresh timed out safely")
+        await check_alerts()
     except Exception as exc:
-        logging.warning("[ExperienceMemory] shadow refresh failed safely: %s", exc)
+        # Operational incident delivery must not be skipped just because a
+        # legacy price-alert query failed during the same scheduler cycle.
+        alert_error = exc
+        logging.warning("[Alerts] price alerts failed; delivering incidents: %s", exc)
+    notifications = await asyncio.to_thread(_v3_pending_incident_notifications, 20)
+    recipients = sorted({int(value) for value in (ADMIN_IDS or []) if value})
+    if not recipients and ADMIN_ID:
+        recipients = [int(ADMIN_ID)]
+    for notification in notifications:
+        payload = notification.get("payload") or {}
+        event_type = str(notification.get("event_type") or "INCIDENT")
+        icon = "✅" if event_type == "RESOLVED" else "🚨"
+        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        detail_text = ", ".join(f"{key}={value}" for key, value in sorted(details.items()))[:500]
+        text = (
+            f"{icon} APEX INCIDENT · {event_type}\n"
+            f"{payload.get('severity', 'UNKNOWN')} · {payload.get('component', 'system')}\n"
+            f"{payload.get('code', 'UNKNOWN')}"
+        )
+        if detail_text:
+            text += f"\n{detail_text}"
+        delivered = False
+        for recipient in recipients:
+            delivered = bool(await _send_with_retry(recipient, text)) or delivered
+        if delivered:
+            await asyncio.to_thread(
+                _v3_mark_incident_delivered, int(notification["notification_id"])
+            )
+    if alert_error is not None:
+        raise alert_error
 
 
-def _schedule_market_scans(scheduler):
-    """Stagger heavy scans in UTC so normal cycles do not contend for the lock.
-
-    Slots include headroom for the job timeouts. Strategies read the latest
-    Gate price at delivery time, while candle-based scans run only as often as
-    their working timeframe can produce materially new information.
-    """
-    common = {"timezone": "UTC", "max_instances": 1, "coalesce": True}
-    scheduler.add_job(auto_scan_1h, "cron", minute="2,24", id="market_mtf_1h", **common)
-    scheduler.add_job(shadow_experience_job, "cron", minute=58, id="experience_shadow", **common)
-    scheduler.add_job(auto_fast_deal_scan, "cron", minute="8,28,48", id="market_fast", **common)
-    scheduler.add_job(auto_zone_scan, "cron", minute="14,34,54", id="market_zone", **common)
-    scheduler.add_job(auto_scan_swing, "cron", minute="20,50", id="market_swing", **common)
-    scheduler.add_job(
-        auto_ltf_watch_scan, "cron", minute="6,16,26,36,46,56",
-        id="market_ltf_watch", **common,
+def _build_v3_scheduler():
+    """Build the only production scheduler; Telegram transport is irrelevant."""
+    return _v3_build_production_scheduler(
+        _V3SchedulerCallbacks(
+            signal_outcome_refresh=auto_scan_job,
+            execution_reconcile=auto_trade_reconcile_job,
+            trade_manager=trade_manager_job,
+            market_intelligence_primary=market_intelligence_job,
+            market_fast=auto_fast_deal_scan,
+            market_mtf_1h=auto_scan_1h,
+            market_zone=auto_zone_scan,
+            market_swing=auto_scan_swing,
+            market_wyckoff=auto_wyckoff_scan,
+            market_ltf_watch=auto_ltf_watch_scan,
+            keepalive=keepalive_heartbeat,
+            dashboard_telemetry=functools.partial(_emit_apex_v2_dashboard_snapshot, DB_PATH),
+            alerts=_v3_alerts_job,
+            state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m"),
+            runtime_watchdog=_v3_runtime_watchdog,
+        ),
+        execution_reconcile_seconds=_auto_trade_reconcile_seconds(),
     )
-    scheduler.add_job(
-        auto_wyckoff_scan, "cron", minute=40,
-        id="market_wyckoff", **common,
+
+
+async def _warmup_market_cache() -> None:
+    try:
+        logging.info("[Cache] Прогрев кеша...")
+        top = await asyncio.to_thread(get_top_pairs, 20)
+        candles_map = await fetch_candles_batch(top, "4h", 100)
+        for symbol, candles in candles_map.items():
+            if candles:
+                get_precomputed_indicators(symbol, "4h")
+            await asyncio.sleep(0.05)
+        logging.info("[Cache] Прогрев завершён: %s пар", len(candles_map))
+    except Exception as exc:
+        logging.warning("[Cache] Ошибка прогрева: %s", exc)
+
+
+async def _delete_webhook_safely() -> None:
+    for attempt, delay in enumerate((0, 2, 4, 8, 12), start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logging.info("Webhook удалён")
+            return
+        except Exception as exc:
+            logging.warning("delete_webhook попытка %s/5: %s", attempt, exc)
+    raise RuntimeError("telegram_webhook_delete_failed")
+
+
+async def _initialize_production_runtime(transport: str):
+    """Run the one production bootstrap for webhook and polling transports."""
+    _V3_RUNTIME.activate(
+        release_sha=_V3_CONFIG.runtime.release_sha,
+        instance_id=_V3_CONFIG.runtime.instance_id,
     )
-    scheduler.add_job(
-        market_intelligence_job, "cron", minute=10,
-        id="market_intelligence_primary", **common,
+    _config_validation = _v3_validate_config(_V3_CONFIG)
+    _V3_RUNTIME.mark_component(
+        "config",
+        _V3_COMPONENT_STATE.READY if _config_validation.valid else _V3_COMPONENT_STATE.FAILED,
+        ";".join(_config_validation.errors),
     )
-
-
-def _schedule_trade_manager(scheduler):
-    """Review active trades after each possible 5m candle close."""
-    scheduler.add_job(
-        trade_manager_job,
-        "cron",
-        minute="1,6,11,16,21,26,31,36,41,46,51,56",
-        timezone="UTC",
-        id="trade_manager",
-        max_instances=1,
-        coalesce=True,
-    )
-
-async def on_startup(app):
-    # Логирование конфигурации при старте
-    logging.info(f"WEBHOOK_URL = {os.environ.get('WEBHOOK_URL', 'НЕТ')}")
-    logging.info(f"TOKEN exists = {bool(os.environ.get('TELEGRAM_TOKEN'))}")
-    logging.info(f"ADMIN_ID = {os.environ.get('ADMIN_ID')}")
-
+    if not _config_validation.valid:
+        _V3_RUNTIME.inhibit_entries("CONFIG_INVALID")
+    _V3_RUNTIME.mark_component("telegram", _V3_COMPONENT_STATE.STARTING)
     await _brain_rollout_settle()
-    _restore_result = await restore_db_from_github()
+    _restore_result = await asyncio.wait_for(restore_db_from_github(), timeout=180)
     if _BRAIN_PERSISTENCE.configured and not _restore_result.get("ready"):
         raise RuntimeError("verified brain.db restore is required before APEX startup")
     init_db()                        # потом применяем миграции к восстановленной БД
+    _state_restore = await restore_state_db_from_github()
+    if _STATE_PERSISTENCE.configured and not _state_restore.get("ready"):
+        raise RuntimeError("verified apex_state.db restore is required before APEX startup")
+    _memory_restore = await restore_memory_db_from_github()
+    _v3_db_status = await asyncio.to_thread(_v3_prepare_databases)
+    _V3_RUNTIME.mark_component("state_db", _V3_COMPONENT_STATE.READY, json.dumps(_v3_db_status))
+    _v3_publish_strategy_activation_health()
+    _memory_ready = (
+        not _MEMORY_PERSISTENCE.configured or bool(_memory_restore.get("ready"))
+    )
+    _V3_RUNTIME.mark_component(
+        "memory_db",
+        _V3_COMPONENT_STATE.READY if _memory_ready else _V3_COMPONENT_STATE.DEGRADED,
+        "live-only memory restored and migrated" if _memory_ready else (
+            "live memory restore unavailable; deterministic trading unaffected"
+        ),
+        required=False,
+    )
+    _restart = await asyncio.to_thread(
+        _v3_record_start, _V3_CONFIG.database.state_db_path,
+        instance_id=_V3_CONFIG.runtime.instance_id,
+        release_sha=_V3_CONFIG.runtime.release_sha,
+    )
+    _V3_RUNTIME.mark_component("restart_guard", _V3_COMPONENT_STATE.READY, json.dumps(_restart), required=False)
+    if _restart.get("restart_count_1h", 0) >= _V3_CONFIG.operational.restart_limit_1h:
+        _V3_RUNTIME.inhibit_entries("WORKER_RESTART_LOOP")
+        _v3_report_incident("WORKER_RESTART_LOOP", "worker", "CRITICAL", _restart)
+    else:
+        _v3_recover_incident("WORKER_RESTART_LOOP", "worker")
+    await _v3_refresh_runtime_lease(acquire=True)
     _ensure_control_schema(DB_PATH)
-    _ensure_experience_schema(DB_PATH)
     _ensure_setup_evidence_schema(DB_PATH)
-    _ensure_trade_manager_schema(DB_PATH)
     _ensure_apex_v2_schema(DB_PATH)
-    _register_pending_manager_signals(DB_PATH)
-    _rebuild_strategy_risk_states(DB_PATH)
+    _lifecycle_import = await _v3_refresh_signal_lifecycle_mirror()
+    logging.info("[APEX V3] Signal lifecycle State mirror: %s", _lifecycle_import)
     if _TRADE_EXECUTION_OK:
-        try:
-            _ensure_execution_schema(DB_PATH)
-        except Exception as _execution_schema_error:
-            logging.error("trade execution schema: %s", _execution_schema_error)
+        _execution_import = await _v3_refresh_execution_state_mirror()
+        logging.info("[APEX V3] Execution State mirror: %s", _execution_import)
+        _ledger_import = await _v3_refresh_execution_ledger_mirror()
+        logging.info("[APEX V3] Execution ledger State mirror: %s", _ledger_import)
+    _manager_import = await _v3_refresh_manager_state_mirror()
+    logging.info("[APEX V3] Manager State mirror: %s", _manager_import)
+    _register_pending_manager_signals(DB_PATH)
+    _manager_registration = await _v3_refresh_manager_state_mirror()
+    logging.info("[APEX V3] Manager registration mirror: %s", _manager_registration)
+    _rebuild_strategy_risk_states(DB_PATH)
     _emit_apex_v2_dashboard_snapshot(DB_PATH)
     start_db_writer()
-    if BRAIN_BUILDER_AVAILABLE:
-        try:
-            init_brain_db()
-            logging.info("init_brain_db() — таблицы мозга созданы")
-        except Exception as _ibe:
-            logging.warning(f"init_brain_db: {_ibe}")
-    # Применяем миграции learning.py (signal_stats, self_rules, confirmed_by и др.)
-    if _LEARNING_OK:
-        try:
-            from learning import init_learning
-            init_learning()
-            logging.info("init_learning() — миграции применены")
-        except Exception as _ile:
-            logging.warning(f"init_learning: {_ile}")
-    await _apply_trade_learning_baseline_reset()
-    if _WEB_LEARNER_OK:
-        _web_init_db()
-    await _brain_startup_checkpoint()
+    _checkpoint = await _brain_startup_checkpoint()
+    _state_checkpoint = await _v3_state_startup_checkpoint()
+    _memory_checkpoint = await _v3_memory_startup_checkpoint()
+    _V3_RUNTIME.mark_component(
+        "backup",
+        _V3_COMPONENT_STATE.READY if (
+            _checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
+            and _state_checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
+            and _memory_checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
+        ) else _V3_COMPONENT_STATE.DEGRADED,
+        f"brain={_checkpoint.get('status')} state={_state_checkpoint.get('status')} "
+        f"memory={_memory_checkpoint.get('status')}",
+    )
+    await _v3_startup_reconcile_and_market_check()
+    if transport == "polling":
+        threading.Thread(target=run_server, daemon=True).start()
     asyncio.create_task(_start_market_intelligence_background())
 
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-    if WEBHOOK_URL:
-        await bot.set_webhook(f"{WEBHOOK_URL}/webhook", drop_pending_updates=True)
-        logging.info(f"Webhook установлен: {WEBHOOK_URL}/webhook")
+    webhook_url = _V3_CONFIG.integrations.webhook_url
+    if transport == "webhook":
+        await bot.set_webhook(f"{webhook_url}/webhook", drop_pending_updates=True)
+        logging.info("Webhook установлен: %s/webhook", webhook_url)
     else:
-        logging.warning("WEBHOOK_URL не задан — работаем в polling режиме")
+        await _delete_webhook_safely()
+    _V3_RUNTIME.mark_component("telegram", _V3_COMPONENT_STATE.READY)
 
-    # ── Webhook режим: настройка планировщика (сигналы + мозг) ──
-    # BUG FIX: этот блок был случайно перемещён внутрь recheck_timing_queue.
-    # Теперь он правильно инициализируется при старте webhook-сервера.
-    webhook_scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1})
-
-    # Основные сигналы
-    webhook_scheduler.add_job(auto_scan_job,        "interval", minutes=5,  jitter=20,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(
-        auto_trade_reconcile_job, "interval", seconds=_auto_trade_reconcile_seconds(),
-        max_instances=1, coalesce=True,
-    )
-    _schedule_market_scans(webhook_scheduler)
-    _schedule_trade_manager(webhook_scheduler)
-    # Pump/accumulation detector notifications are intentionally not scheduled.
-    webhook_scheduler.add_job(keepalive_heartbeat,  "interval", minutes=10, max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(
-        _emit_apex_v2_dashboard_snapshot, "interval", minutes=10,
-        kwargs={"db_path": DB_PATH}, max_instances=1, coalesce=True,
-    )
-    # timing_queue отключена — MTF отправляет сигналы напрямую по скору
-    # webhook_scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(check_alerts,         "interval", minutes=5,  max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(auto_research,        "interval", hours=2,    max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(night_brain_tasks,    "interval", minutes=30, jitter=180, max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120, max_instances=1, coalesce=True)
-
-    # Мозг / самообучение
-    async def _weekly_report_job():
-        try:
-            loop = asyncio.get_running_loop()
-            report = await loop.run_in_executor(None, _learn_weekly_report)
-            if report and ADMIN_ID:
-                await bot.send_message(ADMIN_ID, report, parse_mode="HTML")
-        except Exception as e:
-            logging.warning(f"Weekly report error: {e}")
-    webhook_scheduler.add_job(_weekly_report_job, "cron", day_of_week="sun", hour=8, minute=0, timezone="UTC")
-
-    async def _review_rules_job():
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_review_rules)
-            await loop.run_in_executor(None, _learn_ab_test)
-        except Exception as e:
-            logging.error(f"review_rules_job: {e}")
-    webhook_scheduler.add_job(_review_rules_job, "interval", days=3, start_date="2026-01-01 04:00:00")
-
-    async def _self_diagnose_job():
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self_diagnose_and_grow)
-        await loop.run_in_executor(None, auto_fill_knowledge_gaps)
-    webhook_scheduler.add_job(_self_diagnose_job, "interval", hours=6, jitter=1200)
-
-    async def _run_self_analysis():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_self_analysis)
-    webhook_scheduler.add_job(_run_self_analysis, "interval", hours=3, jitter=600)
-
-    async def _run_decay():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_decay)
-    webhook_scheduler.add_job(_run_decay, "cron", hour=4, minute=30)
-
-    async def _run_strategy_update():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_build_strategy)
-            logging.info("[Scheduler] Стратегия Groq обновлена")
-    webhook_scheduler.add_job(_run_strategy_update, "cron", hour=5, minute=0)
-
-    async def _run_groq_diagnosis():
-        if _LEARNING_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _learn_self_diag)
-            logging.info("[Scheduler] Groq самодиагностика завершена")
-    webhook_scheduler.add_job(_run_groq_diagnosis, "interval", hours=12, jitter=600, max_instances=1, coalesce=True)
-
-    webhook_scheduler.add_job(groq_analyze_logs, "interval", minutes=30, jitter=120, max_instances=1, coalesce=True)
-
-    async def _router_daily_review():
-        if _ROUTER_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _brain_router.daily_review)
-            logging.info("[Scheduler] Router: ежедневная стратегия обновлена")
-    webhook_scheduler.add_job(_router_daily_review, "cron", hour=5, minute=30)
-
-    webhook_scheduler.add_job(run_brain_builder_async,     "interval", hours=1,  jitter=300, max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(run_brain_builder_full_async, "cron",     hour=3,   minute=0, max_instances=1, coalesce=True)
-
-    async def _run_web_learner():
-        if _WEB_LEARNER_OK:
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(None, _web_learn_cycle)
-            if results:
-                logging.info(f"[WebLearner] Изучено тем: {len(results)}")
-            await backup_db_to_github("web_learner")
-    webhook_scheduler.add_job(_run_web_learner, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
-    webhook_scheduler.add_job(_run_web_learner, "date",
-        run_date=datetime.now().replace(second=0) + timedelta(minutes=5))
-
-    async def _run_self_improve():
-        if _WEB_LEARNER_OK:
-            loop = asyncio.get_running_loop()
-            improvements = await loop.run_in_executor(None, _web_self_improve)
-            if improvements:
-                logging.info(f"[SelfImprove] Groq добавил {len(improvements)} улучшений")
-    webhook_scheduler.add_job(_run_self_improve, "interval", hours=8, jitter=1800, max_instances=1, coalesce=True)
-
-    async def _run_autopilot_fast():
-        if _AUTOPILOT_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _autopilot_fast)
-    webhook_scheduler.add_job(_run_autopilot_fast, "interval", minutes=15, jitter=60, max_instances=1, coalesce=True)
-
-    async def _run_autopilot_deep():
-        if _AUTOPILOT_OK:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _autopilot_deep)
-    webhook_scheduler.add_job(_run_autopilot_deep, "interval", hours=4, jitter=600, max_instances=1, coalesce=True)
-
-    # Safety snapshot. It creates a commit only when the verified DB changed.
-    webhook_scheduler.add_job(
-        backup_db_to_github, "interval", minutes=30, jitter=120,
-        kwargs={"reason": "safety_30m"}, max_instances=1, coalesce=True,
-    )
-
-    webhook_scheduler.start()
-    setup_error_capture()
-
-    # Прогрев кеша при старте (webhook)
-    async def _warmup_cache_wh():
-        try:
-            logging.info("[Cache] Прогрев кеша (webhook)...")
-            top = await asyncio.to_thread(get_top_pairs, 20)
-            candles_map = await fetch_candles_batch(top, "4h", 100)
-            for s, c in candles_map.items():
-                if c:
-                    get_precomputed_indicators(s, "4h")
-                await asyncio.sleep(0.05)
-            logging.info(f"[Cache] Прогрев завершён: {len(candles_map)} пар")
-        except Exception as e:
-            logging.warning(f"[Cache] Ошибка прогрева: {e}")
-
-    asyncio.create_task(_warmup_cache_wh())
-    asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(run_brain_builder_async()))
-    logging.info("APEX запущен! (webhook mode)")
+    scheduler = _build_v3_scheduler()
+    scheduler.start()
+    _V3_RUNTIME.mark_component("scheduler", _V3_COMPONENT_STATE.READY)
+    _V3_RUNTIME.evaluate_readiness()
+    logging.warning("[APEX V3] runtime=%s", _V3_RUNTIME.snapshot())
+    asyncio.create_task(_warmup_market_cache())
+    logging.info("APEX запущен (%s mode)", transport)
+    return scheduler
 
 
-async def recheck_timing_queue():
-    """Каждые 15 мин перепроверяет очередь тайминга"""
+async def _shutdown_production_runtime(reason: str) -> None:
+    _V3_RUNTIME.inhibit_entries("GRACEFUL_SHUTDOWN")
+    await _v3_release_runtime_lease()
     try:
-        expired_count = expire_timing_queue()
-        if expired_count > 0:
-            logging.info(f"[TimingQueue] Истекло {expired_count} сигналов")
-
-        queue = get_timing_queue()
-        if not queue:
-            return
-
-        logging.info(f"[TimingQueue] Перепроверяем {len(queue)} сигналов...")
-
-        for row in queue:
-            queue_id, symbol, direction, timeframe, entry, sl, tp1, tp2, tp3, grade, signal_text, old_score, expires_at = row
-            try:
-                candles = get_candles(symbol, timeframe, 50)
-                if not candles:
-                    continue
-
-                current_price = candles[-1]["close"]
-                atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
-
-                # Цена ушла далеко от зоны — удаляем
-                if abs(current_price - entry) > atr * 3:
-                    remove_from_timing_queue(queue_id)
-                    logging.info(f"[TimingQueue] {symbol} {direction} — цена ушла из зоны, удалён")
-                    continue
-
-                timing = check_entry_timing(candles, direction, entry, timeframe)
-                new_score = timing.get("score", 0)
-                logging.info(f"[TimingQueue] {symbol} {direction} {timeframe}: {old_score}/3 → {new_score}/3")
-
-                if timing["valid"] and new_score >= 3:
-                    # Проверяем RR по текущей цене (минимум 2.0 для MTF)
-                    _risk = abs(entry - sl)
-                    _reward = abs(tp1 - entry)
-                    _rr_now = _reward / _risk if _risk > 0 else 0
-                    if _rr_now < 2.0:
-                        logging.info(f"[TimingQueue] {symbol} {direction} — RR {_rr_now:.2f} < 2.0, ждём")
-                        continue
-
-                    # Обновляем текст — добавляем пометку
-                    updated_text = "\U0001F514 <b>\u0422\u0410\u0419\u041c\u0418\u041d\u0413 \u041f\u041e\u0414\u0422\u0412\u0415\u0420\u0416\u0414\u0401\u041d!</b>\n" + signal_text.replace(
-                        f"⏰ <b>Тайминг:</b> ⏳",
-                        f"⏰ <b>Тайминг:</b> ✅ Готов к входу ({new_score}/3) —"
-                    )
-                    sd = {
-                        "symbol": symbol, "direction": direction, "timeframe": timeframe,
-                        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-                        "grade": grade, "text": updated_text,
-                    }
-                    delivered = await _send_signal(sd)
-                    if delivered:
-                        remove_from_timing_queue(queue_id)
-                        logging.info(f"[TimingQueue] {symbol} {direction} → ОТПРАВЛЕН (score {new_score}/3, RR {_rr_now:.2f})")
-
-            except Exception as e:
-                logging.warning(f"[TimingQueue] {symbol}: {e}")
-    except Exception as e:
-        logging.error(f"[TimingQueue] recheck error: {e}")
-
-async def on_startup_diagnose(app):
-    """Первая самодиагностика через 8 мин после старта"""
-    await asyncio.sleep(480)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, self_diagnose_and_grow)
-    logging.info("[SelfGrow] Стартовая диагностика завершена")
-
-async def on_shutdown(app):
+        await asyncio.to_thread(
+            _v3_record_shutdown, _V3_CONFIG.database.state_db_path, reason,
+            instance_id=_V3_CONFIG.runtime.instance_id,
+        )
+    except Exception as exc:
+        logging.warning("[APEX V3] shutdown marker failed safely: %s", exc)
     try:
         await asyncio.wait_for(
-            backup_db_to_github("render_sigterm"), timeout=30
+            _v3_maintenance_and_backup("render_sigterm"), timeout=30
         )
     except asyncio.TimeoutError:
         logging.warning("[BrainPersistence] final SIGTERM snapshot timed out safely")
@@ -6215,221 +4090,31 @@ async def on_shutdown(app):
     if _MARKET_INTELLIGENCE_OK:
         try:await _stop_market_intelligence()
         except Exception:pass
-    logging.info("APEX остановлен")
+
+
+def _v3_token_snapshot():
+    tokens_used = groq_tokens_used()
+    token_pct = round(tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT > 0 else 0
+    return {
+        "tokens_used": tokens_used,
+        "tokens_limit": _GROQ_DAILY_LIMIT,
+        "percent": token_pct,
+        "available": _tokens_available(),
+    }
 
 
 def main():
-    # Файловый лок — предотвращает запуск двух инстансов
-    # Нельзя удалять lock-файл: старый процесс продолжает держать lock на уже
-    # удалённом inode, и второй polling-инстанс тогда запускается параллельно.
-    import fcntl
-    _lock_path = "/tmp/apex_bot.lock"
-    lock_file = open(_lock_path, "w")
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except IOError:
-        logging.error("Другой инстанс уже запущен — выходим")
-        return
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-
-    if WEBHOOK_URL:
-        # Webhook — ручная реализация, работает с любой версией aiogram 3.x
-        app = web.Application()
-
-        async def health(request):
-            # Включаем статистику токенов в health endpoint
-            token_pct = round(_groq_tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT > 0 else 0
-            return web.Response(text=f"APEX OK | tokens: {_groq_tokens_used}/{_GROQ_DAILY_LIMIT} ({token_pct}%)")
-        app.router.add_get("/", health)
-        app.router.add_get("/health", health)
-        app.router.add_head("/", health)  # Render шлёт HEAD запросы
-
-        async def handle_webhook(request):
-            try:
-                import json as _json
-                data = await request.read()
-                update = types.Update(**_json.loads(data))
-                await dp.feed_update(bot, update)
-            except Exception as e:
-                logging.error(f"Webhook error: {e}")
-            return web.Response(text="OK")
-
-        async def token_stats(request):
-            token_pct = round(_groq_tokens_used / _GROQ_DAILY_LIMIT * 100) if _GROQ_DAILY_LIMIT > 0 else 0
-            return web.json_response({
-                "tokens_used": _groq_tokens_used,
-                "tokens_limit": _GROQ_DAILY_LIMIT,
-                "percent": token_pct,
-                "available": _tokens_available()
-            })
-        app.router.add_post("/webhook", handle_webhook)
-        app.router.add_get("/tokens", token_stats)
-        app.on_startup.append(on_startup)
-        app.on_startup.append(on_startup_diagnose)
-        app.on_shutdown.append(on_shutdown)
-
-        port = int(os.environ.get("PORT", 10000))
-        logging.info(f"Запуск в webhook режиме на порту {port}")
-        web.run_app(app, host="0.0.0.0", port=port)
-    else:
-        # Polling режим
-        async def safe_delete_webhook():
-            for i in range(5):
-                try:
-                    await bot.delete_webhook(drop_pending_updates=True)
-                    logging.info("Webhook удалён")
-                    return
-                except Exception as e:
-                    logging.warning(f"delete_webhook попытка {i+1}: {e}")
-                    await asyncio.sleep(2)
-
-        async def polling_main():
-            await _brain_rollout_settle()
-            # Восстанавливаем БД из GitHub с таймаутом 30 сек чтобы не блокировать деплой
-            try:
-                _restore_result = await asyncio.wait_for(restore_db_from_github(), timeout=180)
-                if _BRAIN_PERSISTENCE.configured and not _restore_result.get("ready"):
-                    raise RuntimeError("verified brain.db restore is required before APEX startup")
-            except asyncio.TimeoutError:
-                logging.error("restore_db_from_github: таймаут 180с — backup writes remain blocked")
-                if _BRAIN_PERSISTENCE.configured:
-                    raise
-            except Exception as _re:
-                logging.error(f"restore_db_from_github: {_re}")
-                if _BRAIN_PERSISTENCE.configured:
-                    raise
-            init_db()
-            _ensure_control_schema(DB_PATH)
-            _ensure_experience_schema(DB_PATH)
-            _ensure_setup_evidence_schema(DB_PATH)
-            _ensure_trade_manager_schema(DB_PATH)
-            _ensure_apex_v2_schema(DB_PATH)
-            _register_pending_manager_signals(DB_PATH)
-            _rebuild_strategy_risk_states(DB_PATH)
-            if _TRADE_EXECUTION_OK:
-                try:
-                    _ensure_execution_schema(DB_PATH)
-                except Exception as _execution_schema_error:
-                    logging.error("trade execution schema: %s", _execution_schema_error)
-            _emit_apex_v2_dashboard_snapshot(DB_PATH)
-            start_db_writer()
-            if BRAIN_BUILDER_AVAILABLE:
-                try:
-                    init_brain_db()
-                except Exception as _ibe:
-                    logging.warning(f"init_brain_db: {_ibe}")
-            if _LEARNING_OK:
-                try:
-                    from learning import init_learning
-                    init_learning()
-                except Exception as _ile:
-                    logging.warning(f"init_learning: {_ile}")
-            await _apply_trade_learning_baseline_reset()
-            await _brain_startup_checkpoint()
-            # Health сервер — держит бота живым для UptimeRobot
-            threading.Thread(target=run_server, daemon=True).start()
-            asyncio.create_task(_start_market_intelligence_background())
-            await safe_delete_webhook()
-            await asyncio.sleep(12)  # ждём завершения старого инстанса
-            scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1})
-            scheduler.add_job(auto_scan_job, "interval", minutes=5, jitter=20)         # проверка закрытых
-            scheduler.add_job(
-                auto_trade_reconcile_job, "interval", seconds=_auto_trade_reconcile_seconds(),
-                max_instances=1, coalesce=True,
-            )
-            _schedule_market_scans(scheduler)
-            _schedule_trade_manager(scheduler)
-            # 1d и 1w — только контекст, сигналы не генерируем
-            # scheduler.add_job(auto_scan_1d, ...)
-            # scheduler.add_job(auto_scan_1w, ...)
-            scheduler.add_job(keepalive_heartbeat, "interval", minutes=10)
-            scheduler.add_job(
-                _emit_apex_v2_dashboard_snapshot, "interval", minutes=10,
-                kwargs={"db_path": DB_PATH}, max_instances=1, coalesce=True,
-            )
-            # Pump/accumulation detector notifications are intentionally not scheduled.
-            scheduler.add_job(auto_research, "interval", hours=2)
-            scheduler.add_job(check_alerts, "interval", minutes=5)
-            scheduler.add_job(night_brain_tasks, "interval", minutes=30, jitter=180)
-            # One bounded safety pass every 30m; event transitions and SIGTERM
-            # retain their own immediate paths.  Uploading a growing ~30MB
-            # SQLite file every 10m caused GitHub secondary-limit 403s.
-            scheduler.add_job(
-                backup_db_to_github, "interval", minutes=30, jitter=120,
-                kwargs={"reason": "safety_30m"}, max_instances=1, coalesce=True,
-            )
-            scheduler.add_job(autonomous_learning_cycle, "interval", hours=1, jitter=120)
-            if BRAIN_BUILDER_AVAILABLE:
-                scheduler.add_job(run_brain_builder_async, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
-                scheduler.add_job(run_brain_builder_full_async, "cron", hour=3, minute=0, timezone="UTC", max_instances=1, coalesce=True)
-            if _WEB_LEARNER_OK:
-                async def _polling_web_learner():
-                    try:
-                        results = await asyncio.to_thread(_web_learn_cycle)
-                        logging.info("[WebLearner] polling cycle complete: %s topic(s)", len(results or []))
-                        await backup_db_to_github("web_learner")
-                    except Exception as exc:
-                        logging.warning("[WebLearner] polling cycle failed safely: %s", exc)
-                scheduler.add_job(_polling_web_learner, "interval", hours=1, jitter=300, max_instances=1, coalesce=True)
-                asyncio.get_running_loop().call_later(300, lambda: asyncio.create_task(_polling_web_learner()))
-            if _LEARNING_OK:
-                # В polling-режиме раньше не было ни decay, ни пересмотра
-                # правил — self_rules только росли.
-                scheduler.add_job(_learn_decay, "cron", hour=4, minute=30, timezone="UTC")
-                scheduler.add_job(_learn_review_rules, "interval", days=3, max_instances=1, coalesce=True)
-            # BUG FIX: recheck_timing_queue — перепроверяет очередь тайминга и отправляет сигналы
-            # timing_queue отключена — MTF отправляет напрямую
-            # scheduler.add_job(recheck_timing_queue, "interval", minutes=15, jitter=30, max_instances=1, coalesce=True)
-            scheduler.start()
-
-            # Прогрев кеша при старте — загружаем топ пары асинхронно
-            async def _warmup_cache():
-                try:
-                    logging.info("[Cache] Прогрев кеша...")
-                    top = await asyncio.to_thread(get_top_pairs, 20)
-                    candles_map = await fetch_candles_batch(top, "4h", 100)
-                    for s, c in candles_map.items():
-                        if c:
-                            get_precomputed_indicators(s, "4h")
-                        await asyncio.sleep(0.05)
-                    logging.info(f"[Cache] Прогрев завершён: {len(candles_map)} пар")
-                except Exception as e:
-                    logging.warning(f"[Cache] Ошибка прогрева: {e}")
-
-            asyncio.create_task(_warmup_cache())
-            asyncio.get_running_loop().call_later(30, lambda: asyncio.create_task(autonomous_learning_cycle()))
-            logging.info("APEX запущен в polling режиме")
-            try:
-                await dp.start_polling(
-                    bot,
-                    allowed_updates=dp.resolve_used_update_types()
-                )
-            finally:
-                try:
-                    await asyncio.wait_for(
-                        backup_db_to_github("render_sigterm"), timeout=30
-                    )
-                except asyncio.TimeoutError:
-                    logging.warning("[BrainPersistence] final polling snapshot timed out safely")
-                except Exception as exc:
-                    logging.warning("[BrainPersistence] final polling snapshot failed safely: %s", exc)
-                if _MARKET_INTELLIGENCE_OK:
-                    await _stop_market_intelligence()
-
-        # Watchdog — перезапускаем polling если упал
-        max_restarts = 10
-        restart_count = 0
-        while restart_count < max_restarts:
-            try:
-                asyncio.run(polling_main())
-            except Exception as e:
-                restart_count += 1
-                logging.error(f"Polling упал ({restart_count}/{max_restarts}): {e}")
-                import time as _t
-                _t.sleep(10)
-                logging.info("Перезапускаем polling...")
-            else:
-                break
+    _v3_run_production(_V3_PRODUCTION_DEPENDENCIES(
+        config=_V3_CONFIG,
+        runtime=_V3_RUNTIME,
+        telegram_bot=bot,
+        dispatcher=dp,
+        update_type=types.Update,
+        web=web,
+        initialize=_initialize_production_runtime,
+        shutdown=_shutdown_production_runtime,
+        token_snapshot=_v3_token_snapshot,
+    ))
 
 
 if __name__ == "__main__":

@@ -1,16 +1,14 @@
 """Open Labels Initiative metadata for explicitly configured addresses."""
 from __future__ import annotations
 import json
-import os
+from apex.config.settings import ApexConfig
 from .cache import cache
 from .http_client import http_client
 
 SOURCE = "open_labels_initiative"
-_BASE = os.environ.get("OLI_API_URL", "https://api.openlabelsinitiative.org").rstrip("/")
-
 def _addresses(symbol: str) -> list[str]:
     try:
-        mapping = json.loads(os.environ.get("OLI_TRACKED_ADDRESSES_JSON", "{}"))
+        mapping = json.loads(ApexConfig.from_env().integrations.oli_tracked_addresses_json)
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     values = mapping.get(symbol.upper().replace("/", ""), []) if isinstance(mapping, dict) else []
@@ -20,12 +18,13 @@ async def collect(symbol: str) -> dict:
     addresses = _addresses(symbol)
     if not addresses:
         return {"source": SOURCE, "status": "not_configured", "symbol": symbol}
-    api_key = os.environ.get("OLI_API_KEY", "").strip()
+    settings = ApexConfig.from_env().integrations
+    api_key = settings.oli_api_key
     headers = {"x-api-key": api_key} if api_key else None
     async def fetch():
         rows = []
         for address in addresses[:5]:
-            endpoint = f"{_BASE}/labels" if api_key else f"{_BASE}/attestations"
+            endpoint = f"{settings.oli_api_url}/labels" if api_key else f"{settings.oli_api_url}/attestations"
             params = {"address": address} if api_key else {"recipient": address}
             rows.append({"address": address, "payload": await http_client.get_json(endpoint, params, headers)})
         return rows

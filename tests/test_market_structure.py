@@ -5,6 +5,7 @@ from core.market_structure import (
     analyze_market_structure,
     classify_swings,
 )
+from apex.market.structure import analyze_market_structure as canonical_analyze_market_structure
 
 
 def _candle(open_, high, low, close, timestamp):
@@ -64,6 +65,9 @@ def _bullish_choch_candles():
 
 
 class MarketStructureTests(unittest.TestCase):
+    def test_legacy_import_is_the_canonical_v3_engine(self):
+        self.assertIs(analyze_market_structure, canonical_analyze_market_structure)
+
     def test_first_pivots_are_neutral_not_bullish_votes(self):
         classified = classify_swings([(2, 110.0)], [(4, 100.0)])
         self.assertEqual([s["kind"] for s in classified], ["H", "L"])

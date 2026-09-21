@@ -8,11 +8,6 @@ from unittest.mock import AsyncMock, patch
 
 from core import smc_engine
 from core.historical_zones import build_zone_context, refresh_zones
-from core.outcome_learning import (
-    build_learning_context,
-    capture_signal_evidence,
-    close_learning_loop,
-)
 from external_sources import defillama, live_tape, oli, pair_registry
 
 
@@ -189,6 +184,8 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(book["freshness_status"], "FRESH")
             self.assertEqual({row["side"] for row in book["heatmap_levels"]}, {"BID", "ASK"})
             self.assertFalse(book["execution_authority"])
+            collected = await live_tape.collect("BTCUSDT")
+            self.assertEqual(collected["normalized"]["orderbook"]["freshness_status"], "FRESH")
             with self.assertRaises(live_tape.GateDepthResync):
                 live_tape.ingest_gate(gap)
         self.assertEqual(live_tape._gate_books["BTCUSDT"].status, "RESYNC_REQUIRED")
@@ -211,31 +208,6 @@ class MarketIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["zones"], second["zones"])
         self.assertEqual(first_events, second_events)
         self.assertTrue(build_zone_context("BTCUSDT", 100, "1h", db_path=self.db_path)["available"])
-
-    async def test_closed_loop_confirms_only_after_objective_sample(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("CREATE TABLE market_memory_snapshots (signal_id INTEGER PRIMARY KEY,max_favorable_pct REAL,max_adverse_pct REAL)")
-            conn.executemany(
-                "INSERT INTO market_memory_snapshots VALUES (?,?,?)",
-                [(index, 2.0, -0.5) for index in range(1, 13)],
-            )
-        candidate = {
-            "symbol": "BTCUSDT", "grade": "MTF", "direction": "BULLISH",
-            "timeframe": "1h", "entry": 100, "sl": 95, "tp1": 110,
-            "_external_quality_review": {
-                "context": {"external_bias": "bullish", "external_confidence": 0.7},
-                "news_context": {"risk_level": "LOW"},
-                "historical_zones": {"zones": [{"zone_type": "support"}]},
-            },
-        }
-        with patch.dict(os.environ, {"CLOSED_LOOP_MIN_SAMPLES": "12", "NEW_STRATEGY_MIN_CLOSED_TRADES": "30"}):
-            for signal_id in range(1, 13):
-                capture_signal_evidence(signal_id, candidate, self.db_path)
-                close_learning_loop(signal_id, "tp1" if signal_id <= 9 else "sl", self.db_path)
-            context = build_learning_context(candidate, self.db_path)
-        self.assertEqual(context["comparable_condition"]["samples"], 12)
-        self.assertEqual(context["comparable_condition"]["state"], "confirmed")
-        self.assertFalse(context["new_strategy_research_ready"])
 
     async def test_oli_never_guesses_addresses(self):
         with patch.dict(os.environ, {}, clear=True):

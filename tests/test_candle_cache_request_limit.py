@@ -8,7 +8,7 @@ class CandleCacheRequestLimitTests(unittest.TestCase):
         self.assertIn("len(cached) >= requested_limit", s)
         self.assertIn("len(_gc) >= requested_limit", s)
         self.assertNotIn("len(cached) >= 20:\n            return cached", s)
-        self.assertIn("return rc[-requested_limit:]", s)
+        self.assertIn("return _gc[-requested_limit:]", s)
         self.assertIn("return candles[-requested_limit:]", s)
 
 if __name__ == "__main__":

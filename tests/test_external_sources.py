@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from external_sources.aggregator import (
     _apply_futures,
+    _apply_live_tape,
     _finish,
     _status,
     collect_external_context,
@@ -22,6 +23,23 @@ from external_sources.whale_tracker import collect as collect_whale_tracker
 
 
 class ExternalSourceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fast_contract_does_not_query_slow_or_options_providers(self):
+        unavailable = lambda source: {"source": source, "status": "not_configured"}
+        with patch("external_sources.aggregator.refresh_pair_registry", new=AsyncMock(return_value={})), \
+             patch("external_sources.aggregator.get_pair", return_value={}), \
+             patch("external_sources.aggregator.exchange_fallback.collect", new=AsyncMock(return_value=unavailable("public_futures"))) as futures, \
+             patch("external_sources.aggregator.live_tape.collect", new=AsyncMock(return_value=unavailable("live_market_tape"))) as tape, \
+             patch("external_sources.aggregator.crypto_monitor.collect", new=AsyncMock(return_value=unavailable("crypto_monitor"))) as monitor, \
+             patch("external_sources.aggregator.coinalyze.collect", new=AsyncMock(return_value=unavailable("coinalyze"))), \
+             patch("external_sources.aggregator.deribit_options.collect", new=AsyncMock()) as options, \
+             patch("external_sources.aggregator.whale_tracker.collect", new=AsyncMock()) as whale:
+            await collect_external_context("BTCUSDT", "BULLISH", strategy="FAST")
+        futures.assert_awaited_once()
+        tape.assert_awaited_once()
+        monitor.assert_awaited_once()
+        options.assert_not_awaited()
+        whale.assert_not_awaited()
+
     async def test_cache_deduplicates_requests(self):
         cache = TTLCache()
         fetcher = AsyncMock(return_value={"ok": True})
@@ -143,7 +161,11 @@ class ExternalSourceTests(unittest.IsolatedAsyncioTestCase):
                 "bybit": {},
                 "gate_1h": [
                     {"open_interest": "200"},
-                    {"open_interest": "220", "long_liq_size": "7", "short_liq_size": "9"},
+                    {
+                        "open_interest": "220", "long_liq_size": "7", "short_liq_size": "9",
+                        "lsr_account": "1.20", "lsr_taker": "0.85",
+                        "top_lsr_account": "1.35", "top_lsr_size": "1.10",
+                    },
                 ],
                 "gate_4h": [
                     {"open_interest": "200"},
@@ -166,6 +188,48 @@ class ExternalSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["oi_4h"], 20.0)
         self.assertEqual(result["buy"], 30.0)
         self.assertAlmostEqual(result["short_liq"], 0.09)
+        self.assertEqual(result["long_short_ratio"]["accounts"], 1.2)
+        self.assertEqual(result["long_short_ratio"]["top_positions"], 1.1)
+        self.assertEqual(result["microstructure"]["liquidity_kind"], "VISIBLE_ORDERBOOK_LIQUIDITY")
+        self.assertFalse(result["microstructure"]["hidden_stops_claimed"])
+
+    def test_live_context_projects_ratios_cvd_and_sequence_verified_book(self):
+        context = empty_context("BTCUSDT")
+        futures = {
+            "source": "public_futures", "status": "fresh", "age_seconds": 1,
+            "normalized": {
+                "long_short_ratio": {"accounts": 1.2, "takers": 0.9},
+                "microstructure": {
+                    "source": "gate_rest", "status": "FRESH_REST_SNAPSHOT",
+                    "best_bid": 99, "best_ask": 101, "depth_imbalance": 0.1,
+                },
+            },
+        }
+        _apply_futures(context, futures)
+        self.assertEqual(context["long_short_ratio"]["accounts"], 1.2)
+        self.assertEqual(context["microstructure"]["source"], "gate_rest")
+
+        tape = {
+            "source": "live_market_tape", "status": "fresh", "age_seconds": 0,
+            "normalized": {
+                "buy_usd_60s": 300, "sell_usd_60s": 100,
+                "cvd_real_delta_usd_60s": 200, "trade_count_60s": 4,
+                "long_liq_usd_300s": None, "short_liq_usd_300s": None,
+                "sources": {"gate": {}},
+                "orderbook": {
+                    "source": "gate_ws", "freshness_status": "FRESH",
+                    "sequence_status": "FRESH", "depth_imbalance": 0.3,
+                    "heatmap_levels": [{"side": "BID", "price": 99, "size": 2}],
+                    "hidden_stops_claimed": False,
+                },
+            },
+        }
+        _apply_live_tape(context, tape)
+        self.assertEqual(context["live_tape"]["cvd_real_delta_usd_60s"], 200.0)
+        self.assertEqual(context["live_tape"]["trade_count_60s"], 4.0)
+        self.assertEqual(context["microstructure"]["source"], "gate_ws")
+        self.assertEqual(context["microstructure"]["depth_imbalance"], 0.3)
+        self.assertFalse(context["microstructure"]["execution_authority"])
 
     def test_scaled_derivative_symbols_are_explicit(self):
         self.assertEqual(_provider_symbol("PEPEUSDT"), "1000PEPEUSDT")

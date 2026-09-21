@@ -5,10 +5,11 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import json
 import logging
-import os
 import sqlite3
 import time
 from typing import Any
+from apex.config.settings import ApexConfig
+from apex.db.connection import connect_compatibility
 from core.data_policy import configured_market_data_providers
 from .budget import budget, request_scope
 from .models import number
@@ -21,7 +22,7 @@ except ImportError:  # pragma: no cover
     aiohttp = None
 
 SOURCE = "live_market_tape"
-_DB_PATH = os.environ.get("APEX_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"))
+_DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
 @dataclass
 class TapeEvent:
@@ -164,12 +165,16 @@ def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
         if recent_trades or recent_liq or (updated and now - updated <= 120):
             sources[provider] = {"buy_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "buy"), 2),
                 "sell_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "sell"), 2),
+                "trade_count_60s": len(recent_trades),
                 "long_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "long"), 2),
                 "short_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "short"), 2),
                 "age_seconds": int(max(0, now - (updated or max([r.timestamp for r in recent_trades + recent_liq] or [now])))),
                 **{key: latest.get(key) for key in ("bid", "ask", "oi", "funding")}}
     buy, sell = sum(v["buy_usd_60s"] for v in sources.values()), sum(v["sell_usd_60s"] for v in sources.values())
+    trade_count = sum(int(v.get("trade_count_60s") or 0) for v in sources.values())
     return {"symbol": symbol, "sources": sources, "buy_usd_60s": round(buy, 2), "sell_usd_60s": round(sell, 2),
+        "cvd_real_delta_usd_60s": round(buy - sell, 2) if trade_count else None,
+        "trade_count_60s": trade_count or None,
         "long_liq_usd_300s": round(sum(v["long_liq_usd_300s"] for v in sources.values()), 2),
         "short_liq_usd_300s": round(sum(v["short_liq_usd_300s"] for v in sources.values()), 2),
         "bias": "bullish" if buy > sell * 1.25 else "bearish" if sell > buy * 1.25 else "neutral" if buy + sell else "unknown",
@@ -195,7 +200,7 @@ def order_book_snapshot(symbol: str, now: float | None = None) -> dict[str, Any]
 
 def _persist_snapshot(data: dict[str, Any], db_path: str = _DB_PATH) -> None:
     try:
-        conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False); conn.execute("PRAGMA journal_mode=WAL")
+        conn = connect_compatibility(db_path, timeout=20)
         conn.execute("CREATE TABLE IF NOT EXISTS live_market_tape_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT NOT NULL,observed_at INTEGER NOT NULL,payload_json TEXT NOT NULL)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_live_tape_symbol_time ON live_market_tape_snapshots(symbol,observed_at)")
         conn.execute("INSERT INTO live_market_tape_snapshots(symbol,observed_at,payload_json) VALUES (?,?,?)", (data["symbol"], int(time.time()), json.dumps(data, separators=(",", ":"))))
@@ -204,7 +209,9 @@ def _persist_snapshot(data: dict[str, Any], db_path: str = _DB_PATH) -> None:
 
 async def collect(symbol: str) -> dict:
     data = snapshot(symbol)
-    if not data["sources"]: return {"source": SOURCE, "status": "warming_up", "symbol": symbol}
+    data["orderbook"] = order_book_snapshot(symbol)
+    if not data["sources"] and data["orderbook"].get("freshness_status") != "FRESH":
+        return {"source": SOURCE, "status": "warming_up", "symbol": symbol}
     if time.time() - _last_persist.get(symbol, 0) >= 60:
         _last_persist[symbol] = time.time(); await asyncio.to_thread(_persist_snapshot, data)
         gate = (data.get("sources") or {}).get("gate")
@@ -222,7 +229,7 @@ async def collect(symbol: str) -> dict:
                 "spread_bps": ((ask - bid) / mid * 10000) if mid and ask >= bid else None,
                 "buy_usd_60s": gate.get("buy_usd_60s"), "sell_usd_60s": gate.get("sell_usd_60s"),
                 "age_seconds": gate.get("age_seconds"), "venue_normalized": True,
-                "scope": "SHADOW_CONTEXT", "institutional_intent": False,
+                "scope": "LIVE_CONTEXT", "institutional_intent": False,
             }
             try:
                 from .storage import persist_gate_microstructure
@@ -246,7 +253,8 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
         try:
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=8, sock_read=70)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.ws_connect(url, heartbeat=25, autoping=True) as ws:
+                headers = {"X-Gate-Size-Decimal": "1"} if provider == "gate" else None
+                async with session.ws_connect(url, heartbeat=25, autoping=True, headers=headers) as ws:
                     for subscription in subscriptions: await ws.send_json(subscription)
                     backoff = 1
                     await asyncio.to_thread(budget.outcome, source)
@@ -286,8 +294,8 @@ async def start(symbols: list[str]) -> dict[str, Any]:
     if gate and "gate" in enabled:
         subs = [{"time": int(time.time()), "channel": channel, "event": "subscribe", "payload": gate} for channel in ("futures.trades", "futures.book_ticker", "futures.tickers")]
         requested_depth = {
-            item.strip().upper().replace("/", "")
-            for item in os.environ.get("APEX_GATE_DEPTH_SYMBOLS", "BTCUSDT").split(",") if item.strip()
+            item.replace("/", "")
+            for item in ApexConfig.from_env().integrations.gate_depth_symbols
         }
         depth_gate = [get_pair(s)["gate_symbol"] for s in _configured_symbols if s in requested_depth and get_pair(s).get("gate_supported")][:3]
         if depth_gate:

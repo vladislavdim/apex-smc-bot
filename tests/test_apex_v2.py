@@ -108,25 +108,20 @@ class ApexV2Tests(unittest.TestCase):
         self.assertEqual(dashboard_snapshot(self.db_path)["open_incidents"], [])
 
 
-class DashboardV2SourceTests(unittest.TestCase):
+class DashboardProductionSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         with open("stats_server.py", encoding="utf-8") as handle:
             cls.stats = handle.read()
-        with open("core/runtime_observability.py", encoding="utf-8") as handle:
-            cls.patch = handle.read()
 
-    def test_v2_sections_and_read_only_contract_exist(self):
-        for section in ("APEX V2 · System overview", "Portfolio & Risk", "Trade Manager 2.0", "Opportunity Review"):
-            self.assertIn(section, self.stats)
-        self.assertIn("Dashboard V2 только читает статистику", self.stats)
+    def test_v3_projection_and_read_only_contract_exist(self):
+        self.assertIn("V3_DASHBOARD_HTML", self.stats)
+        self.assertIn("Protected read-only APEX strategy statistics service", self.stats)
+        self.assertNotIn('p.path=="/api/research"', self.stats)
 
     def test_expired_pending_rows_are_excluded(self):
         self.assertIn("_not_expired", self.stats)
         self.assertIn("parsed > now_utc", self.stats)
-
-    def test_runtime_release_patch_keeps_v2_renderer(self):
-        self.assertIn("renderV2();renderFunnels()", self.patch)
 
     def test_rr_catalog_has_no_old_ceiling(self):
         with open("core/strategy_catalog.py", encoding="utf-8") as handle:
@@ -159,7 +154,7 @@ class DashboardV2SourceTests(unittest.TestCase):
              }},
         ]
         with patch.object(stats_server, "_fetch", return_value=events):
-            result = stats_server.build_dashboard(release=release)
+            result = stats_server._build_dashboard_uncached(release=release)
         self.assertEqual(result["ltf_watch"]["waiting"], 0)
         self.assertEqual(result["versions"]["apex_version"], "2.0")
         self.assertEqual(result["opportunity_review"]["counts"]["TARGET_ALREADY_PASSED"], 1)

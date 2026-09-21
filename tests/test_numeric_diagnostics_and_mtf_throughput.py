@@ -37,11 +37,11 @@ class NumericDiagnosticsAndMtfThroughputTests(unittest.TestCase):
         self.assertIn('"old_range_under_25"', MARKET)
         self.assertIn('"structural_box_under_25"', MARKET)
 
-    def test_strategy_lab_aggregates_numeric_metrics_and_shadow_comparison(self):
+    def test_dashboard_aggregates_live_numeric_observations_without_shadow(self):
         self.assertIn('"numeric_telemetry":numeric_telemetry', STATS)
-        self.assertIn('"wyckoff_shadow":wy_shadow', STATS)
-        self.assertIn('Numeric funnel diagnostics', STATS)
-        self.assertIn('structural-only', STATS)
+        self.assertIn('"wyckoff_observation":wy_observation', STATS)
+        self.assertIn('"wyckoff_accumulation_observation":wy_acc_observation', STATS)
+        self.assertNotIn('"wyckoff_shadow"', STATS)
 
 
 if __name__ == "__main__":

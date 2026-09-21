@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sqlite3
 import time
 from typing import Any
 
+from apex.config.settings import ApexConfig
+from apex.db.connection import connect_compatibility
 from core.data_policy import configured_market_data_providers
 from .http_client import http_client
 from .models import number
 
 SOURCE = "pair_registry"
-_DB_PATH = os.environ.get("APEX_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"))
+_DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 _SCALED = {name: f"1000{name}" for name in ("PEPEUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT", "SATSUSDT")}
 _snapshot: dict[str, dict[str, Any]] = {}
 _checked_at = 0.0
@@ -23,7 +24,7 @@ _lock = asyncio.Lock()
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or _DB_PATH, timeout=20, check_same_thread=False)
+    conn = connect_compatibility(db_path or _DB_PATH, timeout=20)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS external_pair_registry (
         apex_symbol TEXT PRIMARY KEY,
@@ -55,7 +56,7 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
 
 def _verified_contracts() -> dict[str, dict[str, str]]:
     try:
-        value = json.loads(os.environ.get("ASSET_CONTRACT_MAP_JSON", "{}"))
+        value = json.loads(ApexConfig.from_env().integrations.asset_contract_map_json)
         return value if isinstance(value, dict) else {}
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}

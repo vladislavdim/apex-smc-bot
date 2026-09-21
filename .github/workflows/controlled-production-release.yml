@@ -55,6 +55,7 @@ jobs:
       - name: Full release verification
         run: |
           set -euo pipefail
+          python scripts/verify_v3_completion.py
           python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
           python -m pytest -q
           python -m unittest discover -s tests -q

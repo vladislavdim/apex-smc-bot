@@ -1,30 +1,31 @@
-"""Optional, bounded positioning experiment. Never enters live Groq voting.
+"""Optional, bounded positioning context. Never becomes a strategy hard gate.
 
 Instrument IDs must be explicitly mapped from Coinalyze's future-markets
 catalog: a ticker alone does not identify exchange, multiplier or contract.
 """
 import asyncio
 import json
-import os
 import time
+from apex.config.settings import ApexConfig
 from .cache import cache
 from .http_client import http_client
 
-SOURCE = "coinalyze_shadow"
+SOURCE = "coinalyze"
 
 
 async def collect(symbol):
-    key = os.getenv("COINALYZE_API_KEY", "")
+    settings = ApexConfig.from_env().integrations
+    key = settings.coinalyze_api_key
     if not key:
-        return {"source": SOURCE, "status": "not_configured", "mode": "shadow"}
+        return {"source": SOURCE, "status": "not_configured", "mode": "LIVE_CONTEXT"}
     try:
-        mapping = json.loads(os.getenv("COINALYZE_SYMBOL_MAP_JSON", "{}"))
+        mapping = json.loads(settings.coinalyze_symbol_map_json)
         if not isinstance(mapping, dict) or not 1 <= len(mapping) <= 10:
             raise ValueError("maximum_ten_explicit_instruments")
         if any(not isinstance(k, str) or not isinstance(v, str) or not v or ',' in v for k,v in mapping.items()):
             raise ValueError("invalid_instrument_map")
         if symbol not in mapping:
-            return {"source": SOURCE, "status": "outside_shadow_universe", "mode": "shadow"}
+            return {"source": SOURCE, "status": "outside_live_context_universe", "mode": "LIVE_CONTEXT"}
         instruments = sorted(set(mapping.values()))
         async def fetch():
             # Sequential endpoints keep the batch under the 24-unit APEX minute cap.
@@ -49,7 +50,7 @@ async def collect(symbol):
                 raise ValueError('stale_or_invalid_source_data')
             rows[endpoint] = {'value': value, 'event_time': event_time}
         return {'source': SOURCE, 'symbol': symbol, 'instrument': mapping[symbol],
-                'status': status, 'age_seconds': age, 'mode': 'shadow', 'normalized': rows,
+                'status': status, 'age_seconds': age, 'mode': 'LIVE_CONTEXT', 'normalized': rows,
                 'provenance': 'Coinalyze exchange-specific contract; not institutional intent'}
     except Exception as exc:
-        return {'source': SOURCE, 'status': 'unavailable', 'mode': 'shadow', 'error': type(exc).__name__}
+        return {'source': SOURCE, 'status': 'unavailable', 'mode': 'LIVE_CONTEXT', 'error': type(exc).__name__}

@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from core import setup_audit
 
@@ -110,7 +110,8 @@ class SetupAuditTests(unittest.TestCase):
             })
         os.environ["APEX_STATS_INGEST_URL"] = "https://stats.invalid/ingest"
         os.environ["APEX_STATS_INGEST_TOKEN"] = "test-token"
-        with patch("requests.post", return_value=SimpleNamespace(status_code=200)) as post:
+        post = Mock(return_value=SimpleNamespace(status_code=200))
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(post=post)}):
             setup_audit._flush_unsynced(100)
         self.assertEqual(post.call_count, 1)
         self.assertEqual(len(post.call_args.kwargs["json"]), 3)
@@ -129,7 +130,8 @@ class SetupAuditTests(unittest.TestCase):
             })
         os.environ["APEX_STATS_INGEST_URL"] = "https://stats.invalid/ingest"
         os.environ["APEX_STATS_INGEST_TOKEN"] = "test-token"
-        with patch("requests.post", return_value=SimpleNamespace(status_code=200)) as post:
+        post = Mock(return_value=SimpleNamespace(status_code=200))
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(post=post)}):
             setup_audit._flush_unsynced(100)
         self.assertEqual(post.call_count, 3)
         self.assertEqual([len(call.kwargs["json"]) for call in post.call_args_list], [20, 20, 5])

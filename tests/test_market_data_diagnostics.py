@@ -37,7 +37,7 @@ def test_dashboard_aggregates_gate_and_ltf_lifecycle():
          "occurred_at": "2026-09-07T10:06:00+00:00", "payload": {"state": "WAITING", "required_timeframe": "15m", "reason": "waiting BOS", "attempts": 2}},
     ]
     with patch.object(stats_server, "_fetch", return_value=events):
-        data = stats_server.build_dashboard(days=1)
+        data = stats_server._build_dashboard_uncached(days=1)
     assert data["market_data"]["total"] == 1
     assert data["market_data"]["failed"] == 1
     assert data["market_data"]["rows"][0]["last_success_at"] == "2026-09-07T10:00:00+00:00"
@@ -61,20 +61,18 @@ def test_ltf_dashboard_deduplicates_by_setup_id_not_cycles():
         {**base, "event_key": "l2", "occurred_at": "2026-09-07T10:05:00+00:00", "payload": {"setup_id": "same", "state": "WAITING", "required_timeframe": "1h", "attempts": 2}},
     ]
     with patch.object(stats_server, "_fetch", return_value=events):
-        data = stats_server.build_dashboard(days=1)
+        data = stats_server._build_dashboard_uncached(days=1)
     assert data["ltf_watch"]["waiting"] == 1
     assert data["ltf_watch"]["rows"][0]["attempts"] == 2
 
 
 def test_rendered_dashboard_contains_operational_blocks():
-    from core import runtime_observability
-
-    rendered = runtime_observability._patch_stats_html(stats_server.HTML)
-    assert "Market Data / Gate" in rendered
-    assert "PENDING LTF lifecycle" in rendered
-    assert "Gate requests OK" in rendered
-    assert "Stale TF" in rendered
-    assert "SWING volume shadow" in rendered
+    rendered = stats_server.HTML
+    assert "APEX V3 · Production" in rendered
+    assert "Gate freshness" in rendered
+    assert "LIVE_CONTEXT" in rendered
+    assert "Статистика реальных сделок" in rendered
+    assert "Research" not in rendered
 
 
 def test_gate_adapter_error_is_exposed_to_health_telemetry():

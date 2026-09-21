@@ -5,21 +5,20 @@ treated as an exhausted API key.
 """
 from __future__ import annotations
 
-import os
+from apex.config.settings import ApexConfig
 
 
 # Groq's current developer-tier replacements for the retired Llama 3.x names.
 DEFAULT_GROQ_MODELS = ("openai/gpt-oss-20b", "openai/gpt-oss-120b")
 
 
-def configured_groq_models() -> tuple[str, ...]:
+def configured_groq_models(env=None) -> tuple[str, ...]:
     """Return a de-duplicated configured model list, with safe defaults."""
-    configured = []
-    for variable in ("GROQ_MODEL", "GROQ_FALLBACK_MODELS"):
-        configured.extend(
-            model.strip() for model in os.environ.get(variable, "").split(",")
-            if model.strip()
-        )
+    settings = ApexConfig.from_env(env).integrations
+    configured = [
+        model.strip() for model in settings.groq_model.split(",") if model.strip()
+    ]
+    configured.extend(settings.groq_fallback_models)
     configured.extend(DEFAULT_GROQ_MODELS)
     return tuple(dict.fromkeys(configured))
 

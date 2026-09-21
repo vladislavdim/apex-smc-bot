@@ -134,17 +134,29 @@ def _apply_futures(context: dict[str, Any], result: dict[str, Any]) -> None:
             **meta,
         })
 
+    ratios = data.get("long_short_ratio")
+    if isinstance(ratios, dict) and any(value is not None for value in ratios.values()):
+        _source_value(context["long_short_ratio"], result, dict(ratios))
+        context["long_short_ratio"].update({**ratios, **meta})
+
+    microstructure = data.get("microstructure")
+    if isinstance(microstructure, dict) and any(
+        microstructure.get(key) is not None for key in ("best_bid", "best_ask", "depth_imbalance")
+    ):
+        context["microstructure"].update(microstructure)
+        context["microstructure"]["age_seconds"] = _age(result)
+
     long_liq = number(data.get("long_liq"))
     short_liq = number(data.get("short_liq"))
     if long_liq is not None or short_liq is not None:
-        long_liq, short_liq = long_liq or 0.0, short_liq or 0.0
         _source_value(context["liquidations"], result, {"long_usd": long_liq, "short_usd": short_liq})
         context["liquidations"].update({
             "long_usd": long_liq,
             "short_usd": short_liq,
             "dominance": (
-                "long" if long_liq > short_liq
-                else "short" if short_liq > long_liq else "unknown"
+                "long" if long_liq is not None and short_liq is not None and long_liq > short_liq
+                else "short" if long_liq is not None and short_liq is not None and short_liq > long_liq
+                else "neutral" if long_liq is not None and short_liq is not None else "unknown"
             ),
             **meta,
         })
@@ -237,8 +249,12 @@ def _apply_live_tape(context: dict[str, Any], result: dict[str, Any]) -> None:
     if not _usable(result) or not isinstance(result.get("normalized"), dict): return
     data = result["normalized"]
     buy, sell = number(data.get("buy_usd_60s")), number(data.get("sell_usd_60s"))
-    long_liq, short_liq = number(data.get("long_liq_usd_300s")) or 0.0, number(data.get("short_liq_usd_300s")) or 0.0
-    context["live_tape"].update({"buy_usd_60s": buy or 0.0, "sell_usd_60s": sell or 0.0,
+    long_liq = number(data.get("long_liq_usd_300s"))
+    short_liq = number(data.get("short_liq_usd_300s"))
+    context["live_tape"].update({"source": result.get("source"),
+        "buy_usd_60s": buy, "sell_usd_60s": sell,
+        "cvd_real_delta_usd_60s": number(data.get("cvd_real_delta_usd_60s")),
+        "trade_count_60s": number(data.get("trade_count_60s")),
         "long_liq_usd_300s": long_liq, "short_liq_usd_300s": short_liq,
         "bias": _bias(buy, sell), "sources": sorted((data.get("sources") or {}).keys()),
         "source_values": data.get("sources") or {}, "age_seconds": _age(result), "status": result.get("status")})
@@ -248,10 +264,14 @@ def _apply_live_tape(context: dict[str, Any], result: dict[str, Any]) -> None:
             "bias": _bias(buy, sell), "method": "public_websocket_taker_flow_60s",
         })
         context["large_orders"].update({"buy_pressure": buy, "sell_pressure": sell, "bias": _bias(buy, sell), "method": "public_websocket_taker_flow_60s", **_metadata(result)})
-    if long_liq or short_liq:
+    if long_liq is not None or short_liq is not None:
         _source_value(context["liquidations"], result, {"long_usd": long_liq, "short_usd": short_liq})
         context["liquidations"].update({"long_usd": long_liq, "short_usd": short_liq,
-            "dominance": "long" if long_liq > short_liq else "short" if short_liq > long_liq else "unknown", **_metadata(result)})
+            "dominance": (
+                "long" if long_liq is not None and short_liq is not None and long_liq > short_liq
+                else "short" if long_liq is not None and short_liq is not None and short_liq > long_liq
+                else "neutral" if long_liq is not None and short_liq is not None else "unknown"
+            ), **_metadata(result)})
     sources = data.get("sources") or {}
     ois = [number(row.get("oi")) for row in sources.values() if isinstance(row, dict) and number(row.get("oi")) is not None]
     fundings = [number(row.get("funding")) for row in sources.values() if isinstance(row, dict) and number(row.get("funding")) is not None]
@@ -260,6 +280,15 @@ def _apply_live_tape(context: dict[str, Any], result: dict[str, Any]) -> None:
     if fundings:
         rate = sum(fundings) / len(fundings); _source_value(context["funding"], result, {"rate": rate})
         context["funding"].update({"rate": rate, "extreme": abs(rate) >= 0.001, "bias": "crowded_longs" if rate > 0 else "crowded_shorts" if rate < 0 else "neutral", **_metadata(result)})
+    book = data.get("orderbook")
+    if isinstance(book, dict) and book.get("freshness_status") == "FRESH":
+        # A sequence-verified WS book supersedes the REST snapshot. It remains
+        # visible liquidity only and has no strategy/execution authority.
+        context["microstructure"].update(book)
+        context["microstructure"].update({
+            "source": "gate_ws", "status": "FRESH",
+            "availability": "FORWARD_ONLY", "execution_authority": False,
+        })
 
 def _apply_onchain(context, result):
     if not _usable(result) or not isinstance(result.get("normalized"), dict): return
@@ -308,7 +337,7 @@ def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
                 continue
             limit = spec.freshness_seconds
             score = 1.0 if age is None or limit is None else max(0.0, 1.0 - float(age) / max(1, limit))
-            weight = 1.0 if spec.mode == "PRIMARY" else 0.5
+            weight = 1.0 if spec.mode == "PRIMARY_MARKET" else 0.5
             weighted += score * weight
             weight_total += weight
             freshness.append(score)
@@ -377,7 +406,12 @@ def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
     return context
 
 
-async def collect_external_context(symbol: str, direction: str | None = None) -> dict[str, Any]:
+async def collect_external_context(
+    symbol: str,
+    direction: str | None = None,
+    *,
+    strategy: str | None = None,
+) -> dict[str, Any]:
     symbol = (symbol or "").upper().replace("/", "")
     context = empty_context(symbol)
     await _bounded_collect("pair_registry", refresh_pair_registry([symbol]))
@@ -385,29 +419,30 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
     context["pair_coverage"] = {provider: {"supported": bool(pair.get(f"{provider}_supported")),
         "status": pair.get(f"{provider}_status", "unverified"), "symbol": pair.get(f"{provider}_symbol")}
         for provider in ("gate", "binance", "bybit", "hyperliquid")}
-    hyperliquid_result = (
-        _bounded_collect(hyperliquid.SOURCE, hyperliquid.collect(symbol))
-        if provider_enabled("hyperliquid")
-        else asyncio.sleep(0, result={
-            "source": hyperliquid.SOURCE,
-            "status": "disabled",
-            "symbol": symbol,
-        })
-    )
-    raw_results = await asyncio.gather(
-        _bounded_collect(exchange_fallback.SOURCE, exchange_fallback.collect(symbol)),
-        _bounded_collect(crypto_monitor.SOURCE, crypto_monitor.collect(symbol)),
-        _bounded_collect(whale_tracker.SOURCE, whale_tracker.collect(symbol)),
-        _bounded_collect(smart_money.SOURCE, smart_money.collect(symbol)),
-        hyperliquid_result,
-        _bounded_collect(live_tape.SOURCE, live_tape.collect(symbol)),
-        _bounded_collect(btc_mempool.SOURCE, btc_mempool.collect(symbol)),
-        _bounded_collect(oli.SOURCE, oli.collect(symbol)),
-        _bounded_collect(defillama.SOURCE, defillama.collect(symbol)),
-        _bounded_collect(deribit_options.SOURCE, deribit_options.collect(symbol)),
-        _bounded_collect(coinmetrics.SOURCE, coinmetrics.collect(symbol)),
-        _bounded_collect(dex_liquidity.SOURCE, dex_liquidity.collect(symbol)),
-    )
+    strategy_key = str(strategy or "").upper()
+    collectors = [
+        (exchange_fallback.SOURCE, exchange_fallback.collect(symbol)),
+        (live_tape.SOURCE, live_tape.collect(symbol)),
+    ]
+    if not strategy_key or strategy_key in {"FAST", "ZONE"}:
+        collectors.append((crypto_monitor.SOURCE, crypto_monitor.collect(symbol)))
+    if not strategy_key:
+        collectors.extend((
+            (whale_tracker.SOURCE, whale_tracker.collect(symbol)),
+            (smart_money.SOURCE, smart_money.collect(symbol)),
+            (btc_mempool.SOURCE, btc_mempool.collect(symbol)),
+            (oli.SOURCE, oli.collect(symbol)),
+            (defillama.SOURCE, defillama.collect(symbol)),
+            (coinmetrics.SOURCE, coinmetrics.collect(symbol)),
+            (dex_liquidity.SOURCE, dex_liquidity.collect(symbol)),
+        ))
+    if not strategy_key or strategy_key in {"SWING", "WYCKOFF"}:
+        collectors.append((deribit_options.SOURCE, deribit_options.collect(symbol)))
+    if provider_enabled("hyperliquid") and not strategy_key:
+        collectors.append((hyperliquid.SOURCE, hyperliquid.collect(symbol)))
+    raw_results = await asyncio.gather(*(
+        _bounded_collect(source, awaitable) for source, awaitable in collectors
+    ))
     normalized_results: list[dict[str, Any]] = []
     for raw in raw_results:
         if isinstance(raw, Exception):
@@ -449,14 +484,16 @@ async def collect_external_context(symbol: str, direction: str | None = None) ->
         elif source == dex_liquidity.SOURCE:
             _apply_nondirectional_context(context, result, "dex_liquidity")
 
-    # New sources stay outside normalized live fields and the Groq prompt.
-    shadow = await _bounded_collect(coinalyze.SOURCE, coinalyze.collect(symbol))
-    if shadow.get("status") != "not_configured":
+    # Optional derivatives remain LIVE_CONTEXT: persisted and visible, but not
+    # promoted into deterministic strategy fields or hard gates here.
+    live_context = await _bounded_collect(coinalyze.SOURCE, coinalyze.collect(symbol))
+    if live_context.get("status") != "not_configured":
         try:
-            from .storage import persist_shadow_source
-            await asyncio.to_thread(persist_shadow_source, {**shadow, "symbol": symbol})
+            from .storage import persist_live_context_source
+            await asyncio.to_thread(persist_live_context_source, {**live_context, "symbol": symbol})
         except Exception:
             pass
+        normalized_results.append(live_context)
     context["_source_results"] = normalized_results
     return _finish(context, direction)
 
@@ -475,12 +512,16 @@ def format_external_context(context: dict[str, Any], strategy: str | None = None
         "EXTERNAL MARKET CONTEXT:",
         _line("Open Interest", context["open_interest"], ("value", "change_1h_pct", "change_4h_pct", "trend")),
         _line("Funding", context["funding"], ("rate", "extreme", "bias")),
+        _line("Long/Short Ratio", context["long_short_ratio"], (
+            "accounts", "takers", "top_accounts", "top_positions",
+        )),
         _line("Liquidations", context["liquidations"], ("long_usd", "short_usd", "dominance")),
         _line("Large Orders", context["large_orders"], ("buy_pressure", "sell_pressure", "bias", "method")),
         _line("Exchange Flow", context["exchange_flow"], ("inflow_usd", "outflow_usd", "bias")),
         _line("Whale Activity", context["whale_activity"], ("buy_usd", "sell_usd", "bias", "confidence")),
         _line("Smart Money", context["smart_money"], ("buy_usd", "sell_usd", "bias", "confidence", "method")),
         _line("Live Market Tape", context["live_tape"], ("buy_usd_60s", "sell_usd_60s", "long_liq_usd_300s", "short_liq_usd_300s", "bias")),
+        f"- Visible order-book liquidity: {context['microstructure']}",
         f"- On-chain Activity: {context['onchain_activity']}",
         f"- Slow Regime (DefiLlama): {context['slow_regime']}",
         _line("Options (Deribit)", context.get("options_context", {}), (

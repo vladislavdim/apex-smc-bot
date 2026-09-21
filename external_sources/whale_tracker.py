@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from apex.config.settings import ApexConfig
 from .cache import cache
 from .http_client import http_client
 
@@ -18,10 +18,11 @@ def ethereum_assets() -> set[str]:
 async def collect(symbol: str) -> dict:
     if symbol not in ethereum_assets():
         return {"source": SOURCE, "status": "unsupported_pair", "symbol": symbol}
-    base = os.getenv("WHALE_TRACKER_API_URL", "").rstrip("/")
+    settings = ApexConfig.from_env().integrations
+    base = settings.whale_tracker_api_url
     if not base:
         return {"source": SOURCE, "status": "not_configured", "symbol": symbol}
-    key = os.getenv("WHALE_TRACKER_API_KEY")
+    key = settings.whale_tracker_api_key
     headers = {"X-API-Key": key} if key else None
     async def fetch():
         # Upstream FastAPI names the filter `token`, not `symbol`.

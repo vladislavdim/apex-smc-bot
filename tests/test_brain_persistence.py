@@ -86,6 +86,28 @@ class _TransientValidationSession(_GitHubSession):
         return super().put(_url, headers=headers, json=json, timeout=timeout)
 
 
+class _MissingGitHubSession:
+    def __init__(self):
+        self.content = b""
+        self.sha = ""
+        self.puts = []
+
+    def get(self, _url, *, params, headers, timeout):
+        del params, headers, timeout
+        if not self.sha:
+            return _Response(status_code=404)
+        return _Response(payload={"sha": self.sha, "size": len(self.content)})
+
+    def put(self, _url, *, headers, json, timeout):
+        del headers, timeout
+        self.puts.append(json)
+        if "sha" in json:
+            return _Response(status_code=409)
+        self.content = base64.b64decode(json["content"])
+        self.sha = hashlib.sha1(self.content).hexdigest()
+        return _Response(status_code=201, payload={"content": {"sha": self.sha}})
+
+
 def _make_db(path, knowledge_rows=1):
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -147,6 +169,29 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertTrue(result["ready"])
         with sqlite3.connect(self.local) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0], 3)
+
+    def test_named_database_initializes_only_when_remote_is_proven_missing(self):
+        _make_db(self.local, knowledge_rows=1)
+        session = _MissingGitHubSession()
+        manager = BrainPersistence(
+            self.local, "owner/repository", "token", session=session,
+            remote_name="apex_state.db",
+        )
+        missing = manager.restore()
+        initialized = manager.initialize("first_v3_state")
+
+        self.assertEqual(missing["reason"], "REMOTE_MISSING")
+        self.assertTrue(initialized["ready"])
+        self.assertTrue(manager.contents_url.endswith("/apex_state.db"))
+        self.assertNotIn("sha", session.puts[0])
+        self.assertEqual(manager.initialize()["status"], "remote_exists")
+
+    def test_invalid_remote_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BrainPersistence(
+                self.local, "owner/repository", "token",
+                session=_MissingGitHubSession(), remote_name="../state.db",
+            )
 
     def test_invalid_remote_never_replaces_or_uploads_local_database(self):
         _make_db(self.local, knowledge_rows=7)
@@ -321,9 +366,15 @@ class BrainPersistenceTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
             bot_source = source.read()
-        self.assertEqual(bot_source.count('kwargs={"reason": "safety_30m"}'), 2)
-        self.assertGreaterEqual(bot_source.count('backup_db_to_github("render_sigterm")'), 2)
-        self.assertIn('backup_db_to_github("experience_transition")', bot_source)
+        self.assertIn('state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m")', bot_source)
+        self.assertEqual(bot_source.count('_v3_maintenance_and_backup("render_sigterm")'), 1)
+        with open(os.path.join(root, "apex/app/bootstrap.py"), encoding="utf-8") as source:
+            bootstrap_source = source.read()
+        self.assertIn('shutdown=_shutdown_production_runtime', bot_source)
+        self.assertIn('await deps.shutdown("polling_shutdown")', bootstrap_source)
+        self.assertIn('remote_name="apex_state.db"', bot_source)
+        self.assertIn('remote_name="apex_memory.db"', bot_source)
+        self.assertIn("backup_memory_db_to_github(reason)", bot_source)
         self.assertNotIn("github_size > local_size * 2", bot_source)
 
 

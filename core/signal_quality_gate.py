@@ -6,12 +6,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import re
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from typing import Any, Callable
+from apex.config.settings import ApexConfig
 
-from external_sources.aggregator import collect_external_context, format_external_context
+from external_sources.aggregator import collect_external_context
 from external_sources.models import empty_context
 from external_sources.storage import persist_context
 from news_context.aggregator import collect_news_context, format_news_context
@@ -19,21 +20,19 @@ from news_context.storage import persist_news_context
 from core.htf_close_context import build_htf_close_context, format_htf_close_context
 from core.setup_evidence import assess_candidate, persist_assessment
 from core.setup_audit import emit_groq_review_event as _emit_setup_audit_groq
+from apex.quality.context_relevance import relevant_external_context
+from apex.quality.groq_schema import parse_review, wait_review
+from apex.market.context_memory import persist_live_context
+from apex.market.universe import universe_context_store
+from apex.strategies.specifications import specification_for
 
 try:
-    from .market_memory import build_memory_context, format_market_memory_context
     from .historical_zones import build_zone_context, format_zone_context
-    from .outcome_learning import build_learning_context, format_learning_context
 except ImportError:  # market.py also supports loading core/ as a direct module path
-    from market_memory import build_memory_context, format_market_memory_context
     from historical_zones import build_zone_context, format_zone_context
-    from outcome_learning import build_learning_context, format_learning_context
 
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db")
-_VALID_DECISIONS = {"APPROVE", "WAIT", "REJECT"}
-
-
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 def _candidate_view(candidate: dict[str, Any]) -> dict[str, Any]:
     """Whitelist fields; AI must not receive or mutate the Telegram message."""
     evidence = candidate.get("technical_evidence")
@@ -59,6 +58,7 @@ def _candidate_view(candidate: dict[str, Any]) -> dict[str, Any]:
         "confluence_score": candidate.get("confluence_score") or candidate.get("score"),
         "regime": candidate.get("regime"),
         "technical_evidence": evidence,
+        "strategy_check_journal": candidate.get("_v3_strategy_trace"),
     }
 
 
@@ -77,30 +77,22 @@ def _extract_json(raw: str | None) -> dict[str, Any] | None:
 
 
 def _normalize_review(data: dict[str, Any] | None, raw: str | None) -> dict[str, Any]:
-    if not data:
-        return {
-            "decision": "WAIT",
-            "confidence": 0.0,
-            "reasons": ["Groq review unavailable; final confirmation required"],
-            "risks": [],
-            "degraded": True,
-            "raw": raw or "",
-        }
-    decision = str(data.get("decision", "WAIT")).upper()
-    if decision not in _VALID_DECISIONS:
-        decision = "WAIT"
-    try:
-        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    reasons = data.get("reasons") if isinstance(data.get("reasons"), list) else []
-    risks = data.get("risks") if isinstance(data.get("risks"), list) else []
+    parsed = parse_review(data) if data is not None else wait_review("GROQ_UNAVAILABLE")
+    degraded = parsed.reason_codes in {("GROQ_BAD_SCHEMA",), ("GROQ_UNAVAILABLE",)}
+    reasons = list(parsed.reason_codes)
+    if parsed.short_summary:
+        reasons.append(parsed.short_summary)
     return {
-        "decision": decision,
-        "confidence": confidence,
-        "reasons": [str(item)[:300] for item in reasons[:5]],
-        "risks": [str(item)[:300] for item in risks[:5]],
-        "degraded": False,
+        "decision": parsed.decision.value,
+        "confidence": parsed.confidence,
+        "reason_codes": list(parsed.reason_codes),
+        "short_summary": parsed.short_summary,
+        # Compatibility projection for the existing audit, Telegram and DB
+        # boundaries. Decisions are derived exclusively from the strict V3
+        # schema above; these aliases carry no authority.
+        "reasons": [str(item)[:300] for item in reasons[:6]],
+        "risks": [],
+        "degraded": degraded,
         "raw": raw or "",
     }
 
@@ -109,13 +101,11 @@ def _persist_review(
     candidate: dict[str, Any],
     context: dict[str, Any],
     news: dict[str, Any],
-    memory: dict[str, Any],
     zones: dict[str, Any],
-    learning: dict[str, Any],
     review: dict[str, Any],
 ) -> None:
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
+        conn = _connect_compatibility_db(DB_PATH, timeout=20, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS ai_signal_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,25 +116,25 @@ def _persist_review(
             timeframe TEXT,
             decision TEXT,
             confidence REAL,
+            reason_codes_json TEXT,
+            short_summary TEXT,
             reasons_json TEXT,
             risks_json TEXT,
             context_json TEXT,
             news_context_json TEXT,
-            market_memory_json TEXT,
             historical_zones_json TEXT,
-            closed_loop_json TEXT,
             degraded INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_signal_reviews)")}
         if "news_context_json" not in columns:
             conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN news_context_json TEXT")
-        if "market_memory_json" not in columns:
-            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN market_memory_json TEXT")
         if "historical_zones_json" not in columns:
             conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN historical_zones_json TEXT")
-        if "closed_loop_json" not in columns:
-            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN closed_loop_json TEXT")
+        if "reason_codes_json" not in columns:
+            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN reason_codes_json TEXT")
+        if "short_summary" not in columns:
+            conn.execute("ALTER TABLE ai_signal_reviews ADD COLUMN short_summary TEXT")
         view = _candidate_view(candidate)
         candidate_key = hashlib.sha256(
             json.dumps(view, sort_keys=True, default=str).encode("utf-8")
@@ -152,8 +142,8 @@ def _persist_review(
         conn.execute(
             """INSERT INTO ai_signal_reviews
                (candidate_key, symbol, strategy, direction, timeframe, decision,
-                confidence, reasons_json, risks_json, context_json, news_context_json,
-                market_memory_json, historical_zones_json, closed_loop_json, degraded)
+                confidence, reason_codes_json, short_summary, reasons_json, risks_json,
+                context_json, news_context_json, historical_zones_json, degraded)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 candidate_key,
@@ -163,13 +153,13 @@ def _persist_review(
                 view.get("timeframe"),
                 review.get("decision"),
                 review.get("confidence", 0.0),
+                json.dumps(review.get("reason_codes", []), ensure_ascii=False),
+                str(review.get("short_summary") or "")[:500],
                 json.dumps(review.get("reasons", []), ensure_ascii=False),
                 json.dumps(review.get("risks", []), ensure_ascii=False),
                 json.dumps(context, ensure_ascii=False, default=str),
                 json.dumps(news, ensure_ascii=False, default=str),
-                json.dumps(memory, ensure_ascii=False, default=str),
                 json.dumps(zones, ensure_ascii=False, default=str),
-                json.dumps(learning, ensure_ascii=False, default=str),
                 int(bool(review.get("degraded"))),
             ),
         )
@@ -191,7 +181,10 @@ async def review_signal_candidate(
     """
     view = _candidate_view(candidate)
     context_result, news_result = await asyncio.gather(
-        collect_external_context(str(candidate.get("symbol", "")), str(view.get("direction", ""))),
+        collect_external_context(
+            str(candidate.get("symbol", "")), str(view.get("direction", "")),
+            strategy=str(view.get("strategy") or ""),
+        ),
         collect_news_context(str(candidate.get("symbol", ""))),
         return_exceptions=True,
     )
@@ -207,24 +200,28 @@ async def review_signal_candidate(
         "data_quality": {"available_sources": [], "failed_sources": [type(news_result).__name__]},
     }
     strategy = str(view.get("strategy") or "").upper()
-    memory = await asyncio.to_thread(
-        build_memory_context,
-        str(view.get("symbol") or ""), strategy,
-        str(view.get("direction") or ""), str(view.get("timeframe") or ""),
-    )
     zones = await asyncio.to_thread(build_zone_context, str(view.get("symbol") or ""), view.get("entry"), str(view.get("timeframe") or ""))
-    evidence_candidate = dict(candidate)
-    evidence_candidate["_external_quality_review"] = {"context": context, "news_context": news, "historical_zones": zones}
-    learning = await asyncio.to_thread(build_learning_context, evidence_candidate)
     htf_close = await asyncio.to_thread(
         build_htf_close_context, str(view.get("symbol") or ""), strategy, candle_loader
     )
     setup_assessment = assess_candidate(candidate, context)
-    external_block = format_external_context(context, strategy)
+    try:
+        specification = specification_for(strategy)
+        universe_timeframes = tuple(dict.fromkeys((
+            specification.working_timeframe, *specification.context_timeframes,
+        )))
+    except (KeyError, ValueError):
+        universe_timeframes = (str(view.get("timeframe") or "1h"),)
+    market_context = universe_context_store.view(
+        str(view.get("symbol") or ""), universe_timeframes,
+    )
+    context_for_groq = relevant_external_context(strategy, context, market_context)
+    external_block = (
+        "RELEVANT LIVE CONTEXT (selected by Strategy Data Contract; never a hard gate):\n"
+        + json.dumps(context_for_groq, ensure_ascii=False, default=str)
+    )
     news_block = format_news_context(news)
-    memory_block = format_market_memory_context(memory)
     zone_block = format_zone_context(zones)
-    learning_block = format_learning_context(learning)
     htf_close_block = format_htf_close_context(htf_close)
     prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
 
@@ -233,18 +230,13 @@ You MUST NOT recalculate, edit or propose replacements for those values.
 Evaluate the technical evidence, external positioning and fresh news risk together.
 Use external/news data as contextual evidence, not as an independent signal.
 Missing providers alone are not a reason to reject. A material conflict must result
-in valid=false and decision=REJECT or WAIT. A scheduled critical release is volatility
+in decision=REJECT or WAIT. A scheduled critical release is volatility
 risk, never proof of direction. Prefer WAIT during a high-risk release window unless
 the supplied evidence specifically justifies approval. Never invent forecast or actual values.
 Do not treat Ethereum-wide data as pair-specific evidence for another chain.
 Historical zones describe prior reactions only and MUST NOT replace the already
-calculated entry, SL or TP. Closed-loop evidence is statistical context, not
-permission to invent a new strategy. Do not propose or activate a new strategy
-unless new_strategy_research_ready=true.
-Validated experience rules inside technical_evidence are out-of-sample observations.
-An ACTIVE or PROBATION AVOID rule that directly matches this strategy and regime may
-reduce confidence or justify WAIT; a CONFIRM rule may support existing evidence but
-can never approve a candidate by itself. These rules MUST NOT alter any price level.
+calculated entry, SL or TP. Live Learning is deliberately downstream of execution
+and is never included in this entry decision.
 Weekly/monthly closed-candle context is background HTF evidence only. It may adjust
 confidence or be listed as a risk, but a conflicting weekly/monthly candle alone is
 NOT sufficient to WAIT or REJECT an otherwise valid candidate.
@@ -262,21 +254,16 @@ SETUP EVIDENCE (deterministic, read-only levels):
 
 {news_block}
 
-{memory_block}
-
 {zone_block}
-
-{learning_block}
 
 {htf_close_block}
 
 Return JSON only:
 {{
-  "valid": true,
   "decision": "APPROVE|WAIT|REJECT",
   "confidence": 0.0,
-  "reasons": ["specific evidence"],
-  "risks": ["specific risk"]
+  "reason_codes": ["MACHINE_READABLE_REASON"],
+  "short_summary": "brief evidence-based summary"
 }}"""
 
     try:
@@ -289,7 +276,8 @@ Return JSON only:
         raw = None
 
     parsed = _extract_json(raw)
-    if raw is not None and parsed is None:
+    strict_review = parse_review(parsed) if parsed is not None else wait_review("GROQ_BAD_SCHEMA")
+    if raw is not None and strict_review.reason_codes == ("GROQ_BAD_SCHEMA",):
         # The provider answered but the final text was not valid JSON. Retry once
         # with a compact immutable candidate/assessment contract. This retry is
         # format recovery only; it cannot alter APEX-calculated trade levels.
@@ -317,11 +305,10 @@ SETUP EVIDENCE:
 
 Return JSON only, with no markdown or commentary:
 {{
-  \"valid\": true,
   \"decision\": \"APPROVE|WAIT|REJECT\",
   \"confidence\": 0.0,
-  \"reasons\": [\"specific evidence\"],
-  \"risks\": [\"specific risk\"]
+  \"reason_codes\": [\"MACHINE_READABLE_REASON\"],
+  \"short_summary\": \"brief evidence-based summary\"
 }}"""
         try:
             retry_raw = await asyncio.wait_for(
@@ -329,7 +316,8 @@ Return JSON only, with no markdown or commentary:
                 timeout=35,
             )
             retry_parsed = _extract_json(retry_raw)
-            if retry_parsed is not None:
+            retry_review = parse_review(retry_parsed) if retry_parsed is not None else wait_review("GROQ_BAD_SCHEMA")
+            if retry_review.reason_codes != ("GROQ_BAD_SCHEMA",):
                 raw = retry_raw
                 parsed = retry_parsed
                 logging.info("[SignalQualityGate] recovered malformed Groq review with compact JSON retry")
@@ -339,32 +327,34 @@ Return JSON only, with no markdown or commentary:
             logging.warning("[SignalQualityGate] compact Groq retry unavailable: %s", exc)
 
     review = _normalize_review(parsed, raw)
-    if parsed and parsed.get("valid") is False and review["decision"] == "APPROVE":
-        review["decision"] = "REJECT"
-    try:
-        min_confidence = float(os.environ.get("GROQ_MIN_APPROVAL_CONFIDENCE", "0.65"))
-    except ValueError:
-        min_confidence = 0.65
-    min_confidence = max(0.0, min(1.0, min_confidence))
+    min_confidence = ApexConfig.from_env().integrations.groq_min_approval_confidence
     if not review["degraded"] and review["decision"] == "APPROVE" and review["confidence"] < min_confidence:
         review["decision"] = "WAIT"
-        review["risks"].append(f"Groq approval confidence below {min_confidence:.2f}")
+        review["reason_codes"].append("GROQ_CONFIDENCE_BELOW_MIN")
+        review["reasons"].append(f"Groq approval confidence below {min_confidence:.2f}")
     matrix_ready = bool((candidate.get("technical_evidence") or {}).get("causal_matrix_ready"))
     if matrix_ready and setup_assessment.get("state") == "INVALID":
         review["decision"] = "REJECT"
+        review["reason_codes"].append("SETUP_EVIDENCE_INVALID")
         review["reasons"].append("Deterministic setup evidence: INVALID")
     elif matrix_ready and setup_assessment.get("state") == "DEVELOPING":
         review["decision"] = "WAIT"
+        review["reason_codes"].append("SETUP_EVIDENCE_DEVELOPING")
         review["reasons"].append("Deterministic setup evidence: causal chain is still DEVELOPING")
     review["setup_assessment"] = setup_assessment
     review["context"] = context
+    review["relevant_context"] = context_for_groq
+    review["market_context"] = market_context
     review["news_context"] = news
-    review["market_memory"] = memory
     review["historical_zones"] = zones
-    review["closed_loop_learning"] = learning
     await asyncio.to_thread(persist_context, context, strategy, True, review.get("decision"))
+    try:
+        await asyncio.to_thread(persist_live_context, context)
+    except Exception as exc:
+        # Optional analytical memory can degrade without changing the candidate.
+        logging.warning("[SignalQualityGate] V3 context persistence failed safely: %s", exc)
     await asyncio.to_thread(persist_news_context, news, strategy, review.get("decision"))
-    await asyncio.to_thread(_persist_review, candidate, context, news, memory, zones, learning, review)
+    await asyncio.to_thread(_persist_review, candidate, context, news, zones, review)
     await asyncio.to_thread(_emit_setup_audit_groq, candidate, review)
     try:
         from core.groq_calibration import record_prediction

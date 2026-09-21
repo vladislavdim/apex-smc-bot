@@ -17,6 +17,13 @@ from core.trade_execution import (
     reconcile_live_executions,
 )
 from core import trade_execution
+from apex.db.state_db import migrate_state
+from apex.db.execution_recovery import recovery_path, replay_recovery
+from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
+from apex.db.repositories.manager import ManagerRepository
+from apex.db.repositories.executions import ExecutionRepository
+from apex.domain.ids import derived_id
+from apex.execution.plan import client_order_ids
 
 
 CANDIDATE = {
@@ -114,6 +121,13 @@ class FakeClient:
             "executedQty": "0.980" if self.entry_status == "FILLED" else "0",
         }
 
+    def query_order_by_client_id(self, symbol, client_id):
+        self.calls.append(("query_client", symbol, client_id))
+        return {
+            "orderId": "entry-recovered", "status": self.entry_status,
+            "executedQty": "0.980" if self.entry_status == "FILLED" else "0",
+        }
+
     def cancel_order(self, symbol, order_id):
         self.calls.append(("cancel", symbol, order_id))
         return {"status": "CANCELED"}
@@ -137,7 +151,7 @@ class FakeClient:
 
     def emergency_close(self, symbol, direction, quantity, client_id):
         self.calls.append(("emergency", symbol, direction, quantity, client_id))
-        return {"orderId": "exit-1"}
+        return {"orderId": "exit-1", "status": "FILLED", "executedQty": quantity}
 
 
 class RecordingResponse:
@@ -175,6 +189,11 @@ class RecordingSession:
             ])
         if url.endswith("/fapi/v1/algoOrder") and method == "POST":
             return RecordingResponse({"algoId": 42, "algoStatus": "NEW"})
+        if url.endswith("/fapi/v1/order") and method == "POST":
+            quantity = kwargs.get("params", {}).get("quantity", "0")
+            return RecordingResponse({
+                "orderId": 43, "status": "FILLED", "executedQty": quantity,
+            })
         return RecordingResponse({})
 
 
@@ -184,9 +203,572 @@ class TradeExecutionTests(unittest.TestCase):
         self.db_path = os.path.join(self.tmp.name, "brain.db")
         trade_execution._binance_blocked_until = 0.0
         trade_execution._shared_symbol_rules_cache.clear()
+        trade_execution.configure_execution_state(None)
 
     def tearDown(self):
+        trade_execution.configure_execution_state(None)
         self.tmp.cleanup()
+
+    def test_balance_cache_can_be_owned_by_state_db_without_legacy_write(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory()
+        migrate_state(conn)
+        conn.close()
+        trade_execution.configure_execution_state(factory)
+        trade_execution._store_balance_attempt(
+            self.db_path,
+            attempted_at=123.0,
+            balance={
+                "wallet_balance": 50,
+                "available_balance": 45,
+                "cross_unrealized_pnl": -1,
+            },
+        )
+        cached = trade_execution._read_balance_cache(self.db_path, now=130.0)
+        self.assertEqual(cached["wallet_balance"], 50.0)
+        self.assertEqual(cached["cache_age_seconds"], 7)
+        self.assertFalse(os.path.exists(self.db_path))
+
+    def test_execution_status_reads_state_without_creating_legacy_db(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        ExecutionRepository(factory).register({
+            "signal_id": 502, "mode": "live", "symbol": "ETHUSDT",
+            "direction": "LONG", "status": "PROTECTED", "entry": 100,
+            "sl": 95, "tp1": 110, "tp2": 115, "quantity": 0.5,
+            "entry_order_id": "entry-502", "stop_order_id": "stop-502",
+        })
+
+        status = execution_status(self.db_path, config=live_config())
+
+        self.assertEqual(status["counts"], {"PROTECTED": 1})
+        self.assertEqual(status["live_active_count"], 1)
+        self.assertFalse(os.path.exists(self.db_path))
+
+    def test_execution_recovery_and_manager_action_converge_in_state(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory()
+        migrate_state(conn)
+        conn.close()
+        trade_execution.configure_execution_state(factory)
+
+        trade_execution._store_execution(
+            self.db_path, 501, live_config(), CANDIDATE, "ENTRY_PENDING",
+            {
+                "entry": "100", "sl": "95", "tp1": "110", "tp2": "115",
+                "quantity": "0.25", "risk_budget": 5.0,
+                "available_balance": 1000.0, "leverage": 5,
+            },
+            entry_order_id="entry-501",
+        )
+        trade_execution._update_execution(
+            self.db_path, 501, "PROTECTED",
+            stop_order_id="stop-501", active_stop_price=95.0,
+        )
+        self.assertTrue(trade_execution._claim_manager_action(
+            self.db_path, "action-501", 501, "PROTECT", 98.0,
+        ))
+        trade_execution._finish_manager_action(
+            self.db_path, "action-501", "EXECUTED", order_id="stop-502",
+        )
+
+        state = factory()
+        execution = state.execute(
+            "SELECT status,entry_order_id,stop_order_id,active_stop_price FROM executions WHERE signal_id=501"
+        ).fetchone()
+        action = state.execute(
+            "SELECT status,exchange_order_id FROM execution_actions WHERE action_key='action-501'"
+        ).fetchone()
+        state.close()
+        self.assertEqual(execution, ("PROTECTED", "entry-501", "stop-501", 95.0))
+        self.assertEqual(action, ("EXECUTED", "stop-502"))
+        self.assertFalse(os.path.exists(self.db_path))
+        cached = trade_execution.cached_execution_snapshot(501, self.db_path)
+        self.assertEqual(cached["status"], "PROTECTED")
+        self.assertEqual(cached["stop_order_id"], "stop-501")
+        status = execution_status(self.db_path, config=live_config())
+        self.assertEqual(status["counts"].get("PROTECTED"), 1)
+        self.assertNotIn("ERROR", status["counts"])
+        self.assertEqual(status["live_active_count"], 1)
+
+    def test_live_entry_persists_state_intent_before_binance_submission(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+        candidate_id = derived_id("candidate", "test", 508)
+        execution_id = derived_id("execution", candidate_id)
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+
+        class InspectingClient(FakeClient):
+            def place_limit_entry(client_self, plan, client_id):
+                intent = ExecutionRepository(factory).get(508)
+                self.assertIsNotNone(intent)
+                self.assertEqual(intent["status"], "SUBMITTING")
+                self.assertTrue(intent["plan_hash"])
+                self.assertEqual(intent["candidate_id"], candidate_id)
+                self.assertEqual(intent["execution_id"], execution_id)
+                self.assertEqual(client_id, client_order_ids(execution_id)["entry"])
+                return super().place_limit_entry(plan, client_id)
+
+        result = execute_approved_candidate(
+            {**CANDIDATE, "_v3_candidate_id": candidate_id}, 508,
+            db_path=self.db_path,
+            config=live_config(), client=InspectingClient(entry_status="NEW"),
+        )
+        self.assertEqual(result["status"], "ENTRY_PENDING")
+        persisted = ExecutionRepository(factory).get(508)
+        self.assertEqual(persisted["status"], "ENTRY_PENDING")
+        self.assertEqual(persisted["execution_id"], execution_id)
+
+    def test_submitting_intent_recovers_by_typed_execution_client_order_id(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        candidate_id = derived_id("candidate", "test", 511)
+        execution_id = derived_id("execution", candidate_id)
+        repository = ExecutionRepository(factory)
+        repository.register({
+            "signal_id": 511, "execution_id": execution_id,
+            "candidate_id": candidate_id, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "BULLISH", "status": "SUBMITTING",
+            "entry": 100, "sl": 95, "tp1": 110, "tp2": 115,
+            "quantity": 0.98,
+        })
+        SignalLifecycleRepository(factory).import_row({
+            "signal_id": 511, "status": "active", "result": "pending",
+        })
+        client = FakeClient(entry_status="FILLED")
+        outcomes = trade_execution._reconcile_live_executions_unlocked(
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(outcomes, [{"status": "PROTECTED", "signal_id": 511}])
+        expected_client_id = client_order_ids(execution_id)["entry"]
+        self.assertIn(("query_client", "BTCUSDT", expected_client_id), client.calls)
+        execution = repository.get(511)
+        self.assertEqual(execution["entry_order_id"], "entry-recovered")
+        self.assertEqual(execution["status"], "PROTECTED")
+
+    def test_submitting_intent_recovers_by_deterministic_client_order_id(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        repository = ExecutionRepository(factory)
+        repository.register({
+            "signal_id": 509, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "BULLISH", "status": "SUBMITTING",
+            "entry": 100, "sl": 95, "tp1": 110, "tp2": 115,
+            "quantity": 0.98,
+        })
+        SignalLifecycleRepository(factory).import_row({
+            "signal_id": 509, "status": "active", "result": "pending",
+        })
+        client = FakeClient(entry_status="FILLED")
+        outcomes = trade_execution._reconcile_live_executions_unlocked(
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(outcomes, [{"status": "PROTECTED", "signal_id": 509}])
+        self.assertIn(("query_client", "BTCUSDT", "apex_e_509"), client.calls)
+        execution = repository.get(509)
+        self.assertEqual(execution["entry_order_id"], "entry-recovered")
+        self.assertEqual(execution["status"], "PROTECTED")
+        self.assertEqual(execution["stop_order_id"], "stop-1")
+
+    def test_live_entry_is_not_submitted_when_state_intent_cannot_persist(self):
+        def unavailable():
+            raise sqlite3.OperationalError("state unavailable")
+
+        trade_execution.configure_execution_state(unavailable)
+        client = FakeClient(entry_status="NEW")
+        result = execute_approved_candidate(
+            CANDIDATE, 510, db_path=self.db_path,
+            config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "BLOCKED_STATE_PERSISTENCE")
+        self.assertFalse(any(
+            isinstance(call, tuple) and call[0] == "entry" for call in client.calls
+        ))
+
+    def test_pre_exchange_state_does_not_create_legacy_execution(self):
+        state_path = os.path.join(self.tmp.name, "state-pre-entry.db")
+        legacy_path = os.path.join(self.tmp.name, "absent-pre-entry.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        result = trade_execution._store_execution(
+            legacy_path, 511, live_config(), CANDIDATE, "BLOCKED_KILL_SWITCH",
+            error="test fence",
+        )
+
+        self.assertTrue(result["state_persisted"])
+        self.assertFalse(os.path.exists(legacy_path))
+        state = ExecutionRepository(factory).get(511)
+        self.assertEqual(state["status"], "BLOCKED_KILL_SWITCH")
+
+    def test_accepted_entry_persists_only_in_state_when_state_is_available(self):
+        state_path = os.path.join(self.tmp.name, "state-accepted-entry.db")
+        legacy_path = os.path.join(self.tmp.name, "accepted-entry-recovery.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        trade_execution._store_execution(
+            legacy_path, 512, live_config(), CANDIDATE, "ENTRY_PENDING",
+            {
+                "entry": "100", "sl": "95", "tp1": "110", "tp2": "115",
+                "quantity": "0.25", "risk_budget": 5.0,
+                "available_balance": 1000.0, "leverage": 5,
+            },
+            entry_order_id="entry-512",
+        )
+
+        self.assertFalse(os.path.exists(legacy_path))
+        self.assertFalse(recovery_path(legacy_path).exists())
+        state = ExecutionRepository(factory).get(512)
+        self.assertEqual((state["status"], state["entry_order_id"]), ("ENTRY_PENDING", "entry-512"))
+
+    def test_manager_action_claim_is_state_owned_and_fails_closed(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        ExecutionRepository(factory).register({
+            "signal_id": 77, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "LONG", "status": "PROTECTED", "entry": 100,
+            "sl": 95, "tp1": 110, "tp2": 115, "quantity": 1,
+        })
+        self.assertTrue(trade_execution._claim_manager_action(
+            self.db_path, "state-action", 77, "PROTECT", 98.0,
+        ))
+        with sqlite3.connect(self.db_path) as legacy:
+            table = legacy.execute(
+                """SELECT 1 FROM sqlite_master
+                     WHERE type='table' AND name='manager_execution_actions'"""
+            ).fetchone()
+            self.assertIsNone(table)
+        # The canonical claim alone prevents a duplicate Binance mutation.
+        self.assertFalse(trade_execution._claim_manager_action(
+            self.db_path, "state-action", 77, "PROTECT", 98.0,
+        ))
+
+        def unavailable():
+            raise sqlite3.OperationalError("state unavailable")
+
+        trade_execution.configure_execution_state(unavailable)
+        self.assertFalse(trade_execution._claim_manager_action(
+            self.db_path, "blocked-action", 78, "CLOSE", None,
+        ))
+        with sqlite3.connect(self.db_path) as legacy:
+            table = legacy.execute(
+                """SELECT 1 FROM sqlite_master
+                     WHERE type='table' AND name='manager_execution_actions'"""
+            ).fetchone()
+        self.assertIsNone(table)
+
+    def test_manager_action_finish_uses_durable_journal_when_state_fails(self):
+        state_path = os.path.join(self.tmp.name, "manager-action-state.db")
+        recovery_db_path = os.path.join(self.tmp.name, "manager-action-recovery.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        ExecutionRepository(factory).register({
+            "signal_id": 79, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "LONG", "status": "PROTECTED", "entry": 100,
+            "sl": 95, "tp1": 110, "tp2": 115, "quantity": 1,
+        })
+        self.assertTrue(trade_execution._claim_manager_action(
+            recovery_db_path, "protect-recovery", 79, "PROTECT", 98.0,
+        ))
+        self.assertFalse(os.path.exists(recovery_db_path))
+
+        def unavailable():
+            raise sqlite3.OperationalError("state unavailable after exchange action")
+
+        trade_execution.configure_execution_state(unavailable)
+        trade_execution._finish_manager_action(
+            recovery_db_path, "protect-recovery", "EXECUTED", order_id="stop-79",
+        )
+        journal = recovery_path_fn = recovery_path(recovery_db_path)
+        self.assertTrue(journal.exists())
+        self.assertFalse(os.path.exists(recovery_db_path))
+        self.assertEqual(replay_recovery(recovery_db_path, factory), 1)
+        action = ExecutionRepository(factory).latest_action(79, ("PROTECT",))
+        self.assertEqual((action["status"], action["exchange_order_id"]), ("EXECUTED", "stop-79"))
+        self.assertFalse(recovery_path_fn.exists())
+
+    def test_reconcile_uses_state_signal_lifecycle_and_missing_is_pending(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory()
+        migrate_state(conn)
+        conn.close()
+        trade_execution.configure_execution_state(factory)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+        conn.execute("INSERT INTO signals (id,result) VALUES (901,'sl')")
+        conn.commit()
+        conn.close()
+        trade_execution._store_execution(
+            self.db_path, 901, live_config(), CANDIDATE, "ENTRY_PENDING",
+            {
+                "entry": "100", "sl": "95", "tp1": "110", "tp2": "115",
+                "quantity": "0.25", "risk_budget": 5.0,
+                "available_balance": 1000.0, "leverage": 5,
+            },
+            entry_order_id="entry-901",
+        )
+        trade_execution._update_execution(
+            self.db_path, 901, "PROTECTED", stop_order_id="stop-901",
+        )
+
+        # Legacy says closed, but a missing State projection must not make a
+        # protected execution actionable or cancel exchange protection.
+        self.assertEqual(trade_execution._live_reconcile_rows(self.db_path), [])
+
+        SignalLifecycleRepository(factory).import_row({
+            "signal_id": 901,
+            "status": "closed",
+            "result": "sl",
+        })
+        rows = trade_execution._live_reconcile_rows(self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["signal_id"], 901)
+        self.assertEqual(rows[0]["signal_result"], "sl")
+
+    def test_reconcile_selects_execution_status_from_state_not_legacy(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        trade_execution._store_execution(
+            self.db_path, 905, live_config(), CANDIDATE, "ENTRY_PENDING",
+            {
+                "entry": "100", "sl": "95", "tp1": "110", "tp2": "115",
+                "quantity": "0.25", "risk_budget": 5.0,
+                "available_balance": 1000.0, "leverage": 5,
+            }, entry_order_id="entry-905",
+        )
+        trade_execution._update_execution(
+            self.db_path, 905, "PROTECTED", stop_order_id="stop-905",
+        )
+        SignalLifecycleRepository(factory).import_row({
+            "signal_id": 905, "status": "active", "result": "pending",
+        })
+        trade_execution.ensure_execution_schema(self.db_path)
+        with sqlite3.connect(self.db_path) as legacy:
+            legacy.execute(
+                "UPDATE trade_executions SET status='ENTRY_PENDING' WHERE signal_id=905"
+            )
+
+        # A stale compatibility status cannot make State-owned protection look
+        # like an entry that needs another Binance reconciliation pass.
+        self.assertEqual(trade_execution._live_reconcile_rows(self.db_path), [])
+
+        SignalLifecycleRepository(factory).import_row({
+            "signal_id": 905, "status": "closed", "result": "sl",
+        })
+        rows = trade_execution._live_reconcile_rows(self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "PROTECTED")
+        self.assertEqual(rows[0]["signal_result"], "sl")
+
+    def test_state_reconcile_selection_does_not_create_legacy_db(self):
+        state_path = os.path.join(self.tmp.name, "state-only.db")
+        legacy_path = os.path.join(self.tmp.name, "absent-brain.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        ExecutionRepository(factory).register({
+            "signal_id": 990, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "LONG", "status": "ENTRY_PENDING", "entry": 100,
+            "sl": 95, "tp1": 110, "tp2": 115, "quantity": 0.25,
+            "entry_order_id": "entry-990",
+        })
+
+        rows = trade_execution._live_reconcile_rows(legacy_path)
+
+        self.assertEqual([row["signal_id"] for row in rows], [990])
+        self.assertFalse(os.path.exists(legacy_path))
+
+    def test_reconcile_updates_state_without_legacy_execution_row(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        ExecutionRepository(factory).register({
+            "signal_id": 906, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "BULLISH", "status": "PROTECTED",
+            "entry": 100, "sl": 95, "tp1": 110, "tp2": 115,
+            "quantity": 0.25, "entry_order_id": "entry-906",
+            "stop_order_id": "stop-906", "active_stop_price": 95,
+        })
+        SignalLifecycleRepository(factory).import_row({
+            "signal_id": 906, "status": "closed", "result": "sl",
+        })
+
+        outcomes = trade_execution._reconcile_live_executions_unlocked(
+            db_path=self.db_path, config=live_config(), client=FakeClient(),
+        )
+        self.assertEqual(outcomes, [{"status": "CLOSED_SL", "signal_id": 906}])
+        state = ExecutionRepository(factory).get(906)
+        self.assertEqual(state["status"], "CLOSED_SL")
+        with sqlite3.connect(self.db_path) as legacy:
+            table = legacy.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_executions'"
+            ).fetchone()
+        self.assertIsNone(table)
+
+    def test_stop_replacement_recovery_uses_state_action_without_legacy_rows(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        repository = ExecutionRepository(factory)
+        repository.register({
+            "signal_id": 907, "mode": "live", "symbol": "BTCUSDT",
+            "direction": "BULLISH", "status": "STOP_REPLACEMENT_PENDING",
+            "entry": 100, "sl": 95, "tp1": 110, "tp2": 115,
+            "quantity": 0.25, "entry_order_id": "entry-907",
+            "stop_order_id": "stop-new", "active_stop_price": 98,
+            "pending_stop_order_id": "stop-new",
+            "previous_stop_order_id": "stop-old",
+            "tp1_order_id": "tp1-907", "tp2_order_id": "tp2-907",
+        })
+        self.assertTrue(repository.claim_action(
+            "protect-907", 907, "PROTECT", 98,
+        ))
+        row = repository.get(907)
+        row["signal_result"] = "pending"
+        client = FakeClient()
+
+        result = trade_execution._reconcile_stop_replacement(
+            row, client, self.db_path,
+        )
+        self.assertEqual(result["status"], "STOP_REPLACEMENT_RECOVERED")
+        self.assertIn(("cancel_algo", "stop-old"), client.calls)
+        execution = repository.get(907)
+        action = repository.latest_action(907, ("PROTECT",))
+        self.assertEqual(execution["status"], "PROTECTED")
+        self.assertIsNone(execution["pending_stop_order_id"])
+        self.assertEqual(action["status"], "EXECUTED")
+        self.assertEqual(action["exchange_order_id"], "stop-new")
+
+    def test_unavailable_state_lifecycle_keeps_legacy_close_non_actionable(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+        conn.execute("INSERT INTO signals (id,result) VALUES (902,'sl')")
+        conn.commit(); conn.close()
+        trade_execution._store_execution(
+            self.db_path, 902, live_config(), CANDIDATE, "ENTRY_PENDING",
+            {
+                "entry": "100", "sl": "95", "tp1": "110", "tp2": "115",
+                "quantity": "0.25", "risk_budget": 5.0,
+                "available_balance": 1000.0, "leverage": 5,
+            }, entry_order_id="entry-902",
+        )
+        trade_execution._update_execution(
+            self.db_path, 902, "PROTECTED", stop_order_id="stop-902",
+        )
+
+        def unavailable():
+            raise sqlite3.OperationalError("state unavailable")
+
+        trade_execution.configure_execution_state(unavailable)
+        self.assertEqual(trade_execution._live_reconcile_rows(self.db_path), [])
+
+    def test_manager_cutover_and_action_validation_read_state(self):
+        state_path = os.path.join(self.tmp.name, "apex_state.db")
+
+        def factory():
+            return sqlite3.connect(state_path)
+
+        conn = factory(); migrate_state(conn); conn.close()
+        trade_execution.configure_execution_state(factory)
+        repository = ManagerRepository(factory)
+        repository.register({
+            "signal_id": 903, "symbol": "BTCUSDT", "strategy": "ZONE",
+            "direction": "BULLISH", "management_tf": "15m",
+            "initial_entry": 100, "initial_sl": 95, "initial_tp1": 110,
+            "initial_tp2": 115, "initial_tp3": 120, "initial_rr": 2,
+            "manager_version": 2,
+        })
+        conn = factory()
+        conn.execute(
+            """UPDATE manager_positions
+               SET status='CLOSING',manager_state='RECONCILIATION_REQUIRED'
+               WHERE signal_id=903"""
+        )
+        conn.commit(); conn.close()
+        self.assertEqual(
+            trade_execution._reconciliation_required_signal_ids(self.db_path), {903},
+        )
+
+        result = execute_manager_review(
+            {
+                "signal_id": 904,
+                "review": {"action": "PROTECT", "confidence": 0.9},
+                "facts": {},
+            },
+            db_path=self.db_path, config=live_config(), client=FakeClient(),
+        )
+        self.assertEqual(result["status"], "MANAGER_STATE_UNAVAILABLE")
 
     def test_strategy_pause_blocks_before_exchange_calls(self):
         candidate = {**CANDIDATE, "_strategy_risk_state": {
@@ -518,6 +1100,50 @@ class TradeExecutionTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("PROTECTED", "stop-1", "tp1-1", "tp2-1"))
 
+    def test_gate_close_never_removes_protection_while_binance_position_is_open(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (74,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        execute_approved_candidate(
+            CANDIDATE, 74, db_path=self.db_path, config=live_config(), client=client,
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE signals SET result='sl' WHERE id=74")
+        client.calls.clear()
+        client.open_positions = lambda: [{"symbol": "BTCUSDT", "positionAmt": "0.25"}]
+        outcomes = reconcile_live_executions(
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(outcomes, [{"status": "AWAITING_BINANCE_CLOSE", "signal_id": 74}])
+        self.assertFalse(any(
+            isinstance(call, tuple) and call[0] == "cancel_algo" for call in client.calls
+        ))
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT status FROM trade_executions WHERE signal_id=74"
+            ).fetchone()[0], "PROTECTED")
+
+    def test_position_snapshot_failure_keeps_protective_orders(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (75,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        execute_approved_candidate(
+            CANDIDATE, 75, db_path=self.db_path, config=live_config(), client=client,
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE signals SET result='tp2' WHERE id=75")
+        client.calls.clear()
+        client.open_positions = lambda: (_ for _ in ()).throw(RuntimeError("temporary"))
+        outcomes = reconcile_live_executions(
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(outcomes[0]["reason"], "BINANCE_POSITION_SNAPSHOT_UNAVAILABLE")
+        self.assertFalse(any(
+            isinstance(call, tuple) and call[0] == "cancel_algo" for call in client.calls
+        ))
+
     def test_manager_protect_is_validated_and_idempotent(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
@@ -593,6 +1219,37 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "EXECUTED")
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(conn.execute("SELECT result FROM signals WHERE id=72").fetchone()[0], "manager_exit")
+
+    def test_manager_ack_without_fill_does_not_advance_trade_state(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT, closed_at TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (73,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        execute_approved_candidate(
+            CANDIDATE, 73, db_path=self.db_path, config=live_config(), client=client,
+        )
+        client.open_positions = lambda: [{"symbol": "BTCUSDT", "positionAmt": "0.49"}]
+        client.emergency_close = lambda *_args, **_kwargs: {
+            "orderId": "accepted-only", "status": "NEW", "executedQty": "0",
+        }
+        result = execute_manager_review(
+            {"signal_id": 73, "review": {"action": "EXIT", "confidence": .9}},
+            db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "ERROR")
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT result FROM signals WHERE id=73").fetchone()[0], "pending")
+
+    def test_manager_market_order_requests_final_fill_response(self):
+        session = RecordingSession()
+        client = BinanceFuturesClient(live_config(), session=session)
+
+        result = client.emergency_close("BTCUSDT", "BULLISH", "0.1", "apex-close-1")
+
+        self.assertEqual(result["status"], "FILLED")
+        params = session.calls[0][2]["params"]
+        self.assertEqual(params["newOrderRespType"], "RESULT")
+        self.assertEqual(params["reduceOnly"], "true")
 
     def test_expired_signal_filled_at_exchange_is_closed_not_protected(self):
         with sqlite3.connect(self.db_path) as conn:

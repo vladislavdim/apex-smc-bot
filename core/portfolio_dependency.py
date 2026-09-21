@@ -9,20 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from datetime import datetime, timezone
 from math import sqrt
 from typing import Any, Iterable, Mapping
+from apex.config.settings import ApexConfig
 
 
-DB_PATH = os.environ.get(
-    "APEX_DB_PATH",
-    os.environ.get(
-        "APEX_BRAIN_DB_PATH",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain.db"),
-    ),
-)
+DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
 
 def _corr(left: list[float], right: list[float]) -> float | None:
@@ -137,7 +132,7 @@ def build_dependency_graph(
 
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
