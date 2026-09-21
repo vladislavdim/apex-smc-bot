@@ -1,0 +1,38 @@
+{
+  "as_of": "2026-09-21T12:49:59.092171+00:00",
+  "cases": [
+    {
+      "case_id": "gate-fast-btcusdt-1789994999",
+      "file": "fast.json",
+      "sha256": "0a8131debfca829a43d073f7df9820392fc2ceab8b8d7342965da464df0607e3",
+      "strategy": "FAST"
+    },
+    {
+      "case_id": "gate-mtf-btcusdt-1789994999",
+      "file": "mtf.json",
+      "sha256": "27949f7f1351447ed00c60cb98ffbbefad2b0f874204dc3c4c262f01aa09cce6",
+      "strategy": "MTF"
+    },
+    {
+      "case_id": "gate-swing-btcusdt-1789994999",
+      "file": "swing.json",
+      "sha256": "43107ebbb932b93106352413d15dc251614b2dfc3a60013b748bb4b470f4298a",
+      "strategy": "SWING"
+    },
+    {
+      "case_id": "gate-zone-btcusdt-1789994999",
+      "file": "zone.json",
+      "sha256": "ac4f51aa3c2891fefee10d78c5bb295359ff600ee0a95b4a7a1ec30b6b3f1544",
+      "strategy": "ZONE"
+    },
+    {
+      "case_id": "gate-wyckoff-btcusdt-1789994999",
+      "file": "wyckoff.json",
+      "sha256": "0b7f750eafbeec032edc4b00d67e4264a40a344403dbcafd82863111b7c36751",
+      "strategy": "WYCKOFF"
+    }
+  ],
+  "schema_version": 1,
+  "source": "GATE_REAL_MARKET",
+  "symbol": "BTCUSDT"
+}
