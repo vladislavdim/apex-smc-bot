@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any, Callable, Mapping
 from apex.domain.enums import Strategy
 from apex.strategies.specifications import specification_for
 
@@ -18,14 +19,19 @@ from .volume_profile import volume_profile
 from .universe import UniverseContext, market_cap_omission
 
 
+ContextPublisher = Callable[[Mapping[str, Any]], Any]
+
+
 class GateSnapshotProvider:
     def __init__(
         self, client: GateMarketClient, *, candle_limit: int = 500,
         universe_context: UniverseContext | None = None,
+        context_publisher: ContextPublisher | None = None,
     ) -> None:
         self.client = client
         self.candle_limit = min(2000, max(100, int(candle_limit)))
         self.universe_context = universe_context
+        self.context_publisher = context_publisher
 
     def build(
         self,
@@ -59,6 +65,21 @@ class GateSnapshotProvider:
         # Context is optional and cannot change StrategyResult. Late-arriving
         # observations are excluded by PointInTimeContext.
         live = fetch_live_context(self.client, symbol, as_of=int(boundary.timestamp()))
+        if self.context_publisher is not None:
+            try:
+                self.context_publisher({
+                    "symbol": symbol.upper(),
+                    "timestamp": boundary.isoformat(),
+                    "open_interest": live.derivatives.get("open_interest", {}),
+                    "funding": live.derivatives.get("funding", {}),
+                    "long_short_ratio": live.derivatives.get("long_short_ratio", {}),
+                    "liquidations": live.derivatives.get("liquidations", {}),
+                    "live_tape": live.microstructure.get("cvd_real", {}),
+                    "microstructure": live.microstructure.get("visible_orderbook", {}),
+                })
+            except Exception:
+                # Telemetry persistence is advisory and must never block a setup.
+                pass
         working_rows = candles.get(specification.working_timeframe, [])
         context_rows = next((candles[tf] for tf in reversed(required) if candles.get(tf)), working_rows)
         volume = volume_features(working_rows)
