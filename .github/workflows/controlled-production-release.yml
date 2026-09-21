@@ -64,9 +64,9 @@ jobs:
           import yaml
           for path in Path('.github/workflows').glob('*.yml'):
               yaml.safe_load(path.read_text(encoding='utf-8'))
-          page = Path('stats_server.py').read_text(encoding='utf-8')
+          from apex.ui.dashboard.page import HTML
           import re
-          scripts = re.findall(r'<script[^>]*>(.*?)</script>', page, re.S)
+          scripts = re.findall(r'<script[^>]*>(.*?)</script>', HTML, re.S)
           if not scripts:
               raise SystemExit('Dashboard script blocks not found')
           for index, body in enumerate(scripts):
