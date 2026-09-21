@@ -7,6 +7,8 @@ import threading
 import time
 from collections.abc import Callable
 
+from .snapshot_scope import snapshot_scope_active
+
 
 class LegacyAdaptiveIndicators:
     """Preserve legacy ATR/ADX/EMA calculations behind injected providers."""
@@ -24,9 +26,10 @@ class LegacyAdaptiveIndicators:
         """Calculate ATR, ADX and EMA once per indicator TTL."""
         key = f"{symbol}:{timeframe}"
         now = time.time()
+        scoped = snapshot_scope_active()
         with self._lock:
             cached = self._indicator_cache.get(key)
-            if cached and now - cached[0] < self._indicator_ttl:
+            if not scoped and cached and now - cached[0] < self._indicator_ttl:
                 return cached[1]
 
         result = {}
@@ -85,8 +88,9 @@ class LegacyAdaptiveIndicators:
         except Exception as exc:
             logging.warning("get_precomputed_indicators %s: %s", symbol, exc)
 
-        with self._lock:
-            self._indicator_cache[key] = (now, result)
+        if not scoped:
+            with self._lock:
+                self._indicator_cache[key] = (now, result)
         return result
 
     def get_adaptive_params(self, symbol: str, candles: list | None = None, timeframe: str = "4h") -> dict:
@@ -94,8 +98,9 @@ class LegacyAdaptiveIndicators:
         del candles
         key = f"{symbol}:{timeframe}"
         now = time.time()
+        scoped = snapshot_scope_active()
         cached = self._adaptive_cache.get(key)
-        if cached and now - cached[0] < self._adaptive_ttl:
+        if not scoped and cached and now - cached[0] < self._adaptive_ttl:
             return cached[1]
 
         result = {"volatility_factor": 1.0, "adx": 25.0, "adx_strong": False, "adx_weak": False}
@@ -108,7 +113,8 @@ class LegacyAdaptiveIndicators:
                 result["adx_weak"] = indicators.get("adx_weak", False)
         except Exception as exc:
             logging.debug("get_adaptive_params %s: %s", symbol, exc)
-        self._adaptive_cache[key] = (now, result)
+        if not scoped:
+            self._adaptive_cache[key] = (now, result)
         return result
 
 

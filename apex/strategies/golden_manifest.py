@@ -40,7 +40,7 @@ class LegacyGateManifest:
 
 _MANIFESTS = {
     "FAST": LegacyGateManifest(
-        "market.py",
+        "apex/compatibility/legacy_market_runtime.py",
         "detect_fast_deal",
         (
             "FAST_DETECT_FAST_DEAL_G9138",
@@ -95,7 +95,7 @@ _MANIFESTS = {
         post_candidate_review=frozenset({"MTF_FULL_SCAN_RAW_G4964"}),
     ),
     "SWING": LegacyGateManifest(
-        "market.py",
+        "apex/compatibility/legacy_market_runtime.py",
         "detect_swing_setup",
         (
             "SWING_DETECT_SWING_SETUP_G7123",
@@ -129,7 +129,7 @@ _MANIFESTS = {
         context_only=frozenset({"SWING_4H_STRUCTURE_CONTEXT"}),
     ),
     "ZONE": LegacyGateManifest(
-        "market.py",
+        "apex/compatibility/legacy_market_runtime.py",
         "detect_zone_setup",
         (
             "ZONE_DETECT_ZONE_SETUP_G7796",
@@ -154,7 +154,7 @@ _MANIFESTS = {
         post_candidate_review=frozenset({"ZONE_DETECT_ZONE_SETUP_G8127"}),
     ),
     "WYCKOFF_SPRING": LegacyGateManifest(
-        "market.py",
+        "apex/compatibility/legacy_market_runtime.py",
         "detect_wyckoff_spring",
         tuple(
             f"WYCKOFF_DETECT_WYCKOFF_SPRING_G{gate}"
@@ -163,7 +163,7 @@ _MANIFESTS = {
         post_candidate_review=frozenset({"WYCKOFF_DETECT_WYCKOFF_SPRING_G8626"}),
     ),
     "WYCKOFF_DISTRIBUTION": LegacyGateManifest(
-        "market.py",
+        "apex/compatibility/legacy_market_runtime.py",
         "detect_wyckoff_distribution",
         (
             "WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8683",
@@ -178,7 +178,7 @@ _MANIFESTS = {
         post_candidate_review=frozenset({"WYCKOFF_DETECT_WYCKOFF_DISTRIBUTION_G8913"}),
     ),
     "WYCKOFF_REACCUMULATION": LegacyGateManifest(
-        "market.py",
+        "apex/compatibility/legacy_market_runtime.py",
         "detect_wyckoff_reaccumulation",
         tuple(
             f"WYCKOFF_DETECT_WYCKOFF_REACCUMULATION_G{gate}"

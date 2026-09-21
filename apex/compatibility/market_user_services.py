@@ -14,7 +14,7 @@ from apex.ui.groq_runtime import (
     _GROQ_DAILY_LIMIT, _tokens_available, groq_tokens_used,
 )
 
-from market import (
+from apex.compatibility.legacy_market_runtime import (
     ask_ai, ask_groq, get_candles,
 )
 

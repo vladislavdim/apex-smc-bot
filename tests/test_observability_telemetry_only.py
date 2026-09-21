@@ -7,7 +7,7 @@ import stats_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MARKET = (ROOT / "market.py").read_text(encoding="utf-8")
+MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
 STATS = (ROOT / "stats_server.py").read_text(encoding="utf-8")
 DASHBOARD = (ROOT / "apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 

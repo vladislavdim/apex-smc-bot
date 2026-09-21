@@ -518,6 +518,227 @@ def _migration_019(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_020(conn: sqlite3.Connection) -> None:
+    """Make the typed signal identity canonical inside State.
+
+    ``signal_id`` is retained as a unique compatibility lookup for the legacy
+    Telegram/exchange boundary, but no canonical State foreign key depends on
+    it after this migration.
+    """
+    managed_tables = (
+        "manager_events", "execution_actions", "execution_orders",
+        "execution_fills", "execution_funding",
+        "execution_funding_coverage", "manager_positions", "executions",
+        "signal_lifecycle",
+    )
+    for table in managed_tables:
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}__legacy_020")
+
+    conn.execute("""CREATE TABLE executions (
+        signal_entity_id TEXT PRIMARY KEY NOT NULL,
+        signal_id INTEGER NOT NULL UNIQUE,
+        execution_id TEXT UNIQUE,
+        candidate_id TEXT,
+        position_id TEXT UNIQUE,
+        mode TEXT NOT NULL,
+        exchange TEXT NOT NULL DEFAULT 'binance_futures',
+        symbol TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        status TEXT NOT NULL,
+        entry REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
+        quantity REAL, risk_usdt REAL, balance_usdt REAL, leverage INTEGER,
+        entry_order_id TEXT, stop_order_id TEXT, tp1_order_id TEXT,
+        tp2_order_id TEXT, active_stop_price REAL,
+        pending_stop_order_id TEXT, previous_stop_order_id TEXT,
+        last_error TEXT, plan_json TEXT NOT NULL, plan_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""INSERT INTO executions
+        SELECT signal_entity_id,signal_id,execution_id,candidate_id,position_id,
+               mode,exchange,symbol,direction,status,entry,sl,tp1,tp2,tp3,
+               quantity,risk_usdt,balance_usdt,leverage,entry_order_id,
+               stop_order_id,tp1_order_id,tp2_order_id,active_stop_price,
+               pending_stop_order_id,previous_stop_order_id,last_error,
+               plan_json,plan_hash,created_at,updated_at
+          FROM executions__legacy_020""")
+
+    conn.execute("""CREATE TABLE manager_positions (
+        signal_entity_id TEXT PRIMARY KEY NOT NULL,
+        signal_id INTEGER NOT NULL UNIQUE,
+        symbol TEXT NOT NULL, strategy TEXT NOT NULL, direction TEXT NOT NULL,
+        management_tf TEXT NOT NULL, initial_entry REAL NOT NULL,
+        initial_sl REAL NOT NULL, initial_tp1 REAL NOT NULL, initial_tp2 REAL,
+        initial_tp3 REAL, initial_rr REAL, manager_version INTEGER NOT NULL,
+        thesis_json TEXT NOT NULL DEFAULT '{}', snapshot_json TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE',
+        manager_state TEXT NOT NULL DEFAULT 'PROTECTED',
+        position_fraction REAL NOT NULL DEFAULT 1.0,
+        partial_exit_done INTEGER NOT NULL DEFAULT 0, last_price REAL,
+        best_price REAL, current_r REAL NOT NULL DEFAULT 0,
+        tp1_seen INTEGER NOT NULL DEFAULT 0, tp2_seen INTEGER NOT NULL DEFAULT 0,
+        tp3_seen INTEGER NOT NULL DEFAULT 0, manager_target REAL,
+        confirmed_protect_level REAL, proposed_protect_level REAL,
+        last_event TEXT, last_action TEXT, last_confidence REAL,
+        last_reviewed_candle TEXT, no_progress_bars INTEGER NOT NULL DEFAULT 0,
+        progress_anchor_r REAL NOT NULL DEFAULT 0, last_progress_candle TEXT,
+        reconciliation_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, closed_at TEXT,
+        close_result TEXT, exit_price REAL, realized_pct REAL, realized_r REAL,
+        data_failure_count INTEGER NOT NULL DEFAULT 0,
+        data_failure_notified INTEGER NOT NULL DEFAULT 0,
+        last_data_error TEXT, pre_degraded_state TEXT,
+        FOREIGN KEY(signal_entity_id) REFERENCES executions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO manager_positions
+        SELECT signal_entity_id,signal_id,symbol,strategy,direction,management_tf,
+               initial_entry,initial_sl,initial_tp1,initial_tp2,initial_tp3,
+               initial_rr,manager_version,thesis_json,snapshot_json,snapshot_hash,
+               status,manager_state,position_fraction,partial_exit_done,last_price,
+               best_price,current_r,tp1_seen,tp2_seen,tp3_seen,manager_target,
+               confirmed_protect_level,proposed_protect_level,last_event,
+               last_action,last_confidence,last_reviewed_candle,no_progress_bars,
+               progress_anchor_r,last_progress_candle,reconciliation_reason,
+               created_at,updated_at,closed_at,close_result,exit_price,
+               realized_pct,realized_r,data_failure_count,data_failure_notified,
+               last_data_error,pre_degraded_state
+          FROM manager_positions__legacy_020""")
+
+    conn.execute("""CREATE TABLE manager_events (
+        manager_event_id TEXT PRIMARY KEY,
+        signal_entity_id TEXT NOT NULL,
+        signal_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL, action TEXT, confidence REAL, price REAL,
+        r_multiple REAL, manager_target REAL, confirmed_protect_level REAL,
+        facts_json TEXT NOT NULL DEFAULT '{}',
+        reason_codes_json TEXT NOT NULL DEFAULT '[]',
+        summary TEXT NOT NULL DEFAULT '', execution_status TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(signal_entity_id) REFERENCES manager_positions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO manager_events
+        SELECT manager_event_id,signal_entity_id,signal_id,event_type,action,
+               confidence,price,r_multiple,manager_target,
+               confirmed_protect_level,facts_json,reason_codes_json,summary,
+               execution_status,created_at FROM manager_events__legacy_020""")
+
+    conn.execute("""CREATE TABLE execution_actions (
+        action_key TEXT PRIMARY KEY,
+        signal_entity_id TEXT NOT NULL,
+        signal_id INTEGER NOT NULL,
+        action TEXT NOT NULL, status TEXT NOT NULL, requested_level REAL,
+        exchange_order_id TEXT, error TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(signal_entity_id) REFERENCES executions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO execution_actions
+        SELECT action_key,signal_entity_id,signal_id,action,status,
+               requested_level,exchange_order_id,error,created_at,updated_at
+          FROM execution_actions__legacy_020""")
+
+    conn.execute("""CREATE TABLE execution_orders (
+        signal_entity_id TEXT NOT NULL,
+        signal_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL, kind TEXT NOT NULL, remote_id TEXT NOT NULL,
+        is_algo INTEGER NOT NULL, expected_side TEXT NOT NULL,
+        standard_id TEXT, complete INTEGER NOT NULL DEFAULT 0,
+        checked_at REAL NOT NULL DEFAULT 0, error TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(signal_entity_id,kind,remote_id),
+        FOREIGN KEY(signal_entity_id) REFERENCES executions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO execution_orders
+        SELECT signal_entity_id,signal_id,symbol,kind,remote_id,is_algo,
+               expected_side,standard_id,complete,checked_at,error,created_at,
+               updated_at FROM execution_orders__legacy_020""")
+
+    conn.execute("""CREATE TABLE execution_fills (
+        symbol TEXT NOT NULL, trade_id TEXT NOT NULL,
+        signal_entity_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
+        order_id TEXT NOT NULL, kind TEXT NOT NULL, qty TEXT NOT NULL,
+        price TEXT NOT NULL, commission TEXT NOT NULL,
+        commission_asset TEXT NOT NULL, time_ms INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(symbol,trade_id),
+        FOREIGN KEY(signal_entity_id) REFERENCES executions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO execution_fills
+        SELECT symbol,trade_id,signal_entity_id,signal_id,order_id,kind,qty,
+               price,commission,commission_asset,time_ms,payload_json,created_at
+          FROM execution_fills__legacy_020""")
+
+    conn.execute("""CREATE TABLE execution_funding (
+        signal_entity_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
+        tran_id TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL, income TEXT NOT NULL,
+        asset TEXT NOT NULL, time_ms INTEGER NOT NULL, payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(signal_entity_id,tran_id),
+        FOREIGN KEY(signal_entity_id) REFERENCES executions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO execution_funding
+        SELECT signal_entity_id,signal_id,tran_id,symbol,income,asset,time_ms,
+               payload_json,created_at FROM execution_funding__legacy_020""")
+
+    conn.execute("""CREATE TABLE execution_funding_coverage (
+        signal_entity_id TEXT PRIMARY KEY NOT NULL,
+        signal_id INTEGER NOT NULL UNIQUE,
+        start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+        checked_at REAL NOT NULL, status TEXT NOT NULL,
+        FOREIGN KEY(signal_entity_id) REFERENCES executions(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO execution_funding_coverage
+        SELECT signal_entity_id,signal_id,start_ms,end_ms,checked_at,status
+          FROM execution_funding_coverage__legacy_020""")
+
+    conn.execute("""CREATE TABLE signal_lifecycle (
+        signal_entity_id TEXT PRIMARY KEY NOT NULL,
+        signal_id INTEGER NOT NULL UNIQUE,
+        status TEXT NOT NULL, result TEXT NOT NULL DEFAULT 'pending',
+        activated_at TEXT, last_checked_at TEXT, closed_at TEXT,
+        cancel_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+    lifecycle_rows = conn.execute(
+        """SELECT signal_id,status,result,activated_at,last_checked_at,closed_at,
+                  cancel_reason,created_at,updated_at
+             FROM signal_lifecycle__legacy_020"""
+    ).fetchall()
+    for row in lifecycle_rows:
+        legacy_signal_id = int(row[0])
+        owner = conn.execute(
+            "SELECT signal_entity_id FROM executions WHERE signal_id=?",
+            (legacy_signal_id,),
+        ).fetchone()
+        signal_entity_id = (
+            str(owner[0]) if owner and is_id(owner[0], "signal")
+            else derived_id("signal", "legacy-signal", legacy_signal_id)
+        )
+        conn.execute(
+            """INSERT INTO signal_lifecycle(
+                   signal_entity_id,signal_id,status,result,activated_at,
+                   last_checked_at,closed_at,cancel_reason,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (signal_entity_id, legacy_signal_id, *row[1:]),
+        )
+
+    for table in managed_tables:
+        conn.execute(f"DROP TABLE {table}__legacy_020")
+
+    conn.execute("CREATE INDEX idx_executions_status ON executions(mode,status,updated_at DESC)")
+    conn.execute("CREATE INDEX idx_manager_positions_active ON manager_positions(status,updated_at DESC)")
+    conn.execute("CREATE INDEX idx_manager_events_signal_entity ON manager_events(signal_entity_id,created_at DESC)")
+    conn.execute("CREATE INDEX idx_execution_actions_signal_entity ON execution_actions(signal_entity_id)")
+    conn.execute("CREATE INDEX idx_execution_orders_signal_entity ON execution_orders(signal_entity_id)")
+    conn.execute("CREATE INDEX idx_execution_fills_signal_time ON execution_fills(signal_entity_id,time_ms,trade_id)")
+    conn.execute("CREATE INDEX idx_execution_funding_signal_entity ON execution_funding(signal_entity_id)")
+    conn.execute("CREATE INDEX idx_signal_lifecycle_status ON signal_lifecycle(status,updated_at DESC)")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -538,6 +759,7 @@ STATE_MIGRATIONS = (
     Migration(17, "typed_execution_signal_identity", _migration_017),
     Migration(18, "typed_manager_signal_identity", _migration_018),
     Migration(19, "typed_execution_ledger_signal_identity", _migration_019),
+    Migration(20, "canonical_typed_signal_relationships", _migration_020),
 )
 
 

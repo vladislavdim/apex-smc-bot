@@ -38,7 +38,7 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertEqual(assignments, [])
 
     def test_new_brain_schema_does_not_create_autonomous_learning_tables(self):
-        source = (ROOT / "market.py").read_text(encoding="utf-8")
+        source = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
         for table in (
             "signal_learning",
             "signal_stats",

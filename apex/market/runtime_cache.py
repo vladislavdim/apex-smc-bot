@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+from .snapshot_scope import snapshot_candle_override
+
 
 _CANDLES: dict[str, list] = {}
 _UPDATED_AT: dict[str, float] = {}
@@ -17,6 +19,9 @@ def update_global_candles(symbol: str, timeframe: str, candles: list) -> None:
 
 
 def get_global_candles(symbol: str, timeframe: str) -> list:
+    snapshot_rows = snapshot_candle_override(symbol, timeframe, 2000)
+    if snapshot_rows is not None:
+        return snapshot_rows
     key = f"{symbol}:{timeframe}"
     if key in _CANDLES and time.time() - _UPDATED_AT.get(key, 0) < _TTL_SECONDS:
         return _CANDLES[key]

@@ -6,7 +6,7 @@ from apex.compatibility.market_constants import (
 )
 from apex.app.health_server import run_server
 from apex.db.compatibility_runtime import start_db_writer
-from market import (
+from apex.compatibility.legacy_market_runtime import (
     ADMIN_ID, ADMIN_IDS, FAST_DEAL_THREAD_ID, SIGNAL_CHANNEL_MAIN,
     SIGNAL_CHANNEL_SWING, SWING_THREAD_ID, bot, dp, init_db,
 )

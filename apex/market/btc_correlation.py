@@ -6,6 +6,8 @@ import logging
 import time
 from collections.abc import Callable
 
+from .snapshot_scope import snapshot_scope_active
+
 
 class BtcCorrelationProvider:
     def __init__(
@@ -28,8 +30,9 @@ class BtcCorrelationProvider:
     ) -> dict:
         """Return rolling close-return correlation with BTC."""
         now = time.time()
+        scoped = snapshot_scope_active()
         cached = self._cache.get(symbol)
-        if cached and now - cached[0] < self._cache_ttl:
+        if not scoped and cached and now - cached[0] < self._cache_ttl:
             return cached[1]
 
         try:
@@ -40,7 +43,8 @@ class BtcCorrelationProvider:
                     "btc_dir": "BULLISH",
                     "desc": "BTC itself",
                 }
-                self._cache[symbol] = (now, result)
+                if not scoped:
+                    self._cache[symbol] = (now, result)
                 return result
 
             if btc_candles is None:
@@ -102,7 +106,8 @@ class BtcCorrelationProvider:
                 "btc_dir": btc_direction,
                 "desc": f"Корр. BTC: {correlation} ({level})",
             }
-            self._cache[symbol] = (now, result)
+            if not scoped:
+                self._cache[symbol] = (now, result)
             return result
         except Exception as exc:
             logging.warning("get_btc_correlation %s: %s", symbol, exc)

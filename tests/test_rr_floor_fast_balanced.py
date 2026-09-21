@@ -8,7 +8,7 @@ from core.setup_evidence import _geometry
 class RRFloorFastBalancedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.market = Path("market.py").read_text(encoding="utf-8")
+        cls.market = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
         cls.bot = Path("bot.py").read_text(encoding="utf-8")
         cls.evidence = Path("core/setup_evidence.py").read_text(encoding="utf-8")
         cls.structural_levels = Path("apex/market/structural_levels.py").read_text(encoding="utf-8")

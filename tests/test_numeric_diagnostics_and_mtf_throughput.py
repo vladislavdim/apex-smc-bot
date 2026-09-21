@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
-MARKET = (ROOT / "market.py").read_text(encoding="utf-8")
+MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
 STATS = (ROOT / "stats_server.py").read_text(encoding="utf-8")
 
 

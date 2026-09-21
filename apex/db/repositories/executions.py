@@ -329,6 +329,13 @@ class ExecutionRepository:
         conn = self._conn_factory()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            owner = conn.execute(
+                "SELECT signal_entity_id FROM executions WHERE signal_id=?",
+                (int(values["signal_id"]),),
+            ).fetchone()
+            if owner is None or not is_id(owner[0], "signal"):
+                raise ExecutionStateError("execution_action_owner_missing")
+            signal_entity_id = str(owner[0])
             existing = conn.execute(
                 """SELECT signal_id,action,requested_level FROM execution_actions
                    WHERE action_key=?""", (str(values["action_key"]),),
@@ -352,11 +359,12 @@ class ExecutionRepository:
                 return False
             conn.execute(
                 """INSERT INTO execution_actions(
-                    action_key,signal_id,action,status,requested_level,exchange_order_id,
+                    action_key,signal_entity_id,signal_id,action,status,requested_level,exchange_order_id,
                     error,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),COALESCE(?,CURRENT_TIMESTAMP))""",
+                ) VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),COALESCE(?,CURRENT_TIMESTAMP))""",
                 (
-                    str(values["action_key"]), int(values["signal_id"]), str(values["action"]),
+                    str(values["action_key"]), signal_entity_id,
+                    int(values["signal_id"]), str(values["action"]),
                     str(values["status"]), values.get("requested_level"),
                     values.get("exchange_order_id"), values.get("error"),
                     values.get("created_at"), values.get("updated_at"),

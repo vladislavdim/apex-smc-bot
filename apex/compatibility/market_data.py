@@ -14,7 +14,7 @@ from apex.market.legacy_zones import find_fvg, find_ob
 from apex.market.indicators import ema_value
 from apex.market.engine_bridge import calculate_vwap, get_liquidity_heatmap
 
-from market import (
+from apex.compatibility.legacy_market_runtime import (
     fetch_candles_batch,
     get_adaptive_params, get_candles,
     get_market_regime,

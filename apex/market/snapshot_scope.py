@@ -44,4 +44,11 @@ def snapshot_candle_override(
     return [dict(row) for row in rows[-requested:]]
 
 
-__all__ = ["snapshot_candle_override", "use_market_snapshot"]
+def snapshot_scope_active() -> bool:
+    """Return whether strategy data must be isolated to one snapshot."""
+    return _ACTIVE_SNAPSHOT.get() is not None
+
+
+__all__ = [
+    "snapshot_candle_override", "snapshot_scope_active", "use_market_snapshot",
+]

@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 
-MARKET = Path("market.py").read_text(encoding="utf-8")
+MARKET = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
 
 
 class FastStructuralTargetRRTests(unittest.TestCase):

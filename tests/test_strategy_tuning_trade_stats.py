@@ -8,7 +8,7 @@ import stats_server
 class StrategyTuningTradeStatsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.market = Path("market.py").read_text(encoding="utf-8")
+        cls.market = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
         cls.stats = Path("stats_server.py").read_text(encoding="utf-8")
         cls.dashboard = Path("apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 

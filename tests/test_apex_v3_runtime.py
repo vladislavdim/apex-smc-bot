@@ -174,7 +174,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "bot.py"), encoding="utf-8") as source:
             bot_source = source.read()
-        with open(os.path.join(root, "market.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_market_runtime.py"), encoding="utf-8") as source:
             market_source = source.read()
         self.assertIn("DB_PATH = _V3_CONFIG.database.compatibility_db_path", bot_source)
         self.assertIn("DB_PATH = _APEX_CONFIG.database.compatibility_db_path", market_source)
@@ -250,7 +250,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
     def test_unregistered_legacy_timing_queue_runtime_is_removed(self):
         sources = [
             Path("bot.py").read_text(encoding="utf-8"),
-            Path("market.py").read_text(encoding="utf-8"),
+            Path("apex", "compatibility", "legacy_market_runtime.py").read_text(encoding="utf-8"),
             Path("apex", "compatibility", "market_strategy.py").read_text(
                 encoding="utf-8"
             ),
@@ -408,7 +408,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_market_uses_explicit_db_bridge_without_global_sqlite_patch(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "market.py"), encoding="utf-8") as source:
+        with open(os.path.join(root, "apex", "compatibility", "legacy_market_runtime.py"), encoding="utf-8") as source:
             market_source = source.read()
         self.assertNotIn("sqlite3.connect =", market_source)
         self.assertNotIn("_wal_patched", market_source)
@@ -429,12 +429,13 @@ class ApexV3RuntimeTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertNotIn("from market import *", adapter)
-        self.assertNotIn("from apex.compatibility", Path("market.py").read_text(
-            encoding="utf-8"
-        ).replace(
-            "from apex.compatibility.market_constants import ", ""
-        ))
-        market_source = Path("market.py").read_text(encoding="utf-8")
+        facade_source = Path("market.py").read_text(encoding="utf-8")
+        self.assertLess(len(facade_source.splitlines()), 30)
+        self.assertIn('import_module("apex.compatibility.legacy_market_runtime")', facade_source)
+        self.assertNotIn("def detect_fast_deal", facade_source)
+        market_source = Path(
+            "apex", "compatibility", "legacy_market_runtime.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("_RAW_SCAN_HANDLER", market_source)
         self.assertNotIn("TF_CATEGORIES = {", market_source)
         self.assertNotIn("TF_LABELS = {", market_source)
@@ -588,7 +589,10 @@ class ApexV3RuntimeTests(unittest.TestCase):
 
     def test_runtime_db_access_uses_the_canonical_connection_layer(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        runtime_files = [os.path.join(root, "bot.py"), os.path.join(root, "market.py")]
+        runtime_files = [
+            os.path.join(root, "bot.py"), os.path.join(root, "market.py"),
+            os.path.join(root, "apex", "compatibility", "legacy_market_runtime.py"),
+        ]
         runtime_files.extend(
             os.path.join(root, "core", name)
             for name in os.listdir(os.path.join(root, "core"))

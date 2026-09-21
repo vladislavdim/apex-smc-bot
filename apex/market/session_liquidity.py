@@ -6,6 +6,8 @@ import logging
 import time
 from collections.abc import Callable
 
+from .snapshot_scope import snapshot_scope_active
+
 
 class SessionLiquidityProvider:
     def __init__(
@@ -21,9 +23,10 @@ class SessionLiquidityProvider:
     def check(self, symbol: str, timeframe: str = "1h") -> dict:
         """Compare the latest closed candle volume with the prior 20 bars."""
         now = time.time()
+        scoped = snapshot_scope_active()
         cache_key = f"{symbol}:{timeframe}"
         cached = self._cache.get(cache_key)
-        if cached and now - cached[0] < self._cache_ttl:
+        if not scoped and cached and now - cached[0] < self._cache_ttl:
             return cached[1]
 
         result = {"ratio": 1.0, "ok": True, "desc": ""}
@@ -49,7 +52,8 @@ class SessionLiquidityProvider:
         except Exception as exc:
             logging.debug("check_session_liquidity %s: %s", symbol, exc)
 
-        self._cache[cache_key] = (now, result)
+        if not scoped:
+            self._cache[cache_key] = (now, result)
         return result
 
 

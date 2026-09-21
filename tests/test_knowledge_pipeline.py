@@ -38,7 +38,7 @@ class KnowledgePipelineTests(unittest.TestCase):
         self.assertNotIn('autonomous_learning_cycle', runtime)
 
     def test_strategies_do_not_call_removed_adaptive_learning_hooks(self):
-        source = Path("market.py").read_text()
+        source = Path("apex/compatibility/legacy_market_runtime.py").read_text()
         for hook in (
             "_LEARNING_OK",
             "_learn_should_skip",

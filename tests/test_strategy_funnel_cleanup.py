@@ -8,7 +8,7 @@ import stats_server
 class StrategyFunnelCleanupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.market = Path('market.py').read_text(encoding='utf-8')
+        cls.market = Path('apex/compatibility/legacy_market_runtime.py').read_text(encoding='utf-8')
         cls.setup = Path('core/setup_evidence.py').read_text(encoding='utf-8')
         cls.audit = Path('core/setup_audit.py').read_text(encoding='utf-8')
         cls.catalog = Path('core/strategy_catalog.py').read_text(encoding='utf-8')
