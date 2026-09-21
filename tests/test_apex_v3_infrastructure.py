@@ -142,14 +142,14 @@ class ApexV3InfrastructureTests(unittest.TestCase):
     def test_config_validation_accepts_safe_paper_defaults(self):
         self.assertTrue(validate_config(ApexConfig.from_env({})).valid)
 
-    def test_snapshot_strategy_activation_is_typed_and_off_by_default(self):
-        disabled = ApexConfig.from_env({})
+    def test_snapshot_strategy_activation_is_typed_and_on_by_default(self):
+        defaulted = ApexConfig.from_env({})
         enabled = ApexConfig.from_env({
             "APEX_SNAPSHOT_STRATEGIES_ENABLED": "true",
             "APEX_STRATEGY_PARITY_CORPUS": "/proof/corpus",
             "APEX_STRATEGY_PARITY_VERDICT": "/proof/verdict.json",
         })
-        self.assertFalse(disabled.strategies.snapshot_activation_requested)
+        self.assertTrue(defaulted.strategies.snapshot_activation_requested)
         self.assertTrue(enabled.strategies.snapshot_activation_requested)
         self.assertEqual(enabled.strategies.parity_corpus_path, "/proof/corpus")
         self.assertEqual(enabled.strategies.parity_verdict_path, "/proof/verdict.json")
