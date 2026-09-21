@@ -3,12 +3,12 @@ from pathlib import Path
 from unittest import mock
 
 from core import setup_audit
-import stats_server
+from apex.ui.dashboard import server as stats_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
-STATS = (ROOT / "stats_server.py").read_text(encoding="utf-8")
+STATS = (ROOT / "apex" / "ui" / "dashboard" / "server.py").read_text(encoding="utf-8")
 DASHBOARD = (ROOT / "apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 
 

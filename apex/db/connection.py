@@ -44,6 +44,13 @@ def _connect(
     return conn
 
 
+def connect_path(
+    path: str, *, read_only: bool = False, timeout: float = 30,
+) -> sqlite3.Connection:
+    """Open a V3-owned SQLite path through the canonical connection policy."""
+    return _connect(path, read_only=read_only, timeout=timeout)
+
+
 def connect_state(config: ApexConfig | None = None, *, read_only: bool = False) -> sqlite3.Connection:
     settings = config or ApexConfig.from_env()
     return _connect(settings.database.state_db_path, read_only=read_only)
@@ -100,5 +107,5 @@ def compatibility_connection(
 
 __all__ = [
     "compatibility_connection", "connect_compatibility", "connect_memory",
-    "connect_state",
+    "connect_path", "connect_state",
 ]

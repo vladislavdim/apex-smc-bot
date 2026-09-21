@@ -16,12 +16,12 @@ class KnowledgePipelineTests(unittest.TestCase):
             self.assertFalse(Path(name).exists(), name)
 
     def test_startup_never_resets_trade_statistics(self):
-        source = Path("bot.py").read_text()
+        source = Path("apex", "compatibility", "legacy_bot_runtime.py").read_text()
         self.assertNotIn("_apply_trade_learning_baseline_reset", source)
         self.assertNotIn("trade_baseline_reset", source)
 
     def test_telegram_exposes_live_learning_without_legacy_mutation_buttons(self):
-        text = Path('bot.py').read_text()
+        text = Path('apex/compatibility/legacy_bot_runtime.py').read_text()
         self.assertIn('callback_data="menu_live_learning"', text)
         self.assertIn('_format_live_learning', text)
         for callback in ('menu_brain', 'brain_run_analysis', 'brain_web_learn_now',
