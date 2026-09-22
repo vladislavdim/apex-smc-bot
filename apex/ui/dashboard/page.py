@@ -20,7 +20,7 @@ HTML = r'''<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <section id="trades" class="view"><div class="card table"><table><thead><tr><th>Время</th><th>Стратегия</th><th>Пара</th><th>Решение</th><th>Причина</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>RR</th><th>Путь</th></tr></thead><tbody id="rows"></tbody></table></div></section>
 <section id="manager" class="view"><div class="card"><h3>Только подтверждённые позиции</h3><div id="managerRows"></div></div></section>
 <section id="executionView" class="view"><div class="cols"><div class="card"><h3>Binance execution</h3><div id="executionRows"></div></div><div class="card"><h3>Fill accounting</h3><div id="accounting"></div></div></div></section>
-<section id="market" class="view"><div class="cols"><div class="card"><h3>Gate freshness</h3><div id="marketRows"></div></div><div class="card"><h3>LIVE_CONTEXT</h3><div id="sources"></div></div></div></section>
+<section id="market" class="view"><div class="cols"><div class="card"><h3>Gate freshness</h3><div id="marketRows"></div></div><div class="card"><h3>LIVE_CONTEXT · подключения, функции и лимиты</h3><div id="sources"></div></div></div></section>
 <section id="learning" class="view"><div class="cols"><div class="card"><h3>Live evidence only</h3><div id="learningStats"></div></div><div class="card"><h3>Groq calibration</h3><div id="calibration"></div></div></div></section>
 <section id="health" class="view"><div class="cols"><div class="card"><h3>Incidents</h3><div id="incidents"></div></div><div class="card"><h3>Versions</h3><div id="versions"></div></div></div></section>
 <div class="footer muted">Dashboard только показывает production-факты. Он не меняет Entry, SL, TP, RR, gates, risk, Groq или Binance.</div></main><script>

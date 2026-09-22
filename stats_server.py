@@ -871,6 +871,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         "observability_state": "INCOMPLETE" if observability_reasons else "COMPLETE",
         "observability_reasons": observability_reasons,
     }
+    integration_health = _integration_health(latest_v2, market_data)
 
     total=len(joined); page_size=max(20,min(int(page_size),200)); page=max(1,int(page)); start=(page-1)*page_size
     # Keep the attempt denominator for release comparisons; the user-facing
@@ -887,7 +888,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
       "numeric_telemetry":numeric_telemetry,"wyckoff_observation":wy_observation,"wyckoff_accumulation_observation":wy_acc_observation,
       "swing_volume_observation":swing_volume_observation,"fast_target_diagnostics":dict(fast_target_reasons),
       "market_data":market_data,"ltf_watch":ltf_watch,"system_overview":system_overview,
-      "source_registry":system_overview.get("source_registry",[]),
+      "integration_health":integration_health,
+      "source_registry":integration_health.get("display_sources",[]),
       "portfolio_dependency":latest_v2.get("portfolio_dependency",{}),
       "gate_microstructure":system_overview.get("gate_microstructure",[]),
       "api_budget_plan":system_overview.get("api_budget_plan",{}),
@@ -906,6 +908,95 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
 def _runtime_release_sha() -> str:
     import os
     return str(os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "").strip()
+
+
+def _integration_health(snapshot: dict[str, Any], market_data: dict[str, Any]) -> dict[str, Any]:
+    """Project secret-free provider, feature and local-budget diagnostics."""
+    registry = snapshot.get("source_registry")
+    registry = registry if isinstance(registry, list) else []
+    budgets = snapshot.get("api_budget")
+    budgets = budgets if isinstance(budgets, list) else []
+    budget_by_source = {
+        str(row.get("source") or "").lower(): row
+        for row in budgets if isinstance(row, dict)
+    }
+    sources = []
+    for raw in registry:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        source = str(row.get("source") or "unknown").lower()
+        budget = budget_by_source.get(str(row.get("budget_key") or source).lower(), {})
+        used = budget.get("used") if isinstance(budget.get("used"), dict) else {}
+        health = budget.get("health") if isinstance(budget.get("health"), dict) else {}
+        blocked_until = float(health.get("blocked_until") or 0)
+        failures = int(health.get("failures") or 0)
+        day_used = int(used.get("day") or 0)
+        if blocked_until > time.time():
+            status, reason = "BLOCKED", "CIRCUIT_OPEN_OR_RATE_LIMIT"
+        elif failures:
+            status, reason = "DEGRADED", "RECENT_PROVIDER_FAILURES"
+        elif day_used:
+            status, reason = "ACTIVE", "REQUESTS_OBSERVED"
+        elif row.get("mode") in {"PRIMARY_MARKET", "EXECUTION", "INTERNAL", "PROXY"}:
+            status, reason = "AVAILABLE", "NO_BUDGETED_REQUEST_OBSERVED"
+        else:
+            status, reason = "IDLE", "NO_REQUEST_OBSERVED"
+        sources.append({
+            **row, "status": status, "reason_code": reason,
+            "used_minute": int(used.get("minute") or 0),
+            "used_hour": int(used.get("hour") or 0),
+            "used_day": day_used, "remaining_day": budget.get("remaining_day"),
+            "allocation": budget.get("allocation") or {}, "failures": failures,
+            "rate_limits": int(health.get("rate_limits") or 0),
+            "denied": int(health.get("denied") or 0),
+            "blocked_until": blocked_until or None,
+            "provenance": " · ".join(filter(None, (
+                str(row.get("provenance") or ""), reason,
+                f"used day {day_used}" if budget else "budget not observed",
+                f"remaining day {budget.get('remaining_day')}" if budget.get("remaining_day") is not None else "",
+                f"rate limits {int(health.get('rate_limits') or 0)}" if budget else "",
+                f"denied {int(health.get('denied') or 0)}" if budget else "",
+            ))),
+        })
+
+    micro = snapshot.get("gate_microstructure")
+    micro = micro if isinstance(micro, list) else []
+    latest_micro = micro[0] if micro and isinstance(micro[0], dict) else {}
+    live_status = str(
+        latest_micro.get("freshness_status") or latest_micro.get("status") or "NO_TELEMETRY"
+    ).upper()
+    features = [
+        {
+            "feature": "structural_liquidity_heatmap",
+            "label": "Structural liquidity heatmap",
+            "status": "READY" if int(market_data.get("ok") or 0) else "WAITING_FOR_CANDLES",
+            "source": "Gate closed candles", "reason_code": "CANDLE_DERIVED_LEVELS",
+        },
+        {
+            "feature": "live_orderbook_heatmap", "label": "Live Gate order-book heatmap",
+            "status": live_status, "source": "Gate WebSocket depth",
+            "reason_code": str(latest_micro.get("sequence_status") or "NO_SEQUENCE_VERIFIED_DEPTH"),
+            "updated_at": latest_micro.get("created_at") or latest_micro.get("updated_at"),
+            "levels": len(latest_micro.get("heatmap_levels") or []),
+        },
+    ]
+    display_sources = sources + [
+        {
+            "source": feature["label"], "mode": "FEATURE",
+            "status": feature["status"],
+            "provenance": " · ".join(filter(None, (
+                str(feature.get("source") or ""), str(feature.get("reason_code") or ""),
+                f"levels {feature.get('levels')}" if feature.get("levels") is not None else "",
+                str(feature.get("updated_at") or ""),
+            ))),
+        }
+        for feature in features
+    ]
+    return {
+        "sources": sources, "display_sources": display_sources,
+        "budgets": budgets, "features": features,
+    }
 
 
 def _cache_key(strategy: str, symbol: str, outcome: str, groq: str,

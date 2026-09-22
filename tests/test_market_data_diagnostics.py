@@ -7,6 +7,42 @@ os.environ.setdefault("GROQ_API_KEY", "test-key")
 with patch("groq.Groq", return_value=object()):
     import market
 import stats_server
+
+
+def test_integration_health_exposes_heatmaps_and_remaining_budget():
+    snapshot = {
+        "source_registry": [{
+            "source": "gate", "budget_key": "gate", "mode": "PRIMARY_MARKET",
+            "provenance": "Gate public market data",
+        }],
+        "api_budget": [{
+            "source": "gate", "used": {"minute": 2, "hour": 7, "day": 11},
+            "remaining_day": 89, "allocation": {"minute": 10, "hour": 50, "day": 100},
+            "health": {"failures": 0, "rate_limits": 0, "denied": 0, "blocked_until": 0},
+        }],
+        "gate_microstructure": [{
+            "status": "FRESH", "sequence_status": "VERIFIED", "heatmap_levels": [{}, {}],
+            "updated_at": "2026-09-22T07:00:00+00:00",
+        }],
+    }
+
+    result = stats_server._integration_health(snapshot, {"ok": 5})
+
+    assert result["sources"][0]["status"] == "ACTIVE"
+    assert result["sources"][0]["remaining_day"] == 89
+    assert "remaining day 89" in result["sources"][0]["provenance"]
+    assert {row["feature"] for row in result["features"]} == {
+        "structural_liquidity_heatmap", "live_orderbook_heatmap",
+    }
+    assert result["features"][1]["levels"] == 2
+
+
+def test_integration_health_does_not_claim_unobserved_live_heatmap_is_connected():
+    result = stats_server._integration_health({"source_registry": [], "api_budget": []}, {"ok": 0})
+
+    live = next(row for row in result["features"] if row["feature"] == "live_orderbook_heatmap")
+    assert live["status"] == "NO_TELEMETRY"
+    assert live["reason_code"] == "NO_SEQUENCE_VERIFIED_DEPTH"
 from core import market_data_health
 from core import smc_engine
 
