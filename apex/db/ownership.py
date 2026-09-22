@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 
 
-MIGRATION_METADATA_TABLES = frozenset({"apex_schema_migrations"})
+MIGRATION_METADATA_TABLES = frozenset({"apex_schema_migrations", "brain_persistence_meta"})
 
 STATE_TABLES = frozenset({
     "delivery_claims",
