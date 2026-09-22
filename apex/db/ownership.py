@@ -6,7 +6,8 @@ import sqlite3
 from dataclasses import dataclass
 
 
-MIGRATION_METADATA_TABLES = frozenset({"apex_schema_migrations", "brain_persistence_meta"})
+MIGRATION_METADATA_TABLES = frozenset({"apex_schema_migrations"})
+PERSISTENCE_METADATA_TABLES = frozenset({"brain_persistence_meta"})
 
 STATE_TABLES = frozenset({
     "delivery_claims",
@@ -92,20 +93,26 @@ def inspect_schema_ownership(
     memory_tables = _tables(memory)
     expected_state = set(STATE_TABLES | MIGRATION_METADATA_TABLES)
     expected_memory = set(MEMORY_TABLES | MIGRATION_METADATA_TABLES)
+    allowed_state = expected_state | set(PERSISTENCE_METADATA_TABLES)
+    allowed_memory = expected_memory | set(PERSISTENCE_METADATA_TABLES)
     errors: list[str] = []
 
-    for label, actual, expected in (
-        ("state", state_tables, expected_state),
-        ("memory", memory_tables, expected_memory),
+    for label, actual, expected, allowed in (
+        ("state", state_tables, expected_state, allowed_state),
+        ("memory", memory_tables, expected_memory, allowed_memory),
     ):
         missing = sorted(expected - actual)
-        unexpected = sorted(actual - expected)
+        unexpected = sorted(actual - allowed)
         if missing:
             errors.append(f"{label}_missing:" + ",".join(missing))
         if unexpected:
             errors.append(f"{label}_unexpected:" + ",".join(unexpected))
 
-    overlap = sorted((state_tables & memory_tables) - MIGRATION_METADATA_TABLES)
+    overlap = sorted(
+        (state_tables & memory_tables)
+        - MIGRATION_METADATA_TABLES
+        - PERSISTENCE_METADATA_TABLES
+    )
     if overlap:
         errors.append("cross_store_overlap:" + ",".join(overlap))
     legacy_overlap = sorted(
@@ -135,6 +142,7 @@ __all__ = [
     "LEGACY_IMPORT_TABLES",
     "MEMORY_TABLES",
     "MIGRATION_METADATA_TABLES",
+    "PERSISTENCE_METADATA_TABLES",
     "STATE_TABLES",
     "SchemaOwnershipError",
     "SchemaOwnershipReport",
