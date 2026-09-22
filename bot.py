@@ -233,6 +233,7 @@ from apex.db.connection import (
     connect_state as _v3_connect_state,
 )
 from apex.ui.telegram.learning import format_live_learning as _format_live_learning
+from apex.ui.telegram.system import format_system_status as _format_system_status
 from apex.ui.telegram.incidents import format_incidents as _format_incidents
 from apex.ui.telegram.router import (
     TelegramHandlers as _V3TelegramHandlers,
@@ -724,6 +725,7 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
         format_incidents=_format_incidents,
         fetch_strategy_stats=lambda: _fetch_strategy_stats(DB_PATH),
         format_strategy_stats=_format_strategy_stats,
+        system_dashboard=lambda: _format_system_status(_V3_RUNTIME.public_snapshot()),
         stats_url=_V3_CONFIG.integrations.stats_url,
         button=InlineKeyboardButton,
         markup=InlineKeyboardMarkup,
