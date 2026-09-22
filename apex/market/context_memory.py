@@ -34,7 +34,7 @@ def _received_at(context: Mapping[str, Any]) -> datetime:
 
 
 def _status(field: Mapping[str, Any]) -> str:
-    value = str(field.get("freshness_status") or field.get("freshness") or field.get("status") or "UNKNOWN").upper()
+    value = str(field.get("freshness_status") or field.get("status") or "UNKNOWN").upper()
     if value in {"FRESH", "CACHED", "FRESH_REST_SNAPSHOT", "BBO_TRADE_ONLY"}:
         return "FRESH"
     if "STALE" in value or "RESYNC" in value:

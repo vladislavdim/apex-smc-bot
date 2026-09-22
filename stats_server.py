@@ -38,11 +38,6 @@ _DASHBOARD_CACHE: "OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]]" =
 _DASHBOARD_CACHE_LOCK = threading.Lock()
 _DASHBOARD_BUILD_LOCK = threading.Lock()
 _DASHBOARD_PERSIST_CHECKED: set[str] = set()
-# The Render production web service has a 512 MiB memory ceiling.  JSONB rows
-# are materialized twice by psycopg (driver objects and normalized dictionaries),
-# so the old 50k-row batch could be killed before the health endpoint remained
-# routable.  Keep one recent, deterministic operational window in memory.
-_DASHBOARD_EVENT_LIMIT = 5_000
 
 
 
@@ -297,12 +292,7 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
     conn = _connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                "SELECT event_key,kind,strategy,symbol,occurred_at,payload "
-                "FROM apex_stats_events WHERE " + " AND ".join(where)
-                + " ORDER BY occurred_at DESC LIMIT %s",
-                [*params, _DASHBOARD_EVENT_LIMIT],
-            )
+            cur.execute("SELECT event_key,kind,strategy,symbol,occurred_at,payload FROM apex_stats_events WHERE " + " AND ".join(where) + " ORDER BY occurred_at DESC LIMIT 50000", params)
             rows = cur.fetchall()
     finally: conn.close()
     return [{"event_key": r["event_key"], "kind": r["kind"], "strategy": r["strategy"], "symbol": r["symbol"],
@@ -868,7 +858,6 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         "api_budget_plan": budget_plan,
         "api_budget_error": latest_v2.get("api_budget_error"),
         "source_registry": latest_v2.get("source_registry", []),
-        "live_context": latest_v2.get("live_context", []),
         "gate_microstructure": latest_v2.get("gate_microstructure", []),
         "versions": versions, "snapshot_at": latest_v2.get("generated_at") or latest_v2.get("occurred_at"),
         "observability_state": "INCOMPLETE" if observability_reasons else "COMPLETE",
@@ -891,7 +880,6 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
       "swing_volume_observation":swing_volume_observation,"fast_target_diagnostics":dict(fast_target_reasons),
       "market_data":market_data,"ltf_watch":ltf_watch,"system_overview":system_overview,
       "source_registry":system_overview.get("source_registry",[]),
-      "live_context":system_overview.get("live_context",[]),
       "portfolio_dependency":latest_v2.get("portfolio_dependency",{}),
       "gate_microstructure":system_overview.get("gate_microstructure",[]),
       "api_budget_plan":system_overview.get("api_budget_plan",{}),
@@ -1131,9 +1119,10 @@ class APEXStatsServer(ThreadingHTTPServer):
 def main():
     _SETTINGS.validate_startup()
     ensure_schema()
-    # Do not eagerly materialize telemetry on a memory-constrained web instance.
-    # The first authenticated dashboard request uses the bounded single-flight
-    # path, while /health, ingest and the worker lease stay available at startup.
+    # Warm the default cache without delaying port binding. Until it completes,
+    # /health and ingest remain responsive and duplicate dashboard builds fail
+    # fast instead of occupying every request thread.
+    threading.Thread(target=lambda: build_dashboard(), name="dashboard-cache-warm", daemon=True).start()
     print(f"APEX Strategy Stats listening on :{PORT}")
     APEXStatsServer(("0.0.0.0",PORT),Handler).serve_forever()
 

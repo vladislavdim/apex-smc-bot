@@ -33,7 +33,6 @@ class StateCallbackDependencies:
     format_incidents: Callable[[Any], str]
     fetch_strategy_stats: Callable[[], Any]
     format_strategy_stats: Callable[[Any], str]
-    system_dashboard: Callable[[], str]
     stats_url: str
     button: Callable[..., Any]
     markup: Callable[..., Any]
@@ -90,24 +89,7 @@ class StateCallbackHandlers:
         if data == "menu_strategies":
             await self._strategies(callback)
             return True
-        if data == "menu_system":
-            await self._system(callback)
-            return True
         return False
-
-    async def _system(self, callback: Any) -> None:
-        try:
-            text = await asyncio.to_thread(self.dependencies.system_dashboard)
-        except Exception as exc:
-            logging.error("Telegram system dashboard: %s", exc)
-            text = "⚠️ Не удалось прочитать каноническое состояние worker."
-        await self.dependencies.edit_message(
-            callback.message, text, parse_mode="HTML",
-            reply_markup=self.dependencies.markup(inline_keyboard=[
-                [self.dependencies.button(text="🔄 Обновить", callback_data="menu_system")],
-                [self.dependencies.button(text="🔙 Меню", callback_data="menu_back")],
-            ]),
-        )
 
     async def _manager(self, callback: Any) -> None:
         try:

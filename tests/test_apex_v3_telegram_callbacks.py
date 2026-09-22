@@ -34,7 +34,6 @@ class StateCallbackHandlerTests(unittest.IsolatedAsyncioTestCase):
             format_incidents=lambda rows: f"incidents:{len(rows)}",
             fetch_strategy_stats=lambda: ["FAST"],
             format_strategy_stats=lambda rows: f"strategies:{len(rows)}",
-            system_dashboard=lambda: "system:READY",
             stats_url="https://stats.example",
             button=lambda **kwargs: SimpleNamespace(**kwargs),
             markup=lambda **kwargs: SimpleNamespace(**kwargs),
@@ -72,12 +71,6 @@ class StateCallbackHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(self.edit.await_args.args[1], "learning")
-
-    async def test_system_reads_canonical_runtime_projection(self):
-        handled = await self.handlers.handle(self.callback("menu_system"))
-
-        self.assertTrue(handled)
-        self.assertEqual(self.edit.await_args.args[1], "system:READY")
 
 
 if __name__ == "__main__":
