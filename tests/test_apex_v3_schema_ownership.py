@@ -32,6 +32,23 @@ class SchemaOwnershipTests(unittest.TestCase):
         self.assertEqual(set(report.memory_tables) - {"apex_schema_migrations"}, MEMORY_TABLES)
         self.assertFalse(LEGACY_IMPORT_TABLES & (STATE_TABLES | MEMORY_TABLES))
 
+    def test_brain_persistence_metadata_is_allowed_in_both_stores(self):
+        schema = """
+            CREATE TABLE brain_persistence_meta (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                generation INTEGER NOT NULL DEFAULT 0,
+                parent_blob_sha TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                backed_up_at TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT ''
+            )
+        """
+        self.state.execute(schema)
+        self.memory.execute(schema)
+        report = assert_schema_ownership(self.state, self.memory)
+        self.assertTrue(report.ok)
+        self.assertNotIn("cross_store_overlap:brain_persistence_meta", report.errors)
+
     def test_missing_owned_table_fails_closed(self):
         self.state.execute("DROP TABLE manager_events")
         report = inspect_schema_ownership(self.state, self.memory)
