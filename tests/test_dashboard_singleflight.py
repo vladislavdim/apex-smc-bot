@@ -6,6 +6,16 @@ import stats_server
 
 
 class DashboardSingleFlightTests(unittest.TestCase):
+    def test_dashboard_fetch_window_is_memory_bounded(self):
+        self.assertGreaterEqual(stats_server.MAX_DASHBOARD_EVENTS, 5_000)
+        self.assertLessEqual(stats_server.MAX_DASHBOARD_EVENTS, 20_000)
+
+    def test_main_does_not_eager_warm_dashboard(self):
+        import inspect
+        source = inspect.getsource(stats_server.main)
+        self.assertNotIn("dashboard-cache-warm", source)
+        self.assertNotIn("build_dashboard()", source)
+
     def setUp(self):
         with stats_server._DASHBOARD_CACHE_LOCK:
             stats_server._DASHBOARD_CACHE.clear()

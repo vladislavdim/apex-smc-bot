@@ -38,6 +38,9 @@ _DASHBOARD_CACHE: "OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]]" =
 _DASHBOARD_CACHE_LOCK = threading.Lock()
 _DASHBOARD_BUILD_LOCK = threading.Lock()
 _DASHBOARD_PERSIST_CHECKED: set[str] = set()
+# Bound one aggregation pass so the free 512 MB web instance cannot be killed
+# while materializing tens of thousands of JSON telemetry payloads at once.
+MAX_DASHBOARD_EVENTS = 20_000
 
 
 
@@ -292,7 +295,12 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
     conn = _connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT event_key,kind,strategy,symbol,occurred_at,payload FROM apex_stats_events WHERE " + " AND ".join(where) + " ORDER BY occurred_at DESC LIMIT 50000", params)
+            cur.execute(
+                "SELECT event_key,kind,strategy,symbol,occurred_at,payload "
+                "FROM apex_stats_events WHERE " + " AND ".join(where) +
+                " ORDER BY occurred_at DESC LIMIT %s",
+                [*params, MAX_DASHBOARD_EVENTS],
+            )
             rows = cur.fetchall()
     finally: conn.close()
     return [{"event_key": r["event_key"], "kind": r["kind"], "strategy": r["strategy"], "symbol": r["symbol"],
@@ -1119,10 +1127,10 @@ class APEXStatsServer(ThreadingHTTPServer):
 def main():
     _SETTINGS.validate_startup()
     ensure_schema()
-    # Warm the default cache without delaying port binding. Until it completes,
-    # /health and ingest remain responsive and duplicate dashboard builds fail
-    # fast instead of occupying every request thread.
-    threading.Thread(target=lambda: build_dashboard(), name="dashboard-cache-warm", daemon=True).start()
+    # Do not eagerly aggregate the telemetry cohort at process startup. On the
+    # 512 MB web instance that work can race port startup and trigger a restart
+    # loop. The first authenticated dashboard request uses persisted cache when
+    # available and otherwise performs one bounded single-flight build.
     print(f"APEX Strategy Stats listening on :{PORT}")
     APEXStatsServer(("0.0.0.0",PORT),Handler).serve_forever()
 
