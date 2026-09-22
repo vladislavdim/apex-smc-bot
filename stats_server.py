@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -40,7 +41,12 @@ _DASHBOARD_BUILD_LOCK = threading.Lock()
 _DASHBOARD_PERSIST_CHECKED: set[str] = set()
 # Bound one aggregation pass so the free 512 MB web instance cannot be killed
 # while materializing tens of thousands of JSON telemetry payloads at once.
-MAX_DASHBOARD_EVENTS = 20_000
+# JSONB audit payloads can be large (full strategy evidence/check paths).  A
+# 20k fetch has repeatedly exceeded Render Free's 512 MiB limit while Python
+# and psycopg2 held both the raw rows and the normalized projection.  The rows
+# are newest-first, so 5k retains the current scanner window without allowing
+# an authenticated refresh to kill the web process.
+MAX_DASHBOARD_EVENTS = 5_000
 
 
 
@@ -1115,8 +1121,13 @@ def _refresh_dashboard_background(key: tuple[Any, ...], args: tuple[Any, ...]) -
     def run() -> None:
         try:
             _build_and_store_dashboard(key, args)
-        except Exception:
-            pass
+        except Exception as exc:
+            # A failed refresh must be observable.  Silently swallowing this
+            # exception left an old persisted cohort looking authoritative for
+            # days even though worker ingestion continued normally.
+            logging.exception(
+                "Dashboard background refresh failed: %s", type(exc).__name__
+            )
         finally:
             _DASHBOARD_BUILD_LOCK.release()
 

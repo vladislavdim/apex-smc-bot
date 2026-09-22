@@ -7,8 +7,13 @@ import stats_server
 
 class DashboardSingleFlightTests(unittest.TestCase):
     def test_dashboard_fetch_window_is_memory_bounded(self):
-        self.assertGreaterEqual(stats_server.MAX_DASHBOARD_EVENTS, 5_000)
-        self.assertLessEqual(stats_server.MAX_DASHBOARD_EVENTS, 20_000)
+        self.assertEqual(stats_server.MAX_DASHBOARD_EVENTS, 5_000)
+
+    def test_page_discloses_persisted_stale_snapshot(self):
+        from apex.ui.dashboard.page import HTML
+
+        self.assertIn("includes('STALE')", HTML)
+        self.assertIn("Данные устарели", HTML)
 
     def test_main_does_not_eager_warm_dashboard(self):
         import inspect
