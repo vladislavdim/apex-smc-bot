@@ -579,7 +579,7 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     except Exception:
         result["groq_calibration"] = {"calls": 0, "resolved": 0, "scope": "CONFIRMED_LIVE_ONLY"}
     try:
-        from core.portfolio_dependency import latest_dependency_snapshot
+        from apex.risk.dependency import latest_dependency_snapshot
         result["portfolio_dependency"] = latest_dependency_snapshot(db_path)
     except Exception:
         result["portfolio_dependency"] = {}

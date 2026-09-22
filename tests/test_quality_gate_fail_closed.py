@@ -5,7 +5,7 @@ from pathlib import Path
 class QualityGateFailClosedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.bot = Path('bot.py').read_text(encoding='utf-8')
+        cls.bot = Path('apex/app/worker.py').read_text(encoding='utf-8')
 
     def test_unavailable_gate_blocks_candidate(self):
         self.assertIn('if not _SIGNAL_QUALITY_GATE_OK:', self.bot)

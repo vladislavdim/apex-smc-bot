@@ -111,7 +111,7 @@ class ApexV2Tests(unittest.TestCase):
 class DashboardProductionSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with open("stats_server.py", encoding="utf-8") as handle:
+        with open("apex/ui/dashboard/server.py", encoding="utf-8") as handle:
             cls.stats = handle.read()
 
     def test_v3_projection_and_read_only_contract_exist(self):
@@ -130,7 +130,7 @@ class DashboardProductionSourceTests(unittest.TestCase):
         self.assertNotIn('"TP1 RR is between 2.0 and 4.0"', catalog)
 
     def test_dashboard_joins_v2_snapshot_and_drops_expired_pending(self):
-        import stats_server
+        from apex.ui.dashboard import server as stats_server
         release = "abc123"
         events = [
             {"event_key": "a", "kind": "attempt", "strategy": "FAST", "symbol": "BNBUSDT",

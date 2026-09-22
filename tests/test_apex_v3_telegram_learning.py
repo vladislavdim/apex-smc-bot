@@ -9,7 +9,7 @@ from apex.ui.telegram.learning import format_live_learning
 
 class TelegramLiveLearningTests(unittest.TestCase):
     def test_stats_ui_uses_live_memory_not_legacy_signal_tables(self):
-        launcher = Path("bot.py").read_text()
+        launcher = Path("apex/app/worker.py").read_text()
         commands = Path("apex/ui/telegram/commands.py").read_text()
         self.assertIn("async def stats", commands)
         self.assertIn("_format_live_learning", launcher)

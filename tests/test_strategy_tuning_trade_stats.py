@@ -2,14 +2,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import stats_server
+from apex.ui.dashboard import server as stats_server
 
 
 class StrategyTuningTradeStatsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.market = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
-        cls.stats = Path("stats_server.py").read_text(encoding="utf-8")
+        cls.stats = Path("apex/ui/dashboard/server.py").read_text(encoding="utf-8")
         cls.dashboard = Path("apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 
     def test_swing_retains_structure_and_final_rr_after_ltf_refinement(self):

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core.trade_manager import (
+from apex.manager.engine import (
     _prompt,
     build_structure_facts,
     detect_events,
@@ -36,7 +36,7 @@ def test_initial_rr_is_not_rewritten_by_manager_r():
 
 
 def test_manager_v2_remains_advisory_without_live_execution_imports():
-    source = Path(__import__("core.trade_manager", fromlist=["x"]).__file__).read_text(encoding="utf-8")
+    source = Path(__import__("apex.manager.engine", fromlist=["x"]).__file__).read_text(encoding="utf-8")
     assert "core.trade_execution" not in source
     assert "place_order" not in source
     assert "cancel_order" not in source

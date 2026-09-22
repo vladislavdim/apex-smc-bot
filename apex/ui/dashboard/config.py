@@ -56,6 +56,7 @@ class DashboardSettings:
     stats_baseline_utc: datetime = datetime.fromisoformat(DEFAULT_STATS_BASELINE_UTC)
     cache_ttl_seconds: int = 45
     cache_max_entries: int = 16
+    release_sha: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "DashboardSettings":
@@ -69,6 +70,7 @@ class DashboardSettings:
             stats_baseline_utc=_baseline(source),
             cache_ttl_seconds=_bounded_int(source, "APEX_DASHBOARD_CACHE_TTL_SECONDS", 45, 5, 600),
             cache_max_entries=_bounded_int(source, "APEX_DASHBOARD_CACHE_MAX_ENTRIES", 16, 2, 128),
+            release_sha=str(source.get("RENDER_GIT_COMMIT") or source.get("GIT_COMMIT") or "").strip(),
         )
 
     def validate_startup(self) -> None:

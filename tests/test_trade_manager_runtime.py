@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from core.trade_manager import (
+from apex.manager.engine import (
     finalize_manager_trade,
     format_telegram_update,
     load_manager_message,
@@ -260,7 +260,7 @@ def test_manager_review_is_state_only_after_cutover(tmp_path):
     configure_manager_state(state_factory)
     try:
         state = load_state(1, db_path)
-        from core.trade_manager import persist_review
+        from apex.manager.engine import persist_review
         persist_review(
             state, 102, ["BOS"],
             {"management_candle_id": "closed-15m-1", "new_management_candle": True},
@@ -300,7 +300,7 @@ def test_manager_data_availability_is_state_only_after_cutover(tmp_path):
         legacy.commit(); legacy.close()
         assert load_state(1, db_path)["status"] == "ACTIVE"
         assert [item["signal_id"] for item in load_active_states(db_path)] == [1]
-        from core.trade_manager import _record_data_availability
+        from apex.manager.engine import _record_data_availability
         assert _record_data_availability(state, False, "Gate timeout", db_path) == (1, False)
         target = state_factory()
         target_row = target.execute(
@@ -514,7 +514,7 @@ def test_state_manager_normal_writes_do_not_create_legacy_db(tmp_path):
     conn = state_factory(); migrate_state(conn); conn.close()
     configure_manager_state(state_factory)
     try:
-        from core.trade_manager import (
+        from apex.manager.engine import (
             _record_data_availability, persist_review, register_active_trade,
         )
         register_active_trade({

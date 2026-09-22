@@ -145,7 +145,7 @@ class ExecutionLedgerMigrationTests(unittest.TestCase):
         state.close()
 
     def test_runtime_refreshes_ledger_before_live_outcome_sync(self):
-        source = Path("bot.py").read_text(encoding="utf-8")
+        source = Path("apex/app/worker.py").read_text(encoding="utf-8")
         startup = source.index("_execution_import = await _v3_refresh_execution_state_mirror()")
         startup_ledger = source.index("_ledger_import = await _v3_refresh_execution_ledger_mirror()")
         self.assertLess(startup, startup_ledger)

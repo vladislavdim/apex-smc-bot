@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import control_loop
+from apex.telemetry import scanner_metrics as control_loop
 
 
 class LearningAuthorityTests(unittest.TestCase):

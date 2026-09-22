@@ -5,7 +5,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from core.trade_execution import (
+from apex.execution.orders import (
     LIVE_CONFIRMATION,
     BinanceFuturesClient,
     ExecutionConfig,
@@ -16,7 +16,7 @@ from core.trade_execution import (
     execution_status,
     reconcile_live_executions,
 )
-from core import trade_execution
+from apex.execution import orders as trade_execution
 from apex.db.state_db import migrate_state
 from apex.db.execution_recovery import recovery_path, replay_recovery
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
