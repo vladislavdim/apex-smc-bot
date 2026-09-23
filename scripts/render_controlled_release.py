@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import time
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -78,6 +79,27 @@ class RenderReleaseClient:
     def deploy(self, service_id: str, deploy_id: str) -> dict[str, Any]:
         payload = self._request("GET", f"/services/{service_id}/deploys/{deploy_id}")
         return dict(payload.get("deploy") or payload)
+
+    def recent_logs(self, service_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return bounded application logs without exposing the API credential."""
+        service = self.service(service_id)
+        owner = service.get("owner") if isinstance(service.get("owner"), dict) else {}
+        owner_id = str(service.get("ownerId") or owner.get("id") or "").strip()
+        if not owner_id:
+            raise ReleaseError(f"Render returned no owner id for {service_id}")
+        payload = self._request(
+            "GET",
+            "/logs",
+            params={
+                "ownerId": owner_id,
+                "resource": service_id,
+                "type": "app",
+                "direction": "backward",
+                "limit": max(1, min(int(limit), 100)),
+            },
+        )
+        rows = payload.get("logs") if isinstance(payload, dict) else payload
+        return [dict(row) for row in (rows or []) if isinstance(row, dict)]
 
     def wait_live(self, service_id: str, deploy_id: str, *, timeout_seconds: int = 900,
                   interval_seconds: int = 10) -> dict[str, Any]:
@@ -200,6 +222,38 @@ def disable_auto_deploy(client: RenderReleaseClient) -> dict[str, str]:
     return {role: "no" for role in services}
 
 
+_SECRET_LOG_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
+    re.compile(r"(?i)(api\.telegram\.org/bot)[^/\s]+"),
+    re.compile(r"(?i)((?:token|api[_-]?key|secret|password)\s*[:=]\s*)[^\s,;]+"),
+)
+
+
+def sanitize_log_message(value: Any) -> str:
+    """Keep diagnostics useful while preventing credentials from reaching CI logs."""
+    message = str(value or "").replace("\r", " ").replace("\n", " ")[:2000]
+    for pattern in _SECRET_LOG_PATTERNS:
+        message = pattern.sub(r"\1[REDACTED]", message)
+    return message
+
+
+def print_worker_diagnostics(client: RenderReleaseClient) -> None:
+    """Best-effort bounded diagnostics for a failed worker readiness check."""
+    try:
+        rows = client.recent_logs(EXPECTED_SERVICES["worker"][0])
+    except Exception as exc:
+        print(f"Render worker diagnostics unavailable: {type(exc).__name__}")
+        return
+    print(f"Render worker diagnostics ({len(rows)} most recent app logs):")
+    for row in reversed(rows):
+        timestamp = sanitize_log_message(row.get("timestamp") or row.get("time") or "")
+        message = sanitize_log_message(
+            row.get("message") or row.get("text") or row.get("log") or ""
+        )
+        if message:
+            print(f"{timestamp} {message}".strip())
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sha", required=True)
@@ -215,12 +269,16 @@ def main() -> int:
         disabled = disable_auto_deploy(client)
         print(f"APEX auto deploy disabled: {','.join(sorted(disabled))}")
         return 0
-    result = controlled_release(
-        client,
-        commit_sha=args.sha.lower(),
-        health_url=args.health_url,
-        worker_ready_url=args.worker_ready_url,
-    )
+    try:
+        result = controlled_release(
+            client,
+            commit_sha=args.sha.lower(),
+            health_url=args.health_url,
+            worker_ready_url=args.worker_ready_url,
+        )
+    except ReleaseError:
+        print_worker_diagnostics(client)
+        raise
     print(
         f"APEX controlled release live: {result['commit_sha'][:8]} "
         f"web={result['web_deploy_id']} worker={result['worker_deploy_id']}"

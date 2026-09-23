@@ -1,6 +1,8 @@
 import importlib.util
+import io
 from pathlib import Path
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 
@@ -117,6 +119,29 @@ class ControlledRenderReleaseTests(unittest.TestCase):
         )
         self.assertTrue(result["ready"])
         self.assertIn("sha=" + "a" * 40, session.urls[0][0])
+
+    def test_worker_diagnostics_redacts_credentials(self):
+        class DiagnosticClient:
+            def recent_logs(self, service_id):
+                self.service_id = service_id
+                return [{
+                    "timestamp": "2026-09-23T13:00:00Z",
+                    "message": (
+                        "telegram=https://api.telegram.org/bot123:secret/getMe "
+                        "api_key=render-secret Authorization: Bearer bearer-secret"
+                    ),
+                }]
+
+        client = DiagnosticClient()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            release.print_worker_diagnostics(client)
+        rendered = output.getvalue()
+        self.assertEqual(client.service_id, release.EXPECTED_SERVICES["worker"][0])
+        self.assertIn("[REDACTED]", rendered)
+        self.assertNotIn("123:secret", rendered)
+        self.assertNotIn("render-secret", rendered)
+        self.assertNotIn("bearer-secret", rendered)
 
 
 if __name__ == "__main__":
