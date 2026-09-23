@@ -12,20 +12,12 @@ try:
 except ImportError:
     from data_policy import configured_market_data_providers
 
-try:
-    from .market_structure import (
-        analyze_market_structure as _analyze_market_structure,
-        classify_swings as _classify_structure_swings,
-        events_with_trend_fallback as _structure_events,
-        find_swings as _find_structure_swings,
-    )
-except ImportError:  # market.py also imports this module from the core path.
-    from market_structure import (
-        analyze_market_structure as _analyze_market_structure,
-        classify_swings as _classify_structure_swings,
-        events_with_trend_fallback as _structure_events,
-        find_swings as _find_structure_swings,
-    )
+from apex.market.structure import (
+    analyze_market_structure as _analyze_market_structure,
+    classify_swings as _classify_structure_swings,
+    events_with_trend_fallback as _structure_events,
+    find_swings as _find_structure_swings,
+)
 
 # ── WAL патч ──
 

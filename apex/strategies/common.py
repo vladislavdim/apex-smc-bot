@@ -1,4 +1,4 @@
-"""Timezone-aware session windows used by the FAST strategy."""
+"""Shared deterministic helpers for production strategies."""
 
 from __future__ import annotations
 
@@ -34,3 +34,6 @@ def fast_session(now_utc: datetime | None = None) -> str | None:
 
 def is_fast_session(now_utc: datetime | None = None) -> bool:
     return fast_session(now_utc) is not None
+
+
+__all__ = ["fast_session", "is_fast_session"]

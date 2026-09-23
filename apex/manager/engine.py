@@ -23,7 +23,7 @@ from apex.domain.ids import derived_id
 from typing import Any, Callable
 from apex.config.settings import ApexConfig
 
-from core.market_structure import analyze_market_structure
+from apex.market.structure import analyze_market_structure
 
 DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 MANAGER_VERSION = 2
