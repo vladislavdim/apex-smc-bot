@@ -14,12 +14,16 @@ class TelegramSystemTests(unittest.TestCase):
                 "state_db": {"state": "READY"},
                 "gate": {"state": "STALE"},
                 "binance_reconciliation": {"state": "READY"},
+                "strategy_activation": {"state": "READY"},
+                "scanner_fast": {"state": "READY"},
             },
         })
         self.assertIn("Release: <code>aaaaaaaaaaaa</code>", text)
         self.assertIn("State DB: <b>READY</b>", text)
         self.assertIn("Gate: <b>STALE</b>", text)
         self.assertIn("Binance: <b>READY</b>", text)
+        self.assertIn("Strategy activation: <b>READY</b>", text)
+        self.assertIn("Scanner FAST: <b>READY</b>", text)
         self.assertIn("READINESS_UNHEALTHY:gate:STALE", text)
 
 
