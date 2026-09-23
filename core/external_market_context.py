@@ -16,10 +16,7 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-try:
-    from .data_policy import provider_enabled
-except ImportError:  # direct core/ import compatibility
-    from data_policy import provider_enabled
+from apex.market.source_registry import provider_enabled
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL_SECONDS = 120
