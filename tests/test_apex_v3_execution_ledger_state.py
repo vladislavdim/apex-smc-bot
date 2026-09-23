@@ -12,7 +12,7 @@ from apex.db.repositories.execution_ledger import (
 from apex.db.repositories.executions import ExecutionRepository
 from apex.db.state_db import migrate_state
 from apex.domain.ids import is_id, new_id
-from core.execution_ledger import (
+from apex.execution.ledger import (
     ExecutionSnapshot,
     _save_funding_coverage,
     actual_result,

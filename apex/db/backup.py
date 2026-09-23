@@ -1,4 +1,4 @@
-"""Durable, rollback-safe persistence for APEX's ephemeral SQLite brain.
+"""Canonical V3 durable, rollback-safe database persistence.
 
 Render instances are disposable.  The dedicated GitHub backup branch is the
 durable source of truth; a local ``brain.db`` is only a runtime working copy.
@@ -26,7 +26,7 @@ except ImportError:  # Unit tests can inject a transport without runtime deps.
 
 
 _META_TABLE = "brain_persistence_meta"
-# bot.py wraps sqlite3.connect globally to enforce WAL for runtime writers.
+# The worker composition root configures SQLite WAL for runtime writers.
 # Snapshot and read-only validation connections must use the original DB-API
 # constructor so temporary files cannot retain untracked WAL sidecars.
 _SQLITE_CONNECT = sqlite3.dbapi2.connect

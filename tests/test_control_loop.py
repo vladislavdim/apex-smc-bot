@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from core.control_loop import (
+from apex.telemetry.scanner_metrics import (
     begin_scan,
     ensure_control_schema,
     finish_scan,

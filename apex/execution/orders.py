@@ -1,4 +1,4 @@
-"""Optional Binance USD-M execution for approved APEX candidates.
+"""Canonical V3 Binance USD-M execution for approved APEX candidates.
 
 The module is deliberately isolated from strategy calculations.  It consumes
 an immutable, already reviewed candidate and either records a paper order or
@@ -37,10 +37,7 @@ except ImportError:  # pure sizing/paper tests do not need an HTTP package
 
 _RequestException = getattr(requests, "RequestException", OSError) if requests is not None else OSError
 
-try:
-    from .signal_integrity import validate_candidate
-except ImportError:  # direct core/ import compatibility
-    from signal_integrity import validate_candidate
+from core.signal_integrity import validate_candidate
 
 
 DB_PATH = ApexConfig.from_env().database.compatibility_db_path
@@ -888,7 +885,7 @@ def execute_manager_review(
         return {"signal_id": signal_id, "status": "NO_EXECUTION", "action": action}
     # Formal V2 transition validation always precedes risk/exchange checks.
     try:
-        from core.trade_manager import validate_transition
+        from apex.manager.engine import validate_transition
         repository = _manager_state_repository()
         if repository is not None:
             manager_row = repository.get(signal_id)
@@ -990,7 +987,7 @@ def execute_manager_review(
             )
             _finish_manager_action(db_path, action_key, "EXECUTED", order_id=new_stop_id)
             try:
-                from core.trade_manager import confirm_manager_action
+                from apex.manager.engine import confirm_manager_action
                 confirm_manager_action(
                     signal_id, action, "EXECUTED", db_path,
                     confirmed_protect_level=float(rounded),
@@ -1036,7 +1033,7 @@ def execute_manager_review(
                 conn.close()
         _finish_manager_action(db_path, action_key, "EXECUTED", order_id=order_id)
         try:
-            from core.trade_manager import confirm_manager_action
+            from apex.manager.engine import confirm_manager_action
             remaining_fraction = None
             if action == "PARTIAL_EXIT":
                 original_quantity = _decimal(snapshot.get("quantity") or amount)
@@ -1647,7 +1644,7 @@ def _reconcile_stop_replacement(
         )
         conn.commit(); conn.close()
     try:
-        from core.trade_manager import confirm_manager_action
+        from apex.manager.engine import confirm_manager_action
         confirm_manager_action(
             int(row["signal_id"]), "PROTECT", "EXECUTED", db_path,
             confirmed_protect_level=float(row["active_stop_price"]),
@@ -1677,7 +1674,7 @@ def reconcile_live_executions(
         active_config = config or ExecutionConfig.from_env()
         if active_config.live_armed:
             try:
-                from core.execution_ledger import (
+                from apex.execution.ledger import (
                     reconcile_funding_one, reconcile_one, register_execution_orders,
                 )
                 register_execution_orders(db_path)
@@ -1842,7 +1839,7 @@ def _reconcile_live_executions_unlocked(
             outcomes.append({"status": "RECONCILE_ERROR", "signal_id": row["signal_id"]})
     for outcome in outcomes:
         try:
-            from core.trade_manager import confirm_v2_reconciliation
+            from apex.manager.engine import confirm_v2_reconciliation
             confirm_v2_reconciliation(
                 int(outcome.get("signal_id") or 0), str(outcome.get("status") or ""), db_path
             )

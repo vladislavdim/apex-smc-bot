@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from external_sources.budget import SourceBudget, Policy, BudgetDenied, request_scope, projected_load, plan_daily_load
 from external_sources.http_client import ExternalHTTPClient, ExternalHTTPError
-from core.control_loop import due_ltf_watches, ensure_control_schema, upsert_ltf_watch
+from apex.telemetry.scanner_metrics import due_ltf_watches, ensure_control_schema, upsert_ltf_watch
 
 
 class BudgetTests(unittest.TestCase):

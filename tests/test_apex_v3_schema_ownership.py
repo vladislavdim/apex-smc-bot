@@ -64,7 +64,7 @@ class SchemaOwnershipTests(unittest.TestCase):
         self.assertIn("cross_store_overlap:live_candidates", report.errors)
 
     def test_runtime_invokes_gate_after_both_migrations(self):
-        source = Path("bot.py").read_text(encoding="utf-8")
+        source = Path("apex/app/worker.py").read_text(encoding="utf-8")
         prepare = source.index("def _v3_prepare_databases():")
         state = source.index("_v3_migrate_state(state)", prepare)
         memory = source.index("_v3_migrate_memory(memory)", state)

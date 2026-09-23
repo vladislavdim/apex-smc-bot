@@ -2,7 +2,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-import stats_server
+from apex.ui.dashboard import server as stats_server
 
 
 class DashboardSingleFlightTests(unittest.TestCase):

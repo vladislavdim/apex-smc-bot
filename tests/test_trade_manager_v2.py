@@ -1,7 +1,7 @@
 import sqlite3
 
-from core.trade_execution import ExecutionConfig, LIVE_CONFIRMATION, ensure_execution_schema, reconcile_live_executions
-from core.trade_manager import (
+from apex.execution.orders import ExecutionConfig, LIVE_CONFIRMATION, ensure_execution_schema, reconcile_live_executions
+from apex.manager.engine import (
     MANAGEMENT_TF, NO_PROGRESS_BARS, PROGRESS_TF, TRANSITION_MATRIX, activate_v2_once,
     confirm_manager_action, ensure_trade_manager_schema, load_state, no_progress_event_due,
     persist_review, register_active_trade, review_active_trade,

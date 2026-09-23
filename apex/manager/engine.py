@@ -1,4 +1,4 @@
-"""APEX Trade Manager 2.0.
+"""Canonical APEX V3 live Trade Manager.
 
 The manager is deliberately downstream of entry strategies. It never creates a
 signal and never rewrites immutable initial entry/SL/TP/RR. It observes an

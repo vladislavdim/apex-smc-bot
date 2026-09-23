@@ -1,4 +1,4 @@
-"""Confirmed fill accounting. No order submission or market-data requests.
+"""Canonical V3 confirmed-fill ledger and accounting.
 
 Only registered execution orders may contribute fills. Missing pages, unknown
 fee assets or incomplete quantities never produce a closed net-R estimate.

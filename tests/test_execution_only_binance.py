@@ -20,7 +20,7 @@ class ExecutionOnlyBinanceTests(unittest.IsolatedAsyncioTestCase):
                 "api.binance.com",
                 "fstream.binance.com",
             )) and relative.as_posix() not in {
-                "core/trade_execution.py", "apex/config/settings.py",
+                "apex/execution/orders.py", "apex/config/settings.py",
             }:
                 violations.append(relative.as_posix())
         self.assertEqual(violations, [])

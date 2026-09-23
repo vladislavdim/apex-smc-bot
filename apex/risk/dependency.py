@@ -1,4 +1,4 @@
-"""Gate-return dependency diagnostics for portfolio awareness.
+"""Canonical V3 Gate-return dependency diagnostics for portfolio awareness.
 
 This is an observation layer only.  It estimates pairwise Pearson correlation
 and BTC beta from closed Gate returns, groups highly correlated symbols and

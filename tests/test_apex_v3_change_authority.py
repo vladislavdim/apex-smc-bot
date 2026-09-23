@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ChangeAuthorityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = (ROOT / "bot.py").read_text(encoding="utf-8")
+        cls.source = (ROOT / "apex/app/worker.py").read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
 
     def test_runtime_has_no_direct_github_write(self):

@@ -1,4 +1,4 @@
-"""Persistent operational control loop for APEX scanners and risk overlays.
+"""Canonical V3 scanner lifecycle metrics and risk-state projection.
 
 This module observes strategy output and closed outcomes.  It never calculates
 or edits entry, stop, targets, direction, or strategy confirmation rules.

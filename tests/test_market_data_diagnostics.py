@@ -6,7 +6,7 @@ os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 with patch("groq.Groq", return_value=object()):
     import market
-import stats_server
+from apex.ui.dashboard import server as stats_server
 
 
 def test_integration_health_exposes_heatmaps_and_remaining_budget():

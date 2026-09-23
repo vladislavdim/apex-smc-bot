@@ -47,7 +47,7 @@ jobs:
           for path in Path('.github/workflows').glob('*.yml'):
               yaml.safe_load(path.read_text(encoding='utf-8'))
           PY
-          ! rg -n 'contents:\s*write|git push|requests\.(put|patch|delete)' bot.py .github/workflows --glob '!ci.yml'
+          ! rg -n 'contents:\s*write|git push|requests\.(put|patch|delete)' bot.py apex/app/worker.py .github/workflows --glob '!ci.yml'
 
       - name: Diff integrity
         run: git diff --check

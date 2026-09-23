@@ -8,7 +8,7 @@ from apex.db.repositories.manager import ManagerRepository
 from datetime import datetime
 from typing import Any
 
-from core.trade_manager import ensure_trade_manager_schema
+from apex.manager.engine import ensure_trade_manager_schema
 
 
 _MANAGER_DASHBOARD_STATE_FACTORY = None

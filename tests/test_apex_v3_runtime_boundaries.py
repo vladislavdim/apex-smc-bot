@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class RuntimeBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = (ROOT / "bot.py").read_text(encoding="utf-8")
+        cls.source = (ROOT / "apex/app/worker.py").read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
 
     def test_bot_does_not_replace_sqlite_connect(self):
