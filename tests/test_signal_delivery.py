@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.signal_delivery import (
+from apex.db.repositories.deliveries import (
     claim_signal_delivery,
     confirm_signal_delivery,
     release_signal_delivery_claim,
