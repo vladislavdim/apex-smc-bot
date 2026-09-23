@@ -1269,12 +1269,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self): self.send_response(200); self.end_headers()
     def do_GET(self):
         p=urlparse(self.path); q=parse_qs(p.query)
-        if p.path=="/health": self._json({"ok":True,"service":"apex-strategy-stats"}); return
-        if p.path=="/health/worker":
+        # Treat a trailing slash as the same Dashboard route. Mobile browsers,
+        # saved bookmarks and reverse proxies may normalize /stats to /stats/.
+        # Keep / itself unchanged while canonicalizing every other path.
+        route = p.path if p.path == "/" else p.path.rstrip("/")
+        if route=="/health": self._json({"ok":True,"service":"apex-strategy-stats"}); return
+        if route=="/health/worker":
             payload,status=worker_readiness((q.get("sha") or [""])[0]); self._json(payload,status); return
         if not self._auth(q): self._html("<!doctype html><meta charset=utf-8><h2>403 · закрытая статистика APEX</h2>",403); return
-        if p.path in {"/","/stats"}: self._html(HTML); return
-        if p.path=="/api/dashboard":
+        if route in {"/","/stats"}: self._html(HTML); return
+        if route=="/api/dashboard":
             try:
                 val=lambda k,d="":(q.get(k) or [d])[0]; data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")),val("release")); self._json(data)
             except Exception as exc: self._json({"error":f"{type(exc).__name__}: {exc}"},500)
