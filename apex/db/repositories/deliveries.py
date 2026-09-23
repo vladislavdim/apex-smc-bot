@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
+from apex.db.connection import connect_compatibility
+
 
 class DeliveryClaimRepository:
     def __init__(self, conn_factory: Callable[[], sqlite3.Connection]) -> None:
@@ -66,4 +68,37 @@ class DeliveryClaimRepository:
             conn.close()
 
 
-__all__ = ["DeliveryClaimRepository"]
+def signal_delivery_key(candidate: dict, strategy: str) -> str:
+    """Build a stable key independent of display labels or quality grades."""
+    return ":".join((
+        str(candidate.get("symbol") or "").upper(),
+        str(strategy or "MTF").upper(),
+        str(candidate.get("direction") or "").upper(),
+        str(candidate.get("timeframe") or "1h").lower(),
+    ))
+
+
+def _repository(db_path: str) -> DeliveryClaimRepository:
+    return DeliveryClaimRepository(lambda: connect_compatibility(db_path, timeout=30))
+
+
+def claim_signal_delivery(
+    db_path: str, cache_key: str, now_ts: float, cooldown_seconds: float,
+) -> bool:
+    return _repository(db_path).claim(cache_key, now_ts, cooldown_seconds)
+
+
+def release_signal_delivery_claim(db_path: str, cache_key: str, claim_ts: float) -> None:
+    _repository(db_path).release(cache_key, claim_ts)
+
+
+def confirm_signal_delivery(
+    db_path: str, cache_key: str, claim_ts: float, delivered_at: float,
+) -> bool:
+    return _repository(db_path).confirm(cache_key, claim_ts, delivered_at)
+
+
+__all__ = [
+    "DeliveryClaimRepository", "claim_signal_delivery", "confirm_signal_delivery",
+    "release_signal_delivery_claim", "signal_delivery_key",
+]
