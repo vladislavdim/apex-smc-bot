@@ -10,7 +10,7 @@ from . import (btc_mempool, coinmetrics, crypto_monitor, defillama,
                live_tape, oli, smart_money, whale_tracker, coinalyze)
 from .models import empty_context, number
 from .pair_registry import get_pair, refresh_pair_registry
-from core.data_policy import provider_enabled
+from apex.market.source_registry import provider_enabled
 
 
 # Maximum age at which a value may influence Groq. Adapters may retain an
