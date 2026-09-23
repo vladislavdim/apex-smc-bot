@@ -880,6 +880,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         "observability_reasons": observability_reasons,
     }
     integration_health = _integration_health(latest_v2, market_data)
+    function_health = _function_health(latest_v2, integration_health)
 
     total=len(joined); page_size=max(20,min(int(page_size),200)); page=max(1,int(page)); start=(page-1)*page_size
     # Keep the attempt denominator for release comparisons; the user-facing
@@ -897,6 +898,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
       "swing_volume_observation":swing_volume_observation,"fast_target_diagnostics":dict(fast_target_reasons),
       "market_data":market_data,"ltf_watch":ltf_watch,"system_overview":system_overview,
       "integration_health":integration_health,
+      "function_health":function_health,
       "source_registry":integration_health.get("display_sources",[]),
       "portfolio_dependency":latest_v2.get("portfolio_dependency",{}),
       "gate_microstructure":system_overview.get("gate_microstructure",[]),
@@ -1003,6 +1005,80 @@ def _integration_health(snapshot: dict[str, Any], market_data: dict[str, Any]) -
     return {
         "sources": sources, "display_sources": display_sources,
         "budgets": budgets, "features": features,
+    }
+
+
+def _function_health(
+    snapshot: dict[str, Any], integration_health: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one truthful, secret-free health matrix for the Dashboard.
+
+    Runtime rows are worker-observed. Provider rows expose local request and
+    rate-limit telemetry. Request-driven context features are explicitly
+    labelled ON_DEMAND when no periodic production probe exists, so the UI
+    never presents "configured" as proof that a provider is healthy.
+    """
+    runtime = snapshot.get("runtime_health")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    components = runtime.get("components")
+    components = components if isinstance(components, dict) else {}
+    rows: list[dict[str, Any]] = []
+    for name, raw in sorted(components.items()):
+        item = raw if isinstance(raw, dict) else {}
+        rows.append({
+            "category": "runtime", "function": str(name),
+            "status": str(item.get("state") or "UNKNOWN").upper(),
+            "reason_code": str(item.get("detail") or "") or None,
+            "updated_at": item.get("updated_at"),
+            "required": bool(item.get("required", False)),
+        })
+
+    provider_names: set[str] = set()
+    for raw in integration_health.get("sources") or []:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("source") or "unknown").lower()
+        provider_names.add(name)
+        rows.append({
+            "category": "provider", "function": name,
+            "status": str(raw.get("status") or "UNKNOWN").upper(),
+            "reason_code": raw.get("reason_code"),
+            "updated_at": raw.get("updated_at"),
+            "used_day": int(raw.get("used_day") or 0),
+            "remaining_day": raw.get("remaining_day"),
+            "failures": int(raw.get("failures") or 0),
+            "rate_limits": int(raw.get("rate_limits") or 0),
+            "required": False,
+        })
+    for raw in integration_health.get("features") or []:
+        if not isinstance(raw, dict):
+            continue
+        rows.append({
+            "category": "feature", "function": raw.get("feature") or "unknown",
+            "status": str(raw.get("status") or "UNKNOWN").upper(),
+            "reason_code": raw.get("reason_code"),
+            "updated_at": raw.get("updated_at"),
+            "required": False,
+        })
+
+    for name in ("news_rss", "economic_calendar", "dxy", "fear_greed"):
+        if name not in provider_names:
+            rows.append({
+                "category": "context", "function": name,
+                "status": "ON_DEMAND",
+                "reason_code": "REQUEST_DRIVEN_NO_PERIODIC_PROBE",
+                "updated_at": None, "required": False,
+            })
+
+    counts = Counter(str(row.get("status") or "UNKNOWN") for row in rows)
+    return {
+        "runtime_status": str(runtime.get("status") or "UNKNOWN").upper(),
+        "health": str(runtime.get("health") or "UNKNOWN").upper(),
+        "ready": runtime.get("ready") is True,
+        "new_entries": str(runtime.get("new_entries") or "UNKNOWN").upper(),
+        "release_sha": str(runtime.get("release_sha") or "")[:12],
+        "reason_codes": list(runtime.get("reason_codes") or []),
+        "counts": dict(counts), "rows": rows,
     }
 
 
