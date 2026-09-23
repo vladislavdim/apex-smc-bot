@@ -383,7 +383,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
         self.assertTrue(authorize("gate_ws", "context"))
         self.assertNotIn("SHADOW", {row["mode"] for row in rows})
         root = os.path.dirname(os.path.dirname(__file__))
-        for relative in ("core/source_registry.py", "external_sources/coinalyze.py",
+        for relative in ("apex/market/source_registry.py", "external_sources/coinalyze.py",
                          "external_sources/gate_microstructure.py", "external_sources/storage.py"):
             with open(os.path.join(root, relative), encoding="utf-8") as source:
                 self.assertNotIn("SHADOW_CONTEXT", source.read(), relative)
@@ -391,14 +391,13 @@ class ApexV3RuntimeTests(unittest.TestCase):
         with self.assertRaises(SourcePolicyError):
             authorize("binance", "scanner")
 
-    def test_legacy_source_registry_is_only_the_canonical_facade(self):
+    def test_source_registry_has_one_canonical_owner(self):
         from apex.market import source_registry as canonical
-        from core import source_registry as compatibility
 
-        self.assertIs(compatibility.REGISTRY, canonical.REGISTRY)
-        self.assertIs(compatibility.get_source, canonical.get_source)
+        root = os.path.dirname(os.path.dirname(__file__))
+        self.assertFalse(os.path.exists(os.path.join(root, "core", "source_registry.py")))
         self.assertEqual(
-            compatibility.get_source("deribit_options"),
+            canonical.get_source("deribit_options"),
             canonical.get_source("deribit"),
         )
         primary = [item.source for item in canonical.REGISTRY.values() if item.can_influence_entry]
