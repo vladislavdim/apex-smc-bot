@@ -493,6 +493,14 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     ensure_apex_v2_schema(db_path)
     conn = _connect(db_path)
     result: dict[str, Any] = {"versions": version_manifest(), "generated_at": _utc_now()}
+    # Publish the canonical supervisor state with the other worker telemetry.
+    # The web process must not probe production integrations independently:
+    # it renders the last worker-observed state instead.
+    try:
+        from apex.app.runtime import runtime_supervisor
+        result["runtime_health"] = runtime_supervisor.snapshot()
+    except Exception:
+        result["runtime_health"] = {}
     # Source registry is declarative and secret-free.  It makes the Gate-only
     # market-data boundary visible beside the rolling request ledger.
     try:
