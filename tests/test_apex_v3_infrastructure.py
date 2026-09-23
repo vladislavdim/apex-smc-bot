@@ -490,7 +490,14 @@ class ApexV3InfrastructureTests(unittest.TestCase):
         persist_release_manifest(conn, manifest)
         persist_release_manifest(conn, manifest)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM release_manifests").fetchone()[0], 1)
-        changed = build_release_manifest(config, deployed_at="2026-09-11T00:01:00+00:00")
+        restarted = build_release_manifest(config, deployed_at="2026-09-11T00:01:00+00:00")
+        persist_release_manifest(conn, restarted)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM release_manifests").fetchone()[0], 1)
+        changed_config = ApexConfig.from_env({
+            "RENDER_GIT_COMMIT": "a" * 40,
+            "APEX_FAST_CONCURRENCY": "5",
+        })
+        changed = build_release_manifest(changed_config, deployed_at="2026-09-11T00:02:00+00:00")
         with self.assertRaisesRegex(ReleaseManifestError, "release_manifest_conflict"):
             persist_release_manifest(conn, changed)
 
