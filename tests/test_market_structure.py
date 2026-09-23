@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from core.market_structure import (
+from apex.market.structure import (
     analyze_market_structure,
     classify_swings,
 )
