@@ -1132,7 +1132,7 @@ def _has_pending_signal_for_symbol(symbol: str) -> bool:
         return False
 
 
-from core.signal_delivery import (
+from apex.db.repositories.deliveries import (
     claim_signal_delivery as _claim_signal_delivery,
     confirm_signal_delivery as _confirm_signal_delivery,
     release_signal_delivery_claim as _release_signal_delivery_claim,
