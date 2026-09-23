@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from apex.config.settings import ApexConfig
 from apex.domain.enums import SourceMode
 
 
@@ -91,6 +92,25 @@ SOURCE_ALIASES: Mapping[str, str] = {
     "btc_mempool": "mempool",
 }
 
+DEFAULT_MARKET_DATA_PROVIDERS = ("gate",)
+_ALLOWED_MARKET_DATA_PROVIDERS = {"gate"}
+
+
+def configured_market_data_providers(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return only production-authorized primary market-data providers."""
+    configured = ApexConfig.from_env(environ).operational.market_data_providers
+    providers: list[str] = []
+    for provider in configured:
+        if provider in _ALLOWED_MARKET_DATA_PROVIDERS and provider not in providers:
+            providers.append(provider)
+    return tuple(providers) or DEFAULT_MARKET_DATA_PROVIDERS
+
+
+def provider_enabled(provider: str, environ: Mapping[str, str] | None = None) -> bool:
+    return provider.strip().lower() in configured_market_data_providers(environ)
+
 
 def source_spec(source: str) -> SourceSpec:
     raw = str(source or "").strip().lower()
@@ -135,6 +155,7 @@ def source_contract(source: str) -> dict[str, Any]:
 
 __all__ = [
     "REGISTRY", "SOURCES", "SOURCE_ALIASES", "SourcePolicyError", "SourceSpec",
-    "authorize", "get_source", "registry_snapshot", "source_contract", "source_spec",
+    "authorize", "configured_market_data_providers", "get_source", "provider_enabled",
+    "registry_snapshot", "source_contract", "source_spec",
     "validate_source_usage",
 ]

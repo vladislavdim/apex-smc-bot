@@ -1,5 +1,5 @@
 import unittest
-from core.data_policy import configured_market_data_providers, provider_enabled
+from apex.market.source_registry import configured_market_data_providers, provider_enabled
 
 
 class DataPolicyTests(unittest.TestCase):

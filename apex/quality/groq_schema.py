@@ -4,8 +4,30 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from apex.config.settings import ApexConfig
 from apex.domain.enums import Decision
 from apex.domain.models import GroqReview
+
+
+DEFAULT_GROQ_MODELS = ("openai/gpt-oss-20b", "openai/gpt-oss-120b")
+
+
+def configured_groq_models(env=None) -> tuple[str, ...]:
+    """Return a de-duplicated configured model list, with safe defaults."""
+    settings = ApexConfig.from_env(env).integrations
+    configured = [model.strip() for model in settings.groq_model.split(",") if model.strip()]
+    configured.extend(settings.groq_fallback_models)
+    configured.extend(DEFAULT_GROQ_MODELS)
+    return tuple(dict.fromkeys(configured))
+
+
+def is_model_unavailable_error(error: object) -> bool:
+    """True for a model-level 404/deprecation error, never a key quota error."""
+    text = str(error).lower()
+    return any(marker in text for marker in (
+        "model_not_found", "does not exist", "model not found",
+        "model_decommissioned", "decommissioned",
+    ))
 
 
 def wait_review(reason_code: str) -> GroqReview:
@@ -33,4 +55,7 @@ def parse_review(payload: Mapping[str, Any] | None) -> GroqReview:
     return GroqReview(decision, confidence, tuple(reasons), summary[:500])
 
 
-__all__ = ["parse_review", "wait_review"]
+__all__ = [
+    "DEFAULT_GROQ_MODELS", "configured_groq_models", "is_model_unavailable_error",
+    "parse_review", "wait_review",
+]

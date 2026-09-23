@@ -219,7 +219,7 @@ get_santiment_data = _OPTIONAL_SIGNALS.get_santiment_data
 get_whale_alerts = _OPTIONAL_SIGNALS.get_whale_alerts
 
 from aiohttp import ClientSession as _ClientSession, ClientTimeout as _ClientTimeout
-from core.groq_models import configured_groq_models, is_model_unavailable_error
+from apex.quality.groq_schema import configured_groq_models, is_model_unavailable_error
 _timeout = _ClientTimeout(total=30, connect=10)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
