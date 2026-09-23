@@ -10,7 +10,7 @@ import time
 from typing import Any
 from apex.config.settings import ApexConfig
 from apex.db.connection import connect_compatibility
-from core.data_policy import configured_market_data_providers
+from apex.market.source_registry import configured_market_data_providers
 from .budget import budget, request_scope
 from .models import number
 from .pair_registry import get_pair
