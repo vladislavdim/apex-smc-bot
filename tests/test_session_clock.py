@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from core.session_clock import fast_session
+from apex.strategies.common import fast_session
 
 
 class SessionClockTests(unittest.TestCase):
