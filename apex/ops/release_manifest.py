@@ -75,8 +75,20 @@ def persist_release_manifest(conn: sqlite3.Connection, manifest: ReleaseManifest
         "SELECT manifest_json FROM release_manifests WHERE release_sha=?",
         (manifest.release_sha,),
     ).fetchone()
-    if existing is not None and str(existing[0]) != encoded:
-        raise ReleaseManifestError("release_manifest_conflict")
+    if existing is not None:
+        try:
+            stored_identity = json.loads(str(existing[0]))
+            current_identity = json.loads(encoded)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ReleaseManifestError("release_manifest_invalid") from exc
+        # Deployment time describes an instance start, not the immutable
+        # release identity. Restarts and same-SHA redeploys must therefore be
+        # idempotent while any code/config/version drift still fails closed.
+        stored_identity.pop("deployed_at", None)
+        current_identity.pop("deployed_at", None)
+        if stored_identity != current_identity:
+            raise ReleaseManifestError("release_manifest_conflict")
+        return
     conn.execute(
         """INSERT OR IGNORE INTO release_manifests(
                release_sha,manifest_json,config_hash,strategy_config_hash,deployed_at
