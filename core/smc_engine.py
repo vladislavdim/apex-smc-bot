@@ -7,10 +7,7 @@ from datetime import datetime
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.market.snapshot_scope import snapshot_candle_override
 
-try:
-    from .data_policy import configured_market_data_providers
-except ImportError:
-    from data_policy import configured_market_data_providers
+from apex.market.source_registry import configured_market_data_providers
 
 from apex.market.structure import (
     analyze_market_structure as _analyze_market_structure,
