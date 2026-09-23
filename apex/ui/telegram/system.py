@@ -9,7 +9,9 @@ from typing import Any, Mapping
 _ORDER = (
     "config", "state_db", "memory_db", "gate", "market_data", "groq",
     "binance_reconciliation", "manager", "manager_reconciliation",
-    "scheduler", "telegram", "dashboard_telemetry", "backup",
+    "scheduler", "strategy_activation", "scanner_fast", "scanner_mtf",
+    "scanner_zone", "scanner_swing", "scanner_wyckoff",
+    "telegram", "dashboard_telemetry", "backup",
     "instance_fencing", "restart_guard", "cpu", "memory",
 )
 
@@ -18,6 +20,9 @@ _LABELS = {
     "gate": "Gate", "market_data": "Market data", "groq": "Groq",
     "binance_reconciliation": "Binance", "manager": "Manager",
     "manager_reconciliation": "Manager reconcile", "scheduler": "Scheduler",
+    "strategy_activation": "Strategy activation", "scanner_fast": "Scanner FAST",
+    "scanner_mtf": "Scanner MTF", "scanner_zone": "Scanner ZONE",
+    "scanner_swing": "Scanner SWING", "scanner_wyckoff": "Scanner WYCKOFF",
     "telegram": "Telegram", "dashboard_telemetry": "Dashboard",
     "backup": "Backup", "instance_fencing": "Fencing",
     "restart_guard": "Restart guard", "cpu": "CPU", "memory": "Memory",

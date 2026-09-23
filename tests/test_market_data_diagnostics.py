@@ -43,6 +43,42 @@ def test_integration_health_does_not_claim_unobserved_live_heatmap_is_connected(
     live = next(row for row in result["features"] if row["feature"] == "live_orderbook_heatmap")
     assert live["status"] == "NO_TELEMETRY"
     assert live["reason_code"] == "NO_SEQUENCE_VERIFIED_DEPTH"
+
+
+def test_function_health_combines_worker_providers_features_and_on_demand_context():
+    snapshot = {
+        "runtime_health": {
+            "status": "READY", "health": "HEALTHY", "ready": True,
+            "new_entries": "ON", "release_sha": "a" * 40,
+            "components": {
+                "scanner_fast": {
+                    "state": "READY", "updated_at": "2026-09-23T08:00:00+00:00",
+                    "detail": "", "required": False,
+                },
+            },
+        },
+    }
+    integrations = {
+        "sources": [{
+            "source": "gate", "status": "ACTIVE", "reason_code": "REQUESTS_OBSERVED",
+            "used_day": 11, "remaining_day": 89, "failures": 0, "rate_limits": 0,
+        }],
+        "features": [{
+            "feature": "live_orderbook_heatmap", "status": "FRESH",
+            "reason_code": "VERIFIED", "updated_at": "2026-09-23T08:00:00+00:00",
+        }],
+    }
+
+    result = stats_server._function_health(snapshot, integrations)
+
+    assert result["ready"] is True
+    assert result["release_sha"] == "a" * 12
+    rows = {(row["category"], row["function"]): row for row in result["rows"]}
+    assert rows[("runtime", "scanner_fast")]["status"] == "READY"
+    assert rows[("provider", "gate")]["remaining_day"] == 89
+    assert rows[("feature", "live_orderbook_heatmap")]["status"] == "FRESH"
+    assert rows[("context", "news_rss")]["status"] == "ON_DEMAND"
+    assert rows[("context", "dxy")]["reason_code"] == "REQUEST_DRIVEN_NO_PERIODIC_PROBE"
 from core import market_data_health
 from core import smc_engine
 

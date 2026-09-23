@@ -42,6 +42,8 @@ class TelemetryOnlyInvariantTests(unittest.TestCase):
         self.assertIn('"wyckoff_box_width":wy_box_range', STATS)
         self.assertIn('Dashboard только показывает production-факты', DASHBOARD)
         self.assertIn('Он не меняет Entry, SL, TP, RR', DASHBOARD)
+        self.assertIn('Production function health', DASHBOARD)
+        self.assertIn('functionHealth', DASHBOARD)
 
     def test_live_decision_path_preserves_recorded_order(self):
         row = {
