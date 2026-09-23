@@ -121,7 +121,7 @@ from apex.compatibility.market_strategy import (
     detect_wyckoff_spring, detect_zone_setup,
     legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
 )
-from core.session_clock import fast_session
+from apex.strategies.common import fast_session
 from core.trade_views import fetch_trades as _fetch_trade_view_rows
 from core.trade_views import format_trade_view as _format_trade_view
 from core.trade_manager_telegram import (
