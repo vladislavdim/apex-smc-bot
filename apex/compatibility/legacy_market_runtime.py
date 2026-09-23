@@ -106,7 +106,7 @@ for _p in [_os_path.path.join(_BASE_DIR, "core"), _BASE_DIR]:
         _sys.path.insert(0, _p)
 
 try:
-    from session_clock import fast_session as _fast_session
+    from apex.strategies.common import fast_session as _fast_session
 except Exception as _session_clock_error:
     logging.error("session_clock unavailable; FAST scanner will stay disabled: %s", _session_clock_error)
     _fast_session = lambda *_args, **_kwargs: None
