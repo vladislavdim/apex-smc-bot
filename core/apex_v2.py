@@ -504,7 +504,7 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     # Source registry is declarative and secret-free.  It makes the Gate-only
     # market-data boundary visible beside the rolling request ledger.
     try:
-        from core.source_registry import registry_snapshot
+        from apex.market.source_registry import registry_snapshot
         result["source_registry"] = registry_snapshot()
     except Exception:
         result["source_registry"] = []

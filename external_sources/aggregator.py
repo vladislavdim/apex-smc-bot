@@ -325,7 +325,7 @@ def _finish(context: dict[str, Any], direction: str | None) -> dict[str, Any]:
     # strategy gate.  Gate remains the only primary market-data source; all
     # other providers receive a lower context weight and may be omitted.
     try:
-        from core.source_registry import get_source
+        from apex.market.source_registry import get_source
         freshness, weighted, weight_total = [], 0.0, 0.0
         for source in quality["available_sources"]:
             try:

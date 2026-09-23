@@ -45,6 +45,11 @@ class TelemetryOnlyInvariantTests(unittest.TestCase):
         self.assertIn('Production function health', DASHBOARD)
         self.assertIn('functionHealth', DASHBOARD)
 
+    def test_dashboard_uses_canonical_v3_source_registry(self):
+        apex_v2 = (ROOT / "core" / "apex_v2.py").read_text(encoding="utf-8")
+        self.assertIn("from apex.market.source_registry import registry_snapshot", apex_v2)
+        self.assertFalse((ROOT / "core" / "source_registry.py").exists())
+
     def test_live_decision_path_preserves_recorded_order(self):
         row = {
             "outcome": "FILTERED",
