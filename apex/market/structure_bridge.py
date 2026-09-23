@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.market_structure import (
+from apex.market.structure import (
     analyze_market_structure as _analyze_market_structure,
     classify_swings as _classify_swings,
     events_with_trend_fallback as _events_with_trend_fallback,
