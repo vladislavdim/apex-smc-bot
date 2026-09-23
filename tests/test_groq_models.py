@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from core.groq_models import configured_groq_models, is_model_unavailable_error
+from apex.quality.groq_schema import configured_groq_models, is_model_unavailable_error
 
 
 class GroqModelsTests(unittest.TestCase):
