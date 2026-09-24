@@ -149,6 +149,8 @@ class ApexV3RuntimeTests(unittest.TestCase):
         self.assertNotIn("_v3_record_shutdown, DB_PATH", bot_source)
         self.assertIn("restore_state_db_from_github()", bot_source)
         self.assertIn("_v3_state_startup_checkpoint()", bot_source)
+        self.assertIn("_V3_CONFIG.integrations.state_backup_branch", bot_source)
+        self.assertIn("_V3_CONFIG.integrations.memory_backup_branch", bot_source)
         self.assertIn("_v3_recover_deferred_state_checkpoint", bot_source)
         self.assertIn('inhibit_entries("STATE_BACKUP_DEFERRED")', bot_source)
         self.assertIn('clear_inhibit("STATE_BACKUP_DEFERRED")', bot_source)
