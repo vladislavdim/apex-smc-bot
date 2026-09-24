@@ -240,9 +240,14 @@ def worker_readiness(expected_sha: str, *, max_age_seconds: int = 90) -> tuple[d
     response = {
         "ready": ready,
         "status": str(payload.get("status") or "UNKNOWN"),
+        "health": str(payload.get("health") or "UNKNOWN"),
         "release_sha": sha[:12],
         "new_entries": payload.get("new_entries"),
         "reason_codes": payload.get("reason_codes") or [],
+        "started_at": payload.get("started_at"),
+        "fencing_generation": payload.get("fencing_generation"),
+        "fencing_expires_at": payload.get("fencing_expires_at"),
+        "components": payload.get("components") if isinstance(payload.get("components"), dict) else {},
         "occurred_at": row["occurred_at"].isoformat(),
         "received_at": row["received_at"].isoformat(),
     }
@@ -1025,10 +1030,18 @@ def _function_health(
     rows: list[dict[str, Any]] = []
     for name, raw in sorted(components.items()):
         item = raw if isinstance(raw, dict) else {}
+        status = str(item.get("state") or "UNKNOWN").upper()
+        reason_code = str(item.get("detail") or "") or None
+        if status == "UNKNOWN" and name in {"groq", "risk_engine"}:
+            status = "ON_DEMAND"
+            reason_code = "CANDIDATE_DRIVEN_NO_PERIODIC_PROBE"
+        elif status == "UNKNOWN" and name.startswith("scanner_"):
+            status = "WAITING_FIRST_RUN"
+            reason_code = "SCHEDULED_RUN_NOT_OBSERVED_FOR_INSTANCE"
         rows.append({
             "category": "runtime", "function": str(name),
-            "status": str(item.get("state") or "UNKNOWN").upper(),
-            "reason_code": str(item.get("detail") or "") or None,
+            "status": status,
+            "reason_code": reason_code,
             "updated_at": item.get("updated_at"),
             "required": bool(item.get("required", False)),
         })
