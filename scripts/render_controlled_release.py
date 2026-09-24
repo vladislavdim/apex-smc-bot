@@ -145,7 +145,7 @@ def check_worker_ready(
     *,
     commit_sha: str,
     session: Any | None = None,
-    timeout_seconds: int = 240,
+    timeout_seconds: int = 600,
     interval_seconds: int = 5,
 ) -> dict[str, Any]:
     transport = session or requests.Session()
