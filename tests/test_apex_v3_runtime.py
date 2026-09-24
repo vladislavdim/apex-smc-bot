@@ -89,6 +89,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
         self.assertEqual(set(supervisor.snapshot()["components"]), supervisor.COMPONENTS)
         supervisor.mark_component("binance_reconciliation", ComponentState.READY, "private detail")
         self.assertNotIn("detail", supervisor.public_snapshot()["components"]["binance_reconciliation"])
+        self.assertIn("updated_at", supervisor.public_snapshot()["components"]["binance_reconciliation"])
 
     def test_health_is_distinct_from_entry_readiness(self):
         supervisor = RuntimeSupervisor()
