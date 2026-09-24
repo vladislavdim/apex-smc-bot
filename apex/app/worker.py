@@ -371,6 +371,7 @@ _STATE_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.integrations.github_token,
     _V3_CONFIG.integrations.state_backup_branch,
     remote_name="apex_state.db",
+    compression="gzip",
 )
 _MEMORY_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.database.memory_db_path,

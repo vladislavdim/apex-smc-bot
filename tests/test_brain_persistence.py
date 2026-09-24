@@ -1,4 +1,5 @@
 import base64
+import gzip
 import hashlib
 import json as jsonlib
 import os
@@ -291,6 +292,36 @@ class BrainPersistenceTests(unittest.TestCase):
                 "SELECT generation, reason FROM brain_persistence_meta WHERE id=1"
             ).fetchone()
         self.assertEqual(meta, (1, "wal_test"))
+
+    def test_gzip_backup_migrates_raw_remote_and_restores_transparently(self):
+        _make_db(self.remote, knowledge_rows=20)
+        session = _GitHubSession(_bytes(self.remote), sha="raw-v1")
+        manager = BrainPersistence(
+            self.local, "owner/repository", "token", session=session,
+            remote_name="apex_state.db", compression="gzip",
+        )
+        self.assertTrue(manager.restore()["ready"])
+        with sqlite3.connect(self.local) as connection:
+            connection.execute(
+                "INSERT INTO knowledge(topic, content, source) VALUES ('new', 'kept', 'test')"
+            )
+            connection.commit()
+
+        saved = manager.backup("compress_state")
+
+        self.assertTrue(saved["saved"])
+        self.assertTrue(session.content.startswith(b"\x1f\x8b"))
+        self.assertLess(saved["upload_size"], saved["size"])
+        self.assertTrue(gzip.decompress(session.content).startswith(b"SQLite format 3"))
+
+        restored_path = os.path.join(self.temp.name, "restored-state.db")
+        restarted = BrainPersistence(
+            restored_path, "owner/repository", "token", session=session,
+            remote_name="apex_state.db", compression="gzip",
+        )
+        self.assertTrue(restarted.restore()["ready"])
+        with sqlite3.connect(restored_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0], 21)
 
     def test_unchanged_database_does_not_create_another_commit(self):
         _make_db(self.remote, knowledge_rows=1)
