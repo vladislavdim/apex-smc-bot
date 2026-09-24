@@ -369,14 +369,14 @@ _STATE_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.database.state_db_path,
     _V3_CONFIG.integrations.github_repo,
     _V3_CONFIG.integrations.github_token,
-    _V3_CONFIG.integrations.backup_branch,
+    _V3_CONFIG.integrations.state_backup_branch,
     remote_name="apex_state.db",
 )
 _MEMORY_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.database.memory_db_path,
     _V3_CONFIG.integrations.github_repo,
     _V3_CONFIG.integrations.github_token,
-    _V3_CONFIG.integrations.backup_branch,
+    _V3_CONFIG.integrations.memory_backup_branch,
     remote_name="apex_memory.db",
 )
 _brain_backup_async_lock = None
