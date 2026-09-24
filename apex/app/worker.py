@@ -4112,16 +4112,20 @@ async def _initialize_production_runtime(transport: str):
             "STATE_BACKUP_DEFERRED", "backup", "ERROR",
             {"status": "concurrent_update", "phase": "startup"},
         )
+    _backup_ready = (
+        _checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
+        and _state_checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
+        and _memory_checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
+    )
     _V3_RUNTIME.mark_component(
         "backup",
-        _V3_COMPONENT_STATE.READY if (
-            _checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
-            and _state_checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
-            and _memory_checkpoint.get("status") in {"saved", "unchanged", "not_configured"}
-        ) else _V3_COMPONENT_STATE.DEGRADED,
+        _V3_COMPONENT_STATE.READY if _backup_ready else _V3_COMPONENT_STATE.DEGRADED,
         f"brain={_checkpoint.get('status')} state={_state_checkpoint.get('status')} "
         f"memory={_memory_checkpoint.get('status')}",
     )
+    if _backup_ready:
+        _v3_recover_incident("JOB_FAILED", "backup")
+        _v3_recover_incident("JOB_TIMEOUT", "backup")
     await _v3_startup_reconcile_and_market_check()
     if transport == "polling":
         threading.Thread(target=run_server, daemon=True).start()
