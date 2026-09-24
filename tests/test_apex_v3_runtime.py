@@ -663,6 +663,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
         with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn('public["release_sha"] = _V3_RUNTIME.snapshot()["release_sha"]', bot_source)
+        self.assertIn('"startup production snapshot emitted"', bot_source)
 
     def test_ready_runtime_still_rejects_entry_after_fencing_expiry(self):
         supervisor = RuntimeSupervisor()

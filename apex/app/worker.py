@@ -4097,6 +4097,10 @@ async def _initialize_production_runtime(transport: str):
     logging.info("[APEX V3] Manager registration mirror: %s", _manager_registration)
     _rebuild_strategy_risk_states(DB_PATH)
     _emit_apex_v2_dashboard_snapshot(DB_PATH)
+    _V3_RUNTIME.mark_component(
+        "dashboard_telemetry", _V3_COMPONENT_STATE.READY,
+        "startup production snapshot emitted", required=False,
+    )
     start_db_writer()
     _checkpoint = await _brain_startup_checkpoint()
     _state_checkpoint = await _v3_state_startup_checkpoint()
