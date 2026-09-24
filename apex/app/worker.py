@@ -3583,9 +3583,60 @@ async def _v3_maintenance_and_backup(reason="safety_30m"):
 
 async def _v3_state_startup_checkpoint():
     result = await backup_state_db_to_github("startup_verified")
-    if _STATE_PERSISTENCE.configured and result.get("status") not in {"saved", "unchanged"}:
+    if (
+        _STATE_PERSISTENCE.configured
+        and result.get("status") not in {"saved", "unchanged", "concurrent_update"}
+    ):
         raise RuntimeError(f"state startup checkpoint failed: {result.get('status')}")
     return result
+
+
+async def _v3_recover_deferred_state_checkpoint(
+    compatibility_checkpoint, memory_checkpoint, *, attempts=12, delay_seconds=30,
+):
+    """Recover a rollout CAS collision without keeping the worker in a crash loop.
+
+    A verified State restore has already completed.  New entries remain
+    inhibited until the exact local State snapshot is durably checkpointed.
+    Manager/reconciliation and Telegram can stay alive while GitHub finishes
+    validating the competing backup-branch commit.
+    """
+    last_status = "concurrent_update"
+    for attempt in range(max(1, int(attempts))):
+        if attempt:
+            await asyncio.sleep(max(1, int(delay_seconds)))
+        result = await backup_state_db_to_github("startup_deferred_retry")
+        last_status = str(result.get("status") or "failed")
+        if last_status in {"saved", "unchanged", "not_configured"}:
+            compatibility_ok = compatibility_checkpoint.get("status") in {
+                "saved", "unchanged", "not_configured",
+            }
+            memory_ok = memory_checkpoint.get("status") in {
+                "saved", "unchanged", "not_configured",
+            }
+            if compatibility_ok and memory_ok:
+                _V3_RUNTIME.mark_component(
+                    "backup", _V3_COMPONENT_STATE.READY,
+                    f"brain={compatibility_checkpoint.get('status')} "
+                    f"state={last_status} memory={memory_checkpoint.get('status')}",
+                )
+                _V3_RUNTIME.clear_inhibit("STATE_BACKUP_DEFERRED")
+                _v3_recover_incident("STATE_BACKUP_DEFERRED", "backup")
+                _V3_RUNTIME.evaluate_readiness()
+                await _v3_runtime_watchdog()
+                logging.warning("[StatePersistence] deferred startup checkpoint recovered")
+                return result
+        if last_status == "stale_remote":
+            break
+        logging.warning(
+            "[StatePersistence] deferred checkpoint attempt %s/%s status=%s",
+            attempt + 1, attempts, last_status,
+        )
+    _v3_report_incident(
+        "STATE_BACKUP_DEFERRED", "backup", "CRITICAL",
+        {"status": last_status, "attempts": attempts},
+    )
+    return {"status": last_status, "recovered": False}
 
 
 async def _v3_memory_startup_checkpoint():
@@ -4047,6 +4098,13 @@ async def _initialize_production_runtime(transport: str):
     _checkpoint = await _brain_startup_checkpoint()
     _state_checkpoint = await _v3_state_startup_checkpoint()
     _memory_checkpoint = await _v3_memory_startup_checkpoint()
+    _state_checkpoint_deferred = _state_checkpoint.get("status") == "concurrent_update"
+    if _state_checkpoint_deferred:
+        _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
+        _v3_report_incident(
+            "STATE_BACKUP_DEFERRED", "backup", "ERROR",
+            {"status": "concurrent_update", "phase": "startup"},
+        )
     _V3_RUNTIME.mark_component(
         "backup",
         _V3_COMPONENT_STATE.READY if (
@@ -4074,6 +4132,10 @@ async def _initialize_production_runtime(transport: str):
     scheduler.start()
     _V3_RUNTIME.mark_component("scheduler", _V3_COMPONENT_STATE.READY)
     _V3_RUNTIME.evaluate_readiness()
+    if _state_checkpoint_deferred:
+        asyncio.create_task(
+            _v3_recover_deferred_state_checkpoint(_checkpoint, _memory_checkpoint)
+        )
     logging.warning("[APEX V3] runtime=%s", _V3_RUNTIME.snapshot())
     asyncio.create_task(_warmup_market_cache())
     logging.info("APEX запущен (%s mode)", transport)
