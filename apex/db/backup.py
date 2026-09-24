@@ -145,6 +145,104 @@ class BrainPersistence:
             raise RuntimeError(f"GitHub {self.remote_name} is unexpectedly small ({len(content)} bytes)")
         return content
 
+    @property
+    def _git_api_url(self) -> str:
+        return f"https://api.github.com/repos/{self.repository}/git"
+
+    def _upload_via_git_database(
+        self, *, snapshot_path: str, current_blob_sha: str, message: str
+    ) -> Any:
+        """Atomically replace one file through Git's object API.
+
+        GitHub's Contents endpoint can reject otherwise valid large SQLite
+        updates with HTTP 422.  The Git database API accepts the same Base64
+        blob while preserving fail-closed compare-and-swap semantics: the new
+        commit is parented to the branch head observed immediately before the
+        upload and the final ref update is never forced.
+        """
+        ref_url = f"{self._git_api_url}/ref/heads/{self.branch}"
+        ref_response = self.session.get(
+            ref_url, headers=self._headers(), timeout=self.timeout,
+        )
+        if ref_response.status_code != 200:
+            return ref_response
+        head_sha = str(((ref_response.json() or {}).get("object") or {}).get("sha") or "")
+        if not head_sha:
+            raise RuntimeError("GitHub branch ref has no commit SHA")
+
+        commit_response = self.session.get(
+            f"{self._git_api_url}/commits/{head_sha}",
+            headers=self._headers(), timeout=self.timeout,
+        )
+        if commit_response.status_code != 200:
+            return commit_response
+        tree_sha = str(((commit_response.json() or {}).get("tree") or {}).get("sha") or "")
+        if not tree_sha:
+            raise RuntimeError("GitHub branch commit has no tree SHA")
+
+        blob_payload_path = ""
+        try:
+            fd, blob_payload_path = tempfile.mkstemp(
+                dir=os.path.dirname(snapshot_path), prefix="brain-blob-", suffix=".json"
+            )
+            with os.fdopen(fd, "wb") as payload, open(snapshot_path, "rb") as snapshot:
+                payload.write(b'{"content":"')
+                while True:
+                    chunk = snapshot.read(1_048_575)
+                    if not chunk:
+                        break
+                    payload.write(base64.b64encode(chunk))
+                payload.write(b'","encoding":"base64"}')
+            headers = {**self._headers(), "Content-Type": "application/json"}
+            with open(blob_payload_path, "rb") as body:
+                blob_response = self.session.post(
+                    f"{self._git_api_url}/blobs", headers=headers, data=body,
+                    timeout=max(self.timeout, 60),
+                )
+        finally:
+            if blob_payload_path and os.path.exists(blob_payload_path):
+                os.unlink(blob_payload_path)
+        if blob_response.status_code not in (200, 201):
+            return blob_response
+        new_blob_sha = str((blob_response.json() or {}).get("sha") or "")
+        if not new_blob_sha:
+            raise RuntimeError("GitHub accepted blob but returned no SHA")
+
+        # Abort if the file changed while the blob was uploaded.  The final
+        # non-forced ref update also protects against any later branch race.
+        refreshed, refreshed_state = self._remote_metadata()
+        refreshed_blob_sha = str((refreshed or {}).get("sha") or "")
+        if refreshed_state != "ok" or refreshed_blob_sha != current_blob_sha:
+            raise RuntimeError("GitHub branch changed during atomic backup")
+
+        tree_response = self.session.post(
+            f"{self._git_api_url}/trees", headers=self._headers(),
+            json={
+                "base_tree": tree_sha,
+                "tree": [{
+                    "path": self.remote_name, "mode": "100644",
+                    "type": "blob", "sha": new_blob_sha,
+                }],
+            },
+            timeout=self.timeout,
+        )
+        if tree_response.status_code not in (200, 201):
+            return tree_response
+        new_tree_sha = str((tree_response.json() or {}).get("sha") or "")
+        commit_create = self.session.post(
+            f"{self._git_api_url}/commits", headers=self._headers(),
+            json={"message": message, "tree": new_tree_sha, "parents": [head_sha]},
+            timeout=self.timeout,
+        )
+        if commit_create.status_code not in (200, 201):
+            return commit_create
+        new_commit_sha = str((commit_create.json() or {}).get("sha") or "")
+        return self.session.patch(
+            f"{self._git_api_url}/refs/heads/{self.branch}",
+            headers=self._headers(), json={"sha": new_commit_sha, "force": False},
+            timeout=self.timeout,
+        )
+
     def _historical_refs(self, limit: int = 8) -> list[str]:
         response = self.session.get(
             f"https://api.github.com/repos/{self.repository}/commits",
@@ -590,6 +688,12 @@ class BrainPersistence:
                     if attempt < 4:
                         time.sleep(2 ** attempt)
                 assert response is not None
+                if response.status_code in (409, 422) and streaming:
+                    response = self._upload_via_git_database(
+                        snapshot_path=temp_path,
+                        current_blob_sha=current_sha,
+                        message=message,
+                    )
                 if response.status_code not in (200, 201):
                     if response.status_code in (409, 422):
                         self._last_error = f"GitHub concurrent update HTTP {response.status_code}"

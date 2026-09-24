@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json as jsonlib
 import os
 import sqlite3
 import tempfile
@@ -115,6 +116,41 @@ class _MissingGitHubSession:
         self.content = base64.b64decode(json["content"])
         self.sha = hashlib.sha1(self.content).hexdigest()
         return _Response(status_code=201, payload={"content": {"sha": self.sha}})
+
+
+class _GitDatabaseSession:
+    def __init__(self, current_blob_sha="blob-v1"):
+        self.current_blob_sha = current_blob_sha
+        self.posts = []
+        self.patches = []
+
+    def get(self, url, *, headers, timeout, params=None):
+        del headers, timeout
+        if "/git/ref/heads/" in url:
+            return _Response(payload={"object": {"sha": "commit-v1"}})
+        if url.endswith("/git/commits/commit-v1"):
+            return _Response(payload={"tree": {"sha": "tree-v1"}})
+        if "/contents/" in url and params is not None:
+            return _Response(payload={"sha": self.current_blob_sha})
+        raise AssertionError(url)
+
+    def post(self, url, *, headers, timeout, json=None, data=None):
+        del headers, timeout
+        if url.endswith("/git/blobs"):
+            body = jsonlib.load(data)
+            self.posts.append((url, body))
+            return _Response(status_code=201, payload={"sha": "blob-v2"})
+        self.posts.append((url, json))
+        if url.endswith("/git/trees"):
+            return _Response(status_code=201, payload={"sha": "tree-v2"})
+        if url.endswith("/git/commits"):
+            return _Response(status_code=201, payload={"sha": "commit-v2"})
+        raise AssertionError(url)
+
+    def patch(self, url, *, headers, json, timeout):
+        del headers, timeout
+        self.patches.append((url, json))
+        return _Response(status_code=200, payload={"object": {"sha": json["sha"]}})
 
 
 def _make_db(path, knowledge_rows=1):
@@ -334,6 +370,25 @@ class BrainPersistenceTests(unittest.TestCase):
 
         self.assertTrue(result["saved"])
         self.assertEqual(len(session.puts), 2)
+
+    def test_git_database_fallback_is_non_forced_and_keeps_parent(self):
+        _make_db(self.local, knowledge_rows=2)
+        session = _GitDatabaseSession()
+        manager = self._manager(session)
+
+        response = manager._upload_via_git_database(
+            snapshot_path=self.local,
+            current_blob_sha="blob-v1",
+            message="atomic backup",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        blob_body = session.posts[0][1]
+        self.assertEqual(base64.b64decode(blob_body["content"]), _bytes(self.local))
+        self.assertEqual(blob_body["encoding"], "base64")
+        commit_body = session.posts[2][1]
+        self.assertEqual(commit_body["parents"], ["commit-v1"])
+        self.assertEqual(session.patches[0][1], {"sha": "commit-v2", "force": False})
 
     def test_generation_survives_restart_and_advances_monotonically(self):
         _make_db(self.remote, knowledge_rows=1)
