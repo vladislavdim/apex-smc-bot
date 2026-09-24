@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 os.environ.setdefault("TELEGRAM_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
@@ -55,6 +56,14 @@ def test_function_health_combines_worker_providers_features_and_on_demand_contex
                     "state": "READY", "updated_at": "2026-09-23T08:00:00+00:00",
                     "detail": "", "required": False,
                 },
+                "scanner_mtf": {
+                    "state": "UNKNOWN", "updated_at": "2026-09-23T08:00:00+00:00",
+                    "detail": "", "required": False,
+                },
+                "groq": {
+                    "state": "UNKNOWN", "updated_at": "2026-09-23T08:00:00+00:00",
+                    "detail": "", "required": False,
+                },
             },
         },
     }
@@ -75,10 +84,53 @@ def test_function_health_combines_worker_providers_features_and_on_demand_contex
     assert result["release_sha"] == "a" * 12
     rows = {(row["category"], row["function"]): row for row in result["rows"]}
     assert rows[("runtime", "scanner_fast")]["status"] == "READY"
+    assert rows[("runtime", "scanner_mtf")]["status"] == "WAITING_FIRST_RUN"
+    assert rows[("runtime", "groq")]["status"] == "ON_DEMAND"
     assert rows[("provider", "gate")]["remaining_day"] == 89
     assert rows[("feature", "live_orderbook_heatmap")]["status"] == "FRESH"
     assert rows[("context", "news_rss")]["status"] == "ON_DEMAND"
     assert rows[("context", "dxy")]["reason_code"] == "REQUEST_DRIVEN_NO_PERIODIC_PROBE"
+
+
+def test_worker_readiness_exposes_secret_free_component_matrix():
+    now = datetime.now(timezone.utc)
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, _query, _params):
+            pass
+
+        def fetchone(self):
+            return {
+                "occurred_at": now, "received_at": now,
+                "payload": {
+                    "ready": True, "status": "READY", "health": "HEALTHY",
+                    "new_entries": "ON", "started_at": now.isoformat(),
+                    "fencing_generation": 7,
+                    "fencing_expires_at": now.isoformat(),
+                    "components": {"scanner_fast": {"state": "READY", "updated_at": now.isoformat()}},
+                },
+            }
+
+    class Connection:
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    with patch.object(stats_server, "_connect", return_value=Connection()):
+        result, status = stats_server.worker_readiness("a" * 40)
+
+    assert status == 200
+    assert result["health"] == "HEALTHY"
+    assert result["fencing_generation"] == 7
+    assert result["components"]["scanner_fast"]["state"] == "READY"
 from core import market_data_health
 from core import smc_engine
 
