@@ -4134,6 +4134,10 @@ async def _initialize_production_runtime(transport: str):
     scheduler = _build_v3_scheduler()
     scheduler.start()
     _V3_RUNTIME.mark_component("scheduler", _V3_COMPONENT_STATE.READY)
+    _V3_RUNTIME.mark_component(
+        "worker", _V3_COMPONENT_STATE.READY,
+        f"production runtime started transport={transport}", required=False,
+    )
     _V3_RUNTIME.evaluate_readiness()
     if _state_checkpoint_deferred:
         asyncio.create_task(
