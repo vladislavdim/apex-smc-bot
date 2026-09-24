@@ -9,9 +9,12 @@ without changing scanner or execution behaviour.
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
+import io
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -45,6 +48,7 @@ class BrainPersistence:
         remote_name: str = "brain.db",
         session: Any | None = None,
         timeout: int = 30,
+        compression: str = "",
     ) -> None:
         self.db_path = os.path.abspath(db_path)
         self.repository = (repository or "").strip().strip("/")
@@ -54,6 +58,9 @@ class BrainPersistence:
         if not self.remote_name or ".." in self.remote_name.split("/"):
             raise ValueError("invalid remote database name")
         self.timeout = int(timeout)
+        self.compression = str(compression or "").strip().lower()
+        if self.compression not in {"", "gzip"}:
+            raise ValueError("unsupported backup compression")
         if session is None and requests is None:
             raise RuntimeError("requests is required when no GitHub session is injected")
         self.session = session or requests.Session()
@@ -141,9 +148,28 @@ class BrainPersistence:
                     content = base64.b64decode(encoded)
             except Exception:
                 pass
-        if len(content) < 4096:
+        if len(content) < 4096 and content[:2] != b"\x1f\x8b":
             raise RuntimeError(f"GitHub {self.remote_name} is unexpectedly small ({len(content)} bytes)")
         return content
+
+    def _write_downloaded_snapshot(self, content: bytes, target: Any) -> None:
+        """Stream a remote raw or gzip snapshot into an open local file."""
+        if content[:2] == b"\x1f\x8b":
+            with gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as source:
+                shutil.copyfileobj(source, target, length=1_048_576)
+            return
+        target.write(content)
+
+    def _compressed_snapshot(self, path: str) -> str:
+        if self.compression != "gzip":
+            return path
+        fd, compressed_path = tempfile.mkstemp(
+            dir=os.path.dirname(path), prefix="brain-backup-", suffix=".db.gz"
+        )
+        os.close(fd)
+        with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=6) as target:
+            shutil.copyfileobj(source, target, length=1_048_576)
+        return compressed_path
 
     @property
     def _git_api_url(self) -> str:
@@ -391,7 +417,7 @@ class BrainPersistence:
                         with tempfile.NamedTemporaryFile(
                             dir=directory, prefix="brain-restore-", suffix=".db", delete=False
                         ) as target:
-                            target.write(content)
+                            self._write_downloaded_snapshot(content, target)
                             target.flush()
                             os.fsync(target.fileno())
                             temp_path = target.name
@@ -545,6 +571,7 @@ class BrainPersistence:
                 }
             temp_path = ""
             payload_path = ""
+            upload_path = ""
             try:
                 metadata, state = self._remote_metadata()
                 if state != "ok" or metadata is None:
@@ -601,6 +628,7 @@ class BrainPersistence:
                     target.close()
                 self._integrity(temp_path)
                 snapshot_size = os.path.getsize(temp_path)
+                upload_path = self._compressed_snapshot(temp_path)
                 message = (
                     f"{self.remote_name} backup {now[:16].replace('T', ' ')} "
                     f"g{generation} [{str(reason)[:32]}] [skip ci]"
@@ -617,7 +645,7 @@ class BrainPersistence:
                     fd, payload_path = tempfile.mkstemp(
                         dir=os.path.dirname(temp_path), prefix="brain-upload-", suffix=".json"
                     )
-                    with os.fdopen(fd, "wb") as payload, open(temp_path, "rb") as snapshot:
+                    with os.fdopen(fd, "wb") as payload, open(upload_path, "rb") as snapshot:
                         payload.write((
                             '{"message":' + json.dumps(message) + ',"content":"'
                         ).encode("utf-8"))
@@ -633,7 +661,7 @@ class BrainPersistence:
                             ',"sha":' + json.dumps(current_sha) + '}'
                         ).encode("utf-8"))
                 else:
-                    with open(temp_path, "rb") as snapshot:
+                    with open(upload_path, "rb") as snapshot:
                         content = snapshot.read()
                     upload = {
                         "message": message,
@@ -694,7 +722,7 @@ class BrainPersistence:
                 assert response is not None
                 if response.status_code in (409, 422) and streaming:
                     response = self._upload_via_git_database(
-                        snapshot_path=temp_path,
+                        snapshot_path=upload_path,
                         current_blob_sha=current_sha,
                         message=message,
                     )
@@ -733,6 +761,7 @@ class BrainPersistence:
                     "blob_sha": new_sha,
                     "generation": generation,
                     "size": snapshot_size,
+                    "upload_size": os.path.getsize(upload_path),
                     "counts": self._counts(temp_path),
                     "backed_up_at": now,
                 }
@@ -742,6 +771,8 @@ class BrainPersistence:
             finally:
                 if payload_path and os.path.exists(payload_path):
                     os.unlink(payload_path)
+                if upload_path and upload_path != temp_path and os.path.exists(upload_path):
+                    os.unlink(upload_path)
                 if temp_path and os.path.exists(temp_path):
                     os.unlink(temp_path)
 
