@@ -165,6 +165,8 @@ class IntegrationSettings:
     github_repo: str = ""
     github_token: str = field(default="", repr=False)
     backup_branch: str = "brain-backups"
+    state_backup_branch: str = "apex-state-backups"
+    memory_backup_branch: str = "apex-memory-backups"
     github_file: str = "bot.py"
 
 
@@ -376,6 +378,12 @@ class ApexConfig:
                 github_repo=str(source.get("GITHUB_REPO", "")).strip(),
                 github_token=str(source.get("GITHUB_TOKEN", "")).strip(),
                 backup_branch=str(source.get("BRAIN_BACKUP_BRANCH", "brain-backups")).strip(),
+                state_backup_branch=str(source.get(
+                    "APEX_STATE_BACKUP_BRANCH", "apex-state-backups"
+                )).strip(),
+                memory_backup_branch=str(source.get(
+                    "APEX_MEMORY_BACKUP_BRANCH", "apex-memory-backups"
+                )).strip(),
                 github_file=str(source.get("GITHUB_FILE", "bot.py")).strip(),
             ),
             runtime=RuntimeSettings(
