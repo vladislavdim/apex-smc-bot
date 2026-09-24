@@ -120,6 +120,10 @@ class ControlledRenderReleaseTests(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertIn("sha=" + "a" * 40, session.urls[0][0])
 
+    def test_worker_readiness_allows_deferred_checkpoint_recovery_window(self):
+        defaults = release.check_worker_ready.__kwdefaults__
+        self.assertEqual(defaults["timeout_seconds"], 600)
+
     def test_worker_diagnostics_redacts_credentials(self):
         class DiagnosticClient:
             def recent_logs(self, service_id):
