@@ -3629,8 +3629,10 @@ async def _v3_recover_deferred_state_checkpoint(
         if last_status == "stale_remote":
             break
         logging.warning(
-            "[StatePersistence] deferred checkpoint attempt %s/%s status=%s",
+            "[StatePersistence] deferred checkpoint attempt %s/%s status=%s branch=%s error=%s",
             attempt + 1, attempts, last_status,
+            result.get("branch") or _STATE_PERSISTENCE.branch,
+            result.get("error") or "",
         )
     _v3_report_incident(
         "STATE_BACKUP_DEFERRED", "backup", "CRITICAL",

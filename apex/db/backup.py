@@ -160,12 +160,16 @@ class BrainPersistence:
         commit is parented to the branch head observed immediately before the
         upload and the final ref update is never forced.
         """
+        def tagged(response: Any, phase: str) -> Any:
+            setattr(response, "_apex_backup_phase", phase)
+            return response
+
         ref_url = f"{self._git_api_url}/ref/heads/{self.branch}"
         ref_response = self.session.get(
             ref_url, headers=self._headers(), timeout=self.timeout,
         )
         if ref_response.status_code != 200:
-            return ref_response
+            return tagged(ref_response, "read_ref")
         head_sha = str(((ref_response.json() or {}).get("object") or {}).get("sha") or "")
         if not head_sha:
             raise RuntimeError("GitHub branch ref has no commit SHA")
@@ -175,7 +179,7 @@ class BrainPersistence:
             headers=self._headers(), timeout=self.timeout,
         )
         if commit_response.status_code != 200:
-            return commit_response
+            return tagged(commit_response, "read_commit")
         tree_sha = str(((commit_response.json() or {}).get("tree") or {}).get("sha") or "")
         if not tree_sha:
             raise RuntimeError("GitHub branch commit has no tree SHA")
@@ -203,7 +207,7 @@ class BrainPersistence:
             if blob_payload_path and os.path.exists(blob_payload_path):
                 os.unlink(blob_payload_path)
         if blob_response.status_code not in (200, 201):
-            return blob_response
+            return tagged(blob_response, "create_blob")
         new_blob_sha = str((blob_response.json() or {}).get("sha") or "")
         if not new_blob_sha:
             raise RuntimeError("GitHub accepted blob but returned no SHA")
@@ -227,7 +231,7 @@ class BrainPersistence:
             timeout=self.timeout,
         )
         if tree_response.status_code not in (200, 201):
-            return tree_response
+            return tagged(tree_response, "create_tree")
         new_tree_sha = str((tree_response.json() or {}).get("sha") or "")
         commit_create = self.session.post(
             f"{self._git_api_url}/commits", headers=self._headers(),
@@ -235,13 +239,13 @@ class BrainPersistence:
             timeout=self.timeout,
         )
         if commit_create.status_code not in (200, 201):
-            return commit_create
+            return tagged(commit_create, "create_commit")
         new_commit_sha = str((commit_create.json() or {}).get("sha") or "")
-        return self.session.patch(
+        return tagged(self.session.patch(
             f"{self._git_api_url}/refs/heads/{self.branch}",
             headers=self._headers(), json={"sha": new_commit_sha, "force": False},
             timeout=self.timeout,
-        )
+        ), "update_ref")
 
     def _historical_refs(self, limit: int = 8) -> list[str]:
         response = self.session.get(
@@ -696,8 +700,16 @@ class BrainPersistence:
                     )
                 if response.status_code not in (200, 201):
                     if response.status_code in (409, 422):
-                        self._last_error = f"GitHub concurrent update HTTP {response.status_code}"
-                        return {"status": "concurrent_update", "saved": False}
+                        category, detail = self._github_error(response)
+                        phase = str(getattr(response, "_apex_backup_phase", "contents_update"))
+                        self._last_error = (
+                            f"GitHub {phase} HTTP {response.status_code} {category}"
+                            f"{f' ({detail})' if detail else ''}"
+                        )
+                        return {
+                            "status": "concurrent_update", "saved": False,
+                            "error": self._last_error, "branch": self.branch,
+                        }
                     category, message = self._github_error(response)
                     suffix = f" ({message})" if message else ""
                     raise RuntimeError(
