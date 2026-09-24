@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from apex.db.backup import BrainPersistence
 
@@ -64,6 +65,14 @@ class _TransientConflictSession(_GitHubSession):
         if not self.puts:
             self.puts.append(json)
             return _Response(status_code=409)
+        return super().put(_url, headers=headers, json=json, timeout=timeout)
+
+
+class _TransientValidationCollisionSession(_GitHubSession):
+    def put(self, _url, *, headers, json, timeout):
+        if len(self.puts) < 2:
+            self.puts.append(json)
+            return _Response(status_code=422, payload={"message": "Validation is still in progress"})
         return super().put(_url, headers=headers, json=json, timeout=timeout)
 
 
@@ -289,6 +298,20 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertEqual(len(session.puts), 2)
         self.assertEqual(session.puts[0]["sha"], "base")
         self.assertEqual(session.puts[1]["sha"], "base")
+
+    def test_validation_collision_retries_with_backoff_and_same_blob(self):
+        _make_db(self.remote, knowledge_rows=1)
+        session = _TransientValidationCollisionSession(_bytes(self.remote), sha="base")
+        manager = self._manager(session)
+        manager.restore()
+
+        with patch("apex.db.backup.time.sleep") as sleep:
+            result = manager.backup("retry_validation_collision")
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(len(session.puts), 3)
+        self.assertTrue(all(item["sha"] == "base" for item in session.puts))
+        self.assertEqual(sleep.call_count, 2)
 
     def test_transient_github_gateway_failure_is_retried(self):
         _make_db(self.remote, knowledge_rows=1)

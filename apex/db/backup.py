@@ -554,32 +554,42 @@ class BrainPersistence:
                         )
 
                 response = None
-                for attempt in range(3):
+                # GitHub can return 422 while a previous Contents API commit
+                # on the same backup branch is still being validated.  The
+                # file blob SHA remains unchanged in that case, so retrying
+                # the same CAS write is safe.  This is common during a Render
+                # rolling deploy because brain/state/memory share the branch.
+                for attempt in range(5):
                     response = put_snapshot()
                     category, _message = self._github_error(response)
-                    if response.status_code in (200, 201, 409, 422) or category != "transient":
+                    if response.status_code in (200, 201):
                         break
-                    if attempt < 2:
+                    if response.status_code in (409, 422):
+                        refreshed, refreshed_state = self._remote_metadata()
+                        refreshed_sha = str((refreshed or {}).get("sha") or "")
+                        if refreshed_state != "ok" or refreshed_sha != current_sha:
+                            self._last_error = (
+                                f"concurrent update: restored {current_sha[:12]}, "
+                                f"remote is {refreshed_sha[:12] or 'unavailable'}"
+                            )
+                            return {
+                                "status": "stale_remote",
+                                "saved": False,
+                                "remote_blob_sha": refreshed_sha,
+                                "local_base_sha": current_sha,
+                            }
+                        if attempt < 4:
+                            # 409 is normally a short branch-head race.  A 422
+                            # validation collision needs a little more time.
+                            if response.status_code == 422:
+                                time.sleep(2 ** attempt)
+                            continue
+                        break
+                    if category != "transient":
+                        break
+                    if attempt < 4:
                         time.sleep(2 ** attempt)
                 assert response is not None
-                if response.status_code in (409, 422):
-                    # Retry once only when GitHub still reports the exact blob
-                    # we restored. If it advanced, this process is stale and
-                    # must never borrow the newer SHA to overwrite its data.
-                    refreshed, refreshed_state = self._remote_metadata()
-                    refreshed_sha = str((refreshed or {}).get("sha") or "")
-                    if refreshed_state != "ok" or refreshed_sha != current_sha:
-                        self._last_error = (
-                            f"concurrent update: restored {current_sha[:12]}, "
-                            f"remote is {refreshed_sha[:12] or 'unavailable'}"
-                        )
-                        return {
-                            "status": "stale_remote",
-                            "saved": False,
-                            "remote_blob_sha": refreshed_sha,
-                            "local_base_sha": current_sha,
-                        }
-                    response = put_snapshot()
                 if response.status_code not in (200, 201):
                     if response.status_code in (409, 422):
                         self._last_error = f"GitHub concurrent update HTTP {response.status_code}"
