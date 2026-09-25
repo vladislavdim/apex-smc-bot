@@ -26,6 +26,21 @@ class TelegramSystemTests(unittest.TestCase):
         self.assertIn("Scanner FAST: <b>READY</b>", text)
         self.assertIn("READINESS_UNHEALTHY:gate:STALE", text)
 
+    def test_candidate_driven_components_are_not_reported_as_unknown(self):
+        text = format_system_status({
+            "status": "READY", "health": "HEALTHY", "ready": True,
+            "release_sha": "b" * 40,
+            "components": {
+                "groq": {"state": "UNKNOWN"},
+                "risk_engine": {"state": "UNKNOWN"},
+                "scanner_wyckoff": {"state": "UNKNOWN"},
+            },
+        })
+        self.assertIn("Groq: <b>ON_DEMAND</b>", text)
+        self.assertIn("Risk engine: <b>ON_DEMAND</b>", text)
+        self.assertIn("Scanner WYCKOFF: <b>WAITING_FIRST_RUN</b>", text)
+        self.assertIn("это не ошибка подключения", text)
+
 
 if __name__ == "__main__":
     unittest.main()
