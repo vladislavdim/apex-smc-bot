@@ -154,7 +154,7 @@ from core.apex_v2 import (
 from core.setup_audit import emit_event as _emit_stats_event
 from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
 from core.strategy_decisions import configure_strategy_decision_state as _configure_strategy_decision_state
-from core.setup_evidence import (
+from apex.quality.setup_evidence import (
     assess_candidate as _assess_setup_candidate,
     ensure_setup_evidence_schema as _ensure_setup_evidence_schema,
     persist_assessment as _persist_setup_assessment,
