@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from core.signal_integrity import validate_candidate
-from core.setup_evidence import _geometry
+from apex.quality.setup_evidence import _geometry
 
 
 class RRFloorFastBalancedTests(unittest.TestCase):
@@ -10,7 +10,7 @@ class RRFloorFastBalancedTests(unittest.TestCase):
     def setUpClass(cls):
         cls.market = Path("apex/compatibility/legacy_market_runtime.py").read_text(encoding="utf-8")
         cls.bot = Path("apex/app/worker.py").read_text(encoding="utf-8")
-        cls.evidence = Path("core/setup_evidence.py").read_text(encoding="utf-8")
+        cls.evidence = Path("apex/quality/setup_evidence.py").read_text(encoding="utf-8")
         cls.structural_levels = Path("apex/market/structural_levels.py").read_text(encoding="utf-8")
 
     def test_rr_above_four_is_valid_for_every_strategy_integrity(self):

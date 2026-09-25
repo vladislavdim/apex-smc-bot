@@ -6,7 +6,7 @@ import unittest
 from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
-from core.setup_evidence import (
+from apex.quality.setup_evidence import (
     assess_candidate,
     ensure_setup_evidence_schema,
     persist_assessment,
