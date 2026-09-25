@@ -25,7 +25,8 @@ from apex.compatibility.market_constants import (
 )
 from apex.market.runtime_cache import (
     get_confirmed_candles, get_global_candles,
-    last_closed_candle_time as _last_closed_candle_time, update_global_candles,
+    last_closed_candle_time as _last_closed_candle_time, prune_global_candles,
+    update_global_candles,
 )
 from apex.ui.price_format import smart_price_fmt
 from apex.ui.market_format import format_accumulation, format_market_prices, format_news
@@ -466,6 +467,31 @@ get_adaptive_params = _ADAPTIVE_INDICATORS.get_adaptive_params
 _SESSION_LIQUIDITY = SessionLiquidityProvider(get_candles)
 check_session_liquidity = _SESSION_LIQUIDITY.check
 _BTC_CORRELATION = BtcCorrelationProvider(get_candles, get_global_candles)
+
+
+def clear_market_runtime_caches() -> dict[str, int]:
+    """Release optional recomputable market caches under resource pressure."""
+    from core.smc_engine import prune_candle_cache
+
+    counts = {
+        "router_candles": len(candle_cache),
+        "shared_candles": prune_global_candles(force=True),
+        "smc_candles": prune_candle_cache(force=True),
+        "derived_context": len(_DERIVED_CONTEXT._higher_timeframe_cache) + len(_DERIVED_CONTEXT._regime_cache),
+        "indicators": len(_ADAPTIVE_INDICATORS._indicator_cache) + len(_ADAPTIVE_INDICATORS._adaptive_cache),
+        "session_liquidity": len(_SESSION_LIQUIDITY._cache),
+        "btc_correlation": len(_BTC_CORRELATION._cache),
+    }
+    candle_cache.clear()
+    _DERIVED_CONTEXT._higher_timeframe_cache.clear()
+    _DERIVED_CONTEXT._higher_timeframe_cache_time.clear()
+    _DERIVED_CONTEXT._regime_cache.clear()
+    _DERIVED_CONTEXT._regime_cache_time.clear()
+    _ADAPTIVE_INDICATORS._indicator_cache.clear()
+    _ADAPTIVE_INDICATORS._adaptive_cache.clear()
+    _SESSION_LIQUIDITY._cache.clear()
+    _BTC_CORRELATION._cache.clear()
+    return counts
 get_btc_correlation = _BTC_CORRELATION.get
 _BTC_DIRECTION = BtcDirectionFilter(get_candles)
 get_btc_1h_change = _BTC_DIRECTION.one_hour_change
