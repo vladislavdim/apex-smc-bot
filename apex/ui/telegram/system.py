@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 _ORDER = (
     "config", "state_db", "memory_db", "gate", "market_data", "groq",
+    "risk_engine",
     "binance_reconciliation", "manager", "manager_reconciliation",
     "scheduler", "strategy_activation", "scanner_fast", "scanner_mtf",
     "scanner_zone", "scanner_swing", "scanner_wyckoff",
@@ -18,6 +19,7 @@ _ORDER = (
 _LABELS = {
     "config": "Config", "state_db": "State DB", "memory_db": "Memory DB",
     "gate": "Gate", "market_data": "Market data", "groq": "Groq",
+    "risk_engine": "Risk engine",
     "binance_reconciliation": "Binance", "manager": "Manager",
     "manager_reconciliation": "Manager reconcile", "scheduler": "Scheduler",
     "strategy_activation": "Strategy activation", "scanner_fast": "Scanner FAST",
@@ -33,7 +35,7 @@ def _icon(state: str) -> str:
     value = state.upper()
     if value in {"READY", "FRESH", "HEALTHY"}:
         return "✅"
-    if value in {"STARTING", "UNKNOWN"}:
+    if value in {"STARTING", "UNKNOWN", "ON_DEMAND", "WAITING_FIRST_RUN"}:
         return "⚪"
     if value in {"DEGRADED", "STALE"}:
         return "🟡"
@@ -62,7 +64,17 @@ def format_system_status(snapshot: Mapping[str, Any]) -> str:
         item = components.get(name)
         item = item if isinstance(item, Mapping) else {}
         state = str(item.get("state") or "UNKNOWN").upper()
+        if state == "UNKNOWN" and name in {"groq", "risk_engine"}:
+            state = "ON_DEMAND"
+        elif state == "UNKNOWN" and name.startswith("scanner_"):
+            state = "WAITING_FIRST_RUN"
         lines.append(f"{_icon(state)} {html.escape(_LABELS.get(name, name))}: <b>{html.escape(state)}</b>")
+
+    lines.extend([
+        "",
+        "ℹ️ <b>ON_DEMAND</b> — проверка запускается только для найденного кандидата; это не ошибка подключения.",
+        "ℹ️ <b>WAITING_FIRST_RUN</b> — плановый цикл ещё не выполнялся после запуска worker.",
+    ])
 
     reasons = snapshot.get("reason_codes")
     reasons = list(reasons) if isinstance(reasons, (list, tuple, set)) else []
