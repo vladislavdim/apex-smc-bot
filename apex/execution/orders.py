@@ -37,7 +37,7 @@ except ImportError:  # pure sizing/paper tests do not need an HTTP package
 
 _RequestException = getattr(requests, "RequestException", OSError) if requests is not None else OSError
 
-from core.signal_integrity import validate_candidate
+from apex.quality.integrity import validate_legacy_candidate as validate_candidate
 
 
 DB_PATH = ApexConfig.from_env().database.compatibility_db_path

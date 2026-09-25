@@ -193,7 +193,7 @@ except Exception as _market_intelligence_import_error:
     logging.warning("Market intelligence unavailable: %s", _market_intelligence_import_error)
 
 try:
-    from core.signal_integrity import validate_candidate as _validate_signal_candidate
+    from apex.quality.integrity import validate_legacy_candidate as _validate_signal_candidate
     _SIGNAL_INTEGRITY_OK = True
 except Exception as _signal_integrity_import_error:
     _SIGNAL_INTEGRITY_OK = False
