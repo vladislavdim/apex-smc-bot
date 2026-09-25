@@ -57,6 +57,18 @@ DB_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__fil
 if not _os.path.exists(_os.path.dirname(DB_PATH)):
     DB_PATH = "brain.db"
 
+
+def prune_candle_cache(*, force=False):
+    now = time.time()
+    stale = []
+    for key, (_value, updated_at) in list(_candle_cache.items()):
+        interval = key.rsplit("_", 1)[-1]
+        if force or now - updated_at >= _CACHE_TTL.get(interval, 300):
+            stale.append(key)
+    for key in stale:
+        _candle_cache.pop(key, None)
+    return len(stale)
+
 def _init_tables():
     try:
         conn = _connect_compatibility_db(DB_PATH)
@@ -286,6 +298,7 @@ _FETCHERS = {
 # ═══════════════════════════════════════════════════════════════
 
 def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> dict:
+    prune_candle_cache()
     requested_limit = max(1, int(limit or 1))
     snapshot_rows = snapshot_candle_override(symbol, interval, requested_limit)
     if snapshot_rows is not None:
