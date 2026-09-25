@@ -5,7 +5,7 @@ from apex.ui.dashboard import server as stats_server
 
 class StrategyStatsFinalTests(unittest.TestCase):
     def test_setup_audit_uses_versioned_state_db(self):
-        src=Path("core/setup_audit.py").read_text(encoding="utf-8")
+        src=Path("apex/telemetry/event_log.py").read_text(encoding="utf-8")
         self.assertIn("_CONFIG.database.state_db_path",src)
         self.assertIn("migrate_state as _migrate_state",src)
         self.assertNotIn("APEX_SETUP_AUDIT_DB_PATH",src)
