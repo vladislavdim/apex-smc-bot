@@ -124,7 +124,7 @@ class DashboardProductionSourceTests(unittest.TestCase):
         self.assertIn("parsed > now_utc", self.stats)
 
     def test_rr_catalog_has_no_old_ceiling(self):
-        with open("core/strategy_catalog.py", encoding="utf-8") as handle:
+        with open("apex/strategies/specifications.py", encoding="utf-8") as handle:
             catalog = handle.read()
         self.assertIn('"TP1 RR is at least 2.0"', catalog)
         self.assertNotIn('"TP1 RR is between 2.0 and 4.0"', catalog)

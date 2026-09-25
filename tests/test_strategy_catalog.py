@@ -1,5 +1,5 @@
 import unittest
-from core.strategy_catalog import STRATEGY_CATALOG
+from apex.strategies.specifications import STRATEGY_CATALOG
 
 
 class StrategyCatalogTests(unittest.TestCase):
