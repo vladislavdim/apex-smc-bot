@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 import psycopg2
 import psycopg2.extras
 
-from core.strategy_catalog import STRATEGY_CATALOG
+from apex.strategies.specifications import STRATEGY_CATALOG
 from apex.telemetry.dashboard_projection import normalize_incident_snapshot
 from apex.ui.dashboard.config import DashboardSettings
 

@@ -11,7 +11,7 @@ class StrategyFunnelCleanupTests(unittest.TestCase):
         cls.market = Path('apex/compatibility/legacy_market_runtime.py').read_text(encoding='utf-8')
         cls.setup = Path('core/setup_evidence.py').read_text(encoding='utf-8')
         cls.audit = Path('core/setup_audit.py').read_text(encoding='utf-8')
-        cls.catalog = Path('core/strategy_catalog.py').read_text(encoding='utf-8')
+        cls.catalog = Path('apex/strategies/specifications.py').read_text(encoding='utf-8')
         cls.stats = Path('apex/ui/dashboard/server.py').read_text(encoding='utf-8')
 
     def test_swing_4h_structure_is_context_but_1h_is_mandatory(self):
