@@ -108,7 +108,7 @@ from apex.compatibility.market_data import (
     find_swings, get_adaptive_params, get_all_market_pairs,
     get_bos_choch_event, get_candles, get_confirmed_candles, get_dxy_signal,
     get_estimated_time, get_fear_greed, get_funding_rate, get_liquidity_heatmap,
-    get_live_prices, get_market_regime, get_orderbook,
+    get_live_prices, get_market_regime, get_orderbook, clear_market_runtime_caches,
     get_precomputed_indicators, get_top_pairs, get_upcoming_events,
     multi_tf_analysis, smart_price_fmt, smc_on_tf, update_global_candles,
 )
@@ -299,7 +299,10 @@ from apex.strategies.wyckoff import WyckoffStrategy as _V3_WYCKOFF_STRATEGY
 from apex.strategies.zone import ZoneStrategy as _V3_ZONE_STRATEGY
 from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT
 from apex.market.provider import GateSnapshotProvider as _V3_GATE_SNAPSHOT_PROVIDER
-from apex.ops.resource_guard import memory_snapshot as _v3_memory_snapshot
+from apex.ops.resource_guard import (
+    memory_snapshot as _v3_memory_snapshot,
+    release_unused_memory as _v3_release_unused_memory,
+)
 from apex.ops.restart_guard import record_shutdown as _v3_record_shutdown, record_start as _v3_record_start
 from apex.ops.watchdog import EventLoopLagMonitor as _V3EventLoopLagMonitor, ProcessCpuMonitor as _V3ProcessCpuMonitor
 from apex.ops.instance_fencing import InstanceLeaseClient as _V3InstanceLeaseClient, derive_lease_url as _v3_derive_lease_url
@@ -364,6 +367,7 @@ _BRAIN_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.integrations.github_repo,
     _V3_CONFIG.integrations.github_token,
     _V3_CONFIG.integrations.backup_branch,
+    compression="gzip",
 )
 _STATE_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.database.state_db_path,
@@ -383,6 +387,7 @@ _MEMORY_PERSISTENCE = _BrainPersistence(
 _brain_backup_async_lock = None
 _state_backup_async_lock = None
 _memory_backup_async_lock = None
+_v3_memory_relief_active = False
 
 
 def _v3_confirmed_accounting(signal_id: int):
@@ -3748,6 +3753,7 @@ async def _v3_startup_reconcile_and_market_check():
 
 async def _v3_runtime_watchdog():
     """Resource pressure may stop entries, never Manager/reconciliation."""
+    global _v3_memory_relief_active
     try:
         snapshot = await asyncio.to_thread(
             _v3_memory_snapshot,
@@ -3761,6 +3767,14 @@ async def _v3_runtime_watchdog():
             f"ratio={snapshot.ratio:.3f} state={snapshot.state}"
         )
         if snapshot.state in {"DEGRADED", "NEW_ENTRIES_OFF"}:
+            if not _v3_memory_relief_active:
+                cleared = clear_market_runtime_caches()
+                trimmed = _v3_release_unused_memory()
+                _v3_memory_relief_active = True
+                logging.warning(
+                    "[ResourceGuard] optional caches released=%s malloc_trim=%s",
+                    cleared, trimmed,
+                )
             _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.DEGRADED, detail, required=False)
             _V3_RUNTIME.inhibit_entries(f"RESOURCE_MEMORY_{snapshot.state}")
             _v3_report_incident(
@@ -3768,6 +3782,7 @@ async def _v3_runtime_watchdog():
                 {"rss_bytes": snapshot.rss_bytes, "limit_bytes": snapshot.limit_bytes, "ratio": snapshot.ratio},
             )
         else:
+            _v3_memory_relief_active = False
             _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.READY, detail, required=False)
             _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_DEGRADED")
             _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_NEW_ENTRIES_OFF")
