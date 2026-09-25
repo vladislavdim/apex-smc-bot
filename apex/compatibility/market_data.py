@@ -15,6 +15,7 @@ from apex.market.indicators import ema_value
 from apex.market.engine_bridge import calculate_vwap, get_liquidity_heatmap
 
 from apex.compatibility.legacy_market_runtime import (
+    clear_market_runtime_caches,
     fetch_candles_batch,
     get_adaptive_params, get_candles,
     get_market_regime,
