@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 from apex.config.settings import ApexConfig
-from core.setup_audit import emit_event as _emit_stats_event, emit_scan_event as _emit_setup_audit_scan
+from apex.telemetry.event_log import emit_event as _emit_stats_event, emit_scan_event as _emit_setup_audit_scan
 
 
 DB_PATH = ApexConfig.from_env().database.compatibility_db_path

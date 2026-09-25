@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from core.strategy_decisions import configure_strategy_decision_state, record_strategy_decision
+from apex.db.repositories.strategy_decisions import configure_strategy_decision_state, record_strategy_decision
 from core.telegram_dashboard import configure_dashboard_state, fetch_watchlist
 from apex.db.state_db import migrate_state
 from core.strategy_validation import validation_report, walk_forward_report
@@ -16,7 +16,7 @@ class StrategyObservabilityTests(unittest.TestCase):
         self.db_path = os.path.join(self.tmp.name, "brain.db")
         configure_strategy_decision_state(None)
         configure_dashboard_state(None)
-        self.audit_patch = patch("core.strategy_decisions._emit_setup_audit_decision")
+        self.audit_patch = patch("apex.db.repositories.strategy_decisions._emit_setup_audit_decision")
         self.audit_patch.start()
 
     def tearDown(self):

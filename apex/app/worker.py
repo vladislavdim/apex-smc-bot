@@ -4,7 +4,7 @@ The repository-level ``bot.py`` is now launcher-only. Runtime ownership is
 being split from this composition root into ``apex.app`` and domain packages.
 """
 # APEX_STRATEGY_STATS_V1
-from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
+from apex.telemetry.event_log import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
 import asyncio
 import functools
 import logging
@@ -151,9 +151,9 @@ from core.apex_v2 import (
     store_portfolio_snapshot as _store_apex_portfolio_snapshot,
     store_market_state as _store_apex_market_state,
 )
-from core.setup_audit import emit_event as _emit_stats_event
-from core.strategy_decisions import record_strategy_decision as _record_strategy_decision
-from core.strategy_decisions import configure_strategy_decision_state as _configure_strategy_decision_state
+from apex.telemetry.event_log import emit_event as _emit_stats_event
+from apex.db.repositories.strategy_decisions import record_strategy_decision as _record_strategy_decision
+from apex.db.repositories.strategy_decisions import configure_strategy_decision_state as _configure_strategy_decision_state
 from apex.quality.setup_evidence import (
     assess_candidate as _assess_setup_candidate,
     ensure_setup_evidence_schema as _ensure_setup_evidence_schema,

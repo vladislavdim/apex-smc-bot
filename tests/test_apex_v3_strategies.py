@@ -14,7 +14,7 @@ from apex.strategies.registry import StrategyRegistry
 from apex.strategies.swing import SwingStrategy
 from apex.strategies.wyckoff import WyckoffStrategy
 from apex.strategies.zone import ZoneStrategy
-from core.setup_audit import audit_fail, audit_strategy, audit_test
+from apex.telemetry.event_log import audit_fail, audit_strategy, audit_test
 
 
 def accepted(strategy: str, calls: list | None = None):
@@ -52,7 +52,7 @@ def snapshot(symbol="BTCUSDT"):
 
 class ApexV3StrategyTests(unittest.TestCase):
     def setUp(self):
-        self.emit = patch("core.setup_audit.emit_event", return_value="event").start()
+        self.emit = patch("apex.telemetry.event_log.emit_event", return_value="event").start()
 
     def tearDown(self):
         patch.stopall()

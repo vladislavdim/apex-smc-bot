@@ -23,7 +23,7 @@ from apex.strategies.parity import (
     require_parity,
 )
 from apex.strategies.wyckoff import WyckoffStrategy
-from core.setup_audit import audit_fail, audit_strategy, audit_test
+from apex.telemetry.event_log import audit_fail, audit_strategy, audit_test
 
 
 def candidate_detector(strategy: str, *, subtype: str = "", sl: float = 90):
@@ -57,7 +57,7 @@ def rejected_detector(strategy: str, *, subtype: str = ""):
 
 class StrategyParityTests(unittest.TestCase):
     def setUp(self):
-        patch("core.setup_audit.emit_event", return_value="event").start()
+        patch("apex.telemetry.event_log.emit_event", return_value="event").start()
 
     def tearDown(self):
         patch.stopall()
