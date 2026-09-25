@@ -1,0 +1,578 @@
+"""Canonical V3 strategy-attempt event log for APEX.
+
+The module is intentionally fail-open and is not part of signal calculation.
+It records what the existing detector actually evaluated, where it stopped, and
+what values existed at that moment. Network/database failures are swallowed and
+must never affect a trading decision.
+"""
+from __future__ import annotations
+
+import functools
+import json
+import logging
+import queue
+import re
+import sqlite3
+from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.state_db import migrate_state as _migrate_state
+import sys
+import threading
+import time
+import uuid
+import copy
+from datetime import datetime, timezone
+from typing import Any, Callable
+from apex.config.settings import ApexConfig
+
+_CONFIG = ApexConfig.from_env()
+DB_PATH = _CONFIG.database.state_db_path
+RELEASE_SHA = _CONFIG.runtime.release_sha
+SERVICE_INSTANCE = _CONFIG.runtime.instance_id
+DEPLOY_ID = _CONFIG.runtime.deploy_id
+_MAX_PAYLOAD_CHARS = 60000
+_EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=10000)
+_WORKER_LOCK = threading.Lock()
+_WORKER_STARTED = False
+_TLS = threading.local()
+_PRIORITY_LOCAL_NAMES = {
+    "symbol", "timeframe", "direction", "price", "price_now", "live_price", "current_price",
+    "entry", "sl", "tp", "tp1", "tp2", "tp3", "rr", "rr_check", "risk", "reward",
+    "score", "q_score", "confluence_score", "confirms", "fast_score", "zone_type", "zone_desc",
+    "in_zone", "btc_trend", "direction_4h", "direction_1h", "direction_1d", "htf_dir", "htf_1d",
+    "spring_found", "sos_found", "utad_found", "sow_found", "drawdown_pct", "pump_pct",
+    "acc_range_pct", "dist_range_pct", "vol_compression", "vol_compressed", "vol_expanding",
+    "higher_lows", "entry_drift_pct", "sl_pct", "tp_pct", "tp2_pct", "weekly_warning",
+    "_swing_1h_choch", "_swing_fvg_ok", "_swing_pd_ok", "_swing_15m_confirms",
+    "_sw_confirms", "_zone_ltf_structure", "_acceptance", "_sweep_candles_ago",
+    "_fast_funding_warning", "_swing_funding_warning", "_zone_funding_warning",
+}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _stack() -> list[dict[str, Any]]:
+    stack = getattr(_TLS, "audit_stack", None)
+    if stack is None:
+        stack = []
+        _TLS.audit_stack = stack
+    return stack
+
+
+def _current() -> dict[str, Any] | None:
+    stack = _stack()
+    return stack[-1] if stack else None
+
+
+def _safe_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        if isinstance(value, str) and len(value) > 1000:
+            return value[:1000] + "…"
+        return value
+    return None
+
+
+def _safe_value(value: Any, depth: int = 0) -> Any:
+    if depth > 2:
+        return None
+    scalar = _safe_scalar(value)
+    if scalar is not None or value is None:
+        return scalar
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in list(value.items())[:40]:
+            safe = _safe_value(item, depth + 1)
+            if safe is not None:
+                out[str(key)[:100]] = safe
+        return out
+    if isinstance(value, (tuple, list)):
+        if len(value) > 20:
+            return {"type": type(value).__name__, "count": len(value)}
+        out = []
+        for item in value[:20]:
+            safe = _safe_value(item, depth + 1)
+            if safe is not None:
+                out.append(safe)
+        return out
+    return None
+
+
+def _snapshot_locals(values: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(values, dict):
+        return {}
+    result: dict[str, Any] = {}
+    ordered = [name for name in _PRIORITY_LOCAL_NAMES if name in values]
+    ordered.extend(name for name in values if name not in _PRIORITY_LOCAL_NAMES)
+    for name in ordered:
+        if name.startswith("__") or len(result) >= 90:
+            continue
+        value = values.get(name)
+        if callable(value) or isinstance(value, type(sys)):
+            continue
+        safe = _safe_value(value)
+        if safe is not None:
+            result[name] = safe
+    while len(json.dumps(result, ensure_ascii=False, default=str)) > 24000 and result:
+        result.pop(next(reversed(result)))
+    return result
+
+
+def _candidate_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
+    result = _safe_value(candidate)
+    return result if isinstance(result, dict) else {}
+
+
+def _runtime_scan_context() -> dict[str, Any]:
+    try:
+        main = sys.modules.get("__main__")
+        return {"run_id": getattr(main, "_active_scan_run_id", None), "scanner": getattr(main, "_active_market_scan", None)}
+    except Exception:
+        return {"run_id": None, "scanner": None}
+
+
+def _connect() -> sqlite3.Connection:
+    conn = _connect_compatibility_db(DB_PATH, timeout=10, check_same_thread=False)
+    _migrate_state(conn)
+    return conn
+
+
+def _payload_text(payload: dict[str, Any]) -> str:
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(text) <= _MAX_PAYLOAD_CHARS:
+        return text
+    compact = dict(payload)
+    compact.pop("context", None)
+    compact.pop("market_memory", None)
+    compact.pop("historical_zones", None)
+    compact.pop("closed_loop_learning", None)
+    compact["payload_truncated"] = True
+    return json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)[:_MAX_PAYLOAD_CHARS]
+
+
+def _persist_event(event: dict[str, Any]) -> None:
+    try:
+        conn = _connect()
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        conn.execute("""INSERT OR REPLACE INTO setup_audit_events
+            (event_key,kind,strategy,symbol,occurred_at,payload_json,synced,sync_attempts,last_sync_error)
+            VALUES (?,?,?,?,?,?,COALESCE((SELECT synced FROM setup_audit_events WHERE event_key=?),0),
+                    COALESCE((SELECT sync_attempts FROM setup_audit_events WHERE event_key=?),0),
+                    (SELECT last_sync_error FROM setup_audit_events WHERE event_key=?))""",
+            (event["event_key"], event["kind"], event.get("strategy", ""), event.get("symbol", ""),
+             event["occurred_at"], _payload_text(payload), event["event_key"], event["event_key"], event["event_key"]))
+        conn.commit(); conn.close()
+    except Exception as exc:
+        logging.debug("[SetupAudit] local persistence skipped: %s", exc)
+
+
+def _post_events(events: list[dict[str, Any]]) -> bool:
+    integrations = ApexConfig.from_env().integrations
+    url = integrations.stats_ingest_url
+    token = integrations.stats_ingest_token
+    if not url or not token or not events:
+        return False
+    try:
+        import requests
+        payload: Any = events[0] if len(events) == 1 else events
+        response = requests.post(url, json=payload,
+            headers={"X-APEX-Ingest-Token": token, "Content-Type": "application/json"}, timeout=4)
+        if 200 <= response.status_code < 300:
+            return True
+        raise RuntimeError(f"HTTP {response.status_code}")
+    except Exception as exc:
+        try:
+            conn = _connect()
+            conn.executemany(
+                "UPDATE setup_audit_events SET sync_attempts=sync_attempts+1,last_sync_error=? WHERE event_key=?",
+                [(str(exc)[:500], event.get("event_key")) for event in events],
+            )
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+        return False
+
+
+def _post_event(event: dict[str, Any]) -> bool:
+    return _post_events([event])
+
+
+def _mark_synced(event_key: str) -> None:
+    try:
+        conn = _connect()
+        conn.execute("UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?", (event_key,))
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+
+
+def _mark_many_synced(events: list[dict[str, Any]]) -> None:
+    try:
+        conn = _connect()
+        conn.executemany(
+            "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
+            [(str(event.get("event_key") or ""),) for event in events],
+        )
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+
+
+def _flush_unsynced(limit: int = 100) -> None:
+    integrations = ApexConfig.from_env().integrations
+    if not integrations.stats_ingest_url or not integrations.stats_ingest_token:
+        return
+    try:
+        conn = _connect()
+        rows = conn.execute("""SELECT event_key,kind,strategy,symbol,occurred_at,payload_json
+            FROM setup_audit_events WHERE synced=0 ORDER BY occurred_at LIMIT ?""", (int(limit),)).fetchall()
+        conn.close()
+        events = []
+        for key, kind, strategy, symbol, occurred_at, payload_json in rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {}
+            events.append({"event_key": key, "kind": kind, "strategy": strategy, "symbol": symbol,
+                           "occurred_at": occurred_at, "payload": payload})
+        # The web endpoint accepts at most 2 MB. Twenty maximum-size audit
+        # payloads remain below that boundary while still reducing a 100-event
+        # retry burst to at most five HTTP requests.
+        for offset in range(0, len(events), 20):
+            batch = events[offset:offset + 20]
+            if not _post_events(batch):
+                break
+            conn = _connect()
+            conn.executemany(
+                "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
+                [(event["event_key"],) for event in batch],
+            )
+            conn.commit(); conn.close()
+    except Exception:
+        return
+
+
+def _process_event_batch(event: dict[str, Any]) -> int:
+    # A scan can emit hundreds of audit events in a few milliseconds. Drain a
+    # bounded micro-batch so the Dashboard receives one POST, not one per event.
+    batch = [event]
+    while len(batch) < 20:
+        try: batch.append(_EVENT_QUEUE.get_nowait())
+        except queue.Empty: break
+    for item in batch: _persist_event(item)
+    if _post_events(batch): _mark_many_synced(batch)
+    for _ in batch: _EVENT_QUEUE.task_done()
+    return len(batch)
+
+
+def _worker() -> None:
+    last_retry = 0.0
+    while True:
+        try:
+            event = _EVENT_QUEUE.get(timeout=1.0)
+        except queue.Empty:
+            event = None
+        if event: _process_event_batch(event)
+        now = time.monotonic()
+        if now - last_retry >= 30.0:
+            _flush_unsynced(100)
+            last_retry = now
+
+
+def _ensure_worker() -> None:
+    global _WORKER_STARTED
+    if _WORKER_STARTED:
+        return
+    with _WORKER_LOCK:
+        if _WORKER_STARTED:
+            return
+        threading.Thread(target=_worker, name="apex-setup-audit", daemon=True).start()
+        _WORKER_STARTED = True
+
+
+def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *, event_key: str | None = None) -> str:
+    key = event_key or str(uuid.uuid4())
+    payload_data = dict(payload) if isinstance(payload, dict) else {}
+    if RELEASE_SHA:
+        payload_data.setdefault("release_sha", RELEASE_SHA)
+    payload_data.setdefault("service_instance", SERVICE_INSTANCE or "unknown")
+    payload_data.setdefault("deploy_id", DEPLOY_ID)
+    event = {"event_key": key, "kind": str(kind), "strategy": str(strategy or "").upper(),
+             "symbol": str(symbol or "").upper(), "occurred_at": _utc_now(),
+             "payload": payload_data}
+    try:
+        _ensure_worker(); _EVENT_QUEUE.put_nowait(event)
+    except Exception:
+        pass
+    return key
+
+
+def _new_attempt(strategy: str, subtype: str, fn_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    symbol_value = kwargs.get("symbol") or (args[0] if args else "") or ""
+    if not isinstance(symbol_value, str):
+        symbol_value = getattr(symbol_value, "symbol", "")
+    symbol = str(symbol_value or "").upper()
+    timeframe = str(kwargs.get("timeframe") or (args[1] if len(args) > 1 and isinstance(args[1], str) else "") or "")
+    runtime = _runtime_scan_context()
+    return {"attempt_key": str(uuid.uuid4()), "strategy": str(strategy).upper(), "subtype": str(subtype or "").upper(),
+            "function": fn_name, "symbol": symbol, "timeframe": timeframe, "run_id": runtime.get("run_id"),
+            "scanner": runtime.get("scanner"), "started_at": _utc_now(), "started_monotonic": time.monotonic(),
+            "checks": [], "telemetry": {}, "finished": False, "stop": None}
+
+
+def _finish_attempt(context: dict[str, Any], outcome: str, *, candidate: dict[str, Any] | None = None, error: str = "") -> None:
+    if context.get("finished"):
+        return
+    context["finished"] = True
+    payload = {"attempt_key": context["attempt_key"], "strategy": context["strategy"], "subtype": context.get("subtype") or "",
+               "function": context.get("function") or "", "symbol": context.get("symbol") or "", "timeframe": context.get("timeframe") or "",
+               "run_id": context.get("run_id"), "scanner": context.get("scanner"), "started_at": context.get("started_at"),
+               "finished_at": _utc_now(), "duration_ms": round((time.monotonic() - float(context.get("started_monotonic") or time.monotonic())) * 1000, 1),
+               "outcome": outcome, "stop": context.get("stop"), "checks": context.get("checks", []),
+               "telemetry": _safe_value(context.get("telemetry") or {}) or {},
+               "candidate": _candidate_snapshot(candidate or {}), "error": str(error)[:2000] if error else ""}
+    # Only an explicit terminal audit_fail establishes a blocking STOP.  Map it
+    # to exactly one failed predicate: a passed check can never own a STOP and
+    # line adjacency alone is not sufficient evidence (instrumented source can
+    # insert several observations between a predicate and its return).
+    stop = payload.get("stop") or {}
+    failed = [(index, check) for index, check in enumerate(payload["checks"])
+              if str(check.get("state") or "").upper() == "FAIL"]
+    owner_index = None
+    if stop and failed:
+        condition = str(stop.get("condition") or "").strip()
+        label = str(stop.get("label") or "").strip()
+        exact = [(index, check) for index, check in failed
+                 if condition and str(check.get("condition") or "").strip() == condition]
+        if not exact:
+            exact = [(index, check) for index, check in failed
+                     if label and str(check.get("label") or "").strip() == label]
+        candidates = exact or failed
+        # If the stop cannot be matched to one predicate, do not invent an
+        # owner from list order.  Ambiguous telemetry is still retained, but
+        # downstream funnels must not blame an arbitrary check.
+        if not exact and len(candidates) != 1:
+            stop["blocking_mapping"] = "AMBIGUOUS"
+            stop["blocking_check_index"] = None
+            stop["blocking_check_code"] = None
+        else:
+            stop_line = stop.get("line")
+            preceding = [(index, check) for index, check in candidates
+                         if stop_line and check.get("line") and int(check["line"]) <= int(stop_line)]
+            owner_index = (preceding or candidates)[-1][0]
+            stop["blocking_mapping"] = "EXACT" if exact else "SINGLE_FAILED_CHECK"
+            stop["blocking_check_index"] = owner_index
+            stop["blocking_check_code"] = payload["checks"][owner_index].get("code")
+    for index, check in enumerate(payload["checks"]):
+        blocking = owner_index == index
+        check["blocking_stop"] = blocking
+        check["role"] = _manifest_role(
+            str(payload.get("strategy") or ""), str(payload.get("subtype") or ""),
+            str(check.get("code") or ""), blocking,
+        )
+    payload["telemetry_schema_version"] = 3
+    # V3 migration bridge: expose the just-completed attempt only to the same
+    # calling thread. This is read-only observability and cannot alter the
+    # detector result. A consumer must explicitly take (and thereby clear) it.
+    _TLS.last_completed_attempt = copy.deepcopy(payload)
+    emit_event("attempt", context["strategy"], context.get("symbol", ""), payload, event_key=context["attempt_key"])
+
+
+def audit_observe(key: str, value: Any, *, append: bool = False) -> None:
+    """Attach fail-open, decision-neutral telemetry to the current strategy attempt."""
+    context = _current()
+    if context is None:
+        return
+    try:
+        safe = _safe_value(value)
+        if safe is None:
+            return
+        telemetry = context.setdefault("telemetry", {})
+        name = str(key or "")[:100]
+        if not name:
+            return
+        if append:
+            bucket = telemetry.setdefault(name, [])
+            if isinstance(bucket, list):
+                bucket.append(safe)
+        elif isinstance(telemetry.get(name), dict) and isinstance(safe, dict):
+            telemetry[name].update(safe)
+        else:
+            telemetry[name] = safe
+    except Exception:
+        pass
+
+
+def _compact_label(label: str, condition: str = "") -> str:
+    text = " ".join(str(label or "").replace("#", "").split())
+    if not text:
+        text = " ".join(str(condition or "").split())
+    return text[:300]
+
+
+def _predicate_evidence(condition: str, predicate: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Capture named operands without evaluating the trading expression again."""
+    operands: dict[str, Any] = {}
+    try:
+        names = tuple(dict.fromkeys(re.findall(r"\b[A-Za-z_]\w*\b", str(condition or ""))))
+        frame = sys._getframe(2)
+        for _ in range(12):
+            module = str(frame.f_globals.get("__name__") or "")
+            if module != __name__:
+                for name in names[:20]:
+                    if name not in frame.f_locals:
+                        continue
+                    value = frame.f_locals[name]
+                    if isinstance(value, (list, tuple, set, frozenset)):
+                        safe = {"type": type(value).__name__, "count": len(value)}
+                    elif isinstance(value, dict):
+                        safe = {
+                            str(key)[:80]: scalar
+                            for key, item in list(value.items())[:12]
+                            if (scalar := _safe_scalar(item)) is not None
+                        }
+                    else:
+                        safe = _safe_scalar(value)
+                    if safe is not None:
+                        operands[name] = safe
+                break
+            if frame.f_back is None:
+                break
+            frame = frame.f_back
+    except Exception:
+        operands = {}
+    return (
+        {"failure_predicate": bool(predicate), "operands": operands},
+        {"failure_predicate": False, "condition": str(condition or "")[:800]},
+    )
+
+
+def _manifest_role(strategy: str, subtype: str, check_id: str, blocking: bool) -> str:
+    if blocking:
+        return "HARD_GATE"
+    try:
+        from apex.strategies.golden_manifest import GOLDEN_GATE_MANIFESTS
+        manifest_key = str(strategy).upper()
+        if manifest_key == "WYCKOFF" and subtype:
+            manifest_key = f"WYCKOFF_{str(subtype).upper()}"
+        return GOLDEN_GATE_MANIFESTS[manifest_key].role_for(str(check_id))
+    except Exception:
+        return "OBSERVED_CHECK"
+
+
+def audit_test(code: str, value: Any, label: str = "", condition: str = "", line: int | None = None) -> Any:
+    context = _current()
+    if context is not None:
+        try:
+            actual_value, required_value = _predicate_evidence(condition, bool(value))
+            context["checks"].append({"code": str(code), "label": _compact_label(label, condition),
+                "condition": str(condition)[:800], "line": int(line) if line else None,
+                "state": "FAIL" if bool(value) else "PASS", "predicate": bool(value),
+                "actual_value": actual_value, "required_value": required_value})
+        except Exception:
+            pass
+    return value
+
+
+def audit_fail(code: str, label: str = "", values: dict[str, Any] | None = None, condition: str = "", line: int | None = None) -> None:
+    context = _current()
+    if context is not None and not context.get("finished"):
+        context["stop"] = {"code": str(code), "label": _compact_label(label, condition), "condition": str(condition)[:1000],
+                           "line": int(line) if line else None, "snapshot": _snapshot_locals(values)}
+        _finish_attempt(context, "FILTERED")
+    return None
+
+
+def audit_strategy(strategy: str, subtype: str = "") -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        if getattr(fn, "_apex_setup_audited", False):
+            return fn
+        @functools.wraps(fn)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            context = _new_attempt(strategy, subtype, fn.__name__, args, kwargs)
+            stack = _stack(); stack.append(context)
+            try:
+                result = fn(*args, **kwargs)
+                if isinstance(result, dict):
+                    result.setdefault("_audit_attempt_key", context["attempt_key"])
+                    _finish_attempt(context, "PENDING_LTF" if result.get("_pending_ltf") else "CANDIDATE", candidate=result)
+                elif result is None:
+                    if not context.get("finished"):
+                        context["stop"] = {"code": f"{strategy}_UNLABELED", "label": "Unlabelled return None", "condition": "", "line": None, "snapshot": {}}
+                        _finish_attempt(context, "FILTERED")
+                else:
+                    _finish_attempt(context, "OTHER", candidate={"result": _safe_value(result)})
+                return result
+            except Exception as exc:
+                _finish_attempt(context, "ERROR", error=f"{type(exc).__name__}: {exc}"); raise
+            finally:
+                try:
+                    if stack and stack[-1] is context: stack.pop()
+                    elif context in stack: stack.remove(context)
+                except Exception: pass
+        wrapped._apex_setup_audited = True
+        return wrapped
+    return decorate
+
+
+def take_last_completed_attempt(*, strategy: str = "", symbol: str = "") -> dict[str, Any] | None:
+    """Return and clear this thread's last completed detector trace."""
+    payload = getattr(_TLS, "last_completed_attempt", None)
+    _TLS.last_completed_attempt = None
+    if not isinstance(payload, dict):
+        return None
+    if strategy and str(payload.get("strategy") or "").upper() != str(strategy).upper():
+        return None
+    if symbol and str(payload.get("symbol") or "").upper() != str(symbol).upper():
+        return None
+    return copy.deepcopy(payload)
+
+
+def _candidate_attempt_key(candidate: dict[str, Any]) -> str:
+    return str(candidate.get("_audit_attempt_key") or "") if isinstance(candidate, dict) else ""
+
+
+def emit_decision_event(candidate: dict[str, Any], outcome: str, stage: str, reason: str = "", evidence: dict[str, Any] | None = None) -> None:
+    try:
+        strategy = str(candidate.get("scan_type") or candidate.get("grade") or candidate.get("strategy") or "UNKNOWN").upper()
+        payload = {"attempt_key": _candidate_attempt_key(candidate), "symbol": candidate.get("symbol"), "strategy": strategy,
+                   "timeframe": candidate.get("timeframe"), "direction": candidate.get("direction"), "outcome": str(outcome).upper(),
+                   "stage": str(stage), "reason": str(reason)[:2000], "entry": candidate.get("entry"), "sl": candidate.get("sl"),
+                   "tp1": candidate.get("tp1") or candidate.get("tp"), "tp2": candidate.get("tp2"), "tp3": candidate.get("tp3"),
+                   "rr": candidate.get("rr"), "evidence": _safe_value(evidence or {})}
+        emit_event("decision", strategy, str(candidate.get("symbol") or ""), payload)
+    except Exception: pass
+
+
+def emit_groq_review_event(candidate: dict[str, Any], review: dict[str, Any]) -> None:
+    try:
+        strategy = str(candidate.get("scan_type") or candidate.get("grade") or candidate.get("strategy") or "UNKNOWN").upper()
+        payload = {"attempt_key": _candidate_attempt_key(candidate), "symbol": candidate.get("symbol"), "strategy": strategy,
+                   "timeframe": candidate.get("timeframe"), "direction": candidate.get("direction"), "entry": candidate.get("entry"),
+                   "sl": candidate.get("sl"), "tp1": candidate.get("tp1") or candidate.get("tp"), "tp2": candidate.get("tp2"),
+                   "tp3": candidate.get("tp3"), "rr": candidate.get("rr"), "decision": review.get("decision"),
+                   "confidence": review.get("confidence"), "degraded": bool(review.get("degraded")),
+                   "reasons": _safe_value(review.get("reasons") or []), "risks": _safe_value(review.get("risks") or []),
+                   "setup_assessment": _safe_value(review.get("setup_assessment") or {}), "context": _safe_value(review.get("context") or {}),
+                   "news_context": _safe_value(review.get("news_context") or {}), "market_memory": _safe_value(review.get("market_memory") or {}),
+                   "historical_zones": _safe_value(review.get("historical_zones") or {}),
+                   "strategy_check_journal": _safe_value(candidate.get("_v3_strategy_trace") or {}),
+                   "closed_loop_learning": _safe_value(review.get("closed_loop_learning") or {})}
+        emit_event("groq_review", strategy, str(candidate.get("symbol") or ""), payload)
+    except Exception: pass
+
+
+def emit_scan_event(run_id: int, strategy: str, symbol: str, stage: str, outcome: str, reason_code: str = "", detail: dict[str, Any] | None = None) -> None:
+    try:
+        payload = {"run_id": int(run_id), "strategy": str(strategy).upper(), "symbol": symbol, "stage": stage,
+                   "outcome": outcome, "reason_code": reason_code, "detail": _safe_value(detail or {})}
+        emit_event("scan_event", strategy, symbol, payload)
+    except Exception: pass
+
+
+__all__ = [
+    "audit_fail", "audit_observe", "audit_strategy", "audit_test",
+    "emit_decision_event", "emit_event", "emit_groq_review_event",
+    "emit_scan_event", "take_last_completed_attempt",
+]
+

@@ -10,7 +10,7 @@ class StrategyFunnelCleanupTests(unittest.TestCase):
     def setUpClass(cls):
         cls.market = Path('apex/compatibility/legacy_market_runtime.py').read_text(encoding='utf-8')
         cls.setup = Path('apex/quality/setup_evidence.py').read_text(encoding='utf-8')
-        cls.audit = Path('core/setup_audit.py').read_text(encoding='utf-8')
+        cls.audit = Path('apex/telemetry/event_log.py').read_text(encoding='utf-8')
         cls.catalog = Path('apex/strategies/specifications.py').read_text(encoding='utf-8')
         cls.stats = Path('apex/ui/dashboard/server.py').read_text(encoding='utf-8')
 

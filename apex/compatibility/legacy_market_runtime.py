@@ -1,5 +1,5 @@
 # APEX_STRATEGY_STATS_V1
-from core.setup_audit import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe, emit_event as _emit_stats_event
+from apex.telemetry.event_log import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe, emit_event as _emit_stats_event
 from core.market_data_health import record_market_data as _record_market_data
 import asyncio
 import logging

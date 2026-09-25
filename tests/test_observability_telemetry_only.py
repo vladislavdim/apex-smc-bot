@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import setup_audit
+from apex.telemetry import event_log as setup_audit
 from apex.ui.dashboard import server as stats_server
 
 

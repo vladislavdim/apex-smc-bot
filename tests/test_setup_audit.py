@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from core import setup_audit
+from apex.telemetry import event_log as setup_audit
 
 
 class SetupAuditTests(unittest.TestCase):

@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping
 from apex.domain.enums import Strategy
 from apex.domain.models import MarketSnapshot
 from apex.market.snapshot_scope import use_market_snapshot
-from core.setup_audit import take_last_completed_attempt
+from apex.telemetry.event_log import take_last_completed_attempt
 
 from .base import CheckTrace, StrategyTrace
 
