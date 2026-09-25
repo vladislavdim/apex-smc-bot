@@ -483,6 +483,8 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertIn('await deps.shutdown("polling_shutdown")', bootstrap_source)
         self.assertIn('remote_name="apex_state.db"', bot_source)
         self.assertIn('remote_name="apex_memory.db"', bot_source)
+        self.assertIn('_BRAIN_PERSISTENCE = _BrainPersistence(', bot_source)
+        self.assertGreaterEqual(bot_source.count('compression="gzip"'), 2)
         self.assertIn("backup_memory_db_to_github(reason)", bot_source)
         self.assertNotIn("github_size > local_size * 2", bot_source)
 

@@ -5,7 +5,10 @@ from apex.domain.ids import new_id
 from apex.domain.models import MarketRegime, MarketSnapshot
 from apex.market.adaptive_indicators import LegacyAdaptiveIndicators
 from apex.market.btc_correlation import BtcCorrelationProvider
-from apex.market.runtime_cache import get_global_candles, update_global_candles
+from apex.market import runtime_cache
+from apex.market.runtime_cache import (
+    get_global_candles, prune_global_candles, update_global_candles,
+)
 from apex.market.session_liquidity import SessionLiquidityProvider
 from apex.market.snapshot_scope import snapshot_candle_override, use_market_snapshot
 from core.smc_engine import get_candles_smart
@@ -34,8 +37,32 @@ def test_snapshot_scope_blocks_shared_candles_for_other_symbols():
     assert get_global_candles("BTCUSDT", "4h")
 
 
+def test_expired_global_candles_are_released_without_touching_fresh_rows(monkeypatch):
+    runtime_cache._CANDLES.clear()
+    runtime_cache._UPDATED_AT.clear()
+    monkeypatch.setattr(runtime_cache.time, "time", lambda: 1000.0)
+    update_global_candles("BTCUSDT", "1h", list(_rows(5)))
+    runtime_cache._CANDLES["OLDUSDT:1h"] = list(_rows(5))
+    runtime_cache._UPDATED_AT["OLDUSDT:1h"] = 900.0
+
+    assert prune_global_candles() == 1
+    assert "OLDUSDT:1h" not in runtime_cache._CANDLES
+    assert get_global_candles("BTCUSDT", "1h")
+
+
+def test_forced_global_candle_release_is_recomputable(monkeypatch):
+    runtime_cache._CANDLES.clear()
+    runtime_cache._UPDATED_AT.clear()
+    monkeypatch.setattr(runtime_cache.time, "time", lambda: 1000.0)
+    update_global_candles("BTCUSDT", "4h", list(_rows(5)))
+
+    assert prune_global_candles(force=True) == 1
+    assert get_global_candles("BTCUSDT", "4h") == []
+
+
 def test_core_smc_engine_reads_the_snapshot_without_external_sources():
     rows = _rows(30)
+    update_global_candles("BTCUSDT", "4h", list(_rows(30)))
     with use_market_snapshot(_snapshot(rows)):
         result = get_candles_smart("ETHUSDT", "4h", 20)
         missing = get_candles_smart("BTCUSDT", "4h", 20)

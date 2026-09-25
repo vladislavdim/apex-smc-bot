@@ -7,6 +7,7 @@ lets callers skip optional work.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import gc
 
 
 @dataclass(frozen=True)
@@ -73,4 +74,14 @@ def memory_snapshot_dict() -> dict[str, object]:
     return asdict(memory_snapshot())
 
 
-__all__ = ["MemorySnapshot", "memory_snapshot", "memory_snapshot_dict"]
+def release_unused_memory() -> bool:
+    """Best-effort return of freed Python arenas on Linux Render workers."""
+    gc.collect()
+    try:
+        import ctypes
+        return bool(ctypes.CDLL("libc.so.6").malloc_trim(0))
+    except (AttributeError, OSError):
+        return False
+
+
+__all__ = ["MemorySnapshot", "memory_snapshot", "memory_snapshot_dict", "release_unused_memory"]

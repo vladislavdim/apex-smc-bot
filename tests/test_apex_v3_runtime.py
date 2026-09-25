@@ -665,6 +665,8 @@ class ApexV3RuntimeTests(unittest.TestCase):
         self.assertIn('public["release_sha"] = _V3_RUNTIME.snapshot()["release_sha"]', bot_source)
         self.assertIn('"startup production snapshot emitted"', bot_source)
         self.assertIn('_v3_recover_incident("JOB_FAILED", "backup")', bot_source)
+        self.assertIn("clear_market_runtime_caches()", bot_source)
+        self.assertIn("_v3_release_unused_memory()", bot_source)
 
     def test_ready_runtime_still_rejects_entry_after_fencing_expiry(self):
         supervisor = RuntimeSupervisor()

@@ -10,9 +10,30 @@ from .snapshot_scope import snapshot_candle_override
 _CANDLES: dict[str, list] = {}
 _UPDATED_AT: dict[str, float] = {}
 _TTL_SECONDS = 60
+_MAX_ENTRIES = 512
+
+
+def prune_global_candles(*, force: bool = False) -> int:
+    """Drop expired optional candle copies without touching durable state."""
+    now = time.time()
+    stale = [
+        key for key, updated_at in _UPDATED_AT.items()
+        if force or now - updated_at >= _TTL_SECONDS
+    ]
+    for key in stale:
+        _CANDLES.pop(key, None)
+        _UPDATED_AT.pop(key, None)
+    if len(_CANDLES) > _MAX_ENTRIES:
+        overflow = sorted(_UPDATED_AT, key=_UPDATED_AT.get)[:len(_CANDLES) - _MAX_ENTRIES]
+        for key in overflow:
+            _CANDLES.pop(key, None)
+            _UPDATED_AT.pop(key, None)
+        stale.extend(overflow)
+    return len(set(stale))
 
 
 def update_global_candles(symbol: str, timeframe: str, candles: list) -> None:
+    prune_global_candles()
     key = f"{symbol}:{timeframe}"
     _CANDLES[key] = candles
     _UPDATED_AT[key] = time.time()
@@ -45,5 +66,5 @@ def last_closed_candle_time(candles: list):
 
 __all__ = [
     "get_confirmed_candles", "get_global_candles", "last_closed_candle_time",
-    "update_global_candles",
+    "prune_global_candles", "update_global_candles",
 ]
