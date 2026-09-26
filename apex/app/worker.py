@@ -1982,6 +1982,7 @@ async def auto_scan_1h():
         raise
     except Exception as e:
         logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
+        raise
 
 async def _auto_scan_1h_impl():
     logging.info("[auto_scan_1h] ЗАПУЩЕН с режимом рынка")
@@ -2067,6 +2068,7 @@ async def auto_scan_swing():
         raise
     except Exception as e:
         logging.error(f"[auto_scan_swing] ОШИБКА: {e}")
+        raise
 
 async def _auto_scan_swing_impl():
     universe = await asyncio.to_thread(get_top_pairs, DEFAULT_UNIVERSE_SIZE)
@@ -2195,6 +2197,7 @@ async def auto_zone_scan():
         raise
     except Exception as e:
         logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
+        raise
 
 
 def _zone_candidate_from_setup(r):
@@ -2421,6 +2424,7 @@ async def auto_wyckoff_scan():
         raise
     except Exception as e:
         logging.error(f"[auto_wyckoff_scan] ОШИБКА: {e}")
+        raise
 
 async def _auto_wyckoff_scan_impl():
     logging.info("[auto_wyckoff_scan] ЗАПУЩЕН")
@@ -2569,6 +2573,7 @@ async def auto_fast_deal_scan():
         raise
     except Exception as e:
         logging.error(f"[auto_fast_deal_scan] ОШИБКА: {e}")
+        raise
 
 async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН ({_session}, {_hour:02d}:{_minute:02d} UTC)")
