@@ -3958,10 +3958,48 @@ async def _v3_refresh_runtime_lease(*, acquire: bool = False) -> bool:
         return True
     _V3_RUNTIME.mark_component(
         "instance_fencing", _V3_COMPONENT_STATE.UNAVAILABLE,
-        f"reason={state.reason}; generation={state.generation}",
+        f"reason={state.reason}; generation={state.generation}; expires_at={state.expires_at}",
     )
     _V3_RUNTIME.clear_instance_lease()
     _V3_RUNTIME.inhibit_entries("INSTANCE_LEASE_HELD")
+    # Render deploys overlap old/new workers by design. Never steal a valid
+    # lease, but retry exactly after the holder TTL instead of leaving the new
+    # worker fenced until an unrelated watchdog cycle happens to recover it.
+    if acquire and state.reason == "LEASE_HELD" and state.expires_at:
+        try:
+            expires = datetime.fromisoformat(str(state.expires_at).replace("Z", "+00:00"))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            wait_seconds = max(
+                0.5,
+                min(
+                    float(_V3_CONFIG.operational.runtime_lease_ttl_seconds) + 2.0,
+                    (expires - datetime.now(timezone.utc)).total_seconds() + 0.5,
+                ),
+            )
+            logging.warning(
+                "[APEX V3] production lease held by previous instance; "
+                "retrying in %.1fs without bypassing fencing",
+                wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+            retry = await asyncio.to_thread(client.acquire)
+            if retry.granted and retry.valid_at():
+                _V3_RUNTIME.set_instance_lease(
+                    int(retry.generation), str(retry.expires_at)
+                )
+                _V3_RUNTIME.mark_component(
+                    "instance_fencing", _V3_COMPONENT_STATE.READY,
+                    f"generation={retry.generation}; expires_at={retry.expires_at}; handoff=recovered",
+                )
+                _V3_RUNTIME.clear_inhibit("INSTANCE_LEASE_UNAVAILABLE")
+                _V3_RUNTIME.clear_inhibit("INSTANCE_LEASE_HELD")
+                return True
+        except Exception as retry_error:
+            logging.warning(
+                "[APEX V3] production lease handoff retry failed safely: %s",
+                type(retry_error).__name__,
+            )
     return False
 
 
