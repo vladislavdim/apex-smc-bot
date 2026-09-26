@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.connection import connect_compatibility as _connect_compatibility_db, connect_state as _connect_state_db
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 from apex.config.settings import ApexConfig
@@ -617,8 +617,7 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     # only for installations that have not completed the V3 cutover.
     state_conn = None
     try:
-        state_conn = sqlite3.connect(config.database.state_db_path, timeout=5)
-        state_conn.row_factory = sqlite3.Row
+        state_conn = _connect_state_db(config, read_only=True)
         state_tables = {
             str(row[0]) for row in state_conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
