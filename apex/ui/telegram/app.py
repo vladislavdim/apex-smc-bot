@@ -1,12 +1,9 @@
 """Telegram application boundary.
-Transport only: this module must never own trading decisions.
+
+Transport only: trading decisions remain in canonical strategy/risk/execution/manager layers.
 """
-from apex.ui.telegram.router import TelegramHandlers, register_telegram_handlers
+from apex.ui.telegram.router import COMMAND_ROUTES, TelegramHandlers, register_telegram_handlers
 
+register_handlers = register_telegram_handlers
 
-def register_handlers(dispatcher, handlers: TelegramHandlers, command_filter):
-    """Register the canonical production Telegram surface."""
-    return register_telegram_handlers(dispatcher, handlers, command_filter)
-
-
-__all__=["TelegramHandlers","register_handlers"]
+__all__ = ["COMMAND_ROUTES", "TelegramHandlers", "register_handlers", "register_telegram_handlers"]
