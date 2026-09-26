@@ -1,5 +1,5 @@
 """Telegram application boundary.
-Transport only: trading decisions remain outside UI.
+Transport only: this module must never own trading decisions.
 """
-from apex.ui.telegram.router import TelegramHandlers,register_telegram_handlers
-__all__=["TelegramHandlers","register_telegram_handlers"]
+from apex.ui.telegram.router import COMMAND_ROUTES,TelegramHandlers,register_telegram_handlers
+__all__=["COMMAND_ROUTES","TelegramHandlers","register_telegram_handlers"]
