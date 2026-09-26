@@ -21,7 +21,10 @@ from apex.db.repositories.manager import ManagerRepository
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
 from apex.db.execution_recovery import append_recovery, replay_recovery
 from apex.domain.ids import derived_id, is_id
+from apex.domain.enums import Direction, Strategy
+from apex.domain.models import Candidate
 from apex.execution.plan import client_order_ids
+from apex.risk.engine import RiskLimits, RiskState, decide_risk
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -212,6 +215,9 @@ class ExecutionConfig:
     kill_switch: bool = False
     max_open_positions: int = 3
     max_daily_loss_pct: float = 2.0
+    max_risk_pct: float = 1.0
+    max_total_risk_pct: float = 3.0
+    max_same_side_risk_pct: float = 2.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ExecutionConfig":
@@ -237,6 +243,9 @@ class ExecutionConfig:
             kill_switch=execution.kill_switch,
             max_open_positions=max(1, min(10, config.risk.max_open_positions)),
             max_daily_loss_pct=max(0.25, min(10.0, config.risk.max_daily_loss_pct)),
+            max_risk_pct=max(0.05, min(5.0, config.risk.max_risk_pct)),
+            max_total_risk_pct=max(0.1, min(20.0, config.risk.max_total_risk_pct)),
+            max_same_side_risk_pct=max(0.1, min(20.0, config.risk.max_same_side_risk_pct)),
         )
 
     @property
@@ -1188,6 +1197,87 @@ def _store_execution(
     }
 
 
+def _v3_risk_admission(
+    candidate: Mapping[str, Any],
+    signal_id: int,
+    config: ExecutionConfig,
+    *,
+    equity_quote: float,
+    daily_loss_locked: bool,
+) -> tuple[Any, Candidate]:
+    """Run canonical V3 risk without changing Entry/SL/TP geometry."""
+    strategy_text = str(
+        candidate.get("strategy") or candidate.get("grade")
+        or candidate.get("scan_type") or "MTF"
+    ).upper()
+    if strategy_text == "FAST_DEAL":
+        strategy_text = "FAST"
+    strategy = Strategy(strategy_text)
+    direction = Direction.normalize(candidate.get("direction"))
+    tp1 = float(candidate.get("tp1", candidate.get("tp")))
+    tp2 = float(candidate.get("tp2", tp1) or tp1)
+    candidate_id = str(candidate.get("candidate_id") or candidate.get("_candidate_id") or "")
+    if not is_id(candidate_id, "candidate"):
+        candidate_id = derived_id("candidate", "execution", int(signal_id))
+    snapshot_id = str(candidate.get("snapshot_id") or candidate.get("_snapshot_id") or "")
+    if not is_id(snapshot_id, "snapshot"):
+        snapshot_id = derived_id("snapshot", "execution", int(signal_id))
+    domain_candidate = Candidate(
+        candidate_id=candidate_id,
+        symbol=str(candidate.get("symbol") or "").upper(),
+        strategy=strategy,
+        direction=direction,
+        entry=float(candidate.get("entry")),
+        initial_sl=float(candidate.get("sl")),
+        tp1=tp1,
+        tp2=tp2,
+        tp3=float(candidate["tp3"]) if candidate.get("tp3") is not None else None,
+        rr=float(candidate.get("rr") or 0.0),
+        snapshot_id=snapshot_id,
+    )
+    exposure = {"portfolio_risk_usdt": 0.0, "same_side_risk_usdt": 0.0}
+    repository = _execution_state_repository()
+    if repository is not None:
+        try:
+            exposure = repository.risk_exposure(
+                str(candidate.get("direction") or "").upper(), _LIVE_RECONCILE_STATUSES,
+            )
+        except Exception as exc:
+            # The canonical intent persistence fence below remains authoritative.
+            # Do not turn a transient State read into a different failure class.
+            logging.warning("[RiskEngine] State exposure unavailable: %s", type(exc).__name__)
+    equity = max(0.0, float(equity_quote or 0.0))
+    portfolio_pct = (
+        float(exposure["portfolio_risk_usdt"]) / equity * 100.0 if equity > 0 else 0.0
+    )
+    same_side_pct = (
+        float(exposure["same_side_risk_usdt"]) / equity * 100.0 if equity > 0 else 0.0
+    )
+    decision = decide_risk(
+        domain_candidate,
+        base_risk_pct=float(config.risk_pct),
+        leverage=float(config.leverage),
+        state=RiskState(
+            ready=True,
+            daily_loss_locked=bool(daily_loss_locked),
+            equity_quote=equity,
+            portfolio_risk_pct=portfolio_pct,
+            same_side_risk_pct=same_side_pct,
+            # Cluster authority is not inferred from symbols. Until a canonical
+            # cluster map is present, this gate stays neutral rather than guessed.
+            cluster_risk_pct=0.0,
+        ),
+        limits=RiskLimits(
+            max_risk_pct=float(config.max_risk_pct),
+            max_leverage=5.0,
+            max_portfolio_risk_pct=float(config.max_total_risk_pct),
+            max_same_side_risk_pct=float(config.max_same_side_risk_pct),
+            max_cluster_risk_pct=float(config.max_total_risk_pct),
+        ),
+    )
+    return decision, domain_candidate
+
+
 def execute_approved_candidate(
     candidate: dict[str, Any], signal_id: int, *, db_path: str = DB_PATH,
     config: ExecutionConfig | None = None, client: BinanceFuturesClient | None = None,
@@ -1300,16 +1390,77 @@ def execute_approved_candidate(
                 error=f"open positions {len(open_positions)} >= limit {config.max_open_positions}",
             )
         balance_details = client.usdt_balance_details()
+        try:
+            _store_balance_attempt(
+                db_path, attempted_at=time.time(), balance=balance_details,
+            )
+        except Exception as cache_error:
+            # Account telemetry must not bypass the canonical intent-persistence
+            # fence or change its failure classification.
+            logging.warning(
+                "[AutoTrading] balance cache unavailable: %s",
+                type(cache_error).__name__,
+            )
         wallet_balance = float(balance_details.get("wallet_balance", 0) or 0)
+        if wallet_balance <= 0:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "SKIPPED_NO_BALANCE",
+                error="Binance Futures wallet balance is zero",
+            )
         now = time.gmtime()
         utc_midnight_ms = int(calendar.timegm((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, 0)) * 1000)
         daily_realized_pnl = client.realized_pnl_since(utc_midnight_ms)
         loss_limit = wallet_balance * config.max_daily_loss_pct / 100.0
-        if wallet_balance > 0 and daily_realized_pnl <= -loss_limit:
-            return _store_execution(
-                db_path, signal_id, config, candidate, "BLOCKED_DAILY_LOSS",
-                error=f"daily realized PnL {daily_realized_pnl:.2f} <= -{loss_limit:.2f} USDT",
+        daily_loss_locked = bool(
+            wallet_balance > 0 and daily_realized_pnl <= -loss_limit
+        )
+        try:
+            risk_decision, domain_candidate = _v3_risk_admission(
+                candidate,
+                signal_id,
+                config,
+                equity_quote=wallet_balance,
+                daily_loss_locked=daily_loss_locked,
             )
+            candidate["_v3_risk_decision"] = {
+                "decision": risk_decision.decision,
+                "base_risk_pct": risk_decision.base_risk_pct,
+                "final_risk_pct": risk_decision.final_risk_pct,
+                "reason_codes": list(risk_decision.reason_codes),
+                "candidate_id": domain_candidate.candidate_id,
+            }
+            from apex.app.runtime import runtime_supervisor
+            from apex.domain.enums import ComponentState
+            runtime_supervisor.mark_component(
+                "risk_engine", ComponentState.READY,
+                f"{risk_decision.decision}; risk={risk_decision.final_risk_pct:.3f}%",
+                required=False,
+            )
+        except Exception as risk_error:
+            try:
+                from apex.app.runtime import runtime_supervisor
+                from apex.domain.enums import ComponentState
+                runtime_supervisor.mark_component(
+                    "risk_engine", ComponentState.DEGRADED,
+                    f"{type(risk_error).__name__}", required=False,
+                )
+            except Exception:
+                pass
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_RISK_ENGINE",
+                error=f"risk engine unavailable: {type(risk_error).__name__}",
+            )
+        if risk_decision.decision == "BLOCK":
+            if "DAILY_LOSS_LOCK" in risk_decision.reason_codes:
+                return _store_execution(
+                    db_path, signal_id, config, candidate, "BLOCKED_DAILY_LOSS",
+                    error=f"daily realized PnL {daily_realized_pnl:.2f} <= -{loss_limit:.2f} USDT",
+                )
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_RISK_ENGINE",
+                error="; ".join(risk_decision.reason_codes) or "risk admission blocked",
+            )
+        config = replace(config, risk_pct=float(risk_decision.final_risk_pct))
         symbol = str(candidate.get("symbol", "")).upper()
         # Groq/news review and Telegram delivery take time.  Revalidate the
         # immutable strategy levels against the exchange mark price immediately

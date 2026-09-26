@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from apex.db.connection import connect_compatibility as _connect_compatibility_db
+from apex.db.connection import connect_compatibility as _connect_compatibility_db, connect_state as _connect_state_db
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 from apex.config.settings import ApexConfig
@@ -611,6 +611,88 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
         result["execution_health"] = {"statuses": {}, "recent": []}
     conn.close()
     config = ApexConfig.from_env()
+
+    # State DB is the canonical production authority for execution, Manager
+    # and cached Binance account facts. Compatibility DB remains a fallback
+    # only for installations that have not completed the V3 cutover.
+    state_conn = None
+    try:
+        state_conn = _connect_state_db(config, read_only=True)
+        state_tables = {
+            str(row[0]) for row in state_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "executions" in state_tables:
+            result["execution_health"] = {
+                "source": "APEX_STATE_DB",
+                "statuses": {
+                    str(row[0]): int(row[1]) for row in state_conn.execute(
+                        "SELECT status,COUNT(*) FROM executions GROUP BY status"
+                    ).fetchall()
+                },
+                "recent": [
+                    dict(row) for row in state_conn.execute(
+                        """SELECT signal_id,execution_id,mode,symbol,direction,status,
+                                  entry,sl,active_stop_price,tp1,tp2,quantity,
+                                  risk_usdt,balance_usdt,leverage,last_error,updated_at
+                             FROM executions
+                            ORDER BY updated_at DESC LIMIT 50"""
+                    ).fetchall()
+                ],
+            }
+        if "manager_positions" in state_tables:
+            active_states = {
+                str(row[0]): int(row[1]) for row in state_conn.execute(
+                    """SELECT manager_state,COUNT(*) FROM manager_positions
+                        WHERE COALESCE(status,'ACTIVE')!='CLOSED'
+                        GROUP BY manager_state"""
+                ).fetchall()
+            }
+            result["manager_db"] = {
+                "source": "APEX_STATE_DB",
+                "states": active_states,
+                "active_count": sum(active_states.values()),
+                "trades": [
+                    dict(row) for row in state_conn.execute(
+                        """SELECT signal_id,symbol,strategy,direction,manager_state,status,
+                                  last_price,current_r,tp1_seen,tp2_seen,tp3_seen,
+                                  position_fraction,last_event,last_action,last_confidence,
+                                  data_failure_count,updated_at,closed_at
+                             FROM manager_positions
+                            ORDER BY updated_at DESC LIMIT 100"""
+                    ).fetchall()
+                ],
+            }
+        if "execution_account_cache" in state_tables:
+            account_row = state_conn.execute(
+                """SELECT wallet_balance,available_balance,cross_unrealized_pnl,
+                          fetched_at_epoch,attempted_at_epoch,last_error,updated_at
+                     FROM execution_account_cache
+                    WHERE exchange='binance_futures' LIMIT 1"""
+            ).fetchone()
+            if account_row is not None:
+                account = dict(account_row)
+                fetched_at = float(account.get("fetched_at_epoch") or 0.0)
+                account["available"] = fetched_at > 0
+                account["cached"] = True
+                account["cache_age_seconds"] = (
+                    max(0, int(datetime.now(timezone.utc).timestamp() - fetched_at))
+                    if fetched_at else None
+                )
+                account["stale"] = bool(
+                    fetched_at and account["cache_age_seconds"] is not None
+                    and account["cache_age_seconds"] > 900
+                )
+                if account.get("last_error"):
+                    account["error"] = str(account["last_error"])
+                result.setdefault("execution_health", {})["account"] = account
+    except Exception as state_error:
+        result["state_projection_error"] = type(state_error).__name__
+    finally:
+        if state_conn is not None:
+            state_conn.close()
+
     live_mode = config.execution.mode
     enabled = config.execution.enabled
     confirmed = config.execution.live_confirmation == "ENABLE_LIVE_BINANCE_FUTURES"

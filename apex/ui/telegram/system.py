@@ -70,6 +70,34 @@ def format_system_status(snapshot: Mapping[str, Any]) -> str:
             state = "WAITING_FIRST_RUN"
         lines.append(f"{_icon(state)} {html.escape(_LABELS.get(name, name))}: <b>{html.escape(state)}</b>")
 
+    execution = snapshot.get("execution")
+    execution = execution if isinstance(execution, Mapping) else {}
+    account = execution.get("account")
+    account = account if isinstance(account, Mapping) else {}
+    lines.extend(["", "<b>Binance Futures</b>"])
+    lines.append(
+        "⚙️ Execution: "
+        f"<b>{html.escape(str(execution.get('mode') or 'unknown').upper())}</b>"
+        f" · armed {'yes' if execution.get('live_armed') else 'no'}"
+        f" · active {execution.get('live_active_count', 0)}"
+    )
+    if account.get("available"):
+        wallet = float(account.get("wallet_balance", 0.0) or 0.0)
+        available = float(account.get("available_balance", 0.0) or 0.0)
+        unrealized = float(account.get("cross_unrealized_pnl", 0.0) or 0.0)
+        age = account.get("cache_age_seconds")
+        freshness = "STALE" if account.get("stale") else "FRESH"
+        lines.append(
+            f"💰 Wallet: <b>{wallet:,.2f} USDT</b> · Available: <b>{available:,.2f} USDT</b>"
+        )
+        lines.append(
+            f"📈 Unrealized PnL: <b>{unrealized:+,.2f} USDT</b> · "
+            f"{freshness}{f' · age {int(age)}s' if age is not None else ''}"
+        )
+    else:
+        error = html.escape(str(account.get("error") or "balance snapshot unavailable")[:180])
+        lines.append(f"💰 Balance: <b>UNAVAILABLE</b> · {error}")
+
     lines.extend([
         "",
         "ℹ️ <b>ON_DEMAND</b> — проверка запускается только для найденного кандидата; это не ошибка подключения.",
