@@ -7,6 +7,7 @@ being split from this composition root into ``apex.app`` and domain packages.
 from apex.telemetry.event_log import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
 import asyncio
 import functools
+import html
 import logging
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
