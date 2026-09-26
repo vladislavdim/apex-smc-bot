@@ -696,6 +696,21 @@ def _v3_live_analysis_markup(symbol: str, timeframe: str):
     ])
 
 
+def _v3_system_dashboard() -> str:
+    """Render runtime + canonical execution/account facts on explicit request."""
+    snapshot = dict(_V3_RUNTIME.public_snapshot())
+    if _TRADE_EXECUTION_OK:
+        try:
+            snapshot["execution"] = _execution_status(
+                DB_PATH, refresh_balance=True, balance_cache_ttl_seconds=300,
+            )
+        except Exception as exc:
+            snapshot["execution"] = {
+                "account": {"available": False, "error": type(exc).__name__}
+            }
+    return _format_system_status(snapshot)
+
+
 _v3_state_callback_handlers = _V3StateCallbackHandlers(
     _V3StateCallbackDependencies(
         edit_message=_edit_message,
@@ -732,7 +747,7 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
         format_incidents=_format_incidents,
         fetch_strategy_stats=lambda: _fetch_strategy_stats(DB_PATH),
         format_strategy_stats=_format_strategy_stats,
-        system_dashboard=lambda: _format_system_status(_V3_RUNTIME.public_snapshot()),
+        system_dashboard=_v3_system_dashboard,
         stats_url=_V3_CONFIG.integrations.stats_url,
         button=InlineKeyboardButton,
         markup=InlineKeyboardMarkup,
@@ -1394,6 +1409,24 @@ async def _send_signal(sd):
             "[AutoTrading] signal=%s symbol=%s status=%s",
             signal_id, sd.get("symbol"), execution.get("status"),
         )
+        _execution_status_text = str(execution.get("status") or "UNKNOWN").upper()
+        _execution_icon = (
+            "✅" if _execution_status_text in {"ENTRY_PENDING", "PROTECTED", "PROTECTED_NO_TP"}
+            else "🟡" if _execution_status_text.startswith(("SKIPPED_", "BLOCKED_", "LIVE_NOT_"))
+            else "ℹ️" if _execution_status_text in {"DISABLED", "PAPER_PENDING_ENTRY"}
+            else "🚨"
+        )
+        _execution_notice = (
+            f"{_execution_icon} <b>APEX EXECUTION</b>\n"
+            f"{sd.get('symbol', '')} · {_strategy}\n"
+            f"Signal: <code>{signal_id}</code>\n"
+            f"Status: <b>{_execution_status_text}</b>"
+        )
+        _execution_error = str(execution.get("error") or "").strip()
+        if _execution_error:
+            _execution_notice += f"\nПричина: <code>{html.escape(_execution_error[:500])}</code>"
+        for _admin_id in sorted({int(value) for value in (ADMIN_IDS or []) if value}):
+            await _send_with_retry(_admin_id, _execution_notice, parse_mode="HTML")
         try:
             await asyncio.to_thread(_V3_LIVE_BRIDGE.sync_execution, int(signal_id))
         except Exception as exc:
@@ -1945,6 +1978,7 @@ async def auto_scan_1h():
         await _run_market_scan_exclusive("auto_scan_1h", _auto_scan_1h_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_scan_1h] таймаут 210с — пропускаем цикл")
+        raise
     except Exception as e:
         logging.error(f"[auto_scan_1h] ОШИБКА: {e}")
 
@@ -2029,6 +2063,7 @@ async def auto_scan_swing():
         await _run_market_scan_exclusive("auto_scan_swing", _auto_scan_swing_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_scan_swing] таймаут 210с — пропускаем цикл")
+        raise
     except Exception as e:
         logging.error(f"[auto_scan_swing] ОШИБКА: {e}")
 
@@ -2156,6 +2191,7 @@ async def auto_zone_scan():
         await _run_market_scan_exclusive("auto_zone_scan", _auto_zone_scan_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_zone_scan] таймаут 210с — пропускаем цикл")
+        raise
     except Exception as e:
         logging.error(f"[auto_zone_scan] ОШИБКА: {e}")
 
@@ -2381,6 +2417,7 @@ async def auto_wyckoff_scan():
         await _run_market_scan_exclusive("auto_wyckoff_scan", _auto_wyckoff_scan_impl, 300)
     except asyncio.TimeoutError:
         logging.warning("[auto_wyckoff_scan] таймаут 300с — пропускаем цикл")
+        raise
     except Exception as e:
         logging.error(f"[auto_wyckoff_scan] ОШИБКА: {e}")
 
@@ -2528,6 +2565,7 @@ async def auto_fast_deal_scan():
         )
     except asyncio.TimeoutError:
         logging.warning("[auto_fast_deal_scan] таймаут 90с — пропускаем цикл")
+        raise
     except Exception as e:
         logging.error(f"[auto_fast_deal_scan] ОШИБКА: {e}")
 
@@ -3695,10 +3733,21 @@ async def _v3_startup_reconcile_and_market_check():
                 _execution_client = _BinanceFuturesClient(_execution_config)
                 if not await asyncio.to_thread(_execution_client.is_one_way_mode):
                     raise RuntimeError("Binance account must use One-way Mode")
-                _balance = await asyncio.to_thread(_execution_client.usdt_balance_details)
-                if "wallet_balance" not in _balance:
+                _execution_snapshot = await asyncio.to_thread(
+                    _execution_status,
+                    DB_PATH,
+                    config=_execution_config,
+                    client=_execution_client,
+                    refresh_balance=True,
+                    balance_cache_ttl_seconds=300,
+                )
+                _balance = _execution_snapshot.get("account") or {}
+                if not _balance.get("available") or "wallet_balance" not in _balance:
                     raise RuntimeError("Binance balance response has no wallet balance")
-                _account_detail = "Binance account and balance endpoint verified"
+                _account_detail = (
+                    "Binance account and balance endpoint verified; "
+                    f"wallet={float(_balance.get('wallet_balance', 0.0)):.2f} USDT"
+                )
             await asyncio.to_thread(
                 _reconcile_live_executions,
                 db_path=DB_PATH,
@@ -3941,7 +3990,9 @@ async def market_intelligence_job():
         await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
     try:
         await _run_market_scan_exclusive("market_intelligence", refresh, 210)
-    except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
+    except Exception as exc:
+        logging.warning("[MarketIntelligence] refresh failed: %s", exc)
+        raise
 
 
 async def _start_market_intelligence_background():
@@ -3973,6 +4024,14 @@ async def _v3_alerts_job():
     for notification in notifications:
         payload = notification.get("payload") or {}
         event_type = str(notification.get("event_type") or "INCIDENT")
+        severity = str(payload.get("severity") or "UNKNOWN").upper()
+        # WARNING/INFO remain visible in Dashboard but do not flap Telegram.
+        # ERROR/CRITICAL transitions are still delivered immediately.
+        if severity not in {"ERROR", "CRITICAL"}:
+            await asyncio.to_thread(
+                _v3_mark_incident_delivered, int(notification["notification_id"])
+            )
+            continue
         icon = "✅" if event_type == "RESOLVED" else "🚨"
         details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
         detail_text = ", ".join(f"{key}={value}" for key, value in sorted(details.items()))[:500]
