@@ -1436,6 +1436,7 @@ async def _send_signal(sd):
             await _v3_refresh_execution_state_mirror()
         except Exception as exc:
             logging.error("[APEX V3] execution State mirror requires reconcile: %s", exc)
+        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     if _run_id:
         await asyncio.to_thread(
@@ -4207,6 +4208,7 @@ async def _initialize_production_runtime(transport: str):
         _v3_recover_incident("JOB_FAILED", "backup")
         _v3_recover_incident("JOB_TIMEOUT", "backup")
     await _v3_startup_reconcile_and_market_check()
+    await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
     if transport == "polling":
         threading.Thread(target=run_server, daemon=True).start()
     asyncio.create_task(_start_market_intelligence_background())
