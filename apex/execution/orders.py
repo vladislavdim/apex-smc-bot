@@ -1238,9 +1238,14 @@ def _v3_risk_admission(
     exposure = {"portfolio_risk_usdt": 0.0, "same_side_risk_usdt": 0.0}
     repository = _execution_state_repository()
     if repository is not None:
-        exposure = repository.risk_exposure(
-            str(candidate.get("direction") or "").upper(), _LIVE_RECONCILE_STATUSES,
-        )
+        try:
+            exposure = repository.risk_exposure(
+                str(candidate.get("direction") or "").upper(), _LIVE_RECONCILE_STATUSES,
+            )
+        except Exception as exc:
+            # The canonical intent persistence fence below remains authoritative.
+            # Do not turn a transient State read into a different failure class.
+            logging.warning("[RiskEngine] State exposure unavailable: %s", type(exc).__name__)
     equity = max(0.0, float(equity_quote or 0.0))
     portfolio_pct = (
         float(exposure["portfolio_risk_usdt"]) / equity * 100.0 if equity > 0 else 0.0
@@ -1389,6 +1394,11 @@ def execute_approved_candidate(
             db_path, attempted_at=time.time(), balance=balance_details,
         )
         wallet_balance = float(balance_details.get("wallet_balance", 0) or 0)
+        if wallet_balance <= 0:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "SKIPPED_NO_BALANCE",
+                error="Binance Futures wallet balance is zero",
+            )
         now = time.gmtime()
         utc_midnight_ms = int(calendar.timegm((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, 0)) * 1000)
         daily_realized_pnl = client.realized_pnl_since(utc_midnight_ms)
