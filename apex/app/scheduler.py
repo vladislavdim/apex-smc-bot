@@ -95,8 +95,13 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
                     "ERROR" if definition and definition.critical else "WARNING",
                     {"job_id": job_id, "timeout_seconds": timeout},
                 )
+            # Only jobs that protect trading safety may inhibit new entries.
+            # Maintenance/telemetry jobs can degrade and alert, but must never
+            # stop an otherwise healthy scanner -> risk -> execution pipeline.
             if definition and definition.critical:
                 runtime_supervisor.inhibit_entries(reason_code)
+            else:
+                runtime_supervisor.clear_inhibit(reason_code)
             if recorder is not None:
                 recorder.finish("FAILED_TIMEOUT", error_code="TIMEOUT")
             raise
