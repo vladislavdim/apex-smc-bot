@@ -1633,6 +1633,19 @@ async def _run_auto_trade_reconcile_once():
                 "[AutoTrading] reconcile signal=%s status=%s",
                 outcome.get("signal_id"), outcome.get("status"),
             )
+            _material_status = str(outcome.get("status") or "").upper()
+            if _material_status in {
+                "PROTECTED", "PROTECTED_NO_TP", "EMERGENCY_CLOSED",
+                "UNPROTECTED_POSITION", "ENTRY_CANCELLED",
+            }:
+                _icon = "✅" if _material_status in {"PROTECTED", "PROTECTED_NO_TP"} else "🚨"
+                _notice = (
+                    f"{_icon} <b>APEX BINANCE UPDATE</b>\n"
+                    f"Signal: <code>{outcome.get('signal_id')}</code>\n"
+                    f"Status: <b>{_material_status}</b>"
+                )
+                for _admin_id in sorted({int(value) for value in (ADMIN_IDS or []) if value}):
+                    await _send_with_retry(_admin_id, _notice, parse_mode="HTML")
             try:
                 await asyncio.to_thread(
                     _V3_LIVE_BRIDGE.sync_execution, int(outcome.get("signal_id") or 0)
