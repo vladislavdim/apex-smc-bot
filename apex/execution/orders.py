@@ -1390,9 +1390,17 @@ def execute_approved_candidate(
                 error=f"open positions {len(open_positions)} >= limit {config.max_open_positions}",
             )
         balance_details = client.usdt_balance_details()
-        _store_balance_attempt(
-            db_path, attempted_at=time.time(), balance=balance_details,
-        )
+        try:
+            _store_balance_attempt(
+                db_path, attempted_at=time.time(), balance=balance_details,
+            )
+        except Exception as cache_error:
+            # Account telemetry must not bypass the canonical intent-persistence
+            # fence or change its failure classification.
+            logging.warning(
+                "[AutoTrading] balance cache unavailable: %s",
+                type(cache_error).__name__,
+            )
         wallet_balance = float(balance_details.get("wallet_balance", 0) or 0)
         if wallet_balance <= 0:
             return _store_execution(
