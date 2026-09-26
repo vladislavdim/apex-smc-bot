@@ -3940,7 +3940,7 @@ async def market_intelligence_job():
         )
         await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
     try:
-        await _run_market_scan_exclusive("market_intelligence", refresh, 180)
+        await _run_market_scan_exclusive("market_intelligence", refresh, 210)
     except Exception as exc:logging.warning("[MarketIntelligence] refresh failed safely: %s",exc)
 
 
