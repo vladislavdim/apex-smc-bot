@@ -232,6 +232,30 @@ class ExecutionRepository:
         finally:
             conn.close()
 
+    def risk_exposure(self, direction: str, active_statuses: tuple[str, ...]) -> dict[str, float]:
+        """Return canonical live risk already committed in State."""
+        normalized = tuple(sorted({str(value).upper() for value in active_statuses if value}))
+        if not normalized:
+            return {"portfolio_risk_usdt": 0.0, "same_side_risk_usdt": 0.0}
+        side = str(direction or "").upper()
+        conn = self._conn_factory()
+        try:
+            row = conn.execute(
+                """SELECT
+                       COALESCE(SUM(COALESCE(risk_usdt,0)),0),
+                       COALESCE(SUM(CASE WHEN direction=? THEN COALESCE(risk_usdt,0) ELSE 0 END),0)
+                     FROM executions
+                    WHERE mode='live' AND status IN (%s)"""
+                % ",".join("?" for _ in normalized),
+                (side, *normalized),
+            ).fetchone()
+            return {
+                "portfolio_risk_usdt": float(row[0] or 0.0),
+                "same_side_risk_usdt": float(row[1] or 0.0),
+            }
+        finally:
+            conn.close()
+
     def update_exchange_state(self, signal_id: int, **changes: Any) -> bool:
         allowed = {
             "position_id", "status", "entry_order_id", "stop_order_id", "tp1_order_id",
