@@ -53,12 +53,19 @@ _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
 _account_cache_lock = threading.Lock()
 _ACCOUNT_STATE_FACTORY = None
+_MANAGER_CONFIRM_CALLBACK = None
 
 
 def configure_execution_state(connection_factory=None) -> None:
     """Bind non-signal execution state to apex_state.db in production."""
     global _ACCOUNT_STATE_FACTORY
     _ACCOUNT_STATE_FACTORY = connection_factory
+
+
+def configure_manager_confirmation(callback=None) -> None:
+    """Inject Manager acknowledgement without making Execution depend on Manager."""
+    global _MANAGER_CONFIRM_CALLBACK
+    _MANAGER_CONFIRM_CALLBACK = callback
 
 
 def _execution_account_repository(db_path: str) -> ExecutionAccountRepository:
@@ -995,14 +1002,14 @@ def execute_manager_review(
                 active_stop_price=float(rounded),
             )
             _finish_manager_action(db_path, action_key, "EXECUTED", order_id=new_stop_id)
-            try:
-                from apex.manager.engine import confirm_manager_action
-                confirm_manager_action(
-                    signal_id, action, "EXECUTED", db_path,
-                    confirmed_protect_level=float(rounded),
-                )
-            except Exception:
-                pass
+            if _MANAGER_CONFIRM_CALLBACK is not None:
+                try:
+                    _MANAGER_CONFIRM_CALLBACK(
+                        signal_id, action, "EXECUTED", db_path,
+                        confirmed_protect_level=float(rounded),
+                    )
+                except Exception:
+                    pass
             return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": new_stop_id}
 
         positions = [row for row in client.open_positions() if str(row.get("symbol")) == symbol]
