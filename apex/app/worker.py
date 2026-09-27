@@ -189,7 +189,7 @@ except Exception as _quality_gate_import_error:
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
 
 try:
-    from core.market_intelligence import (refresh_market_intelligence as _refresh_market_intelligence,
+    from apex.market.intelligence import (refresh_market_intelligence as _refresh_market_intelligence,
         start_market_intelligence as _start_market_intelligence, stop_market_intelligence as _stop_market_intelligence)
     _MARKET_INTELLIGENCE_OK = True
 except Exception as _market_intelligence_import_error:
