@@ -61,6 +61,18 @@ class StateSignalMonitorTests(unittest.TestCase):
         self.assertEqual(self.repository.get(1)["status"], "cancelled")
         self.assertEqual(self.events, [])
 
+    def test_fast_stop_wins_even_when_tp2_touched(self):
+        self.seed(strategy="FAST")
+        monitor = self.monitor(100, {"low": 94, "high": 121})
+        self.assertEqual(monitor.check()[0]["result"], "sl")
+        self.assertEqual(monitor.check(), [])
+
+    def test_waiting_target_does_not_become_a_trade(self):
+        self.seed(status="waiting_entry")
+        monitor = self.monitor(111, {"low": 99, "high": 112})
+        self.assertEqual(monitor.check()[0]["reason"], "target_reached_without_entry")
+        self.assertEqual(self.events, [])
+
     def test_tp1_trailing_then_tp2_matches_legacy_sequence(self):
         self.seed()
         first = self.monitor(110, {"low": 105, "high": 111})
