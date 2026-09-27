@@ -1,15 +1,31 @@
-"""Fail-closed V3 database migration entry point."""
+"""Run canonical APEX V3 State and Live Memory migrations fail-closed."""
 from __future__ import annotations
-import argparse,sqlite3
-from apex.db.integrity import check_integrity
 
-def main()->None:
-    p=argparse.ArgumentParser(); p.add_argument("path"); a=p.parse_args()
-    conn=sqlite3.connect(a.path)
+from apex.config.settings import ApexConfig
+from apex.db.connection import connect_memory, connect_state
+from apex.db.integrity import check_integrity
+from apex.db.memory_db import migrate_memory
+from apex.db.state_db import migrate_state
+
+
+def main() -> None:
+    config = ApexConfig.from_env()
+    state = connect_state(config)
     try:
-        check_integrity(conn)
-        # Schema migrations are owned by apex.db.state_db / apex.db.memory_db.
-        # This command intentionally never invents or mutates schema implicitly.
-        print("v3_db_integrity: OK")
-    finally: conn.close()
-if __name__=="__main__": main()
+        state_versions = migrate_state(state)
+        check_integrity(state)
+    finally:
+        state.close()
+
+    memory = connect_memory(config)
+    try:
+        memory_versions = migrate_memory(memory)
+        check_integrity(memory)
+    finally:
+        memory.close()
+
+    print({"state": state_versions, "memory": memory_versions})
+
+
+if __name__ == "__main__":
+    main()
