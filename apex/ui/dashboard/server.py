@@ -27,6 +27,7 @@ from apex.strategies.specifications import STRATEGY_CATALOG
 from apex.telemetry.dashboard_projection import normalize_incident_snapshot
 from apex.ui.dashboard.config import DashboardSettings
 from apex.ui.dashboard.auth import authorized
+from apex.ui.dashboard.api import PROJECTORS, project_tab
 
 _SETTINGS = DashboardSettings.from_env()
 DATABASE_URL = _SETTINGS.database_url
@@ -1291,9 +1292,12 @@ class Handler(BaseHTTPRequestHandler):
             payload,status=worker_readiness((q.get("sha") or [""])[0]); self._json(payload,status); return
         if not self._auth(q): self._html("<!doctype html><meta charset=utf-8><h2>403 · закрытая статистика APEX</h2>",403); return
         if route in {"/","/stats"}: self._html(HTML); return
-        if route=="/api/dashboard":
+        if route=="/api/dashboard" or route.startswith("/api/dashboard/"):
+            tab = route.removeprefix("/api/dashboard/") if route != "/api/dashboard" else ""
+            if tab and tab not in PROJECTORS:
+                self._json({"error": "unknown_dashboard_tab"}, 404); return
             try:
-                val=lambda k,d="":(q.get(k) or [d])[0]; data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")),val("release")); self._json(data)
+                val=lambda k,d="":(q.get(k) or [d])[0]; data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")),val("release")); self._json(project_tab(tab,data) if tab else data)
             except Exception as exc: self._json({"error":f"{type(exc).__name__}: {exc}"},500)
             return
         self._json({"error":"not found"},404)
