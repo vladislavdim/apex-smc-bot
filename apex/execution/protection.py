@@ -1,29 +1,25 @@
-"""Execution-owned protective-order state machine.
+"""Execution protection primitives.
 
-Manager decides *when* protection is eligible; Execution owns the mechanics and
-state transitions for confirmed protective orders.
+Exchange protection mechanics live in Execution. Manager decides whether an
+eligible protection action should be requested, but does not own order state.
 """
 from __future__ import annotations
-from dataclasses import dataclass,replace
+from dataclasses import dataclass
+from apex.domain.enums import Direction
 
 @dataclass(frozen=True)
-class ProtectionState:
-    confirmed_stop: float
-    pending_stop: float|None=None
-    pending_order_id: str|None=None
+class ProtectionRequest:
+    position_id: str
+    direction: Direction
+    current_stop: float
+    requested_stop: float
+    current_price: float
 
-def request_protection(state:ProtectionState,new_stop:float)->ProtectionState:
-    return replace(state,pending_stop=float(new_stop),pending_order_id=None)
+def validate_protection(request: ProtectionRequest) -> None:
+    if request.direction is Direction.LONG:
+        valid=request.current_stop < request.requested_stop < request.current_price
+    else:
+        valid=request.current_price < request.requested_stop < request.current_stop
+    if not valid: raise ValueError("PROTECTION_NOT_IMPROVING")
 
-def protection_submitted(state:ProtectionState,order_id:str)->ProtectionState:
-    if state.pending_stop is None: raise RuntimeError("protection_not_requested")
-    return replace(state,pending_order_id=str(order_id))
-
-def protection_confirmed(state:ProtectionState)->ProtectionState:
-    if state.pending_stop is None or not state.pending_order_id: raise RuntimeError("protection_not_submitted")
-    return ProtectionState(confirmed_stop=state.pending_stop)
-
-def protection_failed(state:ProtectionState)->ProtectionState:
-    return replace(state,pending_stop=None,pending_order_id=None)
-
-__all__=["ProtectionState","request_protection","protection_submitted","protection_confirmed","protection_failed"]
+__all__=["ProtectionRequest","validate_protection"]
