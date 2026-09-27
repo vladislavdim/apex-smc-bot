@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from apex.db.connection import connect_compatibility as _connect_compatibility_db, connect_state as _connect_state_db
 from datetime import datetime, timezone
@@ -488,7 +489,7 @@ def upsert_incident(
     conn.commit(); conn.close()
 
 
-def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
+def dashboard_snapshot(db_path: str = DB_PATH, *, require_state: bool = False) -> dict[str, Any]:
     """Return a secret-free local snapshot suitable for telemetry emission."""
     ensure_apex_v2_schema(db_path)
     conn = _connect(db_path)
@@ -556,7 +557,7 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     table_names = {str(row[0]) for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
-    if "trade_manager_state" in table_names:
+    if not require_state and "trade_manager_state" in table_names:
         historical_states = {str(row[0]): int(row[1]) for row in conn.execute(
             "SELECT manager_state,COUNT(*) FROM trade_manager_state GROUP BY manager_state"
         ).fetchall()}
@@ -594,7 +595,7 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     result["learning"].update({
         "groq_calibration": result.get("groq_calibration", {}),
     })
-    if "trade_executions" in table_names:
+    if not require_state and "trade_executions" in table_names:
         execution_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
         active_stop_expr = "active_stop_price" if "active_stop_price" in execution_columns else "sl AS active_stop_price"
         result["execution_health"] = {
@@ -623,6 +624,10 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
+        if require_state and not {
+            "executions", "manager_positions", "execution_account_cache",
+        }.issubset(state_tables):
+            raise RuntimeError("dashboard_state_projection_incomplete")
         if "executions" in state_tables:
             result["execution_health"] = {
                 "source": "APEX_STATE_DB",
@@ -688,6 +693,8 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
                     account["error"] = str(account["last_error"])
                 result.setdefault("execution_health", {})["account"] = account
     except Exception as state_error:
+        if require_state:
+            raise RuntimeError("dashboard_state_projection_unavailable") from state_error
         result["state_projection_error"] = type(state_error).__name__
     finally:
         if state_conn is not None:
@@ -704,13 +711,15 @@ def dashboard_snapshot(db_path: str = DB_PATH) -> dict[str, Any]:
     return result
 
 
-def emit_dashboard_snapshot(db_path: str = DB_PATH) -> None:
+def emit_dashboard_snapshot(db_path: str = DB_PATH, *, require_state: bool = False) -> bool:
     """Best-effort bridge to the existing durable Strategy Lab ingest queue."""
     try:
         from core.setup_audit import emit_event
-        snap = dashboard_snapshot(db_path)
+        snap = dashboard_snapshot(db_path, require_state=require_state)
         release = str((snap.get("versions") or {}).get("release_sha") or "unknown")
         key = f"apex-v2:{release}:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
         emit_event("apex_v2_snapshot", "SYSTEM", "", snap, event_key=key)
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        logging.error("[Dashboard] State snapshot unavailable: %s", type(exc).__name__)
+        return False

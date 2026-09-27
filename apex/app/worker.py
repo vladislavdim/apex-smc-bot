@@ -517,6 +517,11 @@ def _v3_sync_signal_lifecycle():
     )
 
 
+def _v3_emit_dashboard_telemetry() -> None:
+    if not _emit_apex_v2_dashboard_snapshot(DB_PATH, require_state=True):
+        raise RuntimeError("dashboard_state_projection_unavailable")
+
+
 async def _v3_refresh_signal_lifecycle_mirror():
     return await _v3_refresh_cutover(
         _V3_LIFECYCLE_CUTOVER, _v3_sync_signal_lifecycle,
@@ -1508,7 +1513,7 @@ async def _send_signal(sd):
             await _v3_refresh_execution_state_mirror()
         except Exception as exc:
             logging.error("[APEX V3] execution State mirror requires reconcile: %s", exc)
-        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
+        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     if _run_id:
         await asyncio.to_thread(
@@ -4125,7 +4130,7 @@ async def market_intelligence_job():
             },
             DB_PATH,
         )
-        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
+        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     try:
         await _run_market_scan_exclusive("market_intelligence", refresh, 210)
     except Exception as exc:
@@ -4206,7 +4211,7 @@ def _build_v3_scheduler():
             market_wyckoff=auto_wyckoff_scan,
             market_ltf_watch=auto_ltf_watch_scan,
             keepalive=keepalive_heartbeat,
-            dashboard_telemetry=functools.partial(_emit_apex_v2_dashboard_snapshot, DB_PATH),
+            dashboard_telemetry=_v3_emit_dashboard_telemetry,
             alerts=_v3_alerts_job,
             state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m"),
             runtime_watchdog=_v3_runtime_watchdog,
@@ -4308,10 +4313,12 @@ async def _initialize_production_runtime(transport: str):
     _manager_registration = await _v3_refresh_manager_state_mirror()
     logging.info("[APEX V3] Manager registration mirror: %s", _manager_registration)
     _rebuild_strategy_risk_states(DB_PATH)
-    _emit_apex_v2_dashboard_snapshot(DB_PATH)
+    _dashboard_snapshot_ok = _emit_apex_v2_dashboard_snapshot(DB_PATH, require_state=True)
     _V3_RUNTIME.mark_component(
-        "dashboard_telemetry", _V3_COMPONENT_STATE.READY,
-        "startup production snapshot emitted", required=False,
+        "dashboard_telemetry",
+        _V3_COMPONENT_STATE.READY if _dashboard_snapshot_ok else _V3_COMPONENT_STATE.FAILED,
+        "startup production snapshot emitted" if _dashboard_snapshot_ok
+        else "State dashboard snapshot unavailable", required=False,
     )
     start_db_writer()
     _checkpoint = await _brain_startup_checkpoint()
@@ -4339,7 +4346,7 @@ async def _initialize_production_runtime(transport: str):
         _v3_recover_incident("JOB_FAILED", "backup")
         _v3_recover_incident("JOB_TIMEOUT", "backup")
     await _v3_startup_reconcile_and_market_check()
-    await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
+    await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     if transport == "polling":
         threading.Thread(target=run_server, daemon=True).start()
     asyncio.create_task(_start_market_intelligence_background())

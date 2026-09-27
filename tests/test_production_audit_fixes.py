@@ -14,7 +14,7 @@ from apex.execution.orders import (
     configure_execution_state,
 )
 from apex.ui.telegram.system import format_system_status
-from core.apex_v2 import dashboard_snapshot
+from core.apex_v2 import dashboard_snapshot, emit_dashboard_snapshot
 
 
 class ProductionAuditFixTests(unittest.TestCase):
@@ -118,10 +118,21 @@ class ProductionAuditFixTests(unittest.TestCase):
             "APEX_STATE_DB_PATH": self.state_path,
         }
         with patch.dict(os.environ, env, clear=False):
-            snap = dashboard_snapshot(self.compat_path)
+            snap = dashboard_snapshot(self.compat_path, require_state=True)
         self.assertEqual(snap["execution_health"]["source"], "APEX_STATE_DB")
         self.assertEqual(snap["execution_health"]["statuses"]["ENTRY_PENDING"], 1)
         self.assertEqual(snap["execution_health"]["account"]["wallet_balance"], 1000.0)
+
+    def test_production_dashboard_rejects_missing_state_instead_of_legacy_fallback(self):
+        with patch.dict(os.environ, {
+            "APEX_COMPAT_DB_PATH": self.compat_path,
+            "APEX_STATE_DB_PATH": self.state_path + ".missing",
+        }, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "dashboard_state_projection_unavailable"):
+                dashboard_snapshot(self.compat_path, require_state=True)
+            with patch("core.setup_audit.emit_event") as emit:
+                self.assertFalse(emit_dashboard_snapshot(self.compat_path, require_state=True))
+                emit.assert_not_called()
 
 
 if __name__ == "__main__":
