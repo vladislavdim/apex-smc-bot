@@ -123,9 +123,9 @@ from apex.compatibility.market_strategy import (
     legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
 )
 from apex.strategies.common import fast_session
-from core.trade_views import fetch_trades as _fetch_trade_view_rows
-from core.trade_views import format_trade_view as _format_trade_view
-from core.trade_manager_telegram import (
+from apex.ui.telegram.trades import fetch_trades as _fetch_trade_view_rows
+from apex.ui.telegram.trades import format_trade_view as _format_trade_view
+from apex.ui.telegram.manager import (
     configure_manager_dashboard_state as _configure_manager_dashboard_state,
     fetch_manager_trades as _fetch_manager_trades,
     fetch_manager_trade as _fetch_manager_trade,
