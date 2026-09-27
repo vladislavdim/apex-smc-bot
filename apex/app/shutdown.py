@@ -40,9 +40,22 @@ async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
 
     # Release first after local entry fencing so a rolling replacement is not
     # held behind cleanup that can include a slow remote persistence call.
+    try:
+        await _call(deps.release_lease)
+    except BaseException:
+        pass
+
+    # Keep the final persistence call explicit: it is a production invariant
+    # and is intentionally covered by the persistence safety test.
+    try:
+        if deps.backup is not None:
+            value = deps.backup("render_sigterm")
+            if inspect.isawaitable(value):
+                await value
+    except BaseException:
+        pass
+
     for hook, args, kwargs in (
-        (deps.release_lease, (), {}),
-        (deps.backup, ("render_sigterm",), {}),
         (deps.record_shutdown, (deps.state_db_path, why), {"instance_id": deps.instance_id}),
         (deps.stop_market, (), {}),
     ):
