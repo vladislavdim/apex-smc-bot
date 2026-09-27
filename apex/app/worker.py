@@ -292,6 +292,7 @@ from apex.db.signal_lifecycle_migration import (
 )
 from apex.db.repositories.runtime import RuntimeRepository as _V3RuntimeRepository
 from apex.db.repositories.manager import ManagerRepository as _V3ManagerRepository
+from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository as _V3SignalLifecycleRepository
 from apex.db.maintenance import maintain_memory as _v3_maintain_memory, maintain_state as _v3_maintain_state
 from apex.domain.enums import ComponentState as _V3_COMPONENT_STATE, RuntimeStatus as _V3_RUNTIME_STATUS, Strategy as _V3_STRATEGY
 from apex.learning.live_bridge import LiveLearningBridge as _V3LiveLearningBridge
@@ -1420,14 +1421,27 @@ async def _send_signal(sd):
             {"cache_key": cache_key, "error_type": type(exc).__name__},
         )
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
+    lifecycle_ready = False
     if signal_id:
         try: await asyncio.to_thread(_bind_setup_assessment_to_signal, sd, signal_id, DB_PATH)
         except Exception as exc: logging.warning("[SetupEvidence] bind signal %s: %s", signal_id, exc)
         try:
             await _v3_refresh_signal_lifecycle_mirror()
+            await asyncio.to_thread(
+                _V3SignalLifecycleRepository(
+                    lambda: _v3_connect_state(_V3_CONFIG, read_only=True)
+                ).require_pending_for_execution,
+                signal_id, sd.get("symbol"),
+            )
+            lifecycle_ready = True
         except Exception as exc:
-            logging.error("[APEX V3] signal lifecycle requires reconcile: %s", exc)
-    if signal_id and _TRADE_EXECUTION_OK:
+            logging.error("[APEX V3] signal lifecycle requires reconcile; execution inhibited: %s", exc)
+            _V3_RUNTIME.inhibit_entries(_V3_LIFECYCLE_CUTOVER.inhibit_code)
+            _v3_report_incident(
+                _V3_LIFECYCLE_CUTOVER.inhibit_code, "state_db", "CRITICAL",
+                {"error_type": type(exc).__name__, "signal_id": signal_id},
+            )
+    if signal_id and lifecycle_ready and _TRADE_EXECUTION_OK:
         execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
         logging.info(
             "[AutoTrading] signal=%s symbol=%s status=%s",

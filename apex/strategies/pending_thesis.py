@@ -40,7 +40,7 @@ def has_pending_thesis(
     legacy = legacy_factory()
     try:
         row = legacy.execute(
-            "SELECT 1 FROM signals WHERE symbol=? AND result='pending' LIMIT 1",
+            "SELECT 1 FROM signals WHERE UPPER(symbol)=? AND result='pending' LIMIT 1",
             (pair,),
         ).fetchone()
         return bool(row)

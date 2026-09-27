@@ -82,6 +82,18 @@ class SignalLifecycleRepository:
         finally:
             conn.close()
 
+    def require_pending_for_execution(self, signal_id: int, symbol: str) -> dict[str, Any]:
+        """A delivered signal must be mirrored to State before Binance admission."""
+        row = self.get(signal_id)
+        if (
+            row is None
+            or str(row.get("symbol") or "").upper() != str(symbol or "").upper()
+            or str(row.get("status") or "").lower() != "waiting_entry"
+            or str(row.get("result") or "").lower() != "pending"
+        ):
+            raise SignalLifecycleStateError("signal_lifecycle_not_ready_for_execution")
+        return row
+
     def get_many(self, signal_ids: list[int] | tuple[int, ...]) -> dict[int, dict[str, Any]]:
         ids = tuple(sorted({int(value) for value in signal_ids if int(value) > 0}))
         if not ids:

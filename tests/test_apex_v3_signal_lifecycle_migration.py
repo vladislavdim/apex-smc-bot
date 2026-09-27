@@ -8,6 +8,7 @@ from apex.db.signal_lifecycle_migration import (
     signal_lifecycle_parity_report,
 )
 from apex.db.state_db import migrate_state
+from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository, SignalLifecycleStateError
 from apex.domain.ids import derived_id
 
 
@@ -75,6 +76,15 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
                 signal_lifecycle_parity_report(legacy_factory, state_factory)["mismatches"],
             )
             import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
+            self.assertEqual(
+                SignalLifecycleRepository(state_factory).require_pending_for_execution(
+                    7, "BTCUSDT"
+                )["signal_id"], 7,
+            )
+            with self.assertRaisesRegex(SignalLifecycleStateError, "not_ready_for_execution"):
+                SignalLifecycleRepository(state_factory).require_pending_for_execution(
+                    7, "ETHUSDT"
+                )
 
             legacy = legacy_factory()
             legacy.execute(
@@ -86,6 +96,10 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             )
             legacy.commit(); legacy.close()
             import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
+            with self.assertRaisesRegex(SignalLifecycleStateError, "not_ready_for_execution"):
+                SignalLifecycleRepository(state_factory).require_pending_for_execution(
+                    7, "BTCUSDT"
+                )
             state = state_factory()
             row = state.execute(
                 "SELECT status,result,closed_at,cancel_reason FROM signal_lifecycle"

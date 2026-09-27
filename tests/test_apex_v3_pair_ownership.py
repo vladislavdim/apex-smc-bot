@@ -33,7 +33,7 @@ class PairOwnershipTests(unittest.TestCase):
         self.state.execute("INSERT INTO signal_lifecycle VALUES('signal_1','active','BTCUSDT')")
         self.assertTrue(self.check())
         self.state.execute("DELETE FROM executions")
-        self.legacy.execute("INSERT INTO signals VALUES('BTCUSDT','pending')")
+        self.legacy.execute("INSERT INTO signals VALUES('btcusdt','pending')")
         self.assertTrue(self.check())
         self.legacy.execute("UPDATE signals SET result='tp1'")
         self.assertTrue(self.check())
