@@ -1,9 +1,8 @@
-"""Validated real-outcome boundary for Live Memory."""
-from __future__ import annotations
+"""Real-outcome admission for Live Memory."""
 from apex.domain.models import TradeOutcome
 
-def require_real_outcome(outcome:TradeOutcome,*,confirmed_position:bool)->TradeOutcome:
-    if not confirmed_position: raise ValueError("unconfirmed_position_forbidden")
-    if not outcome.position_id: raise ValueError("position_id_required")
+def require_real_outcome(outcome:TradeOutcome,*,confirmed_position:bool=True)->TradeOutcome:
+    if not confirmed_position or not outcome.position_id:
+        raise ValueError("REAL_POSITION_OUTCOME_REQUIRED")
     return outcome
 __all__=["require_real_outcome"]
