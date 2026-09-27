@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import pytest
 
 from apex.manager.engine import (
     finalize_manager_trade,
@@ -502,6 +503,16 @@ def test_manager_dashboard_reads_state_without_legacy_db(tmp_path):
     assert not (tmp_path / "must-not-exist.db").exists()
 
 
+def test_manager_dashboard_fails_closed_without_state(tmp_path):
+    missing = tmp_path / "must-not-exist.db"
+    configure_manager_dashboard_state(None)
+    with pytest.raises(RuntimeError, match="manager_dashboard_state_not_configured"):
+        fetch_manager_trades(str(missing))
+    with pytest.raises(RuntimeError, match="manager_dashboard_state_not_configured"):
+        fetch_manager_trade(str(missing), 44)
+    assert not missing.exists()
+
+
 def test_state_manager_normal_writes_do_not_create_legacy_db(tmp_path):
     state_path = str(tmp_path / "apex_state.db")
     legacy_path = str(tmp_path / "must-not-exist.db")
@@ -552,8 +563,7 @@ def test_closed_trade_remains_in_manager_and_has_final_accounting(tmp_path):
     assert state["status"] == "CLOSED"
     assert state["realized_pct"] == 10
     assert state["realized_r"] == 2
-    rows = fetch_manager_trades(db_path)
-    assert rows[0]["close_result"] == "tp1"
+    assert state["close_result"] == "tp1"
     card = format_final_trade_card(state)
     assert "СДЕЛКА ЗАКРЫТА" in card
     assert "+10.00%" in card

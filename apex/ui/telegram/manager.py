@@ -2,14 +2,9 @@
 from __future__ import annotations
 
 import html
-import sqlite3
-from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.db.repositories.manager import ManagerRepository
 from datetime import datetime
 from typing import Any
-
-from apex.manager.engine import ensure_trade_manager_schema
-
 
 _MANAGER_DASHBOARD_STATE_FACTORY = None
 
@@ -53,13 +48,6 @@ def fetch_state_manager_trade(
     return {"state": state, "events": events}
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=10000")
-    return conn
-
-
 def _fmt_price(value: Any) -> str:
     try:
         number = float(value)
@@ -94,60 +82,11 @@ def _duration(created_at: Any, closed_at: Any) -> str:
 
 
 def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
-    if _MANAGER_DASHBOARD_STATE_FACTORY is not None:
-        return fetch_state_manager_trades(_state_repository(), limit)
-    ensure_trade_manager_schema(db_path)
-    conn = _connect(db_path)
-    try:
-        rows = conn.execute(
-            """
-            SELECT m.signal_id, m.symbol, m.strategy, m.direction, m.management_tf,
-                   m.initial_entry, m.initial_sl, m.initial_tp1, m.initial_tp2, m.initial_tp3,
-                   m.initial_rr, m.last_price, m.current_r, m.tp1_seen, m.tp2_seen,
-                   m.manager_target, m.manager_protect_level, m.last_event, m.last_action,
-                   m.last_confidence, m.updated_at, m.status, m.close_result, m.exit_price,
-                   m.realized_pct, m.realized_r, m.closed_at,
-                   m.manager_version, m.manager_state, m.no_progress_bars,
-                   COALESCE(s.result, 'pending') AS signal_result
-              FROM trade_manager_state m
-              LEFT JOIN signals s ON s.id = m.signal_id
-             ORDER BY CASE WHEN COALESCE(m.status,'ACTIVE')='ACTIVE' THEN 0 ELSE 1 END,
-                      COALESCE(m.closed_at,m.updated_at) DESC, m.signal_id DESC
-             LIMIT ?
-            """,
-            (max(1, int(limit)),),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    return fetch_state_manager_trades(_state_repository(), limit)
 
 
 def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> dict[str, Any] | None:
-    if _MANAGER_DASHBOARD_STATE_FACTORY is not None:
-        return fetch_state_manager_trade(_state_repository(), signal_id, event_limit)
-    ensure_trade_manager_schema(db_path)
-    conn = _connect(db_path)
-    try:
-        state = conn.execute(
-            "SELECT * FROM trade_manager_state WHERE signal_id=?",
-            (int(signal_id),),
-        ).fetchone()
-        if not state:
-            return None
-        events = conn.execute(
-            """
-            SELECT event_type, action, confidence, price, r_multiple,
-                   manager_target, manager_protect_level, reason, created_at
-              FROM trade_manager_events
-             WHERE signal_id=?
-             ORDER BY id DESC
-             LIMIT ?
-            """,
-            (int(signal_id), max(1, int(event_limit))),
-        ).fetchall()
-        return {"state": dict(state), "events": [dict(row) for row in events]}
-    finally:
-        conn.close()
+    return fetch_state_manager_trade(_state_repository(), signal_id, event_limit)
 
 
 def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
