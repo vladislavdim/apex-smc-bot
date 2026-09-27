@@ -1,3 +1,6 @@
-"""Manager structural-analysis boundary over canonical market facts."""
-from apex.market.structure import analyze_market_structure,detect_latest_structure_event,infer_structure_direction
-__all__=["analyze_market_structure","detect_latest_structure_event","infer_structure_direction"]
+"""Manager structural-analysis boundary.
+
+Consumes canonical closed-candle market structure; it does not own scanning.
+"""
+from apex.market.structure import analyze_market_structure
+__all__=["analyze_market_structure"]
