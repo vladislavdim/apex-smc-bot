@@ -1,11 +1,11 @@
 import sqlite3
 
-from apex.execution.orders import ExecutionConfig, LIVE_CONFIRMATION, ensure_execution_schema, reconcile_live_executions
+from apex.execution.orders import ExecutionConfig, LIVE_CONFIRMATION, ensure_execution_schema, reconcile_live_executions, configure_manager_confirmation
 from apex.manager.engine import (
     MANAGEMENT_TF, NO_PROGRESS_BARS, PROGRESS_TF, TRANSITION_MATRIX, activate_v2_once,
     confirm_manager_action, ensure_trade_manager_schema, load_state, no_progress_event_due,
     persist_review, register_active_trade, review_active_trade,
-    validate_transition,
+    validate_transition, confirm_v2_reconciliation,
 )
 
 
@@ -165,7 +165,11 @@ def test_cutover_reconciliation_uses_one_position_snapshot_and_keeps_protection(
 
     client = SnapshotClient()
     config = ExecutionConfig(enabled=True, mode="live", api_key="k", api_secret="s", live_confirmation=LIVE_CONFIRMATION)
-    outcomes = reconcile_live_executions(db_path=db, config=config, client=client)
+    configure_manager_confirmation(confirm_manager_action, transition_validator=validate_transition, reconciliation_callback=confirm_v2_reconciliation)
+    try:
+        outcomes = reconcile_live_executions(db_path=db, config=config, client=client)
+    finally:
+        configure_manager_confirmation(None, transition_validator=None, reconciliation_callback=None)
     assert outcomes == [{"status": "PROTECTED", "signal_id": 1}]
     assert client.calls == ["open_positions"]
     assert load_state(1, db)["manager_state"] == "PROTECTED"
