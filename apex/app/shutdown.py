@@ -1,36 +1,53 @@
-"""Application-level graceful shutdown orchestration for APEX V3."""
+"""Canonical fail-closed production shutdown orchestration for APEX V3."""
 from __future__ import annotations
 import inspect
 from dataclasses import dataclass
-from typing import Any,Callable
+from typing import Any,Awaitable,Callable
+
 Hook=Callable[...,Any]
+
 @dataclass(frozen=True)
 class ShutdownDependencies:
-    runtime:Any
-    state_db_path:str
-    instance_id:str
-    release_lease:Hook
-    record_shutdown:Hook
-    backup:Hook
-    stop_market:Hook|None=None
-async def _await(value:Any)->Any:
+    runtime: Any
+    state_db_path: str
+    instance_id: str
+    release_lease: Hook
+    record_shutdown: Hook
+    backup: Hook
+    stop_market: Hook|None=None
+
+async def _call(fn:Hook|None,*args:Any)->Any:
+    if fn is None:return None
+    value=fn(*args)
     return await value if inspect.isawaitable(value) else value
+
 async def shutdown_production(deps:ShutdownDependencies,reason:str)->None:
-    """Fence first; cleanup is best-effort and never re-opens entries."""
-    deps.runtime.inhibit_entries("GRACEFUL_SHUTDOWN")
-    # Release ownership early so the replacement instance can acquire fencing.
-    try: await _await(deps.release_lease())
-    except Exception: pass
-    # Persistence failures must not prevent the remaining shutdown cleanup.
-    try: await _await(deps.backup("render_sigterm"))
-    except Exception: pass
-    try: await _await(deps.record_shutdown(deps.state_db_path,str(reason),instance_id=deps.instance_id))
-    except Exception: pass
-    if deps.stop_market is not None:
-        try: await _await(deps.stop_market())
-        except Exception: pass
-    clear=getattr(deps.runtime,"clear_instance_lease",None)
-    if callable(clear): clear()
-    deactivate=getattr(deps.runtime,"deactivate",None)
-    if callable(deactivate): deactivate()
+    """Stop producers, persist state, record shutdown, then release fencing.
+
+    Entry admission is disabled first and the lease is released last, so a
+    replacement worker cannot overlap this instance while durable state is
+    still being checkpointed.
+    """
+    deps.runtime.inhibit_entries("SHUTDOWN_IN_PROGRESS")
+    errors=[]
+    try:
+        try: await _call(deps.stop_market)
+        except Exception as exc: errors.append(("stop_market",exc))
+        try: await _call(deps.backup,"shutdown")
+        except TypeError:
+            try: await _call(deps.backup)
+            except Exception as exc: errors.append(("backup",exc))
+        except Exception as exc: errors.append(("backup",exc))
+        try: await _call(deps.record_shutdown,deps.instance_id,reason)
+        except TypeError:
+            try: await _call(deps.record_shutdown,reason)
+            except Exception as exc: errors.append(("record_shutdown",exc))
+        except Exception as exc: errors.append(("record_shutdown",exc))
+    finally:
+        try: await _call(deps.release_lease)
+        finally: deps.runtime.clear_instance_lease()
+    if errors:
+        names=",".join(name for name,_ in errors)
+        raise RuntimeError(f"shutdown_hooks_failed:{names}") from errors[0][1]
+
 __all__=["ShutdownDependencies","shutdown_production"]
