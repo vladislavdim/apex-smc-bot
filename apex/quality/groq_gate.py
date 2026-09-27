@@ -1,4 +1,8 @@
-"""Bounded Groq critique gate for immutable candidate geometry."""
+"""Bounded Groq critique gate for immutable candidates.
+
+Groq may critique/approve/reject a setup, but candidate Entry/SL/TP/RR are
+strategy-owned and immutable across the review boundary.
+"""
 from __future__ import annotations
 from apex.domain.models import Candidate
 
