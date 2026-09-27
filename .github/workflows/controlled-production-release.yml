@@ -59,6 +59,11 @@ jobs:
           python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
           python -m pytest -q
           python -m unittest discover -s tests -q
+          TELEGRAM_TOKEN=123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+            python scripts/run_strategy_parity_corpus.py \
+              --output /tmp/apex-v3-release-verdict.json
+          cmp /tmp/apex-v3-release-verdict.json \
+            tests/fixtures/apex_v3_strategy_parity_verdict.json
           python - <<'PY'
           from pathlib import Path
           import yaml
