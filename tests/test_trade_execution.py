@@ -17,6 +17,7 @@ from apex.execution.orders import (
     reconcile_live_executions,
 )
 from apex.execution import orders as trade_execution
+from apex.manager.engine import confirm_manager_action, validate_transition, confirm_v2_reconciliation
 from apex.db.state_db import migrate_state
 from apex.db.execution_recovery import recovery_path, replay_recovery
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
@@ -204,9 +205,11 @@ class TradeExecutionTests(unittest.TestCase):
         trade_execution._binance_blocked_until = 0.0
         trade_execution._shared_symbol_rules_cache.clear()
         trade_execution.configure_execution_state(None)
+        trade_execution.configure_manager_confirmation(confirm_manager_action, transition_validator=validate_transition, reconciliation_callback=confirm_v2_reconciliation)
 
     def tearDown(self):
         trade_execution.configure_execution_state(None)
+        trade_execution.configure_manager_confirmation(None, transition_validator=None, reconciliation_callback=None)
         self.tmp.cleanup()
 
     def test_balance_cache_can_be_owned_by_state_db_without_legacy_write(self):
