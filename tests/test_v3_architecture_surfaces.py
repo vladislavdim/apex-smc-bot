@@ -14,7 +14,7 @@ def test_launchers_are_thin():
     assert len((ROOT/"stats_server.py").read_text().splitlines())<30
 
 def test_risk_sizing_is_geometry_independent():
-    assert quantity_for_risk(1000,1,100,95)==2
+    assert quantity_for_risk(equity_quote=1000, risk_pct=1, entry=100, stop=95)==2
 
 def test_groq_geometry_tuple_is_stable_shape():
     assert geometry.__module__=="apex.quality.groq_gate"

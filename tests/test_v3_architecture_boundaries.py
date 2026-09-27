@@ -10,7 +10,7 @@ def test_dashboard_has_exact_production_tabs():
 
 
 def test_risk_sizing_is_geometry_independent():
-    assert quantity_for_risk(1000,1,100,95)==2
+    assert quantity_for_risk(equity_quote=1000, risk_pct=1, entry=100, stop=95)==2
 
 
 def test_telegram_app_exports_real_router_contract():

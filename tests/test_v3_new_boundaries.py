@@ -6,7 +6,7 @@ from apex.quality.groq_calibration import approval_rate
 import sqlite3
 
 def test_new_boundaries_are_deterministic():
-    assert quantity_for_risk(1000,1,100,95)==2
+    assert quantity_for_risk(equity_quote=1000, risk_pct=1, entry=100, stop=95)==2
     assert KillSwitch().entries_allowed
     assert authorized("x","x") and not authorized("x","y")
     assert approval_rate([{"decision":"APPROVE"},{"decision":"REJECT"}])==0.5

@@ -95,8 +95,8 @@ def build_webhook_application(deps: ProductionDependencies) -> Any:
 
 
 async def _run_polling(deps: ProductionDependencies) -> None:
-    await deps.initialize("polling")
     try:
+        await deps.initialize("polling")
         await deps.dispatcher.start_polling(
             deps.telegram_bot,
             allowed_updates=deps.dispatcher.resolve_used_update_types(),

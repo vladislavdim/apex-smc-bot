@@ -13,14 +13,17 @@ def test_integrity_accepts_clean_sqlite():
     conn=sqlite3.connect(":memory:");check_integrity(conn);conn.close()
 
 def test_sizing_is_geometry_based_and_pure():
-    assert quantity_for_risk(1000,1,100,95)==pytest.approx(2.0)
+    assert quantity_for_risk(equity_quote=1000, risk_pct=1, entry=100, stop=95)==pytest.approx(2.0)
 
 def test_kill_switch_fail_closed():
     assert not KillSwitch(enabled=True,reason="test").entries_allowed
 
 def test_execution_quality_slippage():
-    assert slippage_bps(100,101)==pytest.approx(100.0)
+    assert slippage_bps(planned=100, filled=101)==pytest.approx(100.0)
 
 def test_learning_requires_real_correlated_outcome():
     outcome=TradeOutcome(new_id("outcome"),new_id("position"),100,101,1,0,0,datetime.now(timezone.utc))
-    assert require_real_outcome(outcome) is outcome
+    assert require_real_outcome(outcome, confirmed_position=True) is outcome
+
+    with pytest.raises(ValueError, match="unconfirmed_position_forbidden"):
+        require_real_outcome(outcome, confirmed_position=False)

@@ -8,7 +8,7 @@ def test_telegram_boundary_is_wired():
     assert callable(register_handlers)
 
 def test_risk_sizing_is_geometry_independent():
-    assert quantity_for_risk(1000,1,100,90)==1.0
+    assert quantity_for_risk(equity_quote=1000, risk_pct=1, entry=100, stop=90)==1.0
 
 def test_groq_geometry_surface_exists():
     assert callable(geometry)

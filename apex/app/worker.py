@@ -220,6 +220,7 @@ except Exception as _trade_execution_import_error:
 # source of truth; main must never provide a competing, stale brain.db.
 from apex.db.backup import BrainPersistence as _BrainPersistence
 from apex.app.runtime import runtime_supervisor as _V3_RUNTIME
+from apex.app.shutdown import ShutdownDependencies, shutdown_production
 from apex.app.bootstrap import ProductionDependencies as _V3_PRODUCTION_DEPENDENCIES, run_production as _v3_run_production
 from apex.app.cutover import (
     CutoverSpec as _V3_CUTOVER_SPEC,
@@ -4291,26 +4292,15 @@ async def _initialize_production_runtime(transport: str):
 
 
 async def _shutdown_production_runtime(reason: str) -> None:
-    _V3_RUNTIME.inhibit_entries("GRACEFUL_SHUTDOWN")
-    await _v3_release_runtime_lease()
-    try:
-        await asyncio.to_thread(
-            _v3_record_shutdown, _V3_CONFIG.database.state_db_path, reason,
-            instance_id=_V3_CONFIG.runtime.instance_id,
-        )
-    except Exception as exc:
-        logging.warning("[APEX V3] shutdown marker failed safely: %s", exc)
-    try:
-        await asyncio.wait_for(
-            _v3_maintenance_and_backup("render_sigterm"), timeout=30
-        )
-    except asyncio.TimeoutError:
-        logging.warning("[BrainPersistence] final SIGTERM snapshot timed out safely")
-    except Exception as exc:
-        logging.warning("[BrainPersistence] final SIGTERM snapshot failed safely: %s", exc)
-    if _MARKET_INTELLIGENCE_OK:
-        try:await _stop_market_intelligence()
-        except Exception:pass
+    await shutdown_production(ShutdownDependencies(
+        runtime=_V3_RUNTIME,
+        state_db_path=_V3_CONFIG.database.state_db_path,
+        instance_id=_V3_CONFIG.runtime.instance_id,
+        release_lease=_v3_release_runtime_lease,
+        record_shutdown=_v3_record_shutdown,
+        backup=_v3_maintenance_and_backup,
+        stop_market=_stop_market_intelligence if _MARKET_INTELLIGENCE_OK else None,
+    ), reason)
 
 
 def _v3_token_snapshot():
