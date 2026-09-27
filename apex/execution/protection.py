@@ -26,6 +26,18 @@ class ProtectionState:
     status:ProtectionStatus=ProtectionStatus.CONFIRMED
 
 @dataclass(frozen=True)
+class StopProtectionRequest:
+    position_id:str
+    symbol:str
+    stop_price:float
+    quantity:float
+    def __post_init__(self):
+        if not str(self.position_id).strip(): raise ValueError("position_id_required")
+        if not str(self.symbol).strip(): raise ValueError("symbol_required")
+        if float(self.stop_price)<=0: raise ValueError("stop_price_invalid")
+        if float(self.quantity)<=0: raise ValueError("quantity_invalid")
+
+@dataclass(frozen=True)
 class ProtectionRequest:
     direction:Direction
     current_price:float
@@ -60,4 +72,4 @@ def replacement_uncertain(state:ProtectionState)->ProtectionState:
 def reconcile_exchange_stop(state:ProtectionState,*,stop:float,order_id:str)->ProtectionState:
     return ProtectionState(direction=state.direction,confirmed_stop=float(stop),confirmed_order_id=str(order_id),status=ProtectionStatus.CONFIRMED)
 
-__all__=["ProtectionRequest","ProtectionState","ProtectionStatus","valid_stop_replacement","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
+__all__=["StopProtectionRequest","ProtectionRequest","ProtectionState","ProtectionStatus","valid_stop_replacement","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
