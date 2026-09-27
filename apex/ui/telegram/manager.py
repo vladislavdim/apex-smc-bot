@@ -25,6 +25,34 @@ def _state_repository() -> ManagerRepository:
     return ManagerRepository(_MANAGER_DASHBOARD_STATE_FACTORY)
 
 
+def fetch_state_manager_trades(
+    repository: ManagerRepository, limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Production Telegram projection with State as the explicit authority."""
+    rows = repository.recent(limit=limit)
+    for row in rows:
+        row["manager_protect_level"] = row.get("confirmed_protect_level")
+        row["signal_result"] = (
+            "pending" if str(row.get("status") or "ACTIVE").upper() == "ACTIVE"
+            else str(row.get("close_result") or "closed")
+        )
+    return rows
+
+
+def fetch_state_manager_trade(
+    repository: ManagerRepository, signal_id: int, event_limit: int = 12,
+) -> dict[str, Any] | None:
+    state = repository.get(signal_id)
+    if state is None:
+        return None
+    state["manager_protect_level"] = state.get("confirmed_protect_level")
+    events = repository.events(signal_id, limit=event_limit)
+    for event in events:
+        event["manager_protect_level"] = event.get("confirmed_protect_level")
+        event["reason"] = event.get("summary")
+    return {"state": state, "events": events}
+
+
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = _connect_compatibility_db(db_path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -67,14 +95,7 @@ def _duration(created_at: Any, closed_at: Any) -> str:
 
 def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
     if _MANAGER_DASHBOARD_STATE_FACTORY is not None:
-        rows = _state_repository().recent(limit=limit)
-        for row in rows:
-            row["manager_protect_level"] = row.get("confirmed_protect_level")
-            row["signal_result"] = (
-                "pending" if str(row.get("status") or "ACTIVE").upper() == "ACTIVE"
-                else str(row.get("close_result") or "closed")
-            )
-        return rows
+        return fetch_state_manager_trades(_state_repository(), limit)
     ensure_trade_manager_schema(db_path)
     conn = _connect(db_path)
     try:
@@ -103,16 +124,7 @@ def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
 
 def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> dict[str, Any] | None:
     if _MANAGER_DASHBOARD_STATE_FACTORY is not None:
-        repository = _state_repository()
-        state = repository.get(signal_id)
-        if state is None:
-            return None
-        state["manager_protect_level"] = state.get("confirmed_protect_level")
-        events = repository.events(signal_id, limit=event_limit)
-        for event in events:
-            event["manager_protect_level"] = event.get("confirmed_protect_level")
-            event["reason"] = event.get("summary")
-        return {"state": state, "events": events}
+        return fetch_state_manager_trade(_state_repository(), signal_id, event_limit)
     ensure_trade_manager_schema(db_path)
     conn = _connect(db_path)
     try:

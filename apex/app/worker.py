@@ -126,9 +126,8 @@ from apex.strategies.common import fast_session
 from apex.ui.telegram.trades import fetch_live_trades as _fetch_trade_view_rows
 from apex.ui.telegram.trades import format_trade_view as _format_trade_view
 from apex.ui.telegram.manager import (
-    configure_manager_dashboard_state as _configure_manager_dashboard_state,
-    fetch_manager_trades as _fetch_manager_trades,
-    fetch_manager_trade as _fetch_manager_trade,
+    fetch_state_manager_trades as _fetch_manager_trades,
+    fetch_state_manager_trade as _fetch_manager_trade,
     format_manager_dashboard as _format_manager_dashboard,
     format_manager_trade_detail as _format_manager_trade_detail,
     format_final_trade_card as _format_final_trade_card,
@@ -361,7 +360,6 @@ _configure_manager_message_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_strategy_decision_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
-_configure_manager_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
 _v3_configure_incidents(lambda: _v3_connect_state(_V3_CONFIG))
 _v3_configure_job_metrics(lambda: _v3_connect_state(_V3_CONFIG))
 _V3_LIVE_BRIDGE = _V3LiveLearningBridge(
@@ -726,9 +724,12 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
     _V3StateCallbackDependencies(
         edit_message=_edit_message,
         main_menu=main_menu,
-        fetch_manager_trades=lambda limit: _fetch_manager_trades(DB_PATH, limit),
+        fetch_manager_trades=lambda limit: _fetch_manager_trades(
+            _V3ManagerRepository(lambda: _v3_connect_state(_V3_CONFIG, read_only=True)), limit
+        ),
         fetch_manager_trade=lambda signal_id, limit: _fetch_manager_trade(
-            DB_PATH, signal_id, limit
+            _V3ManagerRepository(lambda: _v3_connect_state(_V3_CONFIG, read_only=True)),
+            signal_id, limit
         ),
         format_manager_dashboard=_format_manager_dashboard,
         format_manager_trade_detail=_format_manager_trade_detail,
