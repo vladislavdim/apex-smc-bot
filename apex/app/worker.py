@@ -145,6 +145,8 @@ from apex.manager.engine import (
     configure_manager_state as _configure_manager_state,
     telegram_content_hash as _telegram_content_hash,
     confirm_manager_action as _confirm_manager_action,
+    validate_transition as _validate_manager_transition,
+    confirm_v2_reconciliation as _confirm_v2_reconciliation,
 )
 from core.apex_v2 import (
     ensure_apex_v2_schema as _ensure_apex_v2_schema,
@@ -214,7 +216,11 @@ try:
         execute_manager_review as _execute_manager_review,
     )
     _TRADE_EXECUTION_OK = True
-    _configure_manager_confirmation(_confirm_manager_action)
+    _configure_manager_confirmation(
+        _confirm_manager_action,
+        transition_validator=_validate_manager_transition,
+        reconciliation_callback=_confirm_v2_reconciliation,
+    )
 except Exception as _trade_execution_import_error:
     _TRADE_EXECUTION_OK = False
     logging.error("Optional trade execution unavailable: %s", _trade_execution_import_error)
