@@ -1,18 +1,12 @@
 """Bounded Groq critique gate for immutable candidates.
 
-Groq may critique/approve/reject a setup, but Candidate geometry is immutable
-and must be identical before and after the critique call.
+Groq may critique a setup, but Candidate geometry is immutable.
 """
 from __future__ import annotations
 from apex.domain.models import Candidate
-
 Geometry=tuple[float,float,float,float,float|None,float]
-
 def geometry(candidate:Candidate)->Geometry:
     return (candidate.entry,candidate.initial_sl,candidate.tp1,candidate.tp2,candidate.tp3,candidate.rr)
-
 def assert_geometry_unchanged(candidate:Candidate,before:Geometry)->None:
-    if geometry(candidate)!=before:
-        raise RuntimeError("GROQ_GEOMETRY_MUTATION_FORBIDDEN")
-
+    if geometry(candidate)!=before: raise RuntimeError("GROQ_GEOMETRY_MUTATION_FORBIDDEN")
 __all__=["Geometry","assert_geometry_unchanged","geometry"]
