@@ -716,9 +716,12 @@ def emit_dashboard_snapshot(db_path: str = DB_PATH, *, require_state: bool = Fal
     try:
         from core.setup_audit import emit_event
         snap = dashboard_snapshot(db_path, require_state=require_state)
+        if require_state:
+            snap["telemetry_schema"] = "APEX_V3"
         release = str((snap.get("versions") or {}).get("release_sha") or "unknown")
-        key = f"apex-v2:{release}:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
-        emit_event("apex_v2_snapshot", "SYSTEM", "", snap, event_key=key)
+        kind = "apex_v3_snapshot" if require_state else "apex_v2_snapshot"
+        key = f"{kind}:{release}:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
+        emit_event(kind, "SYSTEM", "", snap, event_key=key)
         return True
     except Exception as exc:
         logging.error("[Dashboard] State snapshot unavailable: %s", type(exc).__name__)

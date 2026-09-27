@@ -159,6 +159,24 @@ class DashboardProductionSourceTests(unittest.TestCase):
         self.assertEqual(result["versions"]["apex_version"], "2.0")
         self.assertEqual(result["opportunity_review"]["counts"]["TARGET_ALREADY_PASSED"], 1)
 
+    def test_dashboard_switches_to_newer_state_owned_v3_snapshot(self):
+        from apex.ui.dashboard import server as stats_server
+        events = [
+            {"event_key": "old", "kind": "apex_v2_snapshot", "strategy": "SYSTEM",
+             "symbol": "", "occurred_at": "2026-09-08T08:00:00+00:00",
+             "payload": {"execution_health": {"source": "LEGACY"},
+                         "manager_db": {"source": "LEGACY"}}},
+            {"event_key": "new", "kind": "apex_v3_snapshot", "strategy": "SYSTEM",
+             "symbol": "", "occurred_at": "2026-09-08T08:01:00+00:00",
+             "payload": {"telemetry_schema": "APEX_V3",
+                         "execution_health": {"source": "APEX_STATE_DB"},
+                         "manager_db": {"source": "APEX_STATE_DB"}}},
+        ]
+        with patch.object(stats_server, "_fetch", return_value=events):
+            result = stats_server._build_dashboard_uncached()
+        self.assertEqual(result["execution_health"]["source"], "APEX_STATE_DB")
+        self.assertEqual(result["manager_db"]["source"], "APEX_STATE_DB")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -122,6 +122,11 @@ class ProductionAuditFixTests(unittest.TestCase):
         self.assertEqual(snap["execution_health"]["source"], "APEX_STATE_DB")
         self.assertEqual(snap["execution_health"]["statuses"]["ENTRY_PENDING"], 1)
         self.assertEqual(snap["execution_health"]["account"]["wallet_balance"], 1000.0)
+        with patch.dict(os.environ, env, clear=False), patch("core.setup_audit.emit_event") as emit:
+            self.assertTrue(emit_dashboard_snapshot(self.compat_path, require_state=True))
+        self.assertEqual(emit.call_args.args[0], "apex_v3_snapshot")
+        self.assertEqual(emit.call_args.args[3]["telemetry_schema"], "APEX_V3")
+        self.assertEqual(emit.call_args.args[3]["manager_db"]["source"], "APEX_STATE_DB")
 
     def test_production_dashboard_rejects_missing_state_instead_of_legacy_fallback(self):
         with patch.dict(os.environ, {

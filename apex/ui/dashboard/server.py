@@ -303,7 +303,7 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
     if to_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", to_date): where.append("occurred_at < (%s::date + INTERVAL '1 day')"); params.append(to_date)
     # Market-data health is operational telemetry and must remain visible while
     # Strategy Lab is filtered to a concrete strategy.
-    operational = "'market_data','incident_snapshot','runtime_status','apex_v2_snapshot'"
+    operational = "'market_data','incident_snapshot','runtime_status','apex_v2_snapshot','apex_v3_snapshot'"
     if strategy: where.append(f"(strategy=%s OR kind IN ({operational}))"); params.append(strategy.upper())
     if symbol: where.append(f"(symbol=%s OR kind IN ({operational}))"); params.append(symbol.upper())
     conn = _connect()
@@ -493,7 +493,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
     if active_release:
         events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
     attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]; market_data_events=[]; ltf_watch_events=[]
-    manager_events=[]; apex_v2_snapshots=[]; incident_snapshots=[]
+    manager_events=[]; operational_snapshots=[]; incident_snapshots=[]
     for e in events:
         p=e["payload"]; key=str(p.get("attempt_key") or "")
         if e["kind"]=="attempt":
@@ -505,7 +505,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         elif e["kind"]=="market_data": market_data_events.append({**p,"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
         elif e["kind"]=="ltf_watch": ltf_watch_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
         elif e["kind"]=="manager_event": manager_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
-        elif e["kind"]=="apex_v2_snapshot": apex_v2_snapshots.append({**p,"occurred_at":e["occurred_at"]})
+        elif e["kind"] in {"apex_v2_snapshot", "apex_v3_snapshot"}:
+            operational_snapshots.append({**p,"occurred_at":e["occurred_at"]})
         elif e["kind"]=="incident_snapshot": incident_snapshots.append({**p,"occurred_at":e["occurred_at"]})
     joined=[]
     for a in attempts:
@@ -765,8 +766,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         funnel["pending_ltf_attempts"] = funnel.get("pending_ltf", 0)
         funnel["pending_ltf"] = sum(str(x.get("strategy", "")).upper() == funnel["strategy"] for x in ltf_rows)
 
-    # Dashboard V2 joins the complete control path without being able to alter it.
-    latest_v2 = max(apex_v2_snapshots, key=lambda x: x.get("occurred_at", ""), default={})
+    # The latest worker-authored snapshot wins during the web-first rollout.
+    latest_v2 = max(operational_snapshots, key=lambda x: x.get("occurred_at", ""), default={})
     manager_actions = Counter()
     manager_states = Counter()
     groq_manager_calls = 0
