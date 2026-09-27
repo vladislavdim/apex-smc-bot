@@ -55,7 +55,10 @@ def test_dashboard_has_exact_production_tabs():
 
 
 def test_execution_protection_transition():
-    from apex.execution.protection import ProtectionState, request_protection, protection_submitted, protection_confirmed
-    state = request_protection(ProtectionState(100.0), 101.0)
-    state = protection_submitted(state, "order-1")
-    assert protection_confirmed(state).confirmed_stop == 101.0
+    from apex.domain.enums import Direction
+    from apex.execution.protection import ProtectionState, propose, request, new_stop_accepted, old_stop_cancelled
+    state = ProtectionState(Direction.LONG, 100.0, "old-order")
+    state = propose(state, 101.0, current_price=105.0, structural=True)
+    state = request(state)
+    state = new_stop_accepted(state, "order-1")
+    assert old_stop_cancelled(state).confirmed_stop == 101.0
