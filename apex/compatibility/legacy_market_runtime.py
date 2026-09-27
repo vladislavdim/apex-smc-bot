@@ -43,12 +43,6 @@ from apex.ui.groq_runtime import (
     _GROQ_DAILY_LIMIT, _tokens_available, _track_tokens,
     configure_legacy_strategy_groq, legacy_strategy_groq_enabled,
 )
-from apex.db.legacy_signal_persistence import (
-    LegacySignalPersistence, configure_signal_persistence, save_signal_db,
-)
-from apex.db.legacy_pending_signals import (
-    check_pending_signals, configure_pending_signal_monitor,
-)
 from apex.app.health_server import run_server
 from apex.db.compatibility_runtime import db_write_async, get_db_conn, start_db_writer
 from apex.market.time_estimate import get_estimated_time
@@ -113,36 +107,6 @@ except Exception as _session_clock_error:
     _fast_session = lambda *_args, **_kwargs: None
 
 try:
-    from signal_lifecycle import (
-        ACTIVE as _LIFECYCLE_ACTIVE,
-        CANCELLED as _LIFECYCLE_CANCELLED,
-        WAITING_ENTRY as _LIFECYCLE_WAITING,
-        activated_at_for as _lifecycle_activated_at_for,
-        barrier_hits as _lifecycle_barrier_hits,
-        entry_touched as _lifecycle_entry_touched,
-        mark_active as _lifecycle_mark_active,
-        mark_finished as _lifecycle_mark_finished,
-        register_waiting as _lifecycle_register_waiting,
-        state_for as _lifecycle_state_for,
-        touch as _lifecycle_touch,
-    )
-    _SIGNAL_LIFECYCLE_OK = True
-except Exception as _lifecycle_import_error:
-    _SIGNAL_LIFECYCLE_OK = False
-    _LIFECYCLE_ACTIVE = "active"
-    _LIFECYCLE_CANCELLED = "cancelled"
-    _LIFECYCLE_WAITING = "waiting_entry"
-    _lifecycle_activated_at_for = lambda *_args, **_kwargs: None
-    _lifecycle_register_waiting = lambda *_args, **_kwargs: None
-    _lifecycle_state_for = None
-    _lifecycle_touch = None
-    _lifecycle_entry_touched = None
-    _lifecycle_mark_active = None
-    _lifecycle_barrier_hits = None
-    _lifecycle_mark_finished = None
-    logging.error("signal_lifecycle unavailable: %s", _lifecycle_import_error)
-
-try:
     from smc_engine import (
         get_candles_smart, multi_tf_analysis as _smc_multi_tf,
         find_swings as _smc_find_swings, classify_swings as _smc_classify_swings,
@@ -193,10 +157,6 @@ configure_legacy_strategy_groq(
     _APEX_CONFIG.integrations.legacy_strategy_groq
 )
 DB_PATH = _APEX_CONFIG.database.compatibility_db_path
-configure_signal_persistence(LegacySignalPersistence(
-    _connect_compatibility_db, DB_PATH, _lifecycle_register_waiting,
-    lifecycle_available=_SIGNAL_LIFECYCLE_OK,
-))
 TOKEN = _APEX_CONFIG.integrations.telegram_token
 ADMIN_IDS = list(_APEX_CONFIG.integrations.telegram_admin_ids)
 ADMIN_ID = ADMIN_IDS[0] if ADMIN_IDS else 0
@@ -609,27 +569,6 @@ def _emit_trade_stats_event(action, sig_id, symbol, signal_type, direction, entr
         _emit_stats_event("trade_event", strategy, symbol, payload, event_key=f"trade:{int(sig_id)}:{str(action).lower()}:{suffix}")
     except Exception as exc:
         logging.debug("[TradeStats] emit skipped for %s: %s", sig_id, exc)
-
-
-configure_pending_signal_monitor(
-    get_db_conn_fn=get_db_conn,
-    get_live_prices_fn=get_live_prices,
-    get_candles_fn=get_candles,
-    connector=_connect_compatibility_db,
-    database_path=DB_PATH,
-    lifecycle_available=_SIGNAL_LIFECYCLE_OK,
-    lifecycle_active=_LIFECYCLE_ACTIVE,
-    lifecycle_cancelled=_LIFECYCLE_CANCELLED,
-    lifecycle_waiting=_LIFECYCLE_WAITING,
-    lifecycle_state_for=_lifecycle_state_for,
-    lifecycle_activated_at_for=_lifecycle_activated_at_for,
-    lifecycle_touch=_lifecycle_touch,
-    lifecycle_entry_touched=_lifecycle_entry_touched,
-    lifecycle_mark_active=_lifecycle_mark_active,
-    lifecycle_barrier_hits=_lifecycle_barrier_hits,
-    lifecycle_mark_finished=_lifecycle_mark_finished,
-    emit_trade_stats_event=_emit_trade_stats_event,
-)
 
 
 # ===== TAVILY =====

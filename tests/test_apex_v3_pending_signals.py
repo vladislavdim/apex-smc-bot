@@ -2,7 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from apex.db.legacy_pending_signals import (
+from tests.legacy_pending_signals import (
     check_pending_signals,
     configure_pending_signal_monitor,
 )

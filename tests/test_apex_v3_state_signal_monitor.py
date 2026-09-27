@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta
 
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
-from apex.db.legacy_pending_signals import check_pending_signals, configure_pending_signal_monitor
+from tests.legacy_pending_signals import check_pending_signals, configure_pending_signal_monitor
 from apex.db.state_db import migrate_state
 from apex.strategies.state_signal_monitor import StateSignalMonitor
 from core.signal_lifecycle import (

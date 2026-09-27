@@ -468,8 +468,6 @@ class ApexV3RuntimeTests(unittest.TestCase):
             "def extract_and_save_profile(",
             "def _track_tokens(", "def _tokens_available(",
             "def legacy_strategy_groq_enabled(",
-            "def save_signal_db(",
-            "def check_pending_signals(",
             "def get_user_memory(", "def update_user_memory(",
             "def save_chat_log(", "def get_chat_history(",
             "def save_news(", "def get_recent_news(",
@@ -574,14 +572,8 @@ class ApexV3RuntimeTests(unittest.TestCase):
             "from apex.ui.groq_runtime import legacy_strategy_groq_enabled",
             strategy_bridge,
         )
-        self.assertIn(
-            "from apex.db.legacy_signal_persistence import save_signal_db",
-            strategy_bridge,
-        )
-        self.assertIn(
-            "from apex.db.legacy_pending_signals import check_pending_signals",
-            strategy_bridge,
-        )
+        self.assertNotIn("save_signal_db", strategy_bridge)
+        self.assertNotIn("check_pending_signals", strategy_bridge)
         self.assertIn("from apex.ui.price_alerts import check_alerts", strategy_bridge)
         transport_bridge = Path(
             "apex", "compatibility", "market_transport.py"
