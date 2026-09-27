@@ -123,6 +123,7 @@ from apex.compatibility.market_strategy import (
     legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
 )
 from apex.strategies.common import fast_session
+from apex.strategies.pending_thesis import has_pending_thesis as _v3_has_pending_thesis
 from apex.ui.telegram.trades import fetch_live_trades as _fetch_trade_view_rows
 from apex.ui.telegram.trades import format_trade_view as _format_trade_view
 from apex.ui.telegram.manager import (
@@ -1148,21 +1149,25 @@ def _persist_delivered_signal(sd: dict):
     return signal_id
 
 
-def _has_pending_signal_for_symbol(symbol: str) -> bool:
-    """One active thesis per pair, without imposing a weekly trade quota."""
-    if not symbol:
-        return False
+def _has_pending_signal_for_symbol(symbol: str) -> bool | None:
+    """UNKNOWN blocks entries until both ownership stores can be read."""
     try:
-        conn = _v3_connect_compatibility(DB_PATH, timeout=10, check_same_thread=False)
-        row = conn.execute(
-            "SELECT id FROM signals WHERE symbol=? AND result='pending' LIMIT 1",
-            (symbol,),
-        ).fetchone()
-        conn.close()
-        return bool(row)
+        pending = _v3_has_pending_thesis(
+            symbol,
+            lambda: _v3_connect_state(_V3_CONFIG, read_only=True),
+            lambda: _v3_connect_compatibility(DB_PATH, read_only=True),
+        )
     except Exception as exc:
-        logging.warning("[SignalArbiter] pending-position check failed: %s", exc)
-        return False
+        logging.error("[SignalArbiter] pair ownership unavailable: %s", exc)
+        _V3_RUNTIME.inhibit_entries("PAIR_OWNERSHIP_UNAVAILABLE")
+        _v3_report_incident(
+            "PAIR_OWNERSHIP_UNAVAILABLE", "state_db", "CRITICAL",
+            {"error_type": type(exc).__name__},
+        )
+        return None
+    _V3_RUNTIME.clear_inhibit("PAIR_OWNERSHIP_UNAVAILABLE")
+    _v3_recover_incident("PAIR_OWNERSHIP_UNAVAILABLE", "state_db")
+    return pending
 
 
 from apex.db.repositories.deliveries import (
@@ -1213,13 +1218,15 @@ async def _send_signal(sd):
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
-    if not sd.get("_signal_id") and _has_pending_signal_for_symbol(sd.get("symbol", "")):
-        logging.info(
-            "[SignalArbiter] %s blocked: an existing pending thesis already owns the pair",
-            sd.get("symbol"),
-        )
-        _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
-        return False
+    if not sd.get("_signal_id"):
+        pending_thesis = _has_pending_signal_for_symbol(sd.get("symbol", ""))
+        if pending_thesis is None:
+            _record_strategy_decision(sd, "WAIT", "arbiter", "pair ownership unavailable", db_path=DB_PATH)
+            return False
+        if pending_thesis:
+            logging.info("[SignalArbiter] %s blocked: pending thesis owns the pair", sd.get("symbol"))
+            _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
+            return False
     setup_assessment = _assess_setup_candidate(sd)
     sd["setup_assessment"] = setup_assessment
     await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "TECHNICAL", DB_PATH)
