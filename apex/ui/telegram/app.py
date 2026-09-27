@@ -1,10 +1,5 @@
-"""Canonical Telegram application boundary.
-Transport only: no trading decision authority lives here.
+"""Telegram application boundary.
+Transport/presentation only; trading authority remains outside UI.
 """
-from apex.ui.telegram.router import (
-    COMMAND_ROUTES,
-    TelegramHandlers,
-    register_handlers,
-    register_telegram_handlers,
-)
-__all__=["COMMAND_ROUTES","TelegramHandlers","register_handlers","register_telegram_handlers"]
+from apex.ui.telegram.router import TelegramHandlers,register_telegram_handlers,register_handlers
+__all__=["TelegramHandlers","register_handlers","register_telegram_handlers"]
