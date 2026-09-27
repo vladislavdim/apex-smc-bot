@@ -1,6 +1,3 @@
-"""Telegram application boundary.
-Transport only: this module must never own trading decisions.
-"""
-from apex.ui.telegram.router import TelegramHandlers,register_telegram_handlers
-register_handlers=register_telegram_handlers
-__all__=["TelegramHandlers","register_handlers","register_telegram_handlers"]
+"""Telegram application boundary; transport only, never trading authority."""
+from apex.ui.telegram.router import COMMAND_ROUTES,TelegramHandlers,register_handlers,register_telegram_handlers
+__all__=["COMMAND_ROUTES","TelegramHandlers","register_handlers","register_telegram_handlers"]
