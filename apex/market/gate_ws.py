@@ -1,8 +1,9 @@
 """Gate websocket market-data boundary.
-This protocol is market-data only and cannot submit exchange orders.
+
+Market transport only; order execution is intentionally absent.
 """
 from __future__ import annotations
-from typing import Protocol,AsyncIterator,Mapping,Any
+from typing import Any,AsyncIterator,Protocol
 class GateMarketStream(Protocol):
-    def candles(self,symbol:str,timeframe:str)->AsyncIterator[Mapping[str,Any]]: ...
+    def candles(self,symbol:str,timeframe:str)->AsyncIterator[Any]: ...
 __all__=["GateMarketStream"]
