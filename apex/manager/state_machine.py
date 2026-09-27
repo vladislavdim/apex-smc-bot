@@ -24,3 +24,10 @@ def confirm_closed(state:ManagerState)->ManagerState:
     return replace(state,status=ManagerStatus.CLOSED) if state.status is ManagerStatus.CLOSING else state
 def require_reconcile(state:ManagerState)->ManagerState:return replace(state,status=ManagerStatus.RECONCILE_REQUIRED)
 __all__=["ManagerState","ManagerStatus","activate","begin_close","confirm_closed","confirm_tp1","require_reconcile"]
+
+# Temporary import-compatibility surface. Protection ownership remains in Execution.
+from apex.execution.protection import (
+    ProtectionState, ProtectionStatus, new_stop_accepted, old_stop_cancelled,
+    propose, reconcile_exchange_stop, replacement_uncertain, request,
+)
+__all__ += ["ProtectionState","ProtectionStatus","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
