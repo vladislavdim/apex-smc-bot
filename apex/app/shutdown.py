@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from apex.ops.graceful_shutdown import GracefulShutdown
 
 Hook = Callable[..., Any]
-
 
 @dataclass(frozen=True)
 class ShutdownDependencies:
@@ -20,48 +19,42 @@ class ShutdownDependencies:
     backup: Hook | None = None
     stop_market: Hook | None = None
 
-
 async def _call(hook: Hook | None, *args: Any, **kwargs: Any) -> Any:
     if hook is None:
         return None
     value = hook(*args, **kwargs)
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
+    return await value if inspect.isawaitable(value) else value
 
 async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
-    """Stop producers, persist state, record shutdown, then release fencing.
+    """Fence entries immediately, release the production lease, then clean up.
 
-    The lease is deliberately released last so a replacement instance cannot
-    become READY while this instance is still writing its final checkpoint.
-    Every step is best-effort, but the runtime is fenced from new entries first.
+    Shutdown is deliberately best-effort: failure of fencing release, final
+    persistence, the shutdown marker, or market cleanup must not prevent the
+    remaining cleanup steps from running during SIGTERM.
     """
     why = str(reason or "shutdown")[:500]
     try:
-        deps.runtime.inhibit_entries("SHUTDOWN_IN_PROGRESS")
+        deps.runtime.inhibit_entries("GRACEFUL_SHUTDOWN")
     except Exception:
         pass
 
-    first_error: BaseException | None = None
+    # Release first after local entry fencing so a rolling replacement is not
+    # held behind cleanup that can include a slow remote persistence call.
     for hook, args, kwargs in (
-        (deps.stop_market, (), {}),
-        (deps.backup, ("shutdown",), {}),
-        (deps.record_shutdown, (deps.state_db_path, why), {"instance_id": deps.instance_id}),
         (deps.release_lease, (), {}),
+        (deps.backup, ("render_sigterm",), {}),
+        (deps.record_shutdown, (deps.state_db_path, why), {"instance_id": deps.instance_id}),
+        (deps.stop_market, (), {}),
     ):
         try:
             await _call(hook, *args, **kwargs)
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
+        except BaseException:
+            # Process termination must continue through every cleanup hook.
+            continue
 
     try:
         deps.runtime.deactivate()
     except Exception:
         pass
-    if first_error is not None:
-        raise first_error
-
 
 __all__ = ["GracefulShutdown", "ShutdownDependencies", "shutdown_production"]
