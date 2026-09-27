@@ -12,6 +12,8 @@ from .repositories.signal_lifecycle import SignalLifecycleRepository, SignalLife
 _MARKER = "signal_lifecycle_legacy_import_v1"
 _FIELDS = (
     "symbol", "status", "result", "activated_at", "last_checked_at", "closed_at", "cancel_reason",
+    "direction", "signal_type", "timeframe", "entry", "sl", "tp1", "tp2", "tp3",
+    "estimated_hours", "grade", "tp1_hit", "trailing_sl", "best_price", "confluence", "regime",
 )
 
 
@@ -42,7 +44,14 @@ def _projection(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     checked_expr = life_expr("last_checked_at") if lifecycle else "NULL"
     cancel_expr = life_expr("cancel_reason") if lifecycle else "NULL"
     join = " LEFT JOIN signal_execution_state x ON x.signal_id=s.id" if lifecycle else ""
+    signal_facts = ",".join(
+        f"{signal_expr(field)} AS {field}" for field in (
+            "direction", "signal_type", "timeframe", "entry", "sl", "tp1", "tp2", "tp3",
+            "estimated_hours", "grade", "tp1_hit", "trailing_sl", "best_price", "confluence", "regime",
+        )
+    )
     query = f"""SELECT s.id AS signal_id,{signal_expr('symbol')} AS symbol,{result_expr} AS result,
+                       {signal_facts},
                        {created_expr} AS signal_created_at,{status_expr} AS status,
                        {activated_expr} AS activated_at,{checked_expr} AS last_checked_at,
                        {closed_expr} AS closed_at,{cancel_expr} AS cancel_reason,
@@ -53,6 +62,8 @@ def _projection(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     for raw in rows:
         row = dict(raw)
         row["symbol"] = str(row.get("symbol") or "").upper() or None
+        for field in ("direction", "signal_type"):
+            row[field] = str(row.get(field) or "").upper() or None
         signal_result = str(row.get("result") or "pending").lower()
         status = str(row.get("status") or "").lower()
         if not status:

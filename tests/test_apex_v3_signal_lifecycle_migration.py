@@ -21,13 +21,19 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             legacy.executescript("""
                 CREATE TABLE signals(
                     id INTEGER PRIMARY KEY,result TEXT,created_at TEXT,closed_at TEXT,
-                    symbol TEXT
+                    symbol TEXT,direction TEXT,signal_type TEXT,timeframe TEXT,
+                    entry REAL,sl REAL,tp1 REAL,tp2 REAL,tp3 REAL,estimated_hours REAL,
+                    grade TEXT,tp1_hit INTEGER,trailing_sl REAL,best_price REAL,
+                    confluence REAL,regime TEXT
                 );
                 CREATE TABLE signal_execution_state(
                     signal_id INTEGER PRIMARY KEY,status TEXT,activated_at TEXT,
                     last_checked_at TEXT,closed_at TEXT,cancel_reason TEXT
                 );
-                INSERT INTO signals VALUES(7,'pending','2026-09-01',NULL,'BTCUSDT');
+                INSERT INTO signals VALUES(
+                    7,'pending','2026-09-01',NULL,'BTCUSDT','bullish','mtf','1h',
+                    100,95,110,120,130,72,'A',0,NULL,NULL,8,'TREND'
+                );
                 INSERT INTO signal_execution_state VALUES(
                     7,'waiting_entry',NULL,'2026-09-01T01:00:00',NULL,NULL
                 );
@@ -44,6 +50,14 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             self.assertTrue(signal_lifecycle_parity_report(
                 legacy_factory, state_factory,
             )["ok"])
+            state = state_factory()
+            self.assertEqual(
+                state.execute(
+                    "SELECT direction,entry,sl,tp1,tp2,tp3,signal_type FROM signal_lifecycle WHERE signal_id=7"
+                ).fetchone(),
+                ("BULLISH", 100, 95, 110, 120, 130, "MTF"),
+            )
+            state.close()
             state = state_factory()
             state.execute(
                 """INSERT INTO signal_lifecycle(signal_entity_id,signal_id,status,result,symbol)
@@ -75,6 +89,11 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
                 "signal:7:symbol",
                 signal_lifecycle_parity_report(legacy_factory, state_factory)["mismatches"],
             )
+            with self.assertRaisesRegex(SignalLifecycleStateError, "geometry_conflict:symbol"):
+                import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
+            state = state_factory()
+            state.execute("UPDATE signal_lifecycle SET symbol='BTCUSDT' WHERE signal_id=7")
+            state.commit(); state.close()
             import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
             self.assertEqual(
                 SignalLifecycleRepository(state_factory).require_pending_for_execution(
@@ -85,6 +104,15 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
                 SignalLifecycleRepository(state_factory).require_pending_for_execution(
                     7, "ETHUSDT"
                 )
+
+            legacy = legacy_factory()
+            legacy.execute("UPDATE signals SET entry=101 WHERE id=7")
+            legacy.commit(); legacy.close()
+            with self.assertRaisesRegex(SignalLifecycleStateError, "geometry_conflict:entry"):
+                import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
+            legacy = legacy_factory()
+            legacy.execute("UPDATE signals SET entry=100 WHERE id=7")
+            legacy.commit(); legacy.close()
 
             legacy = legacy_factory()
             legacy.execute(

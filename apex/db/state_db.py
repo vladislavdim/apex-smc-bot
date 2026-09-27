@@ -748,6 +748,18 @@ def _migration_021(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_022(conn: sqlite3.Connection) -> None:
+    """Retain the immutable delivered signal and analytical monitor state."""
+    for column, kind in (
+        ("direction", "TEXT"), ("signal_type", "TEXT"), ("timeframe", "TEXT"),
+        ("entry", "REAL"), ("sl", "REAL"), ("tp1", "REAL"),
+        ("tp2", "REAL"), ("tp3", "REAL"), ("estimated_hours", "REAL"),
+        ("grade", "TEXT"), ("tp1_hit", "INTEGER"), ("trailing_sl", "REAL"),
+        ("best_price", "REAL"), ("confluence", "REAL"), ("regime", "TEXT"),
+    ):
+        conn.execute(f"ALTER TABLE signal_lifecycle ADD COLUMN {column} {kind}")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -770,6 +782,7 @@ STATE_MIGRATIONS = (
     Migration(19, "typed_execution_ledger_signal_identity", _migration_019),
     Migration(20, "canonical_typed_signal_relationships", _migration_020),
     Migration(21, "signal_lifecycle_pair_projection", _migration_021),
+    Migration(22, "delivered_signal_state_projection", _migration_022),
 )
 
 
