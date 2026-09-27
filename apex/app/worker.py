@@ -182,7 +182,7 @@ from core.telegram_dashboard import (
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
 try:
-    from core.signal_quality_gate import review_signal_candidate as _review_signal_candidate
+    from apex.quality.groq_gate import review_signal_candidate as _review_signal_candidate
     _SIGNAL_QUALITY_GATE_OK = True
 except Exception as _quality_gate_import_error:
     _SIGNAL_QUALITY_GATE_OK = False
