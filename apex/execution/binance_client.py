@@ -1,9 +1,8 @@
-"""Binance execution client protocol.
-Only the execution layer may implement/use this order-submission boundary.
+"""Canonical Binance execution client surface.
+
+Implementation remains co-located with order orchestration during the cutover,
+but application/runtime code imports the client only through this Execution
+boundary. No strategy, Manager, Learning or UI module may submit orders.
 """
-from __future__ import annotations
-from typing import Protocol,Any
-class BinanceExecutionClient(Protocol):
-    async def place_order(self,**params:Any)->Any: ...
-    async def cancel_order(self,**params:Any)->Any: ...
-__all__=["BinanceExecutionClient"]
+from apex.execution.orders import BinanceAPIError, BinanceFuturesClient, ExecutionConfig
+__all__=["BinanceAPIError","BinanceFuturesClient","ExecutionConfig"]
