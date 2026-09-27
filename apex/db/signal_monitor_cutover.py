@@ -16,8 +16,8 @@ def sync_state_monitor_projection(
 ) -> int:
     """Replay State-owned monitor progress before any legacy-to-State refresh.
 
-    A missing compatibility identity blocks cutover; this projection cannot
-    invent a delivered signal or an exchange position.
+    Only State-origin signals can create a missing compatibility identity.
+    Missing historical identities fail closed.
     """
     state = state_factory()
     try:
@@ -34,9 +34,39 @@ def sync_state_monitor_projection(
         legacy.execute("BEGIN IMMEDIATE")
         for row in rows:
             signal_id = int(row["signal_id"])
-            exists = legacy.execute("SELECT 1 FROM signals WHERE id=?", (signal_id,)).fetchone()
+            exists = legacy.execute(
+                """SELECT symbol,direction,signal_type,timeframe,entry,sl,tp1,tp2,tp3,
+                          estimated_hours,grade FROM signals WHERE id=?""", (signal_id,)
+            ).fetchone()
             if not exists:
-                raise SignalMonitorProjectionError(f"signal_monitor_legacy_identity_missing:{signal_id}")
+                if row["source"] != "state":
+                    raise SignalMonitorProjectionError(f"signal_monitor_legacy_identity_missing:{signal_id}")
+                conflicting = legacy.execute(
+                    "SELECT id FROM signals WHERE UPPER(symbol)=? AND result='pending' LIMIT 1",
+                    (row["symbol"],),
+                ).fetchone()
+                if conflicting:
+                    raise SignalMonitorProjectionError(f"signal_monitor_pair_conflict:{signal_id}")
+                legacy.execute(
+                    """INSERT INTO signals(
+                        id,symbol,direction,signal_type,timeframe,entry,sl,tp1,tp2,tp3,
+                        estimated_hours,grade,confluence,regime,created_at,result,
+                        closed_at,tp1_hit,trailing_sl,best_price
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (signal_id, *(row[field] for field in (
+                        "symbol", "direction", "signal_type", "timeframe", "entry", "sl",
+                        "tp1", "tp2", "tp3", "estimated_hours", "grade", "confluence",
+                        "regime", "created_at", "result", "closed_at", "tp1_hit",
+                        "trailing_sl", "best_price",
+                    ))),
+                )
+            elif row["source"] == "state":
+                facts = (
+                    "symbol", "direction", "signal_type", "timeframe", "entry", "sl",
+                    "tp1", "tp2", "tp3", "estimated_hours", "grade",
+                )
+                if any(exists[index] != row[field] for index, field in enumerate(facts)):
+                    raise SignalMonitorProjectionError(f"signal_monitor_identity_conflict:{signal_id}")
             legacy.execute(
                 """UPDATE signals SET result=?,closed_at=?,tp1_hit=?,trailing_sl=?,best_price=?
                    WHERE id=?""",

@@ -768,6 +768,14 @@ def _migration_023(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_024(conn: sqlite3.Connection) -> None:
+    """Distinguish native State signals from historical compatibility rows."""
+    conn.execute(
+        "ALTER TABLE signal_lifecycle ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy' "
+        "CHECK(source IN ('legacy','state'))"
+    )
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -792,6 +800,7 @@ STATE_MIGRATIONS = (
     Migration(21, "signal_lifecycle_pair_projection", _migration_021),
     Migration(22, "delivered_signal_state_projection", _migration_022),
     Migration(23, "signal_monitor_state_ownership", _migration_023),
+    Migration(24, "signal_lifecycle_state_creation", _migration_024),
 )
 
 

@@ -120,7 +120,7 @@ from apex.compatibility.market_strategy import (
     detect_rsi_macd_divergence, detect_swing_setup,
     detect_wyckoff_distribution, detect_wyckoff_reaccumulation,
     detect_wyckoff_spring, detect_zone_setup,
-    legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
+    legacy_strategy_groq_enabled, register_raw_scan_handler,
 )
 from apex.strategies.common import fast_session
 from apex.strategies.pending_thesis import has_pending_thesis as _v3_has_pending_thesis
@@ -293,6 +293,7 @@ from apex.db.signal_lifecycle_migration import (
     signal_lifecycle_parity_report as _v3_signal_lifecycle_parity_report,
 )
 from apex.db.signal_monitor_cutover import sync_state_monitor_projection as _v3_sync_state_signal_monitor
+from apex.db.state_signal_persistence import StateSignalPersistence as _V3StateSignalPersistence
 from apex.db.repositories.runtime import RuntimeRepository as _V3RuntimeRepository
 from apex.db.repositories.manager import ManagerRepository as _V3ManagerRepository
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository as _V3SignalLifecycleRepository
@@ -1126,18 +1127,31 @@ def _persist_delivered_signal(sd: dict):
         "FAST": 1, "MTF": 72, "SWING": 12, "ZONE": 12,
         "WYCKOFF": 168, "MEGA": 336,
     }
-    result = save_signal_db(
-        sd.get("symbol"), sd.get("direction"), signal_type,
-        sd.get("entry"), sd.get("tp1", sd.get("tp")),
-        sd.get("tp2", sd.get("tp1", sd.get("tp"))),
-        sd.get("tp3", sd.get("tp2", sd.get("tp1", sd.get("tp")))),
-        sd.get("sl"), sd.get("timeframe", "1h"),
-        sd.get("estimated_hours", default_hours.get(signal_type, 72)),
-        sd.get("grade", signal_type),
-        confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
-        regime=sd.get("regime", signal_type) or signal_type,
-    )
-    signal_id = result[0] if isinstance(result, tuple) else result
+    try:
+        _v3_sync_signal_lifecycle()
+        signal_id = _V3StateSignalPersistence(
+            lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+            lambda: _v3_connect_state(_V3_CONFIG),
+            _V3_LIVE_BRIDGE.release_sha,
+        ).save(
+            sd.get("symbol"), sd.get("direction"), signal_type,
+            sd.get("entry"), sd.get("tp1", sd.get("tp")),
+            sd.get("tp2", sd.get("tp1", sd.get("tp"))),
+            sd.get("tp3", sd.get("tp2", sd.get("tp1", sd.get("tp")))),
+            sd.get("sl"), sd.get("timeframe", "1h"),
+            sd.get("estimated_hours", default_hours.get(signal_type, 72)),
+            sd.get("grade", signal_type),
+            confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
+            regime=sd.get("regime", signal_type) or signal_type,
+        )
+    except Exception as exc:
+        logging.exception("[APEX V3] State signal persistence requires reconcile")
+        _V3_RUNTIME.inhibit_entries(_V3_LIFECYCLE_CUTOVER.inhibit_code)
+        _v3_report_incident(
+            _V3_LIFECYCLE_CUTOVER.inhibit_code, "state_db", "CRITICAL",
+            {"error_type": type(exc).__name__},
+        )
+        return None
     if signal_id:
         sd["_signal_persisted"] = True
         sd["_signal_id"] = signal_id
