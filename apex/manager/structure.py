@@ -1,3 +1,3 @@
-"""Manager read-only structural-analysis boundary."""
-from apex.market.structure import analyze_market_structure,detect_latest_structure_event,infer_structure_direction
-__all__=["analyze_market_structure","detect_latest_structure_event","infer_structure_direction"]
+"""Manager structural-analysis boundary over canonical closed-candle market structure."""
+from apex.market.structure import analyze_market_structure,detect_latest_structure_event
+__all__=["analyze_market_structure","detect_latest_structure_event"]
