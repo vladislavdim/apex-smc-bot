@@ -1,23 +1,55 @@
-"""Execution protection boundary.
+"""Exchange-confirmed protection state owned by Execution.
 
-Protection state belongs to Execution. Manager may request an eligible
-protection action, but confirmed exchange protection is represented here.
+Manager may propose/request an eligible protection action, but only Execution
+tracks the Binance-confirmed stop replacement lifecycle.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
+from enum import Enum
+from apex.domain.enums import Direction
+
+class ProtectionStatus(str,Enum):
+    CONFIRMED="CONFIRMED"
+    REQUESTED="REQUESTED"
+    STOP_REPLACEMENT_PENDING="STOP_REPLACEMENT_PENDING"
+    RECONCILE_REQUIRED="RECONCILE_REQUIRED"
 
 @dataclass(frozen=True)
 class ProtectionState:
-    position_id: str
-    confirmed_stop: float
-    order_id: str|None=None
+    direction:Direction
+    confirmed_stop:float
+    confirmed_order_id:str
+    proposed_stop:float|None=None
+    requested_stop:float|None=None
+    pending_order_id:str|None=None
+    old_order_id:str|None=None
+    status:ProtectionStatus=ProtectionStatus.CONFIRMED
 
-def improves_stop(*,direction:str,current_stop:float,proposed_stop:float,current_price:float)->bool:
-    side=str(direction).upper()
-    if side in {"LONG","BULLISH","BUY"}:
-        return current_stop < proposed_stop < current_price
-    if side in {"SHORT","BEARISH","SELL"}:
-        return current_price < proposed_stop < current_stop
-    return False
+def valid_stop_replacement(state:ProtectionState,level:float,*,current_price:float,structural:bool=True)->bool:
+    if not structural:return False
+    return state.confirmed_stop<level<current_price if state.direction is Direction.LONG else current_price<level<state.confirmed_stop
 
-__all__=["ProtectionState","improves_stop"]
+def propose(state:ProtectionState,level:float,*,current_price:float,structural:bool)->ProtectionState:
+    return replace(state,proposed_stop=level) if valid_stop_replacement(state,level,current_price=current_price,structural=structural) else state
+
+def request(state:ProtectionState)->ProtectionState:
+    if state.proposed_stop is None or state.status is not ProtectionStatus.CONFIRMED:return state
+    return replace(state,requested_stop=state.proposed_stop,proposed_stop=None,old_order_id=state.confirmed_order_id,status=ProtectionStatus.REQUESTED)
+
+def new_stop_accepted(state:ProtectionState,new_order_id:str)->ProtectionState:
+    if state.status is not ProtectionStatus.REQUESTED or not new_order_id:return state
+    return replace(state,pending_order_id=new_order_id,status=ProtectionStatus.STOP_REPLACEMENT_PENDING)
+
+def old_stop_cancelled(state:ProtectionState)->ProtectionState:
+    if state.status is not ProtectionStatus.STOP_REPLACEMENT_PENDING:return state
+    if state.requested_stop is None or state.pending_order_id is None:return replace(state,status=ProtectionStatus.RECONCILE_REQUIRED)
+    return ProtectionState(direction=state.direction,confirmed_stop=state.requested_stop,confirmed_order_id=state.pending_order_id)
+
+def replacement_uncertain(state:ProtectionState)->ProtectionState:
+    if state.status not in {ProtectionStatus.REQUESTED,ProtectionStatus.STOP_REPLACEMENT_PENDING}:return state
+    return replace(state,status=ProtectionStatus.RECONCILE_REQUIRED)
+
+def reconcile_exchange_stop(state:ProtectionState,*,stop:float,order_id:str)->ProtectionState:
+    return ProtectionState(direction=state.direction,confirmed_stop=float(stop),confirmed_order_id=str(order_id),status=ProtectionStatus.CONFIRMED)
+
+__all__=["ProtectionState","ProtectionStatus","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request","valid_stop_replacement"]
