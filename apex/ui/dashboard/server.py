@@ -27,6 +27,7 @@ import psycopg2.extras
 from apex.strategies.specifications import STRATEGY_CATALOG
 from apex.telemetry.dashboard_projection import normalize_incident_snapshot
 from apex.ui.dashboard.config import DashboardSettings
+from apex.ui.dashboard.auth import authorized
 
 _SETTINGS = DashboardSettings.from_env()
 DATABASE_URL = _SETTINGS.database_url
@@ -1278,7 +1279,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError,ConnectionResetError):
             return False
     def _auth(self,q):
-        supplied=(q.get("key") or [""])[0]; return bool(DASHBOARD_TOKEN and hmac.compare_digest(supplied,DASHBOARD_TOKEN))
+        supplied=(q.get("key") or [""])[0]; return authorized(supplied,DASHBOARD_TOKEN)
     def do_HEAD(self): self.send_response(200); self.end_headers()
     def do_GET(self):
         p=urlparse(self.path); q=parse_qs(p.query)
