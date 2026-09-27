@@ -47,3 +47,15 @@ def test_protection_owner_is_execution():
     source = Path("apex/execution/protection.py").read_text(encoding="utf-8")
     assert "class ProtectionState" in source
     assert "apex.manager" not in source
+
+
+def test_dashboard_has_exact_production_tabs():
+    from apex.ui.dashboard.api import PROJECTORS
+    assert tuple(PROJECTORS) == ("overview","strategies","trades","manager","execution","market","learning","health")
+
+
+def test_execution_protection_transition():
+    from apex.execution.protection import ProtectionState, request_protection, protection_submitted, protection_confirmed
+    state = request_protection(ProtectionState(100.0), 101.0)
+    state = protection_submitted(state, "order-1")
+    assert protection_confirmed(state).confirmed_stop == 101.0
