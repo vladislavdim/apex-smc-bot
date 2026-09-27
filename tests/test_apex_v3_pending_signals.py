@@ -65,6 +65,12 @@ class PendingSignalMonitorTests(unittest.TestCase):
             self.assertEqual(result, "sl")
             self.assertEqual(emitted[0][0][0], "CLOSE")
 
+            conn = sqlite3.connect(handle.name)
+            conn.execute("DROP TABLE signals")
+            conn.commit(); conn.close()
+            with self.assertRaises(sqlite3.OperationalError):
+                check_pending_signals()
+
 
 if __name__ == "__main__":
     unittest.main()
