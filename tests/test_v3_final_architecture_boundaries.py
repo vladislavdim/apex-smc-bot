@@ -25,7 +25,7 @@ def test_db_integrity_accepts_clean_sqlite():
     finally: conn.close()
 
 def test_risk_sizing_is_geometry_based_and_pure():
-    assert quantity_for_risk(1000,0.5,100,95)==1.0
+    assert quantity_for_risk(equity_quote=1000,risk_pct=0.5,entry=100,stop=95)==1.0
 
 def test_execution_protection_validates_request():
     request=StopProtectionRequest("position_1","BTCUSDT",90.0,0.1)
