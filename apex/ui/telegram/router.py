@@ -62,4 +62,7 @@ def register_telegram_handlers(
     dispatcher.message.register(handlers.text)
 
 
-# One canonical registration function; legacy/public name is an identity alias.\nregister_handlers = register_telegram_handlers\n\n__all__ = ["COMMAND_ROUTES", "TelegramHandlers", "register_handlers", "register_telegram_handlers"]
+# One canonical registration function; legacy/public name is an identity alias.
+register_handlers = register_telegram_handlers
+
+__all__ = ["COMMAND_ROUTES", "TelegramHandlers", "register_handlers", "register_telegram_handlers"]
