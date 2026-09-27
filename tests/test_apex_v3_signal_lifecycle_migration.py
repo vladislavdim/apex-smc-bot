@@ -18,13 +18,14 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             legacy = sqlite3.connect(legacy_path)
             legacy.executescript("""
                 CREATE TABLE signals(
-                    id INTEGER PRIMARY KEY,result TEXT,created_at TEXT,closed_at TEXT
+                    id INTEGER PRIMARY KEY,result TEXT,created_at TEXT,closed_at TEXT,
+                    symbol TEXT
                 );
                 CREATE TABLE signal_execution_state(
                     signal_id INTEGER PRIMARY KEY,status TEXT,activated_at TEXT,
                     last_checked_at TEXT,closed_at TEXT,cancel_reason TEXT
                 );
-                INSERT INTO signals VALUES(7,'pending','2026-09-01',NULL);
+                INSERT INTO signals VALUES(7,'pending','2026-09-01',NULL,'BTCUSDT');
                 INSERT INTO signal_execution_state VALUES(
                     7,'waiting_entry',NULL,'2026-09-01T01:00:00',NULL,NULL
                 );
@@ -41,6 +42,21 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             self.assertTrue(signal_lifecycle_parity_report(
                 legacy_factory, state_factory,
             )["ok"])
+            state = state_factory()
+            self.assertEqual(
+                state.execute("SELECT symbol FROM signal_lifecycle WHERE signal_id=7").fetchone(),
+                ("BTCUSDT",),
+            )
+            state.execute(
+                "UPDATE signal_lifecycle SET symbol='ETHUSDT' WHERE signal_id=7"
+            )
+            state.commit()
+            state.close()
+            self.assertIn(
+                "signal:7:symbol",
+                signal_lifecycle_parity_report(legacy_factory, state_factory)["mismatches"],
+            )
+            import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
 
             legacy = legacy_factory()
             legacy.execute(

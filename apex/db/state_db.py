@@ -739,6 +739,15 @@ def _migration_020(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_signal_lifecycle_status ON signal_lifecycle(status,updated_at DESC)")
 
 
+def _migration_021(conn: sqlite3.Connection) -> None:
+    """Project the pair on State lifecycle for pending-signal arbitration."""
+    conn.execute("ALTER TABLE signal_lifecycle ADD COLUMN symbol TEXT")
+    conn.execute(
+        "CREATE INDEX idx_signal_lifecycle_pair_status "
+        "ON signal_lifecycle(symbol,status)"
+    )
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -760,6 +769,7 @@ STATE_MIGRATIONS = (
     Migration(18, "typed_manager_signal_identity", _migration_018),
     Migration(19, "typed_execution_ledger_signal_identity", _migration_019),
     Migration(20, "canonical_typed_signal_relationships", _migration_020),
+    Migration(21, "signal_lifecycle_pair_projection", _migration_021),
 )
 
 

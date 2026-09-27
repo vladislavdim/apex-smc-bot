@@ -9,7 +9,7 @@ class PairOwnershipTests(unittest.TestCase):
     def setUp(self):
         self.state = sqlite3.connect(":memory:")
         self.state.execute("CREATE TABLE executions(signal_entity_id TEXT,symbol TEXT,mode TEXT,position_id TEXT)")
-        self.state.execute("CREATE TABLE signal_lifecycle(signal_entity_id TEXT,status TEXT)")
+        self.state.execute("CREATE TABLE signal_lifecycle(signal_entity_id TEXT,status TEXT,symbol TEXT)")
         self.legacy = sqlite3.connect(":memory:")
         self.legacy.execute("CREATE TABLE signals(symbol TEXT,result TEXT)")
 
@@ -30,13 +30,22 @@ class PairOwnershipTests(unittest.TestCase):
 
     def test_state_position_and_legacy_pending_each_block_duplicate(self):
         self.state.execute("INSERT INTO executions VALUES('signal_1','BTCUSDT','live','position_1')")
-        self.state.execute("INSERT INTO signal_lifecycle VALUES('signal_1','active')")
+        self.state.execute("INSERT INTO signal_lifecycle VALUES('signal_1','active','BTCUSDT')")
         self.assertTrue(self.check())
         self.state.execute("DELETE FROM executions")
         self.legacy.execute("INSERT INTO signals VALUES('BTCUSDT','pending')")
         self.assertTrue(self.check())
         self.legacy.execute("UPDATE signals SET result='tp1'")
+        self.assertTrue(self.check())
+        self.state.execute("UPDATE signal_lifecycle SET status='closed'")
         self.assertFalse(self.check())
+
+    def test_state_pending_without_execution_blocks_duplicate(self):
+        self.state.execute(
+            "INSERT INTO signal_lifecycle VALUES('signal_2','waiting_entry','ETHUSDT')"
+        )
+        self.assertTrue(self.check("ETHUSDT"))
+        self.assertFalse(self.check("BTCUSDT"))
 
     def test_unreadable_store_cannot_report_pair_free(self):
         self.state.execute("DROP TABLE executions")

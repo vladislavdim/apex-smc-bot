@@ -36,7 +36,7 @@ def test_migration_020_rebuilds_canonical_typed_relationships_with_data():
     )
     connection.commit()
 
-    assert migrate_state(connection) == (20,)
+    assert migrate_state(connection) == (20, 21)
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute(
         "SELECT signal_entity_id FROM executions WHERE signal_id=41"

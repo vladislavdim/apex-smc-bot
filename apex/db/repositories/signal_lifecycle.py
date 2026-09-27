@@ -48,14 +48,14 @@ class SignalLifecycleRepository:
             cursor = conn.execute(
                 """INSERT INTO signal_lifecycle(
                     signal_entity_id,signal_id,status,result,activated_at,last_checked_at,closed_at,
-                    cancel_reason,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),COALESCE(?,CURRENT_TIMESTAMP))
+                    cancel_reason,created_at,updated_at,symbol
+                ) VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),COALESCE(?,CURRENT_TIMESTAMP),?)
                 ON CONFLICT(signal_id) DO UPDATE SET
                     status=excluded.status,result=excluded.result,
                     activated_at=excluded.activated_at,
                     last_checked_at=excluded.last_checked_at,
                     closed_at=excluded.closed_at,cancel_reason=excluded.cancel_reason,
-                    updated_at=excluded.updated_at""",
+                    updated_at=excluded.updated_at,symbol=excluded.symbol""",
                 (
                     canonical, signal_id, status, result, values.get("activated_at"),
                     values.get("last_checked_at"), values.get("closed_at"),
@@ -63,6 +63,7 @@ class SignalLifecycleRepository:
                     values.get("created_at") or values.get("signal_created_at"),
                     values.get("updated_at") or values.get("last_checked_at")
                     or values.get("closed_at"),
+                    str(values.get("symbol") or "").upper() or None,
                 ),
             )
             conn.commit()
