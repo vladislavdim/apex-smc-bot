@@ -1,6 +1,5 @@
 """Gate websocket market-data boundary.
-
-Market transport only; order execution is intentionally absent.
+Scanning data only; this interface has no execution methods.
 """
 from __future__ import annotations
 from typing import Any,AsyncIterator,Protocol
