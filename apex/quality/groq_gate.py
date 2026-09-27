@@ -1,4 +1,4 @@
-"""Bounded Groq critique gate for immutable candidates."""
+"""Bounded Groq critique gate for immutable candidate geometry."""
 from __future__ import annotations
 from apex.domain.models import Candidate
 Geometry=tuple[float,float,float,float,float|None,float]
