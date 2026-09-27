@@ -760,6 +760,14 @@ def _migration_022(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE signal_lifecycle ADD COLUMN {column} {kind}")
 
 
+def _migration_023(conn: sqlite3.Connection) -> None:
+    """Fence State monitor progress from subsequent historical imports."""
+    conn.execute(
+        "ALTER TABLE signal_lifecycle ADD COLUMN ownership TEXT NOT NULL DEFAULT 'legacy' "
+        "CHECK(ownership IN ('legacy','state'))"
+    )
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -783,6 +791,7 @@ STATE_MIGRATIONS = (
     Migration(20, "canonical_typed_signal_relationships", _migration_020),
     Migration(21, "signal_lifecycle_pair_projection", _migration_021),
     Migration(22, "delivered_signal_state_projection", _migration_022),
+    Migration(23, "signal_monitor_state_ownership", _migration_023),
 )
 
 

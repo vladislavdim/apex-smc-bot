@@ -42,6 +42,14 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
                 (repository.get(11)["result"], repository.get(11)["entry"], repository.get(11)["trailing_sl"]),
                 ("tp2", 100.0, 102.0),
             )
+            self.assertEqual(repository.get(11)["ownership"], "state")
+            self.assertFalse(repository.import_row({
+                "signal_id": 11, "status": "waiting_entry", "result": "pending",
+                "symbol": "BTCUSDT", "direction": "BULLISH", "signal_type": "MTF",
+                "timeframe": "1h", "entry": 100, "sl": 95, "tp1": 110,
+                "tp2": 120, "tp3": 130,
+            }))
+            self.assertEqual(repository.get(11)["result"], "tp2")
             with self.assertRaisesRegex(SignalLifecycleStateError, "result_invalid"):
                 repository.advance_monitor(11, expected_status="active", transition="close", result="pending")
 

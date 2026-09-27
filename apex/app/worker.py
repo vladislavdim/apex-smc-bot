@@ -114,7 +114,7 @@ from apex.compatibility.market_data import (
     multi_tf_analysis, smart_price_fmt, smc_on_tf, update_global_candles,
 )
 from apex.compatibility.market_strategy import (
-    calc_smart_levels, check_alerts, check_entry_timing, check_pending_signals,
+    calc_smart_levels, check_alerts, check_entry_timing,
     check_session_liquidity, detect_breaker_block, detect_fast_deal,
     detect_market_regime_v2, detect_mm_accumulation,
     detect_rsi_macd_divergence, detect_swing_setup,
@@ -124,6 +124,8 @@ from apex.compatibility.market_strategy import (
 )
 from apex.strategies.common import fast_session
 from apex.strategies.pending_thesis import has_pending_thesis as _v3_has_pending_thesis
+from apex.strategies.state_signal_monitor import StateSignalMonitor as _V3StateSignalMonitor
+from apex.compatibility.legacy_market_runtime import _emit_trade_stats_event as _v3_emit_trade_stats_event
 from apex.ui.telegram.trades import fetch_live_trades as _fetch_trade_view_rows
 from apex.ui.telegram.trades import format_trade_view as _format_trade_view
 from apex.ui.telegram.manager import (
@@ -290,6 +292,7 @@ from apex.db.signal_lifecycle_migration import (
     import_legacy_signal_lifecycle as _v3_import_legacy_signal_lifecycle,
     signal_lifecycle_parity_report as _v3_signal_lifecycle_parity_report,
 )
+from apex.db.signal_monitor_cutover import sync_state_monitor_projection as _v3_sync_state_signal_monitor
 from apex.db.repositories.runtime import RuntimeRepository as _V3RuntimeRepository
 from apex.db.repositories.manager import ManagerRepository as _V3ManagerRepository
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository as _V3SignalLifecycleRepository
@@ -502,6 +505,10 @@ async def _v3_refresh_execution_ledger_mirror():
 
 
 def _v3_sync_signal_lifecycle():
+    _v3_sync_state_signal_monitor(
+        lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+        lambda: _v3_connect_state(_V3_CONFIG, read_only=True),
+    )
     return _v3_sync_cutover(
         _V3_LIFECYCLE_CUTOVER,
         lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
@@ -1559,7 +1566,13 @@ def _is_entry_still_valid(sig_data: dict, max_drift_pct: float = 2.0) -> bool:
 async def auto_scan_job():
     """Каждые 10 мин: проверка закрытых сделок"""
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
-    closed = await asyncio.to_thread(check_pending_signals)
+    await _v3_refresh_signal_lifecycle_mirror()
+    closed = await asyncio.to_thread(
+        _V3StateSignalMonitor(
+            _V3SignalLifecycleRepository(lambda: _v3_connect_state(_V3_CONFIG)),
+            get_live_prices, get_candles, _v3_emit_trade_stats_event,
+        ).check
+    )
     await _v3_refresh_signal_lifecycle_mirror()
     if closed:
         await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)

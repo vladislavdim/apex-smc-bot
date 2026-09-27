@@ -61,6 +61,9 @@ class SignalLifecycleRepository:
                 for field, value in facts.items():
                     if existing[field] is not None and value is not None and existing[field] != value:
                         raise SignalLifecycleStateError("signal_lifecycle_geometry_conflict:" + field)
+                if existing["ownership"] == "state":
+                    # Historical import must never roll a State outcome back.
+                    return False
             cursor = conn.execute(
                 """INSERT INTO signal_lifecycle(
                     signal_entity_id,signal_id,status,result,activated_at,last_checked_at,closed_at,
@@ -182,7 +185,8 @@ class SignalLifecycleRepository:
         conn = self._conn_factory()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            assignments = ["last_checked_at=CURRENT_TIMESTAMP", "updated_at=CURRENT_TIMESTAMP"]
+            assignments = ["last_checked_at=CURRENT_TIMESTAMP", "updated_at=CURRENT_TIMESTAMP",
+                           "ownership='state'"]
             parameters: list[Any] = []
             if transition == "activate":
                 assignments += ["status='active'", "activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP)"]

@@ -15,6 +15,10 @@ _FIELDS = (
     "direction", "signal_type", "timeframe", "entry", "sl", "tp1", "tp2", "tp3",
     "estimated_hours", "grade", "tp1_hit", "trailing_sl", "best_price", "confluence", "regime",
 )
+_IMMUTABLE_FIELDS = (
+    "symbol", "direction", "signal_type", "timeframe", "entry", "sl", "tp1",
+    "tp2", "tp3", "estimated_hours", "grade",
+)
 
 
 def _tables(conn: sqlite3.Connection) -> set[str]:
@@ -132,7 +136,8 @@ def signal_lifecycle_parity_report(
         if not set(source).issubset(target):
             mismatches.append("signal_identity_set")
         for signal_id in sorted(set(source) & set(target)):
-            for field in _FIELDS:
+            fields = _IMMUTABLE_FIELDS if target[signal_id]["ownership"] == "state" else _FIELDS
+            for field in fields:
                 if source[signal_id].get(field) != target[signal_id].get(field):
                     mismatches.append(f"signal:{signal_id}:{field}")
     finally:
