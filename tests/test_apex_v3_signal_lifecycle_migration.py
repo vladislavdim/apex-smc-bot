@@ -13,6 +13,38 @@ from apex.domain.ids import derived_id
 
 
 class SignalLifecycleMigrationTests(unittest.TestCase):
+    def test_state_monitor_transitions_are_restart_safe(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "state.db")
+            conn = sqlite3.connect(path); migrate_state(conn); conn.close()
+            factory = lambda: sqlite3.connect(path)
+            repository = SignalLifecycleRepository(factory)
+            repository.import_row({
+                "signal_id": 11, "status": "waiting_entry", "result": "pending",
+                "symbol": "BTCUSDT", "direction": "BULLISH", "signal_type": "MTF",
+                "timeframe": "1h", "entry": 100, "sl": 95, "tp1": 110,
+                "tp2": 120, "tp3": 130,
+            })
+            self.assertTrue(repository.advance_monitor(11, expected_status="waiting_entry", transition="activate"))
+            self.assertFalse(repository.advance_monitor(11, expected_status="waiting_entry", transition="activate"))
+            self.assertTrue(repository.advance_monitor(
+                11, expected_status="active", transition="progress",
+                tp1_hit=True, trailing_sl=102, best_price=111,
+            ))
+            self.assertTrue(repository.advance_monitor(
+                11, expected_status="active", transition="close", result="tp2",
+            ))
+            self.assertFalse(repository.advance_monitor(
+                11, expected_status="active", transition="close", result="sl",
+            ))
+            self.assertEqual(repository.pending_for_monitor(), [])
+            self.assertEqual(
+                (repository.get(11)["result"], repository.get(11)["entry"], repository.get(11)["trailing_sl"]),
+                ("tp2", 100.0, 102.0),
+            )
+            with self.assertRaisesRegex(SignalLifecycleStateError, "result_invalid"):
+                repository.advance_monitor(11, expected_status="active", transition="close", result="pending")
+
     def test_import_refresh_and_field_parity_are_restart_safe(self):
         with tempfile.TemporaryDirectory() as folder:
             legacy_path = os.path.join(folder, "legacy.db")
@@ -50,6 +82,11 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             self.assertTrue(signal_lifecycle_parity_report(
                 legacy_factory, state_factory,
             )["ok"])
+            pending = SignalLifecycleRepository(state_factory).pending_for_monitor()
+            self.assertEqual(
+                [(row["symbol"], row["entry"], row["sl"], row["tp1"]) for row in pending],
+                [("BTCUSDT", 100, 95, 110)],
+            )
             state = state_factory()
             self.assertEqual(
                 state.execute(
@@ -162,6 +199,8 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             state.execute("SELECT status,result FROM signal_lifecycle").fetchone(),
             ("active", "pending"),
         )
+        with self.assertRaisesRegex(SignalLifecycleStateError, "signal_monitor_incomplete:1"):
+            SignalLifecycleRepository(lambda: Proxy(state)).pending_for_monitor()
         legacy.close(); state.close()
 
 

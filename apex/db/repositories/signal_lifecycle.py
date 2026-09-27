@@ -130,6 +130,88 @@ class SignalLifecycleRepository:
             raise SignalLifecycleStateError("signal_lifecycle_not_ready_for_execution")
         return row
 
+    def pending_for_monitor(self) -> list[dict[str, Any]]:
+        """Read complete State-owned analytics inputs without legacy joins."""
+        conn = self._conn_factory()
+        original_row_factory = conn.row_factory
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = [dict(row) for row in conn.execute(
+                """SELECT * FROM signal_lifecycle WHERE result='pending'
+                   ORDER BY signal_id"""
+            ).fetchall()]
+            for row in rows:
+                required = (
+                    "symbol", "direction", "signal_type", "timeframe", "entry", "sl",
+                    "tp1", "tp2", "tp3", "created_at",
+                )
+                missing = [field for field in required if row.get(field) is None]
+                if missing or row.get("status") not in {"waiting_entry", "active"}:
+                    raise SignalLifecycleStateError(
+                        "signal_monitor_incomplete:" + str(row["signal_id"]) + ":" + ",".join(missing)
+                    )
+            return rows
+        finally:
+            conn.row_factory = original_row_factory
+            conn.close()
+
+    def advance_monitor(
+        self, signal_id: int, *, expected_status: str, transition: str,
+        result: str | None = None, reason: str | None = None,
+        tp1_hit: bool | None = None, trailing_sl: float | None = None,
+        best_price: float | None = None,
+    ) -> bool:
+        """Commit one analytical transition only while the expected State row is current."""
+        if transition not in {"touch", "activate", "progress", "close", "cancel"}:
+            raise SignalLifecycleStateError("signal_monitor_transition_invalid")
+        allowed = {
+            "touch": {"waiting_entry", "active"},
+            "activate": {"waiting_entry"},
+            "progress": {"active"},
+            "close": {"active"},
+            "cancel": {"waiting_entry"},
+        }
+        if expected_status not in allowed[transition]:
+            raise SignalLifecycleStateError("signal_monitor_status_invalid")
+        if transition in {"close", "cancel"} and (
+            not result or result == "pending" or (transition == "cancel" and result != "cancelled")
+        ):
+            raise SignalLifecycleStateError("signal_monitor_result_invalid")
+        if transition not in {"close", "cancel"} and result is not None:
+            raise SignalLifecycleStateError("signal_monitor_result_invalid")
+        conn = self._conn_factory()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            assignments = ["last_checked_at=CURRENT_TIMESTAMP", "updated_at=CURRENT_TIMESTAMP"]
+            parameters: list[Any] = []
+            if transition == "activate":
+                assignments += ["status='active'", "activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP)"]
+            elif transition in {"close", "cancel"}:
+                assignments += ["status=?", "result=?", "closed_at=CURRENT_TIMESTAMP", "cancel_reason=?"]
+                parameters += ["cancelled" if transition == "cancel" else "closed", result, reason]
+            elif transition == "progress":
+                if tp1_hit is not None:
+                    assignments.append("tp1_hit=?")
+                    parameters.append(int(tp1_hit))
+                if trailing_sl is not None:
+                    assignments.append("trailing_sl=?")
+                    parameters.append(float(trailing_sl))
+                if best_price is not None:
+                    assignments.append("best_price=?")
+                    parameters.append(float(best_price))
+            updated = conn.execute(
+                f"UPDATE signal_lifecycle SET {','.join(assignments)} "
+                "WHERE signal_id=? AND status=? AND result='pending'",
+                (*parameters, int(signal_id), expected_status),
+            ).rowcount
+            conn.commit()
+            return updated == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def get_many(self, signal_ids: list[int] | tuple[int, ...]) -> dict[int, dict[str, Any]]:
         ids = tuple(sorted({int(value) for value in signal_ids if int(value) > 0}))
         if not ids:
