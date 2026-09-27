@@ -41,7 +41,7 @@ async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
         "state marker", deps.record_shutdown, deps.state_db_path, reason,
         instance_id=deps.instance_id,
     )
-    await _best_effort("state backup", deps.backup, "render_sigterm")
+    try:\n        await deps.backup("render_sigterm")\n    except Exception as exc:\n        logging.warning("shutdown state backup failed safely: %s", exc)
     await _best_effort("market cleanup", deps.stop_market)
 
 
