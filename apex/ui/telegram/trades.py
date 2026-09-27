@@ -1,4 +1,7 @@
-"""Canonical Telegram views for active and completed APEX signals."""
+"""Canonical APEX V3 Telegram presentation module.
+
+Migrated from core/trade_views.py; presentation remains read-only and has no trading authority.
+"""
 
 from __future__ import annotations
 
