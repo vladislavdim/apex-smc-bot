@@ -1,51 +1,41 @@
-"""Fail-closed production shutdown composition for APEX V3."""
+"""Application-level graceful shutdown orchestration for APEX V3."""
 from __future__ import annotations
 
 import inspect
-import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+Hook = Callable[..., Any]
 
 @dataclass(frozen=True)
 class ShutdownDependencies:
     runtime: Any
     state_db_path: str
     instance_id: str
-    release_lease: Callable[[], Awaitable[Any]]
-    record_shutdown: Callable[..., Any]
-    backup: Callable[[str], Awaitable[Any]]
-    stop_market: Callable[[], Awaitable[Any]]
+    release_lease: Hook
+    record_shutdown: Hook
+    backup: Hook
+    stop_market: Hook | None = None
 
-
-async def _best_effort(label: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    try:
-        value = fn(*args, **kwargs)
-        if inspect.isawaitable(value):
-            await value
-    except Exception as exc:
-        logging.warning("shutdown %s failed safely: %s", label, exc)
-
+async def _await(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
 
 async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
-    """Fence entries first, then persist/release, always stopping market I/O."""
-    try:
-        inhibit = getattr(deps.runtime, "inhibit_entries", None)
-        if callable(inhibit):
-            inhibit("GRACEFUL_SHUTDOWN")
-    except Exception as exc:
-        logging.warning("shutdown entry fence failed safely: %s", exc)
+    """Fail closed, checkpoint state, release the lease, then deactivate runtime."""
+    deps.runtime.inhibit_entries("SHUTDOWN")
+    errors: list[Exception] = []
+    if deps.stop_market is not None:
+        try: await _await(deps.stop_market())
+        except Exception as exc: errors.append(exc)
+    try: await _await(deps.backup("shutdown"))
+    except Exception as exc: errors.append(exc)
+    try: await _await(deps.record_shutdown(deps.state_db_path, str(reason), instance_id=deps.instance_id))
+    except Exception as exc: errors.append(exc)
+    try: await _await(deps.release_lease())
+    except Exception as exc: errors.append(exc)
+    deps.runtime.clear_instance_lease()
+    deps.runtime.deactivate()
+    if errors:
+        raise RuntimeError("graceful_shutdown_failed:" + ",".join(type(e).__name__ for e in errors))
 
-    await _best_effort("lease release", deps.release_lease)
-    await _best_effort(
-        "state marker", deps.record_shutdown, deps.state_db_path, reason,
-        instance_id=deps.instance_id,
-    )
-    try:
-        await deps.backup("render_sigterm")
-    except Exception as exc:
-        logging.warning("shutdown state backup failed safely: %s", exc)
-    await _best_effort("market cleanup", deps.stop_market)
-
-
-__all__ = ["ShutdownDependencies", "shutdown_production"]
+__all__=["ShutdownDependencies","shutdown_production"]
