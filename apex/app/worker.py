@@ -3253,7 +3253,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
         conf_score = len(_positive_confluence) * 15
-        # save_signal_db вызывается ниже — только после проверки тайминга
+        # State-запись сигнала выполняется после проверки тайминга и доставки.
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 

@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
 from apex.db.signal_lifecycle_migration import (
@@ -72,6 +73,12 @@ class SignalMonitorCutoverTests(unittest.TestCase):
                          95, "1h", 72, "A")
             self.assertEqual(service.save(*arguments), 72)
             self.assertIsNone(service.save(*arguments))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(lambda _: service.save(
+                    "ETHUSDT", "BEARISH", "ZONE", 200, 190, 180, 170,
+                    205, "1h", 12, "A",
+                ), range(2)))
+            self.assertEqual(sum(value is not None for value in results), 1)
             row = SignalLifecycleRepository(sf).get(72)
             self.assertEqual((row["source"], row["ownership"], row["status"]),
                              ("state", "state", "waiting_entry"))
@@ -81,7 +88,7 @@ class SignalMonitorCutoverTests(unittest.TestCase):
                 ).fetchone(), ("BTCUSDT", "pending"))
                 legacy.execute("DELETE FROM signal_execution_state WHERE signal_id=72")
                 legacy.execute("DELETE FROM signals WHERE id=72")
-            self.assertEqual(sync_state_monitor_projection(lf, sf), 1)
+            self.assertEqual(sync_state_monitor_projection(lf, sf), 2)
             self.assertTrue(signal_lifecycle_parity_report(lf, sf)["ok"])
             with lf() as legacy:
                 self.assertEqual(legacy.execute(
