@@ -1,4 +1,9 @@
-"""Bounded Groq critique gate for immutable candidate geometry."""
+"""Bounded Groq critique guard for immutable candidates.
+
+The gate can approve/reject/hold a candidate, but cannot rewrite strategy
+geometry.  Candidate is frozen; this guard makes the invariant explicit at
+integration boundaries.
+"""
 from __future__ import annotations
 from apex.domain.models import Candidate
 Geometry=tuple[float,float,float,float,float|None,float]
