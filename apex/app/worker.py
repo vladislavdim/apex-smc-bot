@@ -1386,9 +1386,14 @@ async def _send_signal(sd):
             if swing_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except asyncio.CancelledError:
-        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
-        if _sent_signal_cache.get(cache_key) == now_ts:
-            _sent_signal_cache.pop(cache_key, None)
+        # Cancellation can arrive after Telegram accepts a message but before
+        # send_message returns. Keep the durable claim until reconciliation;
+        # releasing it would allow a duplicate after restart or retry.
+        logging.error("[_send_signal] delivery interrupted; claim retained for reconciliation: %s", cache_key)
+        _v3_report_incident(
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            {"cache_key": cache_key, "error_type": "CancelledError"},
+        )
         raise
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
