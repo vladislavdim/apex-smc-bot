@@ -1,8 +1,19 @@
-"""Gate websocket market-data boundary.
-Scanning data only; this interface has no execution methods.
+"""Gate websocket market-data boundary for APEX V3.
+
+The runtime may inject a concrete transport, while strategies consume only
+normalized market snapshots.  This module intentionally has no Binance path.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Any,AsyncIterator,Protocol
-class GateMarketStream(Protocol):
-    def candles(self,symbol:str,timeframe:str)->AsyncIterator[Any]: ...
-__all__=["GateMarketStream"]
+
+@dataclass(frozen=True)
+class GateStreamEvent:
+    channel:str
+    symbol:str
+    payload:Any
+
+class GateStream(Protocol):
+    def events(self)->AsyncIterator[GateStreamEvent]: ...
+
+__all__=["GateStream","GateStreamEvent"]
