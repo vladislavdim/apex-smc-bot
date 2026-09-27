@@ -86,6 +86,32 @@ class SignalPersistenceTests(unittest.TestCase):
             with sqlite3.connect(handle.name) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0], 1)
 
+    def test_failed_lifecycle_registration_rolls_back_signal(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as handle:
+            conn = sqlite3.connect(handle.name)
+            conn.execute(
+                """CREATE TABLE signals(
+                    id INTEGER PRIMARY KEY,symbol TEXT,direction TEXT,signal_type TEXT,
+                    entry REAL,tp1 REAL,tp2 REAL,tp3 REAL,sl REAL,timeframe TEXT,
+                    estimated_hours INTEGER,grade TEXT,result TEXT,created_at TEXT,
+                    closed_at TEXT,learning_id INTEGER,confluence INTEGER,regime TEXT)"""
+            )
+            conn.commit(); conn.close()
+
+            def fail_registration(conn, signal_id):
+                raise RuntimeError("lifecycle unavailable")
+
+            service = LegacySignalPersistence(
+                sqlite3.connect, handle.name, fail_registration,
+            )
+            self.assertEqual(
+                service.save("BTCUSDT", "BULLISH", "MTF", 100, 110, 120, 130,
+                             95, "1h", 72, "A"),
+                (None, None),
+            )
+            with sqlite3.connect(handle.name) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
