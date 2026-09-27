@@ -1,7 +1,3 @@
-"""Manager structural-analysis boundary.
-
-Manager consumes canonical market structure; it does not calculate entries,
-stops, targets, or submit exchange orders.
-"""
-from apex.market.structure import analyze_structure
-__all__=["analyze_structure"]
+"""Manager structural-analysis boundary over canonical closed-candle structure."""
+from apex.market.structure import analyze_market_structure,detect_latest_structure_event,infer_structure_direction
+__all__=["analyze_market_structure","detect_latest_structure_event","infer_structure_direction"]
