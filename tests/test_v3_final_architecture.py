@@ -39,3 +39,15 @@ def test_dashboard_projection_is_a_copy():
     payload={"execution":{"status":"LIVE"}}
     projected=project_tab("execution",payload); projected["status"]="CHANGED"
     assert payload["execution"]["status"]=="LIVE"
+
+
+def test_launchers_remain_thin():
+    from pathlib import Path
+    root=Path(__file__).resolve().parents[1]
+    for name in ("bot.py","stats_server.py"):
+        assert len((root/name).read_text(encoding="utf-8").splitlines()) < 40
+
+def test_manager_protection_is_execution_owned():
+    from apex.manager import state_machine as manager
+    from apex.execution import protection as execution
+    assert manager.ProtectionState is execution.ProtectionState
