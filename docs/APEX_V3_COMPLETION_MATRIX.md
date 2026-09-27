@@ -2,7 +2,9 @@
 
 This is the release gate for the single V3 pull request. `DONE` means code,
 tests, production wiring and legacy-path removal are complete. `PARTIAL` never
-qualifies for release.
+qualifies for release. Set row 111 to `RELEASE_READY` only after final cutover,
+dead-path audit and full release suite; set it to `DONE` only after the 48–72h
+production acceptance. The controlled release requires `RELEASE_READY` or `DONE`.
 
 ## Delivery policy
 
