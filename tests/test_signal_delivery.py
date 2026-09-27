@@ -9,6 +9,7 @@ from apex.db.repositories.deliveries import (
     confirm_signal_delivery,
     release_signal_delivery_claim,
     signal_delivery_key,
+    pair_delivery_key,
 )
 from apex.db.state_db import migrate_state
 
@@ -34,6 +35,23 @@ class SignalDeliveryTests(unittest.TestCase):
             signal_delivery_key(base, "ZONE"),
             signal_delivery_key(changed, "ZONE"),
         )
+        self.assertEqual(pair_delivery_key(base), "pair:AAVEUSDT")
+        with self.assertRaises(ValueError):
+            pair_delivery_key({})
+
+    def test_pair_claim_blocks_concurrent_different_strategies(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = self._state_db(temp_dir)
+            pair_key = pair_delivery_key({"symbol": "BTCUSDT"})
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(
+                    lambda _: claim_signal_delivery(db_path, pair_key, 1000.0, 3600),
+                    range(8),
+                ))
+            self.assertEqual(results.count(True), 1)
+            self.assertFalse(claim_signal_delivery(db_path, pair_key, 1001.0, 3600))
+            release_signal_delivery_claim(db_path, pair_key, 1000.0)
+            self.assertTrue(claim_signal_delivery(db_path, pair_key, 1002.0, 3600))
 
     def test_only_one_concurrent_delivery_claim_wins(self):
         with tempfile.TemporaryDirectory() as temp_dir:

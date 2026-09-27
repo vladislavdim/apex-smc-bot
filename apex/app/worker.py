@@ -1176,6 +1176,7 @@ from apex.db.repositories.deliveries import (
     confirm_signal_delivery as _confirm_signal_delivery,
     release_signal_delivery_claim as _release_signal_delivery_claim,
     signal_delivery_key as _signal_delivery_key,
+    pair_delivery_key as _pair_delivery_key,
 )
 
 
@@ -1320,12 +1321,24 @@ async def _send_signal(sd):
         return False
     now_ts = time.time()
     cache_key = _signal_delivery_key(sd, _strategy)
+    pair_key = _pair_delivery_key(sd)
     delivery_db_path = _V3_CONFIG.database.state_db_path
     try:
+        pair_claimed = await asyncio.to_thread(
+            _claim_signal_delivery, delivery_db_path, pair_key, now_ts,
+            _SIGNAL_COOLDOWN_HOURS * 3600,
+        )
+        _V3_RUNTIME.clear_inhibit("STATE_DB_DELIVERY_UNAVAILABLE")
+        _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
+        if not pair_claimed:
+            _record_strategy_decision(sd, "WAIT", "arbiter", "pair delivery in progress", db_path=DB_PATH)
+            return False
         claimed = await asyncio.to_thread(
             _claim_signal_delivery, delivery_db_path, cache_key, now_ts,
             _SIGNAL_COOLDOWN_HOURS * 3600,
         )
+        if not claimed:
+            await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
         _V3_RUNTIME.clear_inhibit("STATE_DB_DELIVERY_UNAVAILABLE")
         _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
         if not claimed:
@@ -1400,6 +1413,7 @@ async def _send_signal(sd):
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
         if _sent_signal_cache.get(cache_key) == now_ts:
             _sent_signal_cache.pop(cache_key, None)
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
@@ -1484,6 +1498,8 @@ async def _send_signal(sd):
     # Persist them immediately so a Render restart cannot restore a snapshot
     # from before Telegram delivery and emit the same setup again.
     await backup_db_to_github(f"signal_{_strategy.lower()}")
+    if lifecycle_ready:
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
     return True
 
 

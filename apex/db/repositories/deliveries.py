@@ -78,6 +78,14 @@ def signal_delivery_key(candidate: dict, strategy: str) -> str:
     ))
 
 
+def pair_delivery_key(candidate: dict) -> str:
+    """One in-flight Telegram delivery per trading pair across strategies."""
+    symbol = str(candidate.get("symbol") or "").upper().strip()
+    if not symbol:
+        raise ValueError("delivery_pair_symbol_required")
+    return "pair:" + symbol
+
+
 def _repository(db_path: str) -> DeliveryClaimRepository:
     return DeliveryClaimRepository(lambda: connect_compatibility(db_path, timeout=30))
 
@@ -100,5 +108,5 @@ def confirm_signal_delivery(
 
 __all__ = [
     "DeliveryClaimRepository", "claim_signal_delivery", "confirm_signal_delivery",
-    "release_signal_delivery_claim", "signal_delivery_key",
+    "release_signal_delivery_claim", "signal_delivery_key", "pair_delivery_key",
 ]
