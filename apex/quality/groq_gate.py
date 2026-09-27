@@ -1,7 +1,6 @@
 """Bounded Groq critique gate for immutable candidates.
 
-Groq may approve/reject/hold a setup, but candidate Entry/SL/TP/RR are owned by
-the strategy and are never rewritten here.
+Groq may critique a setup, but Entry/SL/TP/RR remain strategy-owned.
 """
 from __future__ import annotations
 from apex.domain.models import Candidate
