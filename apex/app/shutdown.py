@@ -38,10 +38,9 @@ async def shutdown_production(deps:ShutdownDependencies,reason:str)->None:
             try: await _call(deps.backup)
             except Exception as exc: errors.append(("backup",exc))
         except Exception as exc: errors.append(("backup",exc))
-        try: await _call(deps.record_shutdown,deps.instance_id,reason)
-        except TypeError:
-            try: await _call(deps.record_shutdown,reason)
-            except Exception as exc: errors.append(("record_shutdown",exc))
+        try:
+            value=deps.record_shutdown(deps.state_db_path,reason,instance_id=deps.instance_id)
+            if inspect.isawaitable(value): await value
         except Exception as exc: errors.append(("record_shutdown",exc))
     finally:
         try: await _call(deps.release_lease)
