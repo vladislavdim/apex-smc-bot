@@ -4,59 +4,58 @@ from __future__ import annotations
 
 import html
 import sqlite3
-from apex.db.connection import connect_compatibility as _connect_compatibility_db
-from typing import Any
+from typing import Any, Callable
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = _connect_compatibility_db(db_path, timeout=10, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=10000")
-    return conn
-
-
-def fetch_trades(db_path: str, category: str, limit: int = 12) -> list[dict[str, Any]]:
-    """Return existing signal rows; never creates or migrates a table."""
+def fetch_live_trades(
+    category: str, limit: int, connection_factory: Callable[[], sqlite3.Connection],
+) -> list[dict[str, Any]]:
+    """Project confirmed live positions from State without a legacy fallback."""
     category = str(category).lower()
+    active = "m.status='ACTIVE' AND l.status='active'"
+    result = "COALESCE(NULLIF(l.result,'pending'),m.close_result,'')"
     where = {
-        "active": "s.result='pending'",
-        "take": "s.result IN ('tp1','tp2','tp3')",
-        "stop": "s.result='sl'",
+        "active": active,
+        "take": f"NOT ({active}) AND {result} IN ('tp1','tp2','tp3')",
+        "stop": f"NOT ({active}) AND {result}='sl'",
     }.get(category)
-    if not where:
+    if where is None:
         raise ValueError(f"unsupported trade category: {category}")
-    conn = _connect(db_path)
+    conn = connection_factory()
     try:
+        conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"""SELECT s.id, s.symbol, s.direction, s.signal_type, s.entry, s.sl,
-                       s.tp1, s.tp2, s.tp3, s.timeframe, s.grade, s.result,
-                       s.created_at, s.closed_at, s.tp1_hit, s.trailing_sl,
-                       COALESCE(es.status, CASE WHEN s.result='pending' THEN 'active' ELSE 'closed' END) AS lifecycle_status,
-                       te.status AS execution_status
-                FROM signals s
-                LEFT JOIN signal_execution_state es ON es.signal_id=s.id
-                LEFT JOIN trade_executions te ON te.signal_id=s.id
-                WHERE {where}
-                ORDER BY COALESCE(s.closed_at, s.created_at) DESC LIMIT ?""",
+            f"""SELECT m.signal_id AS id, m.symbol, m.direction,
+                      m.strategy AS signal_type, m.strategy AS grade,
+                      m.management_tf AS timeframe, m.initial_entry AS entry,
+                      m.initial_sl AS sl, m.initial_tp1 AS tp1,
+                      m.initial_tp2 AS tp2, m.initial_tp3 AS tp3,
+                      m.tp1_seen AS tp1_hit,
+                      m.confirmed_protect_level AS trailing_sl,
+                      m.status AS manager_status,
+                      m.close_result, m.created_at, m.closed_at,
+                      l.status AS lifecycle_status, l.result AS lifecycle_result,
+                      e.status AS execution_status
+                 FROM manager_positions m
+                 JOIN executions e ON e.signal_entity_id=m.signal_entity_id
+                 JOIN signal_lifecycle l ON l.signal_entity_id=m.signal_entity_id
+                WHERE e.mode='live' AND e.position_id IS NOT NULL
+                  AND ({where})
+                ORDER BY COALESCE(m.closed_at,m.updated_at) DESC,m.signal_id DESC
+                LIMIT ?""",
             (max(1, min(int(limit), 30)),),
         ).fetchall()
-        return [dict(row) for row in rows]
-    except sqlite3.OperationalError as exc:
-        # Older databases can predate either isolated status table.  Preserve
-        # the view with only the stable legacy signals schema.
-        if "no such table" not in str(exc).lower() and "no such column" not in str(exc).lower():
-            raise
-        rows = conn.execute(
-            f"""SELECT s.id, s.symbol, s.direction, s.signal_type, s.entry, s.sl,
-                       s.tp1, s.tp2, s.tp3, s.timeframe, s.grade, s.result,
-                       s.created_at, s.closed_at, 0 AS tp1_hit, 0 AS trailing_sl,
-                       CASE WHEN s.result='pending' THEN 'active' ELSE 'closed' END AS lifecycle_status,
-                       NULL AS execution_status
-                FROM signals s WHERE {where}
-                ORDER BY COALESCE(s.closed_at, s.created_at) DESC LIMIT ?""",
-            (max(1, min(int(limit), 30)),),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        selected: list[dict[str, Any]] = []
+        for item in rows:
+            row = dict(item)
+            result = str(row["lifecycle_result"] or "").lower()
+            if result == "pending":
+                result = str(row["close_result"] or "").lower()
+            row["result"] = "pending" if category == "active" else result
+            if category != "active":
+                row["lifecycle_status"] = "closed"
+            selected.append(row)
+        return selected
     finally:
         conn.close()
 
@@ -81,7 +80,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
         "stop": "🛑 <b>Закрытые по стопу</b>",
     }
     empty = {
-        "active": "Сейчас нет сигналов, ожидающих вход или находящихся в позиции.",
+        "active": "Сейчас нет открытых подтверждённых позиций.",
         "take": "Пока нет сделок, закрытых по тейку.",
         "stop": "Пока нет сделок, закрытых по стопу.",
     }
@@ -135,4 +134,4 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
 def trade_line(symbol,direction,status):
     return f"{symbol} · {direction} · {status}"
 
-__all__=["fetch_trades","format_trade_view","trade_line"]
+__all__=["fetch_live_trades","format_trade_view","trade_line"]

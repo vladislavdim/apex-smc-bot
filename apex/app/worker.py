@@ -123,7 +123,7 @@ from apex.compatibility.market_strategy import (
     legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
 )
 from apex.strategies.common import fast_session
-from apex.ui.telegram.trades import fetch_trades as _fetch_trade_view_rows
+from apex.ui.telegram.trades import fetch_live_trades as _fetch_trade_view_rows
 from apex.ui.telegram.trades import format_trade_view as _format_trade_view
 from apex.ui.telegram.manager import (
     configure_manager_dashboard_state as _configure_manager_dashboard_state,
@@ -734,7 +734,7 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
         format_manager_trade_detail=_format_manager_trade_detail,
         manager_trade_buttons=_manager_trade_buttons,
         fetch_trade_rows=lambda category, limit: _fetch_trade_view_rows(
-            DB_PATH, category, limit
+            category, limit, lambda: _v3_connect_state(_V3_CONFIG, read_only=True)
         ),
         format_trade_view=_format_trade_view,
         fetch_watchlist=lambda limit: _fetch_watchlist(DB_PATH, limit),
