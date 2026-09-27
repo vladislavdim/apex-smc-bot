@@ -1,4 +1,7 @@
-"""Canonical Telegram read-only views for the APEX Trade Manager."""
+"""Canonical APEX V3 Telegram presentation module.
+
+Migrated from core/trade_manager_telegram.py; presentation remains read-only and has no trading authority.
+"""
 from __future__ import annotations
 
 import html
