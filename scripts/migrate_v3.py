@@ -1,17 +1,14 @@
-"""Apply canonical APEX V3 State and Live Memory migrations explicitly."""
+"""Initialize/upgrade canonical V3 State and Memory stores using repository migrations."""
 from __future__ import annotations
-import argparse,sqlite3
-from apex.db.integrity import check_integrity
-from apex.db.state_db import migrate_state
-from apex.db.memory_db import migrate_memory
-
-def _migrate(path,fn):
-    conn=sqlite3.connect(path)
-    try:
-        applied=fn(conn); check_integrity(conn); return applied
-    finally: conn.close()
+import argparse
+from apex.db.connection import connect_memory,connect_state
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument("--state",required=True); p.add_argument("--memory",required=True); a=p.parse_args()
-    print("state",_migrate(a.state,migrate_state)); print("memory",_migrate(a.memory,migrate_memory))
+    p=argparse.ArgumentParser(); p.add_argument("--state"); p.add_argument("--memory"); a=p.parse_args()
+    state=connect_state(a.state) if a.state else connect_state()
+    memory=connect_memory(a.memory) if a.memory else connect_memory()
+    try:
+        print("state_db: READY"); print("memory_db: READY")
+    finally:
+        state.close(); memory.close()
 if __name__=="__main__": main()
