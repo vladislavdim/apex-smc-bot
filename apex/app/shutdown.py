@@ -1,34 +1,37 @@
-"""Fail-closed application shutdown composition for APEX V3."""
+"""Canonical application shutdown orchestration for APEX V3."""
 from __future__ import annotations
-import inspect
-import logging
 from dataclasses import dataclass
 from typing import Any,Awaitable,Callable
-from apex.ops.graceful_shutdown import GracefulShutdown
+
+AsyncHook=Callable[...,Awaitable[Any]]
 
 @dataclass(frozen=True)
 class ShutdownDependencies:
     runtime: Any
     state_db_path: str
     instance_id: str
-    release_lease: Callable[[],Awaitable[None]]
-    record_shutdown: Callable[...,Any]
-    backup: Callable[[str],Awaitable[None]]
-    stop_market: Callable[[],Awaitable[None]]
+    release_lease: AsyncHook
+    record_shutdown: AsyncHook
+    backup: AsyncHook
+    stop_market: AsyncHook|None=None
 
-async def _best_effort(label:str,call:Callable[[],Any])->None:
-    try:
-        value=call()
-        if inspect.isawaitable(value): await value
-    except Exception as exc:
-        logging.warning("shutdown %s failed: %s",label,exc)
+async def _call(hook:AsyncHook|None,*args:Any)->None:
+    if hook is not None:
+        await hook(*args)
 
 async def shutdown_production(deps:ShutdownDependencies,reason:str)->None:
+    """Fail closed, stop producers, persist, then release the instance lease."""
     inhibit=getattr(deps.runtime,"inhibit_entries",None)
-    if callable(inhibit): await _best_effort("inhibit",lambda: inhibit("GRACEFUL_SHUTDOWN"))
-    await _best_effort("lease_release",deps.release_lease)
-    await _best_effort("state_marker",lambda: deps.record_shutdown(deps.state_db_path,reason,instance_id=deps.instance_id))
-    await _best_effort("backup",lambda: deps.backup("render_sigterm"))
-    await _best_effort("market_stop",deps.stop_market)
+    if callable(inhibit): inhibit(f"SHUTDOWN:{reason}")
+    errors=[]
+    for name,hook,args in (
+        ("stop_market",deps.stop_market,()),
+        ("backup",deps.backup,()),
+        ("record_shutdown",deps.record_shutdown,(reason,)),
+        ("release_lease",deps.release_lease,()),
+    ):
+        try: await _call(hook,*args)
+        except Exception as exc: errors.append(f"{name}:{type(exc).__name__}")
+    if errors: raise RuntimeError("shutdown_incomplete:"+",".join(errors))
 
-__all__=["GracefulShutdown","ShutdownDependencies","shutdown_production"]
+__all__=["ShutdownDependencies","shutdown_production"]
