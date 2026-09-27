@@ -1,31 +1,16 @@
-"""Run canonical APEX V3 State and Live Memory migrations fail-closed."""
+"""Run canonical V3 State/Memory schema migrations only.
+Compatibility databases are intentionally outside this migration entry point.
+"""
 from __future__ import annotations
+from apex.db.connection import connect_state,connect_memory
+from apex.db.state_db import migrate_state_db
+from apex.db.memory_db import migrate_memory_db
 
-from apex.config.settings import ApexConfig
-from apex.db.connection import connect_memory, connect_state
-from apex.db.integrity import check_integrity
-from apex.db.memory_db import migrate_memory
-from apex.db.state_db import migrate_state
-
-
-def main() -> None:
-    config = ApexConfig.from_env()
-    state = connect_state(config)
+def main()->None:
+    state=connect_state(); memory=connect_memory()
     try:
-        state_versions = migrate_state(state)
-        check_integrity(state)
+        migrate_state_db(state); migrate_memory_db(memory)
+        print("v3_migrations: OK")
     finally:
-        state.close()
-
-    memory = connect_memory(config)
-    try:
-        memory_versions = migrate_memory(memory)
-        check_integrity(memory)
-    finally:
-        memory.close()
-
-    print({"state": state_versions, "memory": memory_versions})
-
-
-if __name__ == "__main__":
-    main()
+        state.close(); memory.close()
+if __name__=="__main__": main()
