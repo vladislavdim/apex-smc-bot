@@ -1,9 +1,13 @@
-"""Manager-facing compatibility surface for the canonical Execution protection state.
-
-Manager owns decision eligibility; Execution owns exchange protection mechanics.
-"""
-from apex.execution.protection import (
-    ProtectionState,ProtectionStatus,new_stop_accepted,old_stop_cancelled,propose,
-    reconcile_exchange_stop,replacement_uncertain,request,valid_stop_replacement,
-)
-__all__=["ProtectionState","ProtectionStatus","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request","valid_stop_replacement"]
+"""Manager decision lifecycle; exchange protection mechanics remain in Execution."""
+from __future__ import annotations
+from dataclasses import dataclass
+from enum import Enum
+class ManagerStatus(str,Enum):
+    ACTIVE="ACTIVE"; PROTECTING="PROTECTING"; PARTIAL="PARTIAL"; CLOSED="CLOSED"
+@dataclass(frozen=True)
+class ManagerState:
+    position_id:str
+    status:ManagerStatus=ManagerStatus.ACTIVE
+    tp1_confirmed:bool=False
+    remaining_quantity:float=0.0
+__all__=["ManagerState","ManagerStatus"]
