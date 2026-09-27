@@ -8,6 +8,7 @@ from apex.db.signal_lifecycle_migration import (
     signal_lifecycle_parity_report,
 )
 from apex.db.state_db import migrate_state
+from apex.domain.ids import derived_id
 
 
 class SignalLifecycleMigrationTests(unittest.TestCase):
@@ -42,6 +43,23 @@ class SignalLifecycleMigrationTests(unittest.TestCase):
             self.assertTrue(signal_lifecycle_parity_report(
                 legacy_factory, state_factory,
             )["ok"])
+            state = state_factory()
+            state.execute(
+                """INSERT INTO signal_lifecycle(signal_entity_id,signal_id,status,result,symbol)
+                   VALUES(?,?,?,?,?)""",
+                (derived_id("signal", "state-only", 99), 99, "waiting_entry", "pending", "ETHUSDT"),
+            )
+            state.commit(); state.close()
+            import_legacy_signal_lifecycle(legacy_factory, state_factory, refresh=True)
+            self.assertTrue(signal_lifecycle_parity_report(
+                legacy_factory, state_factory,
+            )["ok"])
+            state = state_factory()
+            self.assertEqual(
+                state.execute("SELECT symbol,status FROM signal_lifecycle WHERE signal_id=99").fetchone(),
+                ("ETHUSDT", "waiting_entry"),
+            )
+            state.close()
             state = state_factory()
             self.assertEqual(
                 state.execute("SELECT symbol FROM signal_lifecycle WHERE signal_id=7").fetchone(),

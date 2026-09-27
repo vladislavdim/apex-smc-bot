@@ -89,7 +89,9 @@ def import_legacy_signal_lifecycle(
     state = state_factory()
     try:
         target_ids = {int(row[0]) for row in state.execute("SELECT signal_id FROM signal_lifecycle")}
-        if target_ids != set(source):
+        # Historical compatibility rows must be present, while new V3-only
+        # signals may exist in State without a legacy counterpart.
+        if not set(source).issubset(target_ids):
             raise SignalLifecycleStateError("signal_lifecycle_identity_set")
         state.execute(
             """INSERT INTO runtime_state(key,value_json) VALUES(?,?)
@@ -116,7 +118,7 @@ def signal_lifecycle_parity_report(
             int(row["signal_id"]): dict(row)
             for row in state.execute("SELECT * FROM signal_lifecycle")
         }
-        if set(source) != set(target):
+        if not set(source).issubset(target):
             mismatches.append("signal_identity_set")
         for signal_id in sorted(set(source) & set(target)):
             for field in _FIELDS:
