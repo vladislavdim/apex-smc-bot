@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass,replace
 from enum import Enum
 from apex.execution.protection import (
-    ProtectionState,ProtectionStatus,StopProtectionRequest,new_stop_accepted,
+    ProtectionState,ProtectionStatus,new_stop_accepted,
     old_stop_cancelled,propose,reconcile_exchange_stop,replacement_uncertain,request,
 )
 
@@ -30,4 +30,4 @@ class ManagerState:
             raise ValueError("closed_manager_state_is_terminal")
         return replace(self,status=status,last_action=action or self.last_action)
 
-__all__=["ManagerState","ManagerStatus","ProtectionState","ProtectionStatus","StopProtectionRequest","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
+__all__=["ManagerState","ManagerStatus","ProtectionState","ProtectionStatus","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
