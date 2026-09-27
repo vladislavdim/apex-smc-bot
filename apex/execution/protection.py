@@ -36,4 +36,17 @@ def replacement_uncertain(state):
     return replace(state,status=ProtectionStatus.RECONCILE_REQUIRED) if state.status in {ProtectionStatus.REQUESTED,ProtectionStatus.STOP_REPLACEMENT_PENDING} else state
 
 def reconcile_exchange_stop(state,*,stop,order_id): return ProtectionState(state.direction,float(stop),str(order_id))
-__all__=["ProtectionState","ProtectionStatus","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
+__all__=["ProtectionState","ProtectionStatus","StopProtectionRequest","new_stop_accepted","old_stop_cancelled","propose","reconcile_exchange_stop","replacement_uncertain","request"]
+
+
+@dataclass(frozen=True)
+class StopProtectionRequest:
+    position_id: str
+    symbol: str
+    stop_price: float
+    quantity: float
+    def __post_init__(self)->None:
+        if not str(self.position_id).strip(): raise ValueError("position_id_required")
+        if not str(self.symbol).strip(): raise ValueError("symbol_required")
+        if float(self.stop_price)<=0: raise ValueError("stop_price_must_be_positive")
+        if float(self.quantity)<=0: raise ValueError("quantity_must_be_positive")
