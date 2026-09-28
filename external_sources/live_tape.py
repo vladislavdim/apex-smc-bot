@@ -247,9 +247,13 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
             await asyncio.to_thread(budget.reserve, source, units)
         except Exception as exc:
             # A websocket reconnect is still external traffic.  If the local
-            # ledger/circuit is unavailable, fail closed instead of spinning.
+            # ledger/circuit is unavailable, fail closed for this attempt.
+            # Keep the task alive so a temporary SQLite lock can recover.
             logging.warning("[LiveTape] %s websocket budget denied: %s", provider, type(exc).__name__)
-            return
+            if _stop_event and not _stop_event.is_set():
+                await asyncio.sleep(min(backoff, 30))
+                backoff = min(backoff * 2, 30)
+            continue
         try:
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=8, sock_read=70)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -268,7 +272,10 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
                         elif message.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}: break
         except asyncio.CancelledError: raise
         except Exception as exc:
-            await asyncio.to_thread(budget.outcome, source, failed=True)
+            try:
+                await asyncio.to_thread(budget.outcome, source, failed=True)
+            except Exception as ledger_exc:
+                logging.warning("[LiveTape] %s outcome ledger unavailable: %s", provider, type(ledger_exc).__name__)
             logging.warning("[LiveTape] %s websocket retry url=%s error=%s", provider, url.split("?", 1)[0], type(exc).__name__)
         if _stop_event and not _stop_event.is_set(): await asyncio.sleep(min(backoff, 30)); backoff = min(backoff * 2, 30)
 

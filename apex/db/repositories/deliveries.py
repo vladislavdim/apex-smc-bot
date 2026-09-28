@@ -19,10 +19,13 @@ class DeliveryClaimRepository:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT claimed_at FROM delivery_claims WHERE cache_key=?",
+                "SELECT claimed_at,delivered_at FROM delivery_claims WHERE cache_key=?",
                 (cache_key,),
             ).fetchone()
             last_claim = float(row[0]) if row is not None else 0.0
+            if row is not None and row[1] is not None and float(row[1]) < 0:
+                conn.rollback()
+                return False  # unknown Telegram outcome: never expire automatically
             if last_claim > 0 and float(claimed_at) - last_claim < float(cooldown_seconds):
                 conn.rollback()
                 return False
@@ -61,6 +64,20 @@ class DeliveryClaimRepository:
                 """UPDATE delivery_claims SET delivered_at=?,updated_at=CURRENT_TIMESTAMP
                      WHERE cache_key=? AND claimed_at=? AND delivered_at IS NULL""",
                 (float(delivered_at), cache_key, float(claimed_at)),
+            ).rowcount
+            conn.commit()
+            return updated == 1
+        finally:
+            conn.close()
+
+    def mark_uncertain(self, cache_key: str, claimed_at: float) -> bool:
+        """Negative delivered_at is a durable, non-expiring unknown outcome."""
+        conn = self._conn_factory()
+        try:
+            updated = conn.execute(
+                "UPDATE delivery_claims SET delivered_at=-1,updated_at=CURRENT_TIMESTAMP "
+                "WHERE cache_key=? AND claimed_at=? AND delivered_at IS NULL",
+                (cache_key, float(claimed_at)),
             ).rowcount
             conn.commit()
             return updated == 1
@@ -106,7 +123,12 @@ def confirm_signal_delivery(
     return _repository(db_path).confirm(cache_key, claim_ts, delivered_at)
 
 
+def mark_signal_delivery_uncertain(db_path: str, cache_key: str, claim_ts: float) -> bool:
+    return _repository(db_path).mark_uncertain(cache_key, claim_ts)
+
+
 __all__ = [
     "DeliveryClaimRepository", "claim_signal_delivery", "confirm_signal_delivery",
-    "release_signal_delivery_claim", "signal_delivery_key", "pair_delivery_key",
+    "release_signal_delivery_claim", "mark_signal_delivery_uncertain",
+    "signal_delivery_key", "pair_delivery_key",
 ]

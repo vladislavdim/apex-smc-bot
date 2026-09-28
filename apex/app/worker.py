@@ -22,7 +22,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from groq import Groq
 from aiogram import Bot, Dispatcher, types
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 from apex.telemetry.scanner_metrics import (
@@ -313,7 +313,7 @@ from apex.strategies.registry import StrategyRegistry as _V3_STRATEGY_REGISTRY_C
 from apex.strategies.swing import SwingStrategy as _V3_SWING_STRATEGY
 from apex.strategies.wyckoff import WyckoffStrategy as _V3_WYCKOFF_STRATEGY
 from apex.strategies.zone import ZoneStrategy as _V3_ZONE_STRATEGY
-from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT
+from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT, normalize_gate_candles as _v3_normalize_gate_candles
 from apex.market.provider import GateSnapshotProvider as _V3_GATE_SNAPSHOT_PROVIDER
 from apex.ops.resource_guard import (
     memory_snapshot as _v3_memory_snapshot,
@@ -1065,6 +1065,37 @@ async def _send_with_retry(chat_id, text, parse_mode="HTML", retries=3, **kwargs
     return False
 
 
+class _SignalDeliveryUncertain(RuntimeError):
+    """Telegram might have accepted a signal even though the reply was lost."""
+
+
+async def _send_signal_message(chat_id, text, parse_mode="HTML", **kwargs):
+    """Send a claimed signal once; unknown outcomes must retain its claim."""
+    try:
+        await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter) as exc:
+        # These Bot API responses explicitly reject the request, so the
+        # current attempt cannot have produced a duplicate.
+        logging.error("[Telegram] signal rejected chat=%s reason=%s", chat_id, type(exc).__name__)
+        return False
+    except Exception as exc:
+        # No Telegram send idempotency key exists. A timeout, disconnected
+        # socket or 5xx can happen after acceptance; retrying duplicates it.
+        # Preserve the claim and require reconciliation instead.
+        raise _SignalDeliveryUncertain(type(exc).__name__) from exc
+
+
+async def _retain_uncertain_signal_claims(db_path, cache_key, pair_key, claimed_at):
+    try:
+        for key in (cache_key, pair_key):
+            if not await asyncio.to_thread(_mark_signal_delivery_uncertain, db_path, key, claimed_at):
+                raise RuntimeError(f"delivery claim vanished: {key}")
+    except Exception as exc:
+        logging.error("[_send_signal] uncertain claim persistence failed: %s", exc)
+        _V3_RUNTIME.inhibit_entries("STATE_DB_DELIVERY_UNAVAILABLE")
+
+
 def _manager_destinations():
     destinations = [(int(admin_id), 0) for admin_id in ADMIN_IDS]
     destinations += [(int(SIGNAL_CHANNEL_MAIN), 0), (int(SIGNAL_CHANNEL_SWING), int(SWING_THREAD_ID))]
@@ -1201,6 +1232,7 @@ from apex.db.repositories.deliveries import (
     claim_signal_delivery as _claim_signal_delivery,
     confirm_signal_delivery as _confirm_signal_delivery,
     release_signal_delivery_claim as _release_signal_delivery_claim,
+    mark_signal_delivery_uncertain as _mark_signal_delivery_uncertain,
     signal_delivery_key as _signal_delivery_key,
     pair_delivery_key as _pair_delivery_key,
 )
@@ -1388,7 +1420,7 @@ async def _send_signal(sd):
             if destination in sent_destinations:
                 continue
             sent_destinations.add(destination)
-            ok = await _send_with_retry(admin_id, sd["text"], parse_mode="HTML")
+            ok = await _send_signal_message(admin_id, sd["text"], parse_mode="HTML")
             if ok:
                 delivered = True
                 logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
@@ -1398,7 +1430,7 @@ async def _send_signal(sd):
             fast_ok = False
             if destination not in sent_destinations:
                 sent_destinations.add(destination)
-                fast_ok = await _send_with_retry(
+                fast_ok = await _send_signal_message(
                     SIGNAL_CHANNEL_SWING, sd["text"], parse_mode="HTML",
                     message_thread_id=FAST_DEAL_THREAD_ID,
                 )
@@ -1411,7 +1443,7 @@ async def _send_signal(sd):
             main_ok = False
             if destination not in sent_destinations:
                 sent_destinations.add(destination)
-                main_ok = await _send_with_retry(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+                main_ok = await _send_signal_message(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
             delivered = delivered or main_ok
             if main_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
@@ -1421,7 +1453,7 @@ async def _send_signal(sd):
             swing_ok = False
             if destination not in sent_destinations:
                 sent_destinations.add(destination)
-                swing_ok = await _send_with_retry(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+                swing_ok = await _send_signal_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
             delivered = delivered or swing_ok
             if swing_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
@@ -1430,11 +1462,21 @@ async def _send_signal(sd):
         # send_message returns. Keep the durable claim until reconciliation;
         # releasing it would allow a duplicate after restart or retry.
         logging.error("[_send_signal] delivery interrupted; claim retained for reconciliation: %s", cache_key)
+        await asyncio.shield(_retain_uncertain_signal_claims(delivery_db_path, cache_key, pair_key, now_ts))
         _v3_report_incident(
             "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
             {"cache_key": cache_key, "error_type": "CancelledError"},
         )
         raise
+    except _SignalDeliveryUncertain as ce:
+        logging.error("[_send_signal] Telegram outcome unknown; claim retained: %s", cache_key)
+        await _retain_uncertain_signal_claims(delivery_db_path, cache_key, pair_key, now_ts)
+        _v3_report_incident(
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            {"cache_key": cache_key, "error_type": str(ce)},
+        )
+        _record_strategy_decision(sd, "WAIT", "delivery", "Telegram outcome unknown", db_path=DB_PATH)
+        return False
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
@@ -1456,10 +1498,13 @@ async def _send_signal(sd):
         # Telegram has already accepted at least one destination. Keep the
         # original claim (and therefore the cooldown) and surface reconciliation.
         logging.error("[_send_signal] delivery confirmation requires reconcile: %s", exc)
+        await _retain_uncertain_signal_claims(delivery_db_path, cache_key, pair_key, now_ts)
         _v3_report_incident(
             "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
             {"cache_key": cache_key, "error_type": type(exc).__name__},
         )
+        _record_strategy_decision(sd, "WAIT", "delivery", "delivery confirmation requires reconciliation", db_path=DB_PATH)
+        return False
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
     lifecycle_ready = False
     if signal_id:
@@ -3884,25 +3929,48 @@ async def _v3_startup_reconcile_and_market_check():
             "manager_reconciliation", _V3_COMPONENT_STATE.FAILED, str(exc)
         )
 
+    await _v3_probe_gate_freshness(force=True)
+    return execution_ok
+
+
+_v3_gate_last_probe_at = 0.0
+_v3_gate_probe_symbol = None
+
+
+async def _v3_probe_gate_freshness(*, force=False):
+    """Verify a recent closed Gate candle on startup and every minute."""
+    global _v3_gate_last_probe_at, _v3_gate_probe_symbol
+    now = time.time()
+    if not force and now - _v3_gate_last_probe_at < 60:
+        return
+    _v3_gate_last_probe_at = now
     try:
-        pairs = await asyncio.wait_for(
-            asyncio.to_thread(get_top_pairs, 1), timeout=30
+        if not _v3_gate_probe_symbol:
+            pairs = await asyncio.wait_for(asyncio.to_thread(get_top_pairs, 1), timeout=30)
+            if not pairs:
+                raise RuntimeError("Gate returned no production symbols")
+            _v3_gate_probe_symbol = pairs[0]
+        client = _get_v3_strategy_snapshot_provider().client
+        response = await asyncio.wait_for(
+            asyncio.to_thread(client.candles, _v3_gate_probe_symbol, "1m", limit=4),
+            timeout=30,
         )
-        if not pairs:
-            raise RuntimeError("Gate returned no production symbols")
-        _V3_RUNTIME.mark_component("gate", _V3_COMPONENT_STATE.FRESH)
-        _V3_RUNTIME.mark_component(
-            "market_data", _V3_COMPONENT_STATE.FRESH,
-            f"Gate universe probe returned {len(pairs)} symbol(s)",
-        )
+        candles = _v3_normalize_gate_candles(response.payload)
+        closed = [row for row in candles if row["open_time"] + 60 <= now]
+        if not closed or not 0 <= now - (closed[-1]["open_time"] + 60) <= 180:
+            raise RuntimeError("Gate closed 1m candle is stale or missing")
+        detail = f"{_v3_gate_probe_symbol} closed_1m={int(closed[-1]['open_time'] + 60)}"
+        _V3_RUNTIME.mark_component("gate", _V3_COMPONENT_STATE.FRESH, detail)
+        _V3_RUNTIME.mark_component("market_data", _V3_COMPONENT_STATE.FRESH, detail)
+        _V3_RUNTIME.clear_inhibit("GATE_CANDLE_UNAVAILABLE")
         _v3_recover_incident("GATE_UNAVAILABLE", "gate")
     except Exception as exc:
         _V3_RUNTIME.mark_component("gate", _V3_COMPONENT_STATE.UNAVAILABLE, str(exc))
         _V3_RUNTIME.mark_component("market_data", _V3_COMPONENT_STATE.UNAVAILABLE, str(exc))
+        _V3_RUNTIME.inhibit_entries("GATE_CANDLE_UNAVAILABLE")
         _v3_report_incident(
             "GATE_UNAVAILABLE", "gate", "ERROR", {"error_type": type(exc).__name__}
         )
-    return execution_ok
 
 
 async def _v3_runtime_watchdog():
@@ -3970,6 +4038,7 @@ async def _v3_runtime_watchdog():
             )
             _V3_RUNTIME.clear_inhibit("EVENT_LOOP_DEGRADED")
             _v3_recover_incident("EVENT_LOOP_LAG", "event_loop")
+        await _v3_probe_gate_freshness()
         await _v3_refresh_runtime_lease()
         _V3_RUNTIME.evaluate_readiness()
         _v3_recover_incident("RUNTIME_WATCHDOG_FAILED", "runtime")
