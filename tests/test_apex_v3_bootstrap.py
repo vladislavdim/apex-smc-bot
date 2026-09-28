@@ -103,6 +103,14 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
         )
         deps.shutdown.assert_awaited_once_with("polling_shutdown")
 
+    async def test_failed_polling_initialization_still_shuts_down(self):
+        deps = self.dependencies()
+        deps.initialize.side_effect = RuntimeError("partial startup")
+        with self.assertRaisesRegex(RuntimeError, "partial startup"):
+            await _run_polling(deps)
+        deps.dispatcher.start_polling.assert_not_awaited()
+        deps.shutdown.assert_awaited_once_with("polling_shutdown")
+
 
 if __name__ == "__main__":
     unittest.main()

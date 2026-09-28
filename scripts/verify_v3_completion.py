@@ -53,9 +53,18 @@ def verify_predeployment(path: Path) -> tuple[str, ...]:
     )
     if unfinished:
         raise CompletionError("v3_workstreams_not_done:" + ",".join(unfinished))
-    if rows[-1][1] not in {"PARTIAL", "DONE"}:
+    if rows[-1][1] not in {"PARTIAL", "RELEASE_READY", "DONE"}:
         raise CompletionError("v3_acceptance_status_invalid:" + rows[-1][1])
     return tuple(ids for ids, _ in rows)
+
+
+def verify_release_ready(path: Path) -> tuple[str, ...]:
+    """Require final code cutover before production acceptance can begin."""
+    rows = verify_predeployment(path)
+    status = tuple(ROW.finditer(path.read_text(encoding="utf-8")))[-1].group("status")
+    if status not in {"RELEASE_READY", "DONE"}:
+        raise CompletionError("v3_release_cutover_not_ready:" + status)
+    return rows
 
 
 def verify_corpus(path: Path) -> tuple[str, ...]:
@@ -93,16 +102,17 @@ def main() -> int:
         "--pre-deploy", action="store_true",
         help="Require code workstreams complete while acceptance row 111 remains pending",
     )
-    args = parser.parse_args()
-    rows = (
-        verify_predeployment(args.path)
-        if args.pre_deploy
-        else verify_completion(args.path)
+    parser.add_argument(
+        "--release-ready", action="store_true",
+        help="Require row 111 to certify cutover before controlled production release",
     )
+    args = parser.parse_args()
+    rows = (verify_release_ready(args.path) if args.release_ready else
+            verify_predeployment(args.path) if args.pre_deploy else verify_completion(args.path))
     cases = verify_corpus(args.corpus)
     verdict_sha = verify_verdict(args.corpus, args.verdict)
     print(
-        f"APEX V3 {'pre-deployment' if args.pre_deploy else 'completion'} verified: "
+        f"APEX V3 {'release-ready' if args.release_ready else 'pre-deployment' if args.pre_deploy else 'completion'} verified: "
         f"{len(rows)} workstreams, "
         f"{len(cases)} real-market parity cases, verdict={verdict_sha[:12]}"
     )

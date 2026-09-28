@@ -8,7 +8,6 @@ telemetry is accepted at /ingest and persisted in Postgres.
 """
 from __future__ import annotations
 
-import hmac
 import hashlib
 import json
 import logging
@@ -27,6 +26,8 @@ import psycopg2.extras
 from apex.strategies.specifications import STRATEGY_CATALOG
 from apex.telemetry.dashboard_projection import normalize_incident_snapshot
 from apex.ui.dashboard.config import DashboardSettings
+from apex.ui.dashboard.auth import authorized
+from apex.ui.dashboard.api import PROJECTORS, project_tab
 
 _SETTINGS = DashboardSettings.from_env()
 DATABASE_URL = _SETTINGS.database_url
@@ -302,7 +303,7 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
     if to_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", to_date): where.append("occurred_at < (%s::date + INTERVAL '1 day')"); params.append(to_date)
     # Market-data health is operational telemetry and must remain visible while
     # Strategy Lab is filtered to a concrete strategy.
-    operational = "'market_data','incident_snapshot','runtime_status','apex_v2_snapshot'"
+    operational = "'market_data','incident_snapshot','runtime_status','apex_v2_snapshot','apex_v3_snapshot'"
     if strategy: where.append(f"(strategy=%s OR kind IN ({operational}))"); params.append(strategy.upper())
     if symbol: where.append(f"(symbol=%s OR kind IN ({operational}))"); params.append(symbol.upper())
     conn = _connect()
@@ -492,7 +493,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
     if active_release:
         events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
     attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]; market_data_events=[]; ltf_watch_events=[]
-    manager_events=[]; apex_v2_snapshots=[]; incident_snapshots=[]
+    manager_events=[]; operational_snapshots=[]; incident_snapshots=[]
     for e in events:
         p=e["payload"]; key=str(p.get("attempt_key") or "")
         if e["kind"]=="attempt":
@@ -504,7 +505,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         elif e["kind"]=="market_data": market_data_events.append({**p,"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
         elif e["kind"]=="ltf_watch": ltf_watch_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
         elif e["kind"]=="manager_event": manager_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
-        elif e["kind"]=="apex_v2_snapshot": apex_v2_snapshots.append({**p,"occurred_at":e["occurred_at"]})
+        elif e["kind"] in {"apex_v2_snapshot", "apex_v3_snapshot"}:
+            operational_snapshots.append({**p,"occurred_at":e["occurred_at"]})
         elif e["kind"]=="incident_snapshot": incident_snapshots.append({**p,"occurred_at":e["occurred_at"]})
     joined=[]
     for a in attempts:
@@ -764,8 +766,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         funnel["pending_ltf_attempts"] = funnel.get("pending_ltf", 0)
         funnel["pending_ltf"] = sum(str(x.get("strategy", "")).upper() == funnel["strategy"] for x in ltf_rows)
 
-    # Dashboard V2 joins the complete control path without being able to alter it.
-    latest_v2 = max(apex_v2_snapshots, key=lambda x: x.get("occurred_at", ""), default={})
+    # The latest worker-authored snapshot wins during the web-first rollout.
+    latest_v2 = max(operational_snapshots, key=lambda x: x.get("occurred_at", ""), default={})
     manager_actions = Counter()
     manager_states = Counter()
     groq_manager_calls = 0
@@ -1278,7 +1280,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError,ConnectionResetError):
             return False
     def _auth(self,q):
-        supplied=(q.get("key") or [""])[0]; return bool(DASHBOARD_TOKEN and hmac.compare_digest(supplied,DASHBOARD_TOKEN))
+        supplied=(q.get("key") or [""])[0]; return authorized(supplied,DASHBOARD_TOKEN)
     def do_HEAD(self): self.send_response(200); self.end_headers()
     def do_GET(self):
         p=urlparse(self.path); q=parse_qs(p.query)
@@ -1291,16 +1293,19 @@ class Handler(BaseHTTPRequestHandler):
             payload,status=worker_readiness((q.get("sha") or [""])[0]); self._json(payload,status); return
         if not self._auth(q): self._html("<!doctype html><meta charset=utf-8><h2>403 · закрытая статистика APEX</h2>",403); return
         if route in {"/","/stats"}: self._html(HTML); return
-        if route=="/api/dashboard":
+        if route=="/api/dashboard" or route.startswith("/api/dashboard/"):
+            tab = route.removeprefix("/api/dashboard/") if route != "/api/dashboard" else ""
+            if tab and tab not in PROJECTORS:
+                self._json({"error": "unknown_dashboard_tab"}, 404); return
             try:
-                val=lambda k,d="":(q.get(k) or [d])[0]; data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")),val("release")); self._json(data)
+                val=lambda k,d="":(q.get(k) or [d])[0]; data=build_dashboard(int(val("days","1")),val("strategy"),val("symbol"),val("outcome"),val("groq"),float(val("min_rr")) if val("min_rr") else None,float(val("max_rr")) if val("max_rr") else None,val("fromdate"),val("todate"),int(val("page","1")),int(val("page_size","100")),val("release")); self._json(project_tab(tab,data) if tab else data)
             except Exception as exc: self._json({"error":f"{type(exc).__name__}: {exc}"},500)
             return
         self._json({"error":"not found"},404)
     def do_POST(self):
         path=urlparse(self.path).path
         if path not in {"/ingest","/runtime/lease"}: self._json({"error":"not found"},404); return
-        if not INGEST_TOKEN or not hmac.compare_digest(self.headers.get("X-APEX-Ingest-Token",""),INGEST_TOKEN): self._json({"error":"forbidden"},403); return
+        if not authorized(self.headers.get("X-APEX-Ingest-Token"),INGEST_TOKEN): self._json({"error":"forbidden"},403); return
         try:
             max_bytes=16_384 if path=="/runtime/lease" else 2_000_000
             n=min(int(self.headers.get("Content-Length","0") or 0),max_bytes)

@@ -281,14 +281,19 @@ def check_pending_signals():
 
                 is_win = result in ("tp1", "tp2", "tp3")
                 # Получаем confluence и regime из БД для этого сигнала
+                _extra_conn = None
                 try:
-                    _row_extra = _connect_compatibility_db(DB_PATH, timeout=30, check_same_thread=False).execute(
+                    _extra_conn = _connect_compatibility_db(DB_PATH, timeout=30, check_same_thread=False)
+                    _row_extra = _extra_conn.execute(
                         "SELECT confluence, regime FROM signals WHERE id=?", (sig_id,)
                     ).fetchone()
                     _confluence_val = _row_extra[0] if _row_extra and _row_extra[0] else 0
                     _regime_val = _row_extra[1] if _row_extra and _row_extra[1] else "UNKNOWN"
                 except Exception:
                     _confluence_val, _regime_val = 0, "UNKNOWN"
+                finally:
+                    if _extra_conn is not None:
+                        _extra_conn.close()
 
                 closed.append({
                     "signal_id": sig_id,
@@ -314,7 +319,7 @@ def check_pending_signals():
         return closed
     except Exception as e:
         logging.error(f"Check signals error: {e}")
-        return []
+        raise
 
 # ===== ЖИВОЙ АНАЛИЗ — ГДЕ МЫ СЕЙЧАС =====
 

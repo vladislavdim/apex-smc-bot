@@ -41,13 +41,20 @@ jobs:
 
       - name: Verify workflow syntax and production authority
         run: |
+          set -euo pipefail
           python - <<'PY'
           from pathlib import Path
           import yaml
           for path in Path('.github/workflows').glob('*.yml'):
               yaml.safe_load(path.read_text(encoding='utf-8'))
           PY
-          ! rg -n 'contents:\s*write|git push|requests\.(put|patch|delete)' bot.py apex/app/worker.py .github/workflows --glob '!ci.yml'
+          python scripts/verify_production_authority.py
+          python scripts/verify_v3_completion.py --release-ready
+          TELEGRAM_TOKEN=123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+            python scripts/run_strategy_parity_corpus.py \
+              --output /tmp/apex-v3-ci-verdict.json
+          cmp /tmp/apex-v3-ci-verdict.json \
+            tests/fixtures/apex_v3_strategy_parity_verdict.json
 
       - name: Diff integrity
         run: git diff --check

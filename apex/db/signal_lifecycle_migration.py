@@ -11,7 +11,13 @@ from .repositories.signal_lifecycle import SignalLifecycleRepository, SignalLife
 
 _MARKER = "signal_lifecycle_legacy_import_v1"
 _FIELDS = (
-    "status", "result", "activated_at", "last_checked_at", "closed_at", "cancel_reason",
+    "symbol", "status", "result", "activated_at", "last_checked_at", "closed_at", "cancel_reason",
+    "direction", "signal_type", "timeframe", "entry", "sl", "tp1", "tp2", "tp3",
+    "estimated_hours", "grade", "tp1_hit", "trailing_sl", "best_price", "confluence", "regime",
+)
+_IMMUTABLE_FIELDS = (
+    "symbol", "direction", "signal_type", "timeframe", "entry", "sl", "tp1",
+    "tp2", "tp3", "estimated_hours", "grade",
 )
 
 
@@ -42,7 +48,14 @@ def _projection(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     checked_expr = life_expr("last_checked_at") if lifecycle else "NULL"
     cancel_expr = life_expr("cancel_reason") if lifecycle else "NULL"
     join = " LEFT JOIN signal_execution_state x ON x.signal_id=s.id" if lifecycle else ""
-    query = f"""SELECT s.id AS signal_id,{result_expr} AS result,
+    signal_facts = ",".join(
+        f"{signal_expr(field)} AS {field}" for field in (
+            "direction", "signal_type", "timeframe", "entry", "sl", "tp1", "tp2", "tp3",
+            "estimated_hours", "grade", "tp1_hit", "trailing_sl", "best_price", "confluence", "regime",
+        )
+    )
+    query = f"""SELECT s.id AS signal_id,{signal_expr('symbol')} AS symbol,{result_expr} AS result,
+                       {signal_facts},
                        {created_expr} AS signal_created_at,{status_expr} AS status,
                        {activated_expr} AS activated_at,{checked_expr} AS last_checked_at,
                        {closed_expr} AS closed_at,{cancel_expr} AS cancel_reason,
@@ -52,6 +65,9 @@ def _projection(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     result: dict[int, dict[str, Any]] = {}
     for raw in rows:
         row = dict(raw)
+        row["symbol"] = str(row.get("symbol") or "").upper() or None
+        for field in ("direction", "signal_type"):
+            row[field] = str(row.get(field) or "").upper() or None
         signal_result = str(row.get("result") or "pending").lower()
         status = str(row.get("status") or "").lower()
         if not status:
@@ -88,7 +104,9 @@ def import_legacy_signal_lifecycle(
     state = state_factory()
     try:
         target_ids = {int(row[0]) for row in state.execute("SELECT signal_id FROM signal_lifecycle")}
-        if target_ids != set(source):
+        # Historical compatibility rows must be present, while new V3-only
+        # signals may exist in State without a legacy counterpart.
+        if not set(source).issubset(target_ids):
             raise SignalLifecycleStateError("signal_lifecycle_identity_set")
         state.execute(
             """INSERT INTO runtime_state(key,value_json) VALUES(?,?)
@@ -115,10 +133,11 @@ def signal_lifecycle_parity_report(
             int(row["signal_id"]): dict(row)
             for row in state.execute("SELECT * FROM signal_lifecycle")
         }
-        if set(source) != set(target):
+        if not set(source).issubset(target):
             mismatches.append("signal_identity_set")
         for signal_id in sorted(set(source) & set(target)):
-            for field in _FIELDS:
+            fields = _IMMUTABLE_FIELDS if target[signal_id]["ownership"] == "state" else _FIELDS
+            for field in fields:
                 if source[signal_id].get(field) != target[signal_id].get(field):
                     mismatches.append(f"signal:{signal_id}:{field}")
     finally:

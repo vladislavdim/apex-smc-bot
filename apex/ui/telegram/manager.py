@@ -1,0 +1,216 @@
+"""Telegram read-only views for the APEX Trade Manager."""
+from __future__ import annotations
+
+import html
+from apex.db.repositories.manager import ManagerRepository
+from datetime import datetime
+from typing import Any
+
+_MANAGER_DASHBOARD_STATE_FACTORY = None
+
+
+def configure_manager_dashboard_state(connection_factory=None) -> None:
+    global _MANAGER_DASHBOARD_STATE_FACTORY
+    _MANAGER_DASHBOARD_STATE_FACTORY = connection_factory
+
+
+def _state_repository() -> ManagerRepository:
+    if _MANAGER_DASHBOARD_STATE_FACTORY is None:
+        raise RuntimeError("manager_dashboard_state_not_configured")
+    return ManagerRepository(_MANAGER_DASHBOARD_STATE_FACTORY)
+
+
+def fetch_state_manager_trades(
+    repository: ManagerRepository, limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Production Telegram projection with State as the explicit authority."""
+    rows = repository.recent(limit=limit)
+    for row in rows:
+        row["manager_protect_level"] = row.get("confirmed_protect_level")
+        row["signal_result"] = (
+            "pending" if str(row.get("status") or "ACTIVE").upper() == "ACTIVE"
+            else str(row.get("close_result") or "closed")
+        )
+    return rows
+
+
+def fetch_state_manager_trade(
+    repository: ManagerRepository, signal_id: int, event_limit: int = 12,
+) -> dict[str, Any] | None:
+    state = repository.get(signal_id)
+    if state is None:
+        return None
+    state["manager_protect_level"] = state.get("confirmed_protect_level")
+    events = repository.events(signal_id, limit=event_limit)
+    for event in events:
+        event["manager_protect_level"] = event.get("confirmed_protect_level")
+        event["reason"] = event.get("summary")
+    return {"state": state, "events": events}
+
+
+def _fmt_price(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number == 0:
+        return "—"
+    if abs(number) < 0.0001:
+        return f"{number:.8f}"
+    if abs(number) < 1:
+        return f"{number:.6f}".rstrip("0").rstrip(".")
+    return f"{number:,.4f}".rstrip("0").rstrip(".")
+
+
+def _direction_label(value: Any) -> str:
+    direction = str(value or "").upper()
+    if direction == "BULLISH":
+        return "🟢 LONG"
+    if direction == "BEARISH":
+        return "🔴 SHORT"
+    return html.escape(direction or "—")
+
+
+def _duration(created_at: Any, closed_at: Any) -> str:
+    try:
+        start = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+        hours = max(0.0, (end - start).total_seconds() / 3600.0)
+        return f"{hours:.1f}ч"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fetch_manager_trades(db_path: str, limit: int = 12) -> list[dict[str, Any]]:
+    return fetch_state_manager_trades(_state_repository(), limit)
+
+
+def fetch_manager_trade(db_path: str, signal_id: int, event_limit: int = 12) -> dict[str, Any] | None:
+    return fetch_state_manager_trade(_state_repository(), signal_id, event_limit)
+
+
+def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
+    lines = ["🛠 <b>Менеджер сделок APEX</b>", "━━━━━━━━━━━━━━━━", ""]
+    if not items:
+        lines += [
+            "Сейчас менеджер не сопровождает активные сделки.",
+            "",
+            "<i>Здесь появляются только сделки, зарегистрированные Trade Manager.</i>",
+        ]
+        return "\n".join(lines)
+
+    active_count = sum(1 for item in items if str(item.get("status") or "ACTIVE").upper() == "ACTIVE")
+    lines.append(f"Активно: <b>{active_count}</b> · показано сделок: <b>{len(items)}</b>\n")
+    for item in items:
+        action = html.escape(str(item.get("last_action") or "HOLD"))
+        event = html.escape(str(item.get("last_event") or "—"))
+        confidence = item.get("last_confidence")
+        confidence_text = f"{float(confidence) * 100:.0f}%" if confidence is not None else "—"
+        tp_state = "TP1 ✅" if item.get("tp1_seen") else "TP1 ⏳"
+        if item.get("tp2_seen"):
+            tp_state += " · TP2 ✅"
+        elif item.get("tp1_seen"):
+            tp_state += " · TP2 ⏳"
+        if item.get("tp3_seen"):
+            tp_state += " · TP3 ✅"
+        closed = str(item.get("status") or "ACTIVE").upper() == "CLOSED"
+        status_text = f" · ✅ {html.escape(str(item.get('close_result') or 'CLOSED').upper())}" if closed else ""
+        lines += [
+            f"<b>#{item['signal_id']} {html.escape(str(item.get('symbol') or ''))}</b> · "
+            f"{html.escape(str(item.get('strategy') or 'MTF'))} · {_direction_label(item.get('direction'))}{status_text}",
+            f"V{int(item.get('manager_version') or 2)} · state <b>{html.escape(str(item.get('manager_state') or 'PROTECTED'))}</b>",
+            f"Entry <code>{_fmt_price(item.get('initial_entry'))}</code> · "
+            f"Цена <code>{_fmt_price(item.get('last_price'))}</code> · "
+            f"R <b>{float(item.get('current_r') or 0):+.2f}</b>",
+            f"{tp_state} · Событие: <b>{event}</b>",
+            f"Решение: <b>{action}</b> · уверенность {confidence_text}",
+            f"Цель менеджера: <code>{_fmt_price(item.get('manager_target'))}</code> · "
+            f"защита: <code>{_fmt_price(item.get('manager_protect_level'))}</code>",
+            "",
+        ]
+    lines.append("<i>Решения менеджера — рекомендации; сами по себе они не означают исполненный ордер.</i>")
+    return "\n".join(lines)[:4000]
+
+
+def manager_trade_buttons(items: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    buttons: list[tuple[str, str]] = []
+    for item in items:
+        status = "✅" if str(item.get("status") or "ACTIVE").upper() == "CLOSED" else "🟢"
+        label = f"{status} {str(item.get('symbol') or '').replace('USDT', '')} · {item.get('strategy') or 'MTF'} · {float(item.get('current_r') or 0):+.1f}R"
+        buttons.append((label[:48], f"manager_trade_{int(item['signal_id'])}"))
+    return buttons
+
+
+def format_manager_trade_detail(payload: dict[str, Any]) -> str:
+    state = payload["state"]
+    events = payload.get("events") or []
+    confidence = state.get("last_confidence")
+    confidence_text = f"{float(confidence) * 100:.0f}%" if confidence is not None else "—"
+    lines = [
+        f"🧠 <b>APEX MANAGER · #{state['signal_id']}</b>",
+        "━━━━━━━━━━━━━━━━",
+        f"<b>{html.escape(str(state.get('symbol') or ''))}</b> · {html.escape(str(state.get('strategy') or 'MTF'))} · {_direction_label(state.get('direction'))}",
+        f"Management TF: <b>{html.escape(str(state.get('management_tf') or '—'))}</b>",
+        f"Manager V{int(state.get('manager_version') or 2)}: <b>{html.escape(str(state.get('manager_state') or 'PROTECTED'))}</b> · NO_PROGRESS {int(state.get('no_progress_bars') or 0)}",
+        "",
+        f"Entry: <code>{_fmt_price(state.get('initial_entry'))}</code>",
+        f"Initial SL: <code>{_fmt_price(state.get('initial_sl'))}</code>",
+        f"TP1/TP2/TP3: <code>{_fmt_price(state.get('initial_tp1'))}</code> / <code>{_fmt_price(state.get('initial_tp2'))}</code> / <code>{_fmt_price(state.get('initial_tp3'))}</code>",
+        f"Initial RR: <b>{float(state.get('initial_rr') or 0):.2f}</b>",
+        f"Current price: <code>{_fmt_price(state.get('last_price'))}</code> · R <b>{float(state.get('current_r') or 0):+.2f}</b>",
+        f"TP1: {'✅' if state.get('tp1_seen') else '⏳'} · TP2: {'✅' if state.get('tp2_seen') else '⏳'}",
+        "",
+        f"Последнее событие: <b>{html.escape(str(state.get('last_event') or '—'))}</b>",
+        f"Рекомендация: <b>{html.escape(str(state.get('last_action') or 'HOLD'))}</b> · {confidence_text}",
+        f"Структурная цель: <code>{_fmt_price(state.get('manager_target'))}</code>",
+        f"Уровень защиты: <code>{_fmt_price(state.get('manager_protect_level'))}</code>",
+        "",
+        "<b>Последние события:</b>",
+    ]
+    if str(state.get("status") or "ACTIVE").upper() == "CLOSED":
+        lines[2:2] = [
+            f"✅ <b>ЗАКРЫТА · {html.escape(str(state.get('close_result') or 'CLOSED').upper())}</b>",
+            f"Exit: <code>{_fmt_price(state.get('exit_price'))}</code> · "
+            f"<b>{float(state.get('realized_pct') or 0):+.2f}%</b> · "
+            f"<b>{float(state.get('realized_r') or 0):+.2f}R</b>",
+        ]
+    if not events:
+        lines.append("Пока нет записанных событий.")
+    else:
+        for event in events[:10]:
+            reason = html.escape(str(event.get("reason") or "").strip())[:180]
+            action = html.escape(str(event.get("action") or "—"))
+            event_type = html.escape(str(event.get("event_type") or "—"))
+            ts = html.escape(str(event.get("created_at") or ""))[:16]
+            r_value = float(event.get("r_multiple") or 0)
+            conf = event.get("confidence")
+            conf_text = f"{float(conf) * 100:.0f}%" if conf is not None else "—"
+            lines.append(f"• <code>{ts}</code> {event_type} → <b>{action}</b> · {r_value:+.2f}R · {conf_text}")
+            if reason:
+                lines.append(f"  {reason}")
+    lines += ["", "<i>История read-only: исходные Entry/SL/TP/RR не переписываются.</i>"]
+    return "\n".join(lines)[:4000]
+
+
+def format_final_trade_card(state: dict[str, Any]) -> str:
+    result = html.escape(str(state.get("close_result") or "closed").upper())
+    tp_hits = [name for name, key in (("TP1", "tp1_seen"), ("TP2", "tp2_seen"), ("TP3", "tp3_seen")) if state.get(key)]
+    reached = ", ".join(tp_hits) if tp_hits else "—"
+    return "\n".join([
+        f"🏁 <b>APEX · СДЕЛКА ЗАКРЫТА — {html.escape(str(state.get('symbol') or '—'))}</b>",
+        f"{html.escape(str(state.get('strategy') or 'MTF'))} · {_direction_label(state.get('direction'))} · <b>{result}</b>",
+        "━━━━━━━━━━━━━━━━",
+        f"Вход: <code>{_fmt_price(state.get('initial_entry'))}</code>",
+        f"Выход: <code>{_fmt_price(state.get('exit_price'))}</code>",
+        f"Результат: <b>{float(state.get('realized_pct') or 0):+.2f}%</b> · <b>{float(state.get('realized_r') or 0):+.2f}R</b>",
+        f"SL: <code>{_fmt_price(state.get('initial_sl'))}</code>",
+        f"TP1/TP2/TP3: <code>{_fmt_price(state.get('initial_tp1'))}</code> / <code>{_fmt_price(state.get('initial_tp2'))}</code> / <code>{_fmt_price(state.get('initial_tp3'))}</code>",
+        f"Достигнуты: <b>{reached}</b>",
+        f"Длительность: <b>{_duration(state.get('created_at'), state.get('closed_at'))}</b>",
+        f"Последнее решение: <b>{html.escape(str(state.get('last_action') or 'EXIT'))}</b>",
+        f"Закрыто: <code>{html.escape(str(state.get('closed_at') or '—'))}</code>",
+    ])[:4000]
+
+
+def manager_line(state=None,position_id=None):
+    return f"Manager {state or 'UNKNOWN'} · {position_id or 'no position'}"

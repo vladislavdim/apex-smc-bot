@@ -60,3 +60,9 @@ def register_telegram_handlers(
     dispatcher.callback_query.register(handlers.callback)
     dispatcher.chat_member.register(handlers.chat_member)
     dispatcher.message.register(handlers.text)
+
+
+# One canonical registration function; legacy/public name is an identity alias.
+register_handlers = register_telegram_handlers
+
+__all__ = ["COMMAND_ROUTES", "TelegramHandlers", "register_handlers", "register_telegram_handlers"]

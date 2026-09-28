@@ -26,7 +26,7 @@ def main() -> int:
         default=Path("tests/fixtures/apex_v3_strategy_parity_verdict.json"),
     )
     args = parser.parse_args()
-    from bot import _get_v3_live_strategy_registry
+    from apex.app.worker import _get_v3_live_strategy_registry
 
     result = run_corpus(args.corpus, args.output, _get_v3_live_strategy_registry())
     if not result.ready:

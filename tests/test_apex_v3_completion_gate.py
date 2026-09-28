@@ -6,6 +6,7 @@ from pathlib import Path
 
 from scripts.verify_v3_completion import (
     CompletionError, verify_completion, verify_corpus, verify_predeployment,
+    verify_release_ready,
     verify_verdict,
 )
 
@@ -48,6 +49,19 @@ class CompletionGateTests(unittest.TestCase):
         self.assertEqual(
             verify_predeployment(path), ("1–3", "110", "111"),
         )
+        with self.assertRaisesRegex(CompletionError, "v3_release_cutover_not_ready:PARTIAL"):
+            verify_release_ready(path)
+
+    def test_release_ready_allows_acceptance_to_follow_deployment(self):
+        path = self.write(
+            "| IDs | Workstream | Status | Evidence |\n"
+            "|---|---|---|---|\n"
+            "| 1–3 | first | DONE | yes |\n"
+            "| 111 | acceptance | RELEASE_READY | cutover and tests complete |\n"
+        )
+        self.assertEqual(verify_release_ready(path), ("1–3", "111"))
+        with self.assertRaisesRegex(CompletionError, "v3_workstreams_not_done:111"):
+            verify_completion(path)
 
     def test_predeployment_rejects_unfinished_code_workstream(self):
         path = self.write(

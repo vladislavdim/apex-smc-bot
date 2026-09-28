@@ -476,7 +476,10 @@ class BrainPersistenceTests(unittest.TestCase):
         with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn('state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m")', bot_source)
-        self.assertEqual(bot_source.count('_v3_maintenance_and_backup("render_sigterm")'), 1)
+        self.assertIn('backup=_v3_maintenance_and_backup', bot_source)
+        with open(os.path.join(root, "apex/app/shutdown.py"), encoding="utf-8") as source:
+            shutdown_source = source.read()
+        self.assertEqual(shutdown_source.count('deps.backup("render_sigterm")'), 1)
         with open(os.path.join(root, "apex/app/bootstrap.py"), encoding="utf-8") as source:
             bootstrap_source = source.read()
         self.assertIn('shutdown=_shutdown_production_runtime', bot_source)

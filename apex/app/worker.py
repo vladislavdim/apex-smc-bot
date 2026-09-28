@@ -114,21 +114,23 @@ from apex.compatibility.market_data import (
     multi_tf_analysis, smart_price_fmt, smc_on_tf, update_global_candles,
 )
 from apex.compatibility.market_strategy import (
-    calc_smart_levels, check_alerts, check_entry_timing, check_pending_signals,
+    calc_smart_levels, check_alerts, check_entry_timing,
     check_session_liquidity, detect_breaker_block, detect_fast_deal,
     detect_market_regime_v2, detect_mm_accumulation,
     detect_rsi_macd_divergence, detect_swing_setup,
     detect_wyckoff_distribution, detect_wyckoff_reaccumulation,
     detect_wyckoff_spring, detect_zone_setup,
-    legacy_strategy_groq_enabled, register_raw_scan_handler, save_signal_db,
+    legacy_strategy_groq_enabled, register_raw_scan_handler,
 )
 from apex.strategies.common import fast_session
-from core.trade_views import fetch_trades as _fetch_trade_view_rows
-from core.trade_views import format_trade_view as _format_trade_view
-from core.trade_manager_telegram import (
-    configure_manager_dashboard_state as _configure_manager_dashboard_state,
-    fetch_manager_trades as _fetch_manager_trades,
-    fetch_manager_trade as _fetch_manager_trade,
+from apex.strategies.pending_thesis import has_pending_thesis as _v3_has_pending_thesis
+from apex.strategies.state_signal_monitor import StateSignalMonitor as _V3StateSignalMonitor
+from apex.compatibility.legacy_market_runtime import _emit_trade_stats_event as _v3_emit_trade_stats_event
+from apex.ui.telegram.trades import fetch_live_trades as _fetch_trade_view_rows
+from apex.ui.telegram.trades import format_trade_view as _format_trade_view
+from apex.ui.telegram.manager import (
+    fetch_state_manager_trades as _fetch_manager_trades,
+    fetch_state_manager_trade as _fetch_manager_trade,
     format_manager_dashboard as _format_manager_dashboard,
     format_manager_trade_detail as _format_manager_trade_detail,
     format_final_trade_card as _format_final_trade_card,
@@ -144,6 +146,9 @@ from apex.manager.engine import (
     configure_manager_message_state as _configure_manager_message_state,
     configure_manager_state as _configure_manager_state,
     telegram_content_hash as _telegram_content_hash,
+    confirm_manager_action as _confirm_manager_action,
+    validate_transition as _validate_manager_transition,
+    confirm_v2_reconciliation as _confirm_v2_reconciliation,
 )
 from core.apex_v2 import (
     ensure_apex_v2_schema as _ensure_apex_v2_schema,
@@ -179,14 +184,14 @@ from core.telegram_dashboard import (
 # Финальная проверка внешнего рыночного контекста. Она вызывается только после
 # того, как стратегия уже рассчитала готовый кандидат, и не меняет его уровни.
 try:
-    from core.signal_quality_gate import review_signal_candidate as _review_signal_candidate
+    from apex.quality.groq_gate import review_signal_candidate as _review_signal_candidate
     _SIGNAL_QUALITY_GATE_OK = True
 except Exception as _quality_gate_import_error:
     _SIGNAL_QUALITY_GATE_OK = False
     logging.warning(f"Signal quality gate недоступен: {_quality_gate_import_error}")
 
 try:
-    from core.market_intelligence import (refresh_market_intelligence as _refresh_market_intelligence,
+    from apex.market.intelligence import (refresh_market_intelligence as _refresh_market_intelligence,
         start_market_intelligence as _start_market_intelligence, stop_market_intelligence as _stop_market_intelligence)
     _MARKET_INTELLIGENCE_OK = True
 except Exception as _market_intelligence_import_error:
@@ -209,9 +214,15 @@ try:
         reconcile_live_executions as _reconcile_live_executions,
         cached_execution_snapshot as _cached_execution_snapshot,
         configure_execution_state as _configure_execution_state,
+        configure_manager_confirmation as _configure_manager_confirmation,
         execute_manager_review as _execute_manager_review,
     )
     _TRADE_EXECUTION_OK = True
+    _configure_manager_confirmation(
+        _confirm_manager_action,
+        transition_validator=_validate_manager_transition,
+        reconciliation_callback=_confirm_v2_reconciliation,
+    )
 except Exception as _trade_execution_import_error:
     _TRADE_EXECUTION_OK = False
     logging.error("Optional trade execution unavailable: %s", _trade_execution_import_error)
@@ -220,6 +231,7 @@ except Exception as _trade_execution_import_error:
 # source of truth; main must never provide a competing, stale brain.db.
 from apex.db.backup import BrainPersistence as _BrainPersistence
 from apex.app.runtime import runtime_supervisor as _V3_RUNTIME
+from apex.app.shutdown import ShutdownDependencies, shutdown_production
 from apex.app.bootstrap import ProductionDependencies as _V3_PRODUCTION_DEPENDENCIES, run_production as _v3_run_production
 from apex.app.cutover import (
     CutoverSpec as _V3_CUTOVER_SPEC,
@@ -280,8 +292,11 @@ from apex.db.signal_lifecycle_migration import (
     import_legacy_signal_lifecycle as _v3_import_legacy_signal_lifecycle,
     signal_lifecycle_parity_report as _v3_signal_lifecycle_parity_report,
 )
+from apex.db.signal_monitor_cutover import sync_state_monitor_projection as _v3_sync_state_signal_monitor
+from apex.db.state_signal_persistence import StateSignalPersistence as _V3StateSignalPersistence
 from apex.db.repositories.runtime import RuntimeRepository as _V3RuntimeRepository
 from apex.db.repositories.manager import ManagerRepository as _V3ManagerRepository
+from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository as _V3SignalLifecycleRepository
 from apex.db.maintenance import maintain_memory as _v3_maintain_memory, maintain_state as _v3_maintain_state
 from apex.domain.enums import ComponentState as _V3_COMPONENT_STATE, RuntimeStatus as _V3_RUNTIME_STATUS, Strategy as _V3_STRATEGY
 from apex.learning.live_bridge import LiveLearningBridge as _V3LiveLearningBridge
@@ -351,7 +366,6 @@ _configure_manager_message_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_strategy_decision_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
-_configure_manager_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
 _v3_configure_incidents(lambda: _v3_connect_state(_V3_CONFIG))
 _v3_configure_job_metrics(lambda: _v3_connect_state(_V3_CONFIG))
 _V3_LIVE_BRIDGE = _V3LiveLearningBridge(
@@ -492,11 +506,20 @@ async def _v3_refresh_execution_ledger_mirror():
 
 
 def _v3_sync_signal_lifecycle():
+    _v3_sync_state_signal_monitor(
+        lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+        lambda: _v3_connect_state(_V3_CONFIG, read_only=True),
+    )
     return _v3_sync_cutover(
         _V3_LIFECYCLE_CUTOVER,
         lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
         lambda: _v3_connect_state(_V3_CONFIG),
     )
+
+
+def _v3_emit_dashboard_telemetry() -> None:
+    if not _emit_apex_v2_dashboard_snapshot(DB_PATH, require_state=True):
+        raise RuntimeError("dashboard_state_projection_unavailable")
 
 
 async def _v3_refresh_signal_lifecycle_mirror():
@@ -716,15 +739,18 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
     _V3StateCallbackDependencies(
         edit_message=_edit_message,
         main_menu=main_menu,
-        fetch_manager_trades=lambda limit: _fetch_manager_trades(DB_PATH, limit),
+        fetch_manager_trades=lambda limit: _fetch_manager_trades(
+            _V3ManagerRepository(lambda: _v3_connect_state(_V3_CONFIG, read_only=True)), limit
+        ),
         fetch_manager_trade=lambda signal_id, limit: _fetch_manager_trade(
-            DB_PATH, signal_id, limit
+            _V3ManagerRepository(lambda: _v3_connect_state(_V3_CONFIG, read_only=True)),
+            signal_id, limit
         ),
         format_manager_dashboard=_format_manager_dashboard,
         format_manager_trade_detail=_format_manager_trade_detail,
         manager_trade_buttons=_manager_trade_buttons,
         fetch_trade_rows=lambda category, limit: _fetch_trade_view_rows(
-            DB_PATH, category, limit
+            category, limit, lambda: _v3_connect_state(_V3_CONFIG, read_only=True)
         ),
         format_trade_view=_format_trade_view,
         fetch_watchlist=lambda limit: _fetch_watchlist(DB_PATH, limit),
@@ -1106,18 +1132,31 @@ def _persist_delivered_signal(sd: dict):
         "FAST": 1, "MTF": 72, "SWING": 12, "ZONE": 12,
         "WYCKOFF": 168, "MEGA": 336,
     }
-    result = save_signal_db(
-        sd.get("symbol"), sd.get("direction"), signal_type,
-        sd.get("entry"), sd.get("tp1", sd.get("tp")),
-        sd.get("tp2", sd.get("tp1", sd.get("tp"))),
-        sd.get("tp3", sd.get("tp2", sd.get("tp1", sd.get("tp")))),
-        sd.get("sl"), sd.get("timeframe", "1h"),
-        sd.get("estimated_hours", default_hours.get(signal_type, 72)),
-        sd.get("grade", signal_type),
-        confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
-        regime=sd.get("regime", signal_type) or signal_type,
-    )
-    signal_id = result[0] if isinstance(result, tuple) else result
+    try:
+        _v3_sync_signal_lifecycle()
+        signal_id = _V3StateSignalPersistence(
+            lambda: _v3_connect_compatibility(DB_PATH, timeout=20, check_same_thread=False),
+            lambda: _v3_connect_state(_V3_CONFIG),
+            _V3_LIVE_BRIDGE.release_sha,
+        ).save(
+            sd.get("symbol"), sd.get("direction"), signal_type,
+            sd.get("entry"), sd.get("tp1", sd.get("tp")),
+            sd.get("tp2", sd.get("tp1", sd.get("tp"))),
+            sd.get("tp3", sd.get("tp2", sd.get("tp1", sd.get("tp")))),
+            sd.get("sl"), sd.get("timeframe", "1h"),
+            sd.get("estimated_hours", default_hours.get(signal_type, 72)),
+            sd.get("grade", signal_type),
+            confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
+            regime=sd.get("regime", signal_type) or signal_type,
+        )
+    except Exception as exc:
+        logging.exception("[APEX V3] State signal persistence requires reconcile")
+        _V3_RUNTIME.inhibit_entries(_V3_LIFECYCLE_CUTOVER.inhibit_code)
+        _v3_report_incident(
+            _V3_LIFECYCLE_CUTOVER.inhibit_code, "state_db", "CRITICAL",
+            {"error_type": type(exc).__name__},
+        )
+        return None
     if signal_id:
         sd["_signal_persisted"] = True
         sd["_signal_id"] = signal_id
@@ -1137,21 +1176,25 @@ def _persist_delivered_signal(sd: dict):
     return signal_id
 
 
-def _has_pending_signal_for_symbol(symbol: str) -> bool:
-    """One active thesis per pair, without imposing a weekly trade quota."""
-    if not symbol:
-        return False
+def _has_pending_signal_for_symbol(symbol: str) -> bool | None:
+    """UNKNOWN blocks entries until both ownership stores can be read."""
     try:
-        conn = _v3_connect_compatibility(DB_PATH, timeout=10, check_same_thread=False)
-        row = conn.execute(
-            "SELECT id FROM signals WHERE symbol=? AND result='pending' LIMIT 1",
-            (symbol,),
-        ).fetchone()
-        conn.close()
-        return bool(row)
+        pending = _v3_has_pending_thesis(
+            symbol,
+            lambda: _v3_connect_state(_V3_CONFIG, read_only=True),
+            lambda: _v3_connect_compatibility(DB_PATH, read_only=True),
+        )
     except Exception as exc:
-        logging.warning("[SignalArbiter] pending-position check failed: %s", exc)
-        return False
+        logging.error("[SignalArbiter] pair ownership unavailable: %s", exc)
+        _V3_RUNTIME.inhibit_entries("PAIR_OWNERSHIP_UNAVAILABLE")
+        _v3_report_incident(
+            "PAIR_OWNERSHIP_UNAVAILABLE", "state_db", "CRITICAL",
+            {"error_type": type(exc).__name__},
+        )
+        return None
+    _V3_RUNTIME.clear_inhibit("PAIR_OWNERSHIP_UNAVAILABLE")
+    _v3_recover_incident("PAIR_OWNERSHIP_UNAVAILABLE", "state_db")
+    return pending
 
 
 from apex.db.repositories.deliveries import (
@@ -1159,6 +1202,7 @@ from apex.db.repositories.deliveries import (
     confirm_signal_delivery as _confirm_signal_delivery,
     release_signal_delivery_claim as _release_signal_delivery_claim,
     signal_delivery_key as _signal_delivery_key,
+    pair_delivery_key as _pair_delivery_key,
 )
 
 
@@ -1202,13 +1246,15 @@ async def _send_signal(sd):
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
-    if not sd.get("_signal_id") and _has_pending_signal_for_symbol(sd.get("symbol", "")):
-        logging.info(
-            "[SignalArbiter] %s blocked: an existing pending thesis already owns the pair",
-            sd.get("symbol"),
-        )
-        _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
-        return False
+    if not sd.get("_signal_id"):
+        pending_thesis = _has_pending_signal_for_symbol(sd.get("symbol", ""))
+        if pending_thesis is None:
+            _record_strategy_decision(sd, "WAIT", "arbiter", "pair ownership unavailable", db_path=DB_PATH)
+            return False
+        if pending_thesis:
+            logging.info("[SignalArbiter] %s blocked: pending thesis owns the pair", sd.get("symbol"))
+            _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
+            return False
     setup_assessment = _assess_setup_candidate(sd)
     sd["setup_assessment"] = setup_assessment
     await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "TECHNICAL", DB_PATH)
@@ -1301,12 +1347,24 @@ async def _send_signal(sd):
         return False
     now_ts = time.time()
     cache_key = _signal_delivery_key(sd, _strategy)
+    pair_key = _pair_delivery_key(sd)
     delivery_db_path = _V3_CONFIG.database.state_db_path
     try:
+        pair_claimed = await asyncio.to_thread(
+            _claim_signal_delivery, delivery_db_path, pair_key, now_ts,
+            _SIGNAL_COOLDOWN_HOURS * 3600,
+        )
+        _V3_RUNTIME.clear_inhibit("STATE_DB_DELIVERY_UNAVAILABLE")
+        _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
+        if not pair_claimed:
+            _record_strategy_decision(sd, "WAIT", "arbiter", "pair delivery in progress", db_path=DB_PATH)
+            return False
         claimed = await asyncio.to_thread(
             _claim_signal_delivery, delivery_db_path, cache_key, now_ts,
             _SIGNAL_COOLDOWN_HOURS * 3600,
         )
+        if not claimed:
+            await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
         _V3_RUNTIME.clear_inhibit("STATE_DB_DELIVERY_UNAVAILABLE")
         _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
         if not claimed:
@@ -1368,14 +1426,20 @@ async def _send_signal(sd):
             if swing_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
     except asyncio.CancelledError:
-        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
-        if _sent_signal_cache.get(cache_key) == now_ts:
-            _sent_signal_cache.pop(cache_key, None)
+        # Cancellation can arrive after Telegram accepts a message but before
+        # send_message returns. Keep the durable claim until reconciliation;
+        # releasing it would allow a duplicate after restart or retry.
+        logging.error("[_send_signal] delivery interrupted; claim retained for reconciliation: %s", cache_key)
+        _v3_report_incident(
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            {"cache_key": cache_key, "error_type": "CancelledError"},
+        )
         raise
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
         if _sent_signal_cache.get(cache_key) == now_ts:
             _sent_signal_cache.pop(cache_key, None)
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
@@ -1397,14 +1461,27 @@ async def _send_signal(sd):
             {"cache_key": cache_key, "error_type": type(exc).__name__},
         )
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
+    lifecycle_ready = False
     if signal_id:
         try: await asyncio.to_thread(_bind_setup_assessment_to_signal, sd, signal_id, DB_PATH)
         except Exception as exc: logging.warning("[SetupEvidence] bind signal %s: %s", signal_id, exc)
         try:
             await _v3_refresh_signal_lifecycle_mirror()
+            await asyncio.to_thread(
+                _V3SignalLifecycleRepository(
+                    lambda: _v3_connect_state(_V3_CONFIG, read_only=True)
+                ).require_pending_for_execution,
+                signal_id, sd.get("symbol"),
+            )
+            lifecycle_ready = True
         except Exception as exc:
-            logging.error("[APEX V3] signal lifecycle requires reconcile: %s", exc)
-    if signal_id and _TRADE_EXECUTION_OK:
+            logging.error("[APEX V3] signal lifecycle requires reconcile; execution inhibited: %s", exc)
+            _V3_RUNTIME.inhibit_entries(_V3_LIFECYCLE_CUTOVER.inhibit_code)
+            _v3_report_incident(
+                _V3_LIFECYCLE_CUTOVER.inhibit_code, "state_db", "CRITICAL",
+                {"error_type": type(exc).__name__, "signal_id": signal_id},
+            )
+    if signal_id and lifecycle_ready and _TRADE_EXECUTION_OK:
         execution = await asyncio.to_thread(_execute_approved_candidate, sd, signal_id, db_path=DB_PATH)
         logging.info(
             "[AutoTrading] signal=%s symbol=%s status=%s",
@@ -1436,7 +1513,7 @@ async def _send_signal(sd):
             await _v3_refresh_execution_state_mirror()
         except Exception as exc:
             logging.error("[APEX V3] execution State mirror requires reconcile: %s", exc)
-        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
+        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     if _run_id:
         await asyncio.to_thread(
@@ -1447,6 +1524,8 @@ async def _send_signal(sd):
     # Persist them immediately so a Render restart cannot restore a snapshot
     # from before Telegram delivery and emit the same setup again.
     await backup_db_to_github(f"signal_{_strategy.lower()}")
+    if lifecycle_ready:
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
     return True
 
 
@@ -1506,7 +1585,13 @@ def _is_entry_still_valid(sig_data: dict, max_drift_pct: float = 2.0) -> bool:
 async def auto_scan_job():
     """Каждые 10 мин: проверка закрытых сделок"""
     logging.info("⚡ auto_scan_job ЗАПУЩЕН")
-    closed = await asyncio.to_thread(check_pending_signals)
+    await _v3_refresh_signal_lifecycle_mirror()
+    closed = await asyncio.to_thread(
+        _V3StateSignalMonitor(
+            _V3SignalLifecycleRepository(lambda: _v3_connect_state(_V3_CONFIG)),
+            get_live_prices, get_candles, _v3_emit_trade_stats_event,
+        ).check
+    )
     await _v3_refresh_signal_lifecycle_mirror()
     if closed:
         await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
@@ -3173,7 +3258,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         tf_label = TF_LABELS.get(timeframe, timeframe)
 
         conf_score = len(_positive_confluence) * 15
-        # save_signal_db вызывается ниже — только после проверки тайминга
+        # State-запись сигнала выполняется после проверки тайминга и доставки.
         emoji = "🟢" if direction == "BULLISH" else "🔴"
         conf_text = "\n".join(confluence)
 
@@ -4045,7 +4130,7 @@ async def market_intelligence_job():
             },
             DB_PATH,
         )
-        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
+        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     try:
         await _run_market_scan_exclusive("market_intelligence", refresh, 210)
     except Exception as exc:
@@ -4126,7 +4211,7 @@ def _build_v3_scheduler():
             market_wyckoff=auto_wyckoff_scan,
             market_ltf_watch=auto_ltf_watch_scan,
             keepalive=keepalive_heartbeat,
-            dashboard_telemetry=functools.partial(_emit_apex_v2_dashboard_snapshot, DB_PATH),
+            dashboard_telemetry=_v3_emit_dashboard_telemetry,
             alerts=_v3_alerts_job,
             state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m"),
             runtime_watchdog=_v3_runtime_watchdog,
@@ -4228,10 +4313,12 @@ async def _initialize_production_runtime(transport: str):
     _manager_registration = await _v3_refresh_manager_state_mirror()
     logging.info("[APEX V3] Manager registration mirror: %s", _manager_registration)
     _rebuild_strategy_risk_states(DB_PATH)
-    _emit_apex_v2_dashboard_snapshot(DB_PATH)
+    _dashboard_snapshot_ok = _emit_apex_v2_dashboard_snapshot(DB_PATH, require_state=True)
     _V3_RUNTIME.mark_component(
-        "dashboard_telemetry", _V3_COMPONENT_STATE.READY,
-        "startup production snapshot emitted", required=False,
+        "dashboard_telemetry",
+        _V3_COMPONENT_STATE.READY if _dashboard_snapshot_ok else _V3_COMPONENT_STATE.FAILED,
+        "startup production snapshot emitted" if _dashboard_snapshot_ok
+        else "State dashboard snapshot unavailable", required=False,
     )
     start_db_writer()
     _checkpoint = await _brain_startup_checkpoint()
@@ -4259,7 +4346,7 @@ async def _initialize_production_runtime(transport: str):
         _v3_recover_incident("JOB_FAILED", "backup")
         _v3_recover_incident("JOB_TIMEOUT", "backup")
     await _v3_startup_reconcile_and_market_check()
-    await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH)
+    await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     if transport == "polling":
         threading.Thread(target=run_server, daemon=True).start()
     asyncio.create_task(_start_market_intelligence_background())
@@ -4291,26 +4378,15 @@ async def _initialize_production_runtime(transport: str):
 
 
 async def _shutdown_production_runtime(reason: str) -> None:
-    _V3_RUNTIME.inhibit_entries("GRACEFUL_SHUTDOWN")
-    await _v3_release_runtime_lease()
-    try:
-        await asyncio.to_thread(
-            _v3_record_shutdown, _V3_CONFIG.database.state_db_path, reason,
-            instance_id=_V3_CONFIG.runtime.instance_id,
-        )
-    except Exception as exc:
-        logging.warning("[APEX V3] shutdown marker failed safely: %s", exc)
-    try:
-        await asyncio.wait_for(
-            _v3_maintenance_and_backup("render_sigterm"), timeout=30
-        )
-    except asyncio.TimeoutError:
-        logging.warning("[BrainPersistence] final SIGTERM snapshot timed out safely")
-    except Exception as exc:
-        logging.warning("[BrainPersistence] final SIGTERM snapshot failed safely: %s", exc)
-    if _MARKET_INTELLIGENCE_OK:
-        try:await _stop_market_intelligence()
-        except Exception:pass
+    await shutdown_production(ShutdownDependencies(
+        runtime=_V3_RUNTIME,
+        state_db_path=_V3_CONFIG.database.state_db_path,
+        instance_id=_V3_CONFIG.runtime.instance_id,
+        release_lease=_v3_release_runtime_lease,
+        record_shutdown=_v3_record_shutdown,
+        backup=_v3_maintenance_and_backup,
+        stop_market=_stop_market_intelligence if _MARKET_INTELLIGENCE_OK else None,
+    ), reason)
 
 
 def _v3_token_snapshot():

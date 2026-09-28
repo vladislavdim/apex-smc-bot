@@ -18,7 +18,7 @@ from apex.db.connection import connect_compatibility as _connect_compatibility_d
 from apex.db.repositories.execution_account import ExecutionAccountRepository
 from apex.db.repositories.executions import ExecutionRepository
 from apex.db.repositories.manager import ManagerRepository
-from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
+from apex.db.repositories.signals import SignalLifecycleRepository
 from apex.db.execution_recovery import append_recovery, replay_recovery
 from apex.domain.ids import derived_id, is_id
 from apex.domain.enums import Direction, Strategy
@@ -53,12 +53,23 @@ _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
 _account_cache_lock = threading.Lock()
 _ACCOUNT_STATE_FACTORY = None
+_MANAGER_CONFIRM_CALLBACK = None
+_MANAGER_TRANSITION_VALIDATOR = None
+_MANAGER_RECONCILIATION_CALLBACK = None
 
 
 def configure_execution_state(connection_factory=None) -> None:
     """Bind non-signal execution state to apex_state.db in production."""
     global _ACCOUNT_STATE_FACTORY
     _ACCOUNT_STATE_FACTORY = connection_factory
+
+
+def configure_manager_confirmation(callback=None, *, transition_validator=None, reconciliation_callback=None) -> None:
+    """Inject Manager callbacks without making Execution depend on Manager."""
+    global _MANAGER_CONFIRM_CALLBACK, _MANAGER_TRANSITION_VALIDATOR, _MANAGER_RECONCILIATION_CALLBACK
+    _MANAGER_CONFIRM_CALLBACK = callback
+    _MANAGER_TRANSITION_VALIDATOR = transition_validator
+    _MANAGER_RECONCILIATION_CALLBACK = reconciliation_callback
 
 
 def _execution_account_repository(db_path: str) -> ExecutionAccountRepository:
@@ -894,7 +905,9 @@ def execute_manager_review(
         return {"signal_id": signal_id, "status": "NO_EXECUTION", "action": action}
     # Formal V2 transition validation always precedes risk/exchange checks.
     try:
-        from apex.manager.engine import validate_transition
+        validate_transition = _MANAGER_TRANSITION_VALIDATOR
+        if validate_transition is None:
+            return {"signal_id": signal_id, "status": "MANAGER_VALIDATOR_UNAVAILABLE", "action": action}
         repository = _manager_state_repository()
         if repository is not None:
             manager_row = repository.get(signal_id)
@@ -995,14 +1008,14 @@ def execute_manager_review(
                 active_stop_price=float(rounded),
             )
             _finish_manager_action(db_path, action_key, "EXECUTED", order_id=new_stop_id)
-            try:
-                from apex.manager.engine import confirm_manager_action
-                confirm_manager_action(
-                    signal_id, action, "EXECUTED", db_path,
-                    confirmed_protect_level=float(rounded),
-                )
-            except Exception:
-                pass
+            if _MANAGER_CONFIRM_CALLBACK is not None:
+                try:
+                    _MANAGER_CONFIRM_CALLBACK(
+                        signal_id, action, "EXECUTED", db_path,
+                        confirmed_protect_level=float(rounded),
+                    )
+                except Exception:
+                    pass
             return {"signal_id": signal_id, "status": "EXECUTED", "action": action, "order_id": new_stop_id}
 
         positions = [row for row in client.open_positions() if str(row.get("symbol")) == symbol]
@@ -1042,13 +1055,13 @@ def execute_manager_review(
                 conn.close()
         _finish_manager_action(db_path, action_key, "EXECUTED", order_id=order_id)
         try:
-            from apex.manager.engine import confirm_manager_action
             remaining_fraction = None
             if action == "PARTIAL_EXIT":
                 original_quantity = _decimal(snapshot.get("quantity") or amount)
                 remaining = max(Decimal("0"), amount - executed_quantity)
                 remaining_fraction = float(remaining / original_quantity) if original_quantity > 0 else None
-            confirm_manager_action(
+            if _MANAGER_CONFIRM_CALLBACK is not None:
+                _MANAGER_CONFIRM_CALLBACK(
                 signal_id, action, "EXECUTED", db_path,
                 remaining_fraction=remaining_fraction,
             )
@@ -1795,8 +1808,8 @@ def _reconcile_stop_replacement(
         )
         conn.commit(); conn.close()
     try:
-        from apex.manager.engine import confirm_manager_action
-        confirm_manager_action(
+        if _MANAGER_CONFIRM_CALLBACK is not None:
+            _MANAGER_CONFIRM_CALLBACK(
             int(row["signal_id"]), "PROTECT", "EXECUTED", db_path,
             confirmed_protect_level=float(row["active_stop_price"]),
         )
@@ -1990,10 +2003,10 @@ def _reconcile_live_executions_unlocked(
             outcomes.append({"status": "RECONCILE_ERROR", "signal_id": row["signal_id"]})
     for outcome in outcomes:
         try:
-            from apex.manager.engine import confirm_v2_reconciliation
-            confirm_v2_reconciliation(
-                int(outcome.get("signal_id") or 0), str(outcome.get("status") or ""), db_path
-            )
+            if _MANAGER_RECONCILIATION_CALLBACK is not None:
+                _MANAGER_RECONCILIATION_CALLBACK(
+                    int(outcome.get("signal_id") or 0), str(outcome.get("status") or ""), db_path
+                )
         except Exception:
             pass
     return outcomes

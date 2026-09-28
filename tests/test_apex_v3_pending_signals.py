@@ -2,7 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from apex.db.legacy_pending_signals import (
+from tests.legacy_pending_signals import (
     check_pending_signals,
     configure_pending_signal_monitor,
 )
@@ -64,6 +64,12 @@ class PendingSignalMonitorTests(unittest.TestCase):
             conn.close()
             self.assertEqual(result, "sl")
             self.assertEqual(emitted[0][0][0], "CLOSE")
+
+            conn = sqlite3.connect(handle.name)
+            conn.execute("DROP TABLE signals")
+            conn.commit(); conn.close()
+            with self.assertRaises(sqlite3.OperationalError):
+                check_pending_signals()
 
 
 if __name__ == "__main__":
