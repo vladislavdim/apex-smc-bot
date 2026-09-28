@@ -60,7 +60,7 @@ def maintain_state(
         (telemetry_cutoff,),
     ).rowcount
     delivery_claims = conn.execute(
-        "DELETE FROM delivery_claims WHERE delivered_at IS NOT NULL AND updated_at<?",
+        "DELETE FROM delivery_claims WHERE delivered_at>=0 AND updated_at<?",
         (telemetry_cutoff,),
     ).rowcount
     setup_audit = conn.execute(

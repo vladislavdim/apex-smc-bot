@@ -31,7 +31,10 @@ def _connect(
     conn.execute("PRAGMA busy_timeout=30000")
     if not read_only:
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            # Setting WAL again can require a schema lock even when the
+            # database is already in WAL mode (the normal worker case).
+            if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.OperationalError as exc:
             # A concurrent opener may already be negotiating the same durable
             # mode.  That transient lock must not reject an otherwise valid

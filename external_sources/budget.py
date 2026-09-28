@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, asdict
 from contextlib import closing
@@ -78,14 +79,24 @@ class SourceBudget:
         self.db_path = db_path
         self.clock = clock
         self.policies = policies or POLICIES
+        self._schema_ready = False
+        self._schema_lock = threading.Lock()
 
     def _connect(self):
         path = self.db_path or ApexConfig.from_env().database.compatibility_db_path
-        conn = connect_compatibility(path, timeout=2)
+        conn = connect_compatibility(path, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE IF NOT EXISTS external_api_usage (source TEXT, slot INTEGER, units INTEGER NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(source,slot))")
-        conn.execute("CREATE TABLE IF NOT EXISTS external_api_health (source TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, blocked_until REAL NOT NULL DEFAULT 0, rate_limits INTEGER NOT NULL DEFAULT 0, denied INTEGER NOT NULL DEFAULT 0)")
-        conn.commit()
+        if not self._schema_ready:
+            with self._schema_lock:
+                if not self._schema_ready:
+                    try:
+                        conn.execute("CREATE TABLE IF NOT EXISTS external_api_usage (source TEXT, slot INTEGER, units INTEGER NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(source,slot))")
+                        conn.execute("CREATE TABLE IF NOT EXISTS external_api_health (source TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, blocked_until REAL NOT NULL DEFAULT 0, rate_limits INTEGER NOT NULL DEFAULT 0, denied INTEGER NOT NULL DEFAULT 0)")
+                        conn.commit()
+                    except Exception:
+                        conn.close()
+                        raise
+                    self._schema_ready = True
         return conn
 
     def reserve(self, source, units=1):
