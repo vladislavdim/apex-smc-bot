@@ -56,6 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/verify_v3_completion.py --release-ready
+          python scripts/verify_production_authority.py
           python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
           python -m pytest -q
           python -m unittest discover -s tests -q

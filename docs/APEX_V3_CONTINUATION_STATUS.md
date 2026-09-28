@@ -24,10 +24,11 @@ Base: `942f59c7188f33cbd23250bff8197889fdba7ee3` on
 - Compile and `git diff --check`: passed.
 - No production process, real orders, merge or deployment invoked.
 
-## Still open
+## Release status
 
-This is not a completed V3 release. `apex/app/worker.py` still contains substantial
-scanner, lifecycle and infrastructure composition. Continue transferring real
-implementations with behavior tests, audit compatibility call paths and Dashboard
-ownership, then verify strategy parity and restart/reconciliation behavior.
-A green local suite does not establish live acceptance or snapshot parity proof.
+Subsequent commits completed State-first delivered-signal persistence, the
+restart-safe analytical monitor, State-owned Telegram and Dashboard projections,
+pair-level delivery fencing and the pinned five-strategy corpus replay. The final
+dead-path/production-authority audit is portable and runs in both CI and the
+controlled release. The branch is `RELEASE_READY`; `DONE` and
+`PRODUCTION_STABLE` remain reserved for 48–72 hours of live acceptance.
