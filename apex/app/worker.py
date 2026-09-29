@@ -379,14 +379,14 @@ _V3_LAG_MONITOR = _V3EventLoopLagMonitor(sla_ms=_V3_CONFIG.operational.event_loo
 _V3_LEASE_CLIENT = None
 _BRAIN_PERSISTENCE = _BrainPersistence(
     DB_PATH,
-    _V3_CONFIG.integrations.github_repo,
+    _V3_CONFIG.integrations.github_backup_repo,
     _V3_CONFIG.integrations.github_token,
     _V3_CONFIG.integrations.backup_branch,
     compression="gzip",
 )
 _STATE_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.database.state_db_path,
-    _V3_CONFIG.integrations.github_repo,
+    _V3_CONFIG.integrations.github_backup_repo,
     _V3_CONFIG.integrations.github_token,
     _V3_CONFIG.integrations.state_backup_branch,
     remote_name="apex_state.db",
@@ -394,7 +394,7 @@ _STATE_PERSISTENCE = _BrainPersistence(
 )
 _MEMORY_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.database.memory_db_path,
-    _V3_CONFIG.integrations.github_repo,
+    _V3_CONFIG.integrations.github_backup_repo,
     _V3_CONFIG.integrations.github_token,
     _V3_CONFIG.integrations.memory_backup_branch,
     remote_name="apex_memory.db",
@@ -899,6 +899,7 @@ _v3_register_telegram_handlers(
         text=handle_text,
     ),
     Command,
+    admin_ids=frozenset(ADMIN_IDS),
 )
 
 # ===== AUTO TASKS =====
@@ -4422,7 +4423,10 @@ async def _initialize_production_runtime(transport: str):
 
     webhook_url = _V3_CONFIG.integrations.webhook_url
     if transport == "webhook":
-        await bot.set_webhook(f"{webhook_url}/webhook", drop_pending_updates=True)
+        await bot.set_webhook(
+            f"{webhook_url}/webhook", drop_pending_updates=False,
+            secret_token=_V3_CONFIG.integrations.telegram_webhook_secret,
+        )
         logging.info("Webhook установлен: %s/webhook", webhook_url)
     else:
         await _delete_webhook_safely()

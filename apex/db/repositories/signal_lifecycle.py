@@ -163,6 +163,8 @@ class SignalLifecycleRepository:
         result: str | None = None, reason: str | None = None,
         tp1_hit: bool | None = None, trailing_sl: float | None = None,
         best_price: float | None = None,
+        monitor_bar_close: float | None = None,
+        expected_bar_close: float | None = None,
     ) -> bool:
         """Commit one analytical transition only while the expected State row is current."""
         if transition not in {"touch", "activate", "progress", "close", "cancel"}:
@@ -188,6 +190,9 @@ class SignalLifecycleRepository:
             assignments = ["last_checked_at=CURRENT_TIMESTAMP", "updated_at=CURRENT_TIMESTAMP",
                            "ownership='state'"]
             parameters: list[Any] = []
+            if monitor_bar_close is not None:
+                assignments.append("monitor_bar_close=?")
+                parameters.append(float(monitor_bar_close))
             if transition == "activate":
                 assignments += ["status='active'", "activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP)"]
             elif transition in {"close", "cancel"}:
@@ -203,10 +208,12 @@ class SignalLifecycleRepository:
                 if best_price is not None:
                     assignments.append("best_price=?")
                     parameters.append(float(best_price))
+            cursor_clause = " AND monitor_bar_close IS ?" if monitor_bar_close is not None else ""
+            cursor_params = (expected_bar_close,) if monitor_bar_close is not None else ()
             updated = conn.execute(
                 f"UPDATE signal_lifecycle SET {','.join(assignments)} "
-                "WHERE signal_id=? AND status=? AND result='pending'",
-                (*parameters, int(signal_id), expected_status),
+                "WHERE signal_id=? AND status=? AND result='pending'" + cursor_clause,
+                (*parameters, int(signal_id), expected_status, *cursor_params),
             ).rowcount
             conn.commit()
             return updated == 1

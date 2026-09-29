@@ -97,3 +97,29 @@ def get_all_market_pairs() -> list[str]:
 
 
 __all__ = ["get_all_market_pairs", "get_live_prices", "get_top_pairs"]
+
+
+def get_execution_quote(symbol: str) -> dict:
+    """Fetch an uncached Gate quote; never return a stale/display fallback."""
+    import math
+    from apex.config.settings import ApexConfig
+    from apex.market.gate_client import gate_contract
+
+    settings = ApexConfig.from_env()
+    contract = gate_contract(symbol)
+    started_at = time.time()
+    response = _request_get(
+        settings.integrations.gate_api_base.rstrip('/') + '/futures/usdt/tickers',
+        params={"contract": contract}, headers={"User-Agent": "APEX-SMC/1.0"},
+        timeout=settings.operational.gate_timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload if isinstance(payload, list) else []
+    row = next((row for row in rows if row.get("contract") == contract), None)
+    if row is None:
+        raise RuntimeError("GATE_EXECUTION_QUOTE_MISSING")
+    price = float(row.get("last") or row.get("mark_price") or 0)
+    if not math.isfinite(price) or price <= 0:
+        raise RuntimeError("GATE_EXECUTION_QUOTE_INVALID")
+    return {"price": price, "observed_at": started_at, "source": "gate"}

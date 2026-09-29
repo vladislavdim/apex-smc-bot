@@ -776,6 +776,11 @@ def _migration_024(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_025(conn: sqlite3.Connection) -> None:
+    """Persist the last fully processed analytical candle across restarts."""
+    conn.execute("ALTER TABLE signal_lifecycle ADD COLUMN monitor_bar_close REAL")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -801,6 +806,7 @@ STATE_MIGRATIONS = (
     Migration(22, "delivered_signal_state_projection", _migration_022),
     Migration(23, "signal_monitor_state_ownership", _migration_023),
     Migration(24, "signal_lifecycle_state_creation", _migration_024),
+    Migration(25, "signal_monitor_cursor", _migration_025),
 )
 
 

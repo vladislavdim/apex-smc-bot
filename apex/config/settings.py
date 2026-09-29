@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import hmac
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Mapping
@@ -162,6 +163,8 @@ class IntegrationSettings:
     runtime_lease_url: str = ""
     stats_url: str = ""
     webhook_url: str = ""
+    telegram_webhook_secret: str = field(default="", repr=False)
+    github_backup_repo: str = ""
     github_repo: str = ""
     github_token: str = field(default="", repr=False)
     backup_branch: str = "brain-backups"
@@ -242,7 +245,7 @@ class ApexConfig:
         payload = asdict(self)
         integrations = payload["integrations"]
         for name in (
-            "groq_api_key", "telegram_token", "telegram_admin_id",
+            "groq_api_key", "telegram_token", "telegram_webhook_secret", "telegram_admin_id",
             "telegram_admin_ids",
             "groq_api_keys", "tavily_api_key", "twelvedata_api_key",
             "mobula_api_key", "coinalyze_api_key", "lunarcrush_api_key",
@@ -375,6 +378,11 @@ class ApexConfig:
                 runtime_lease_url=str(source.get("APEX_RUNTIME_LEASE_URL", "")).strip(),
                 stats_url=str(source.get("APEX_STATS_URL", "")).strip(),
                 webhook_url=str(source.get("WEBHOOK_URL", "")).strip(),
+                telegram_webhook_secret=str(source.get("TELEGRAM_WEBHOOK_SECRET") or (
+                    hmac.new(str(source["TELEGRAM_TOKEN"]).encode(), b"apex-webhook-v1", hashlib.sha256).hexdigest()
+                    if source.get("TELEGRAM_TOKEN") else ""
+                )).strip(),
+                github_backup_repo=str(source.get("GITHUB_BACKUP_REPO") or source.get("GITHUB_REPO", "")).strip(),
                 github_repo=str(source.get("GITHUB_REPO", "")).strip(),
                 github_token=str(source.get("GITHUB_TOKEN", "")).strip(),
                 backup_branch=str(source.get("BRAIN_BACKUP_BRANCH", "brain-backups")).strip(),

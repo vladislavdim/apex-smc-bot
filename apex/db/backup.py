@@ -77,6 +77,19 @@ class BrainPersistence:
     def configured(self) -> bool:
         return bool(self.repository and self.token)
 
+    def _require_private_repository(self) -> None:
+        """Never upload user/trading state to a public or unverified repository.
+
+        Recheck on every upload: visibility can change between backup cycles.
+        Reads/restores remain available to migrate an existing exposed backup.
+        """
+        response = self.session.get(
+            f"https://api.github.com/repos/{self.repository}",
+            params={}, headers=self._headers(), timeout=self.timeout,
+        )
+        if response.status_code != 200 or response.json().get("private") is not True:
+            raise RuntimeError("BACKUP_REPOSITORY_NOT_PRIVATE")
+
     @property
     def contents_url(self) -> str:
         return f"https://api.github.com/repos/{self.repository}/contents/{self.remote_name}"
@@ -479,6 +492,7 @@ class BrainPersistence:
                 return {"status": "not_configured", "ready": False}
             temp_path = ""
             try:
+                self._require_private_repository()
                 metadata, state = self._remote_metadata()
                 if state == "ok" and metadata is not None:
                     return {"status": "remote_exists", "ready": False}
@@ -573,6 +587,7 @@ class BrainPersistence:
             payload_path = ""
             upload_path = ""
             try:
+                self._require_private_repository()
                 metadata, state = self._remote_metadata()
                 if state != "ok" or metadata is None:
                     raise RuntimeError("remote brain.db disappeared after restore")

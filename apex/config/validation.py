@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from apex.domain.enums import Strategy
 
@@ -106,6 +107,10 @@ def validate_config(config: ApexConfig, *, raise_on_error: bool = False) -> Vali
         errors.append("STATS_INGEST_CONFIG_INCOMPLETE")
     if config.integrations.runtime_lease_url and not config.integrations.stats_ingest_token:
         errors.append("RUNTIME_LEASE_TOKEN_MISSING")
+    if config.integrations.webhook_url and not re.fullmatch(
+        r"[A-Za-z0-9_-]{32,256}", config.integrations.telegram_webhook_secret
+    ):
+        errors.append("WEBHOOK_SECRET_INVALID")
     if not 1 <= config.runtime.port <= 65535:
         errors.append("PORT_INVALID")
     if not 0 <= config.runtime.rollout_settle_seconds <= 120:
