@@ -7,6 +7,7 @@ module owns the public command surface and registration order.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any, Callable
 
 
@@ -51,15 +52,27 @@ def register_telegram_handlers(
     dispatcher: Any,
     handlers: TelegramHandlers,
     command_filter: Callable[[str], Any],
+    *, admin_ids: tuple[int, ...] | frozenset[int] = (),
 ) -> None:
     """Register the explicit production surface before the catch-all route."""
+    permitted = frozenset(admin_ids)
+
+    def protect(handler):
+        @wraps(handler)
+        async def authorized(event, *args, **kwargs):
+            user = getattr(event, "from_user", None)
+            if user is None or user.id not in permitted:
+                return None
+            return await handler(event, *args, **kwargs)
+        return authorized
+
     for command, attribute in COMMAND_ROUTES:
         dispatcher.message.register(
-            getattr(handlers, attribute), command_filter(command)
+            protect(getattr(handlers, attribute)), command_filter(command)
         )
-    dispatcher.callback_query.register(handlers.callback)
-    dispatcher.chat_member.register(handlers.chat_member)
-    dispatcher.message.register(handlers.text)
+    dispatcher.callback_query.register(protect(handlers.callback))
+    dispatcher.chat_member.register(protect(handlers.chat_member))
+    dispatcher.message.register(protect(handlers.text))
 
 
 # One canonical registration function; legacy/public name is an identity alias.

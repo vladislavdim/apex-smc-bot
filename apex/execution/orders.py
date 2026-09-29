@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import calendar
+import math
 import logging
 import re
 import sqlite3
@@ -46,6 +47,7 @@ from apex.quality.integrity import validate_legacy_candidate as validate_candida
 DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 LIVE_CONFIRMATION = "ENABLE_LIVE_BINANCE_FUTURES"
 _TRUTHY = {"1", "true", "yes", "on"}
+_entry_process_lock = threading.RLock()
 _reconcile_process_lock = threading.Lock()
 _binance_circuit_lock = threading.Lock()
 _binance_blocked_until = 0.0
@@ -120,7 +122,8 @@ def _mirror_execution_record(values: Mapping[str, Any]) -> bool:
         return True
     try:
         signal_id = int(values["signal_id"])
-        if repository.get(signal_id) is None:
+        existing = repository.get(signal_id)
+        if existing is None:
             repository.register(values)
         repository.bind_identity(
             signal_id,
@@ -135,7 +138,10 @@ def _mirror_execution_record(values: Mapping[str, Any]) -> bool:
                     "status", "quantity", "entry_order_id", "stop_order_id",
                     "tp1_order_id", "tp2_order_id", "active_stop_price",
                     "pending_stop_order_id", "previous_stop_order_id", "last_error",
-                ) if key in values
+                ) if key in values and not (
+                    key.endswith("order_id") and not values.get(key)
+                    and existing and existing.get(key)
+                )
             },
         )
         return True
@@ -147,6 +153,7 @@ _binance_request_metrics = {"total": 0, "rate_limited": 0, "last_status": None, 
 _DEFAULT_BALANCE_CACHE_TTL_SECONDS = 900
 _LIVE_RECONCILE_STATUSES = (
     "SUBMITTING",
+    "UNPROTECTED_POSITION",
     "ENTRY_PENDING",
     "PROTECTED",
     "PROTECTED_NO_TP",
@@ -966,7 +973,10 @@ def execute_manager_review(
     candle_id = str(facts.get("management_candle_id") or "event")
     requested_level = review.get("protect_level") if action == "PROTECT" else None
     if action == "MOVE_STOP_TO_BREAKEVEN":
-        requested_level = float(manager_row[2]) if manager_row else None
+        requested_level = (
+            float(manager_row["initial_entry"] if isinstance(manager_row, Mapping) else manager_row[2])
+            if manager_row else None
+        )
     raw_key = f"{signal_id}:{action}:{candle_id}:{requested_level or ''}"
     action_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:32]
     if not _claim_manager_action(db_path, action_key, signal_id, action, requested_level):
@@ -1092,8 +1102,7 @@ def _live_reconcile_rows(db_path: str) -> list[Mapping[str, Any]]:
                 [int(row["signal_id"]) for row in state_rows]
             )
         except Exception as exc:
-            logging.error("[APEX V3] execution/lifecycle State read unavailable: %s", type(exc).__name__)
-            return []
+            raise RuntimeError("EXECUTION_STATE_UNAVAILABLE") from exc
         # State is the V3 lifecycle authority. Missing rows remain pending so
         # an incomplete migration can never trigger protective-order cleanup.
         rows = [
@@ -1136,7 +1145,7 @@ def _live_reconcile_rows(db_path: str) -> list[Mapping[str, Any]]:
     for row in rows:
         status = str(row["status"])
         signal_pending = str(row["signal_result"]) == "pending"
-        if status in {"SUBMITTING", "ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}:
+        if status in {"SUBMITTING", "UNPROTECTED_POSITION", "ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}:
             actionable.append(row)
         elif status == "PROTECTED" and (not signal_pending or int(row["signal_id"]) in cutover_ids):
             actionable.append(row)
@@ -1258,7 +1267,7 @@ def _v3_risk_admission(
         except Exception as exc:
             # The canonical intent persistence fence below remains authoritative.
             # Do not turn a transient State read into a different failure class.
-            logging.warning("[RiskEngine] State exposure unavailable: %s", type(exc).__name__)
+            raise RuntimeError("RISK_EXPOSURE_UNAVAILABLE") from exc
     equity = max(0.0, float(equity_quote or 0.0))
     portfolio_pct = (
         float(exposure["portfolio_risk_usdt"]) / equity * 100.0 if equity > 0 else 0.0
@@ -1291,9 +1300,39 @@ def _v3_risk_admission(
     return decision, domain_candidate
 
 
+def _fresh_gate_quote(symbol: str) -> Mapping[str, Any]:
+    from apex.market.gate_tickers import get_execution_quote
+    return get_execution_quote(symbol)
+
+
 def execute_approved_candidate(
     candidate: dict[str, Any], signal_id: int, *, db_path: str = DB_PATH,
     config: ExecutionConfig | None = None, client: BinanceFuturesClient | None = None,
+    quote_provider=None,
+) -> dict[str, Any]:
+    """Serialize admission through intent persistence under the single-worker lease.
+
+    A signal is an idempotency key, including rejected/terminal submissions.
+    Retrying an existing signal must never mutate its exchange state.
+    """
+    with _entry_process_lock:
+        try:
+            existing = cached_execution_snapshot(signal_id, db_path)
+        except Exception as exc:
+            return {"status": "BLOCKED_STATE_PERSISTENCE", "signal_id": signal_id,
+                    "error": type(exc).__name__}
+        if existing.get("status") != "NOT_EXECUTED":
+            return {**existing, "duplicate": True}
+        return _execute_approved_candidate(
+            candidate, signal_id, db_path=db_path, config=config, client=client,
+            quote_provider=quote_provider,
+        )
+
+
+def _execute_approved_candidate(
+    candidate: dict[str, Any], signal_id: int, *, db_path: str = DB_PATH,
+    config: ExecutionConfig | None = None, client: BinanceFuturesClient | None = None,
+    quote_provider=None,
 ) -> dict[str, Any]:
     """Record paper execution or submit one live limit entry; never raise."""
     config = config or ExecutionConfig.from_env()
@@ -1351,8 +1390,14 @@ def execute_approved_candidate(
         risk_multiplier = max(0.0, min(1.0, float(risk_state.get("live_risk_multiplier", 1.0))))
     except (TypeError, ValueError):
         risk_multiplier = 1.0
+    if risk_multiplier <= 0:
+        return _store_execution(db_path, signal_id, config, candidate,
+                                "BLOCKED_ZERO_RISK", error="strategy risk multiplier is zero")
     if risk_multiplier < 1.0:
-        config = replace(config, risk_pct=max(0.01, config.risk_pct * risk_multiplier))
+        config = replace(config, risk_pct=config.risk_pct * risk_multiplier)
+
+    submission_started = False
+    plan = None
 
     try:
         if config.mode == "paper":
@@ -1397,10 +1442,22 @@ def execute_approved_candidate(
         # Exchange state is authoritative. Any failure here is caught by the
         # outer fail-closed guard and no order is submitted.
         open_positions = client.open_positions()
-        if len(open_positions) >= config.max_open_positions:
+        repository = _execution_state_repository()
+        if repository is not None:
+            committed = repository.requiring_reconciliation(_LIVE_RECONCILE_STATUSES)
+        else:
+            committed = _live_reconcile_rows(db_path)
+        if any(row["status"] == "UNPROTECTED_POSITION" for row in committed):
+            return _store_execution(db_path, signal_id, config, candidate,
+                                    "BLOCKED_UNPROTECTED_POSITION")
+        # Pending intents reserve slots before fills; deduplicate exchange/State symbols.
+        reserved_symbols = {str(row["symbol"]).upper() for row in committed}
+        position_symbols = {str(row["symbol"]).upper() for row in open_positions}
+        occupied_slots = len(reserved_symbols | position_symbols)
+        if occupied_slots >= config.max_open_positions:
             return _store_execution(
                 db_path, signal_id, config, candidate, "BLOCKED_MAX_POSITIONS",
-                error=f"open positions {len(open_positions)} >= limit {config.max_open_positions}",
+                error=f"open/reserved positions {occupied_slots} >= limit {config.max_open_positions}",
             )
         balance_details = client.usdt_balance_details()
         try:
@@ -1475,18 +1532,17 @@ def execute_approved_candidate(
             )
         config = replace(config, risk_pct=float(risk_decision.final_risk_pct))
         symbol = str(candidate.get("symbol", "")).upper()
-        # Groq/news review and Telegram delivery take time.  Revalidate the
-        # immutable strategy levels against the exchange mark price immediately
-        # before sizing/submission so a setup that already hit SL/TP cannot be
-        # turned into a late live entry.
-        # Market-data integrity is evaluated from the Gate snapshot carried by
-        # the approved candidate. Binance is execution/account state only.
-        gate_price = candidate.get("_gate_price") or candidate.get("current_price") or candidate.get("market_price")
-        current_price = float(gate_price or client.mark_price(symbol))
-        if current_price <= 0:
+        # Do not trust a price carried by a candidate through AI/Telegram latency.
+        quote = (quote_provider or _fresh_gate_quote)(symbol)
+        current_price = float(quote.get("price") or 0)
+        quote_time = float(quote.get("observed_at") or 0)
+        quote_age = time.time() - quote_time
+        if (quote.get("source") != "gate" or not math.isfinite(current_price)
+                or current_price <= 0 or not math.isfinite(quote_age)
+                or not 0 <= quote_age <= 15):
             return _store_execution(
                 db_path, signal_id, config, candidate, "SKIPPED_STALE_GATE_DATA",
-                error="fresh Gate price is required before live submission",
+                error="fresh Gate quote is required before live submission",
             )
         current_integrity = validate_candidate(candidate, current_price)
         if not current_integrity.get("valid"):
@@ -1518,6 +1574,14 @@ def execute_approved_candidate(
                 error="canonical execution intent was not persisted",
             )
         client_order_id = client_order_ids(str(intent["execution_id"]))["entry"]
+        # Account/risk calls can outlive the runtime lease or quote freshness.
+        admitted, reason = entry_admission()
+        if not admitted or time.time() - quote_time > 15:
+            return _store_execution(
+                db_path, signal_id, config, candidate, "BLOCKED_ADMISSION_EXPIRED", plan,
+                error=reason or "Gate quote expired before submission",
+            )
+        submission_started = True
         response = client.place_limit_entry(plan, client_order_id)
         order_id = str(response.get("orderId", ""))
         if not order_id:
@@ -1541,7 +1605,12 @@ def execute_approved_candidate(
             return stored
     except Exception as exc:
         logging.error("[AutoTrading] %s failed safely: %s", candidate.get("symbol"), exc)
-        return _store_execution(db_path, signal_id, config, candidate, "ERROR", error=str(exc))
+        # A transport exception cannot prove the exchange rejected the order.
+        # Preserve the immutable plan and deterministic client ID for reconciliation.
+        return _store_execution(
+            db_path, signal_id, config, candidate,
+            "SUBMITTING" if submission_started else "ERROR", plan, error=str(exc),
+        )
 
 
 def _update_execution(db_path: str, signal_id: int, status: str, **fields: Any) -> None:
@@ -1618,7 +1687,9 @@ def _install_brackets(
         stop_id = _required_remote_order_id(stop, "protective stop")
     except Exception as stop_error:
         try:
-            client.emergency_close(symbol, direction, _plain_decimal(quantity), f"apex_x_{signal_id}")
+            closed = client.emergency_close(symbol, direction, _plain_decimal(quantity), f"apex_x_{signal_id}")
+            if str(closed.get("status", "")).upper() != "FILLED" or _decimal(closed.get("executedQty", "0")) < quantity:
+                raise RuntimeError("emergency close not fill-confirmed")
             status = "EMERGENCY_CLOSED"
         except Exception as close_error:
             status = "UNPROTECTED_POSITION"
@@ -1894,6 +1965,18 @@ def _reconcile_live_executions_unlocked(
     for row in rows:
         try:
             signal_pending = str(row["signal_result"]) == "pending"
+            if row["status"] == "UNPROTECTED_POSITION":
+                positions = client.open_positions()
+                quantity = sum(
+                    (abs(_decimal(item.get("positionAmt", "0"))) for item in positions
+                     if str(item.get("symbol", "")).upper() == str(row["symbol"]).upper()),
+                    Decimal("0"),
+                )
+                if quantity > 0:
+                    outcomes.append(_install_brackets(row, client, config, db_path, quantity))
+                else:
+                    outcomes.append(_cleanup_protective_orders(row, client, db_path))
+                continue
             if row["status"] == "STOP_REPLACEMENT_PENDING":
                 outcomes.append(_reconcile_stop_replacement(row, client, db_path))
                 continue
@@ -1958,9 +2041,15 @@ def _reconcile_live_executions_unlocked(
                 order = client.query_order(str(row["symbol"]), str(row["entry_order_id"]))
             order_status = str(order.get("status", "")).upper()
             executed = _decimal(order.get("executedQty", "0"))
-            if str(row["signal_result"]) != "pending":
+            if order_status == "PARTIALLY_FILLED" or (not signal_pending and order_status == "NEW"):
+                order_id = str(order.get("orderId") or row["entry_order_id"])
+                client.cancel_order(str(row["symbol"]), order_id)
+                final_order = client.query_order(str(row["symbol"]), order_id)
+                order_status = str(final_order.get("status", "")).upper()
+                executed = max(executed, _decimal(final_order.get("executedQty", "0")))
                 if order_status in {"NEW", "PARTIALLY_FILLED"}:
-                    client.cancel_order(str(row["symbol"]), str(row["entry_order_id"]))
+                    raise RuntimeError("entry cancellation not confirmed")
+            if str(row["signal_result"]) != "pending":
                 if executed > 0 or order_status == "FILLED":
                     # The signal can expire between the exchange fill and this
                     # reconciliation pass. Do not turn that race into a fresh
@@ -1983,10 +2072,7 @@ def _reconcile_live_executions_unlocked(
                     _update_execution(db_path, int(row["signal_id"]), "ENTRY_CANCELLED")
                     outcomes.append({"status": "ENTRY_CANCELLED", "signal_id": row["signal_id"]})
                 continue
-            if order_status == "PARTIALLY_FILLED" and executed > 0:
-                client.cancel_order(str(row["symbol"]), str(row["entry_order_id"]))
-                outcomes.append(_install_brackets(row, client, config, db_path, executed))
-            elif order_status == "FILLED":
+            if executed > 0 or order_status == "FILLED":
                 filled = executed or _decimal(row["quantity"])
                 outcomes.append(_install_brackets(row, client, config, db_path, filled))
             elif order_status in {"CANCELED", "REJECTED", "EXPIRED"}:
@@ -1996,7 +2082,7 @@ def _reconcile_live_executions_unlocked(
             logging.error("[AutoTrading] reconcile signal %s: %s", row["signal_id"], exc)
             retry_status = (
                 str(row["status"])
-                if row["status"] in {"SUBMITTING", "PROTECTED", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}
+                if row["status"] in {"SUBMITTING", "UNPROTECTED_POSITION", "PROTECTED", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}
                 else "ENTRY_PENDING"
             )
             _update_execution(db_path, int(row["signal_id"]), retry_status, last_error=str(exc))

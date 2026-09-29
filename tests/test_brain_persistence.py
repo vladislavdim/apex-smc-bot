@@ -29,6 +29,8 @@ class _GitHubSession:
         self.puts = []
 
     def get(self, _url, *, params, headers, timeout):
+        if "/contents/" not in _url:
+            return _Response(payload={"private": True})
         del params, timeout
         if "raw" in headers.get("Accept", ""):
             return _Response(content=self.content)
@@ -51,6 +53,8 @@ class _HistorySession(_GitHubSession):
 
     def get(self, url, *, params, headers, timeout):
         del timeout
+        if url.endswith("/repos/owner/repo") or ("/contents/" not in url and not url.endswith("/commits")):
+            return _Response(payload={"private": True})
         if url.endswith("/commits"):
             return _Response(payload=[{"sha": "head"}, {"sha": "good-commit"}])
         if params.get("ref") == "good-commit":
@@ -104,6 +108,8 @@ class _MissingGitHubSession:
         self.puts = []
 
     def get(self, _url, *, params, headers, timeout):
+        if "/contents/" not in _url:
+            return _Response(payload={"private": True})
         del params, headers, timeout
         if not self.sha:
             return _Response(status_code=404)

@@ -7,3 +7,7 @@ brain.db-shm
 setup_audit.db
 setup_audit.db-wal
 setup_audit.db-shm
+
+apex_state.db*
+apex_memory.db*
+apex_execution_recovery.jsonl

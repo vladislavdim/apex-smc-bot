@@ -37,6 +37,12 @@ def decide_risk(
     dependency_multiplier: float = 1.0,
 ) -> RiskDecision:
     reasons: list[str] = []
+    numeric = (base_risk_pct, leverage, dependency_multiplier, state.equity_quote,
+               state.portfolio_risk_pct, state.same_side_risk_pct, state.cluster_risk_pct,
+               limits.max_risk_pct, limits.max_leverage, limits.max_portfolio_risk_pct,
+               limits.max_same_side_risk_pct, limits.max_cluster_risk_pct)
+    if not all(isfinite(float(value)) for value in numeric):
+        return RiskDecision("BLOCK", base_risk_pct, 0.0, 0.0, ("INVALID_RISK_STATE",))
     if not state.ready:
         reasons.append("RUNTIME_NOT_READY")
     if state.daily_loss_locked:
@@ -58,13 +64,20 @@ def decide_risk(
         return RiskDecision("BLOCK", base_risk_pct, 0.0, 0.0, tuple(reasons))
 
     multiplier = min(1.0, max(0.0, float(dependency_multiplier)))
-    final = min(base_risk_pct, limits.max_risk_pct) * multiplier
+    available = min(
+        limits.max_portfolio_risk_pct - state.portfolio_risk_pct,
+        limits.max_same_side_risk_pct - state.same_side_risk_pct,
+        limits.max_cluster_risk_pct - state.cluster_risk_pct,
+    )
+    requested = min(base_risk_pct, limits.max_risk_pct) * multiplier
+    final = min(requested, available)
     if final <= 0:
         return RiskDecision("BLOCK", base_risk_pct, 0.0, 0.0, ("DEPENDENCY_BLOCK",))
     risk_quote = state.equity_quote * final / 100
     quantity = risk_quote / stop_distance
     decision = "KEEP" if abs(final - base_risk_pct) < 1e-12 else "REDUCE"
-    reason_codes = () if decision == "KEEP" else ("DEPENDENCY_REDUCTION",)
+    reason_codes = (() if decision == "KEEP" else
+                    ("EXPOSURE_REDUCTION",) if final < requested else ("DEPENDENCY_REDUCTION",))
     return RiskDecision(decision, base_risk_pct, final, quantity, reason_codes)
 
 

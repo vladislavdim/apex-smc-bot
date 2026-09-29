@@ -46,9 +46,9 @@ class TelegramRouterTests(unittest.TestCase):
             [call[1] for call in dispatcher.message.calls[:-1]],
             [("command", command) for command, _ in COMMAND_ROUTES],
         )
-        self.assertEqual(dispatcher.message.calls[-1], (handlers.text,))
-        self.assertEqual(dispatcher.callback_query.calls, [(handlers.callback,)])
-        self.assertEqual(dispatcher.chat_member.calls, [(handlers.chat_member,)])
+        self.assertEqual(dispatcher.message.calls[-1][0].__wrapped__, handlers.text)
+        self.assertEqual(dispatcher.callback_query.calls[0][0].__wrapped__, handlers.callback)
+        self.assertEqual(dispatcher.chat_member.calls[0][0].__wrapped__, handlers.chat_member)
 
     def test_launcher_has_no_import_time_handler_decorators(self):
         source = Path("apex/app/worker.py").read_text(encoding="utf-8")

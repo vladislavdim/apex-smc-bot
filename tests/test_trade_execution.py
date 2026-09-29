@@ -202,6 +202,11 @@ class TradeExecutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "brain.db")
+        self.gate_quote_patcher = patch("apex.execution.orders._fresh_gate_quote", side_effect=lambda _: {
+            "price": 100, "source": "gate", "observed_at": __import__("time").time(),
+        })
+        self.gate_quote = self.gate_quote_patcher.start()
+        self.addCleanup(self.gate_quote_patcher.stop)
         trade_execution._binance_blocked_until = 0.0
         trade_execution._shared_symbol_rules_cache.clear()
         trade_execution.configure_execution_state(None)
@@ -734,7 +739,8 @@ class TradeExecutionTests(unittest.TestCase):
             raise sqlite3.OperationalError("state unavailable")
 
         trade_execution.configure_execution_state(unavailable)
-        self.assertEqual(trade_execution._live_reconcile_rows(self.db_path), [])
+        with self.assertRaisesRegex(RuntimeError, "EXECUTION_STATE_UNAVAILABLE"):
+            trade_execution._live_reconcile_rows(self.db_path)
 
     def test_manager_cutover_and_action_validation_read_state(self):
         state_path = os.path.join(self.tmp.name, "apex_state.db")
@@ -1079,6 +1085,9 @@ class TradeExecutionTests(unittest.TestCase):
 
     def test_live_setup_already_at_target_does_not_submit_an_order(self):
         client = FakeClient(balance=1000, mark_price=111)
+        self.gate_quote.side_effect = lambda _: {
+            "price": 111, "source": "gate", "observed_at": __import__("time").time(),
+        }
         result = execute_approved_candidate(
             CANDIDATE, 4, db_path=self.db_path, config=live_config(), client=client,
         )

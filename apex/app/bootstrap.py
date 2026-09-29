@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import hmac
 import logging
 import time
 from dataclasses import dataclass
@@ -67,11 +68,20 @@ def build_webhook_application(deps: ProductionDependencies) -> Any:
         )
 
     async def handle_webhook(request: Any) -> Any:
+        secret = deps.config.integrations.telegram_webhook_secret
+        supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not secret or not hmac.compare_digest(supplied, secret):
+            return deps.web.Response(text="Forbidden", status=403)
         try:
             update = deps.update_type(**json.loads(await request.read()))
+        except (ValueError, TypeError):
+            return deps.web.Response(text="Invalid update", status=400)
+        try:
             await deps.dispatcher.feed_update(deps.telegram_bot, update)
         except Exception as exc:
-            logging.error("Webhook error: %s", exc)
+            logging.error("Webhook processing failed: %s", type(exc).__name__)
+            # Do not acknowledge an update that was not successfully processed.
+            return deps.web.Response(text="Retry later", status=503)
         return deps.web.Response(text="OK")
 
     async def token_stats(_request: Any) -> Any:
