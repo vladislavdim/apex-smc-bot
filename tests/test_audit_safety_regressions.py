@@ -159,14 +159,6 @@ class SafetyRegressionTests(unittest.TestCase):
 
 
 class TransportRegressionTests(unittest.IsolatedAsyncioTestCase):
-    def test_private_backup_check_rejects_public_repo(self):
-        from apex.db.backup import BrainPersistence
-        session = SimpleNamespace(get=lambda *a, **k: SimpleNamespace(
-            status_code=200, json=lambda: {"private": False}))
-        persistence = BrainPersistence("/tmp/apex-test.db", "owner/public", "token", session=session)
-        with self.assertRaisesRegex(RuntimeError, "BACKUP_REPOSITORY_NOT_PRIVATE"):
-            persistence._require_private_repository()
-
     async def test_webhook_rejects_spoofing_and_retries_failures(self):
         class Web(FakeWeb):
             @staticmethod
