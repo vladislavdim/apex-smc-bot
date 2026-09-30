@@ -6,6 +6,7 @@ import logging
 import queue
 import sqlite3
 import threading
+from contextlib import closing
 
 from apex.config.settings import ApexConfig
 from apex.db.connection import connect_compatibility
@@ -18,12 +19,9 @@ _WRITER_LOCK = threading.Lock()
 
 
 def get_db_conn(path: str | None = None, timeout: int = 30) -> sqlite3.Connection:
-    conn = connect_compatibility(
+    return connect_compatibility(
         path or _DB_PATH, timeout=timeout, check_same_thread=False,
     )
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
 
 
 def _writer_loop() -> None:
@@ -34,10 +32,8 @@ def _writer_loop() -> None:
                 break
             sql, params, callback = task
             try:
-                conn = get_db_conn()
-                conn.execute(sql, params or [])
-                conn.commit()
-                conn.close()
+                with closing(get_db_conn()) as conn, conn:
+                    conn.execute(sql, params or [])
                 if callback:
                     callback(True)
             except Exception as exc:
