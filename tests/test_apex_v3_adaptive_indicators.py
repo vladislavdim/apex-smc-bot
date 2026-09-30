@@ -22,10 +22,10 @@ class AdaptiveIndicatorsTests(unittest.TestCase):
         self.assertEqual(result["atr_med"], 3.0)
         self.assertEqual(result["volatility_factor"], 1.0)
         self.assertEqual((result["ema20"], result["ema50"], result["ema200"]), (20.0, 50.0, 200.0))
-        self.assertEqual(result["avg_vol"], 24.0)
+        self.assertEqual(result["avg_vol"], 23.0)
         self.assertTrue(result["hh_hl"])
         self.assertFalse(result["ll_lh"])
-        get_candles.assert_called_once_with("BTCUSDT", "4h", 100)
+        get_candles.assert_called_once_with("BTCUSDT", "4h", 201)
 
     def test_indicator_result_is_cached_per_symbol_and_timeframe(self):
         get_candles = Mock(return_value=_candles())
