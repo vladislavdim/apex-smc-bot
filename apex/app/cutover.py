@@ -56,17 +56,23 @@ async def refresh_cutover(
     try:
         result = await asyncio.to_thread(sync_call)
     except Exception as exc:
-        runtime.mark_component(
-            "state_db", failed_state,
+        runtime.fail_component(
+            "state_db", spec.inhibit_code, failed_state,
             f"{spec.label} mirror failed: {type(exc).__name__}",
         )
-        runtime.inhibit_entries(spec.inhibit_code)
+        details = {"error_type": type(exc).__name__}
+        # SQLite's structured codes identify lock/schema/I/O failures without
+        # publishing SQL, database contents or credentials in an incident.
+        for field in ("sqlite_errorcode", "sqlite_errorname"):
+            value = getattr(exc, field, None)
+            if value is not None:
+                details[field] = value
         report_incident(
             spec.inhibit_code, "state_db", "CRITICAL",
-            {"error_type": type(exc).__name__},
+            details,
         )
         raise
-    runtime.clear_inhibit(spec.inhibit_code)
+    runtime.recover_component("state_db", spec.inhibit_code)
     recover_incident(spec.inhibit_code, "state_db")
     return result
 
