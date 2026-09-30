@@ -258,3 +258,26 @@ def test_smc_short_candle_request_is_not_a_false_failure():
     assert result["source"] == "gate_io"
     assert result["candles"] == candles
     assert result["error"] == ""
+
+
+def test_smc_cache_refetches_when_larger_history_is_requested():
+    smc_engine._candle_cache.clear()
+    calls = []
+
+    def fetch(_symbol, _interval, limit):
+        calls.append(limit)
+        return [{"close": float(i)} for i in range(limit)]
+
+    with patch.object(smc_engine, "_ordered_sources_for_interval", return_value=["gate_io"]), \
+         patch.dict(smc_engine._FETCHERS, {"gate_io": fetch}, clear=True), \
+         patch.object(smc_engine, "_record"):
+        assert len(smc_engine.get_candles_smart("AUDITUSDT", "4h", 50)["candles"]) == 50
+        larger = smc_engine.get_candles_smart("AUDITUSDT", "4h", 61)
+        assert len(larger["candles"]) == 61
+        from apex.market.runtime_cache import get_confirmed_candles
+        assert len(get_confirmed_candles(larger["candles"])) == 60
+        smaller = smc_engine.get_candles_smart("AUDITUSDT", "4h", 3)
+        assert smaller["candles"] == larger["candles"][-3:]
+        assert len(smc_engine.get_candles_smart("AUDITUSDT", "4h", 61)["candles"]) == 61
+    assert calls == [50, 61]
+    smc_engine._candle_cache.clear()
