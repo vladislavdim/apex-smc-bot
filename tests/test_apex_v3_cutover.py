@@ -12,13 +12,11 @@ class RuntimeStub:
         self.inhibits = []
         self.cleared = []
 
-    def mark_component(self, *args):
+    def fail_component(self, component, code, *args):
         self.marked.append(args)
-
-    def inhibit_entries(self, code):
         self.inhibits.append(code)
 
-    def clear_inhibit(self, code):
+    def recover_component(self, component, code):
         self.cleared.append(code)
 
 
