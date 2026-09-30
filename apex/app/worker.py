@@ -248,7 +248,11 @@ from apex.db.connection import (
 )
 from apex.ui.telegram.learning import format_live_learning as _format_live_learning
 from apex.ui.telegram.system import format_system_status as _format_system_status
-from apex.ui.telegram.incidents import format_incidents as _format_incidents
+from apex.ui.telegram.incidents import (
+    format_incidents as _format_incidents,
+    format_notification as _format_incident_notification,
+    notification_batches as _incident_notification_batches,
+)
 from apex.ui.telegram.router import (
     TelegramHandlers as _V3TelegramHandlers,
     register_telegram_handlers as _v3_register_telegram_handlers,
@@ -326,7 +330,7 @@ from apex.ops.release_manifest import build_release_manifest as _v3_build_releas
 from apex.telemetry.incidents import (
     configure_incidents as _v3_configure_incidents,
     current_incidents as _v3_current_incidents,
-    mark_notification_delivered as _v3_mark_incident_delivered,
+    mark_notifications_delivered as _v3_mark_incidents_delivered,
     pending_notifications as _v3_pending_incident_notifications,
     recover_incident as _v3_recover_incident,
     report_incident as _v3_report_incident,
@@ -4202,7 +4206,7 @@ async def market_intelligence_job():
         )
         await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     try:
-        await _run_market_scan_exclusive("market_intelligence", refresh, 210)
+        return await _run_market_scan_exclusive("market_intelligence", refresh, 210)
     except Exception as exc:
         logging.warning("[MarketIntelligence] refresh failed: %s", exc)
         raise
@@ -4234,34 +4238,20 @@ async def _v3_alerts_job():
     recipients = sorted({int(value) for value in (ADMIN_IDS or []) if value})
     if not recipients and ADMIN_ID:
         recipients = [int(ADMIN_ID)]
-    for notification in notifications:
+    for notification in _incident_notification_batches(notifications):
         payload = notification.get("payload") or {}
-        event_type = str(notification.get("event_type") or "INCIDENT")
         severity = str(payload.get("severity") or "UNKNOWN").upper()
         # WARNING/INFO remain visible in Dashboard but do not flap Telegram.
-        # ERROR/CRITICAL transitions are still delivered immediately.
+        # ERROR/CRITICAL episodes remain visible, including brief recoveries.
         if severity not in {"ERROR", "CRITICAL"}:
-            await asyncio.to_thread(
-                _v3_mark_incident_delivered, int(notification["notification_id"])
-            )
+            await asyncio.to_thread(_v3_mark_incidents_delivered, notification["notification_ids"])
             continue
-        icon = "✅" if event_type == "RESOLVED" else "🚨"
-        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
-        detail_text = ", ".join(f"{key}={value}" for key, value in sorted(details.items()))[:500]
-        text = (
-            f"{icon} APEX INCIDENT · {event_type}\n"
-            f"{payload.get('severity', 'UNKNOWN')} · {payload.get('component', 'system')}\n"
-            f"{payload.get('code', 'UNKNOWN')}"
-        )
-        if detail_text:
-            text += f"\n{detail_text}"
+        text = _format_incident_notification(notification)
         delivered = False
         for recipient in recipients:
             delivered = bool(await _send_with_retry(recipient, text)) or delivered
         if delivered:
-            await asyncio.to_thread(
-                _v3_mark_incident_delivered, int(notification["notification_id"])
-            )
+            await asyncio.to_thread(_v3_mark_incidents_delivered, notification["notification_ids"])
     if alert_error is not None:
         raise alert_error
 
