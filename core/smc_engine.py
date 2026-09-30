@@ -314,7 +314,8 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
     ttl = _CACHE_TTL.get(interval, 300)
     if ck in _candle_cache:
         cached, ts = _candle_cache[ck]
-        if time.time() - ts < ttl: return cached
+        if time.time() - ts < ttl and len(cached.get("candles", [])) >= requested_limit:
+            return {**cached, "candles": cached["candles"][-requested_limit:]}
 
     sources = _ordered_sources_for_interval(symbol, interval)
     attempts = 0

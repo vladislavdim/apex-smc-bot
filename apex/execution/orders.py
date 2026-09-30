@@ -359,30 +359,42 @@ def build_order_plan(
     margin_qty = available_balance * config.leverage / float(entry)
     quantity = _floor_step(min(risk_qty, margin_qty), rules.step_size)
     notional = quantity * entry
-    if quantity <= 0 or quantity < rules.min_qty or notional < rules.min_notional:
-        return {
-            "ok": False,
-            "status": "SKIPPED_BELOW_MIN_NOTIONAL",
-            "errors": [],
-            "risk_budget": risk_budget,
-        }
-
-    return {
+    plan = {
         "ok": True,
         "status": "READY",
         "symbol": str(candidate["symbol"]).upper(),
-        "direction": str(candidate["direction"]).upper(),
+        "direction": direction,
         "entry": _plain_decimal(entry),
         "sl": _plain_decimal(sl),
         "tp1": _plain_decimal(tp1),
         "tp2": _plain_decimal(tp2),
         "quantity": _plain_decimal(quantity),
+        "notional": _plain_decimal(notional),
         "risk_budget": round(risk_budget, 8),
         "available_balance": round(available_balance, 8),
         "leverage": config.leverage,
+        "tick_size": _plain_decimal(rules.tick_size),
         "step_size": _plain_decimal(rules.step_size),
         "min_qty": _plain_decimal(rules.min_qty),
+        "min_notional": _plain_decimal(rules.min_notional),
     }
+    reasons = []
+    if quantity <= 0:
+        reasons.append("QUANTITY_ROUNDED_TO_ZERO")
+    if quantity < rules.min_qty:
+        reasons.append("BELOW_MIN_QTY")
+    if notional < rules.min_notional:
+        reasons.append("BELOW_MIN_NOTIONAL")
+    if reasons:
+        detail = "; ".join(reasons) + "; " + "; ".join(
+            f"{key}={plan[key]}" for key in (
+                "quantity", "notional", "available_balance", "risk_budget",
+                "tick_size", "step_size", "min_qty", "min_notional",
+            )
+        )
+        plan.update(ok=False, status="SKIPPED_BELOW_MIN_NOTIONAL",
+                    reason_codes=reasons, errors=[detail])
+    return plan
 
 
 class BinanceAPIError(RuntimeError):
@@ -1157,6 +1169,7 @@ def _store_execution(
     status: str, plan: dict[str, Any] | None = None, error: str = "", entry_order_id: str = "",
 ) -> dict[str, Any]:
     plan = plan or {}
+    error = error or "; ".join(plan.get("errors", []))
     candidate_id = str(candidate.get("_v3_candidate_id") or "")
     if not is_id(candidate_id, "candidate"):
         candidate_id = ""

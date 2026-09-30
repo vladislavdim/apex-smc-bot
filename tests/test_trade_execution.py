@@ -1029,6 +1029,34 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(short_plan["sl"], "105.1")
         self.assertEqual(short_plan["tp1"], "90.1")
 
+    def test_minimum_size_rejection_preserves_balance_quantity_and_filters(self):
+        client = FakeClient(balance=3)
+        result = execute_approved_candidate(
+            CANDIDATE, 901, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "SKIPPED_BELOW_MIN_NOTIONAL")
+        plan = result["plan"]
+        self.assertEqual(plan["reason_codes"], ["BELOW_MIN_NOTIONAL"])
+        self.assertEqual(plan["available_balance"], 3)
+        self.assertEqual(plan["quantity"], "0.002")
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT balance_usdt,quantity,risk_usdt,last_error FROM trade_executions WHERE signal_id=901"
+            ).fetchone()
+        self.assertEqual(row[:3], (3, 0.002, 0.015))
+        self.assertIn("BELOW_MIN_NOTIONAL", row[3])
+        self.assertIn("min_notional=5", row[3])
+        self.assertIn("notional=0.2", row[3])
+        self.assertFalse(any(isinstance(call, tuple) and call[0] == "entry" for call in client.calls))
+
+    def test_minimum_size_rejection_distinguishes_zero_and_min_qty(self):
+        zero = build_order_plan(CANDIDATE, 0.01, live_config(), RULES)
+        self.assertIn("QUANTITY_ROUNDED_TO_ZERO", zero["reason_codes"])
+        self.assertIn("BELOW_MIN_QTY", zero["reason_codes"])
+        rules = SymbolRules(Decimal("0.1"), Decimal("0.001"), Decimal("0.01"), Decimal("0"))
+        small = build_order_plan(CANDIDATE, 3, live_config(), rules)
+        self.assertEqual(small["reason_codes"], ["BELOW_MIN_QTY"])
+
     def test_zero_balance_is_a_safe_skip(self):
         plan = build_order_plan(CANDIDATE, 0, live_config(), RULES)
         self.assertFalse(plan["ok"])
