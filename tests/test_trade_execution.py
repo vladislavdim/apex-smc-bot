@@ -1140,6 +1140,41 @@ class TradeExecutionTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("PROTECTED", "stop-1", "tp1-1", "tp2-1"))
 
+    def test_short_entry_fill_and_protection_use_sell_then_buy(self):
+        short = {**CANDIDATE, "direction": "BEARISH", "sl": 105, "tp1": 90, "tp2": 85}
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        submitted = execute_approved_candidate(
+            short, 78, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(submitted["status"], "PROTECTED")
+        entry_plan = next(call[1] for call in client.calls if isinstance(call, tuple) and call[0] == "entry")
+        self.assertEqual(entry_plan["direction"], "BEARISH")
+        self.assertGreater(Decimal(entry_plan["quantity"]), 0)
+        protection = [call for call in client.calls if isinstance(call, tuple) and call[0] in {"close_trigger", "reduce_trigger"}]
+        self.assertEqual(len(protection), 3)
+        self.assertTrue(all(call[1] == "BUY" for call in protection))
+        stop = next(call for call in protection if call[0] == "close_trigger" and call[2] == "STOP_MARKET")
+        self.assertEqual(Decimal(stop[3]), Decimal("105"))
+        session = RecordingSession()
+        wire = BinanceFuturesClient(live_config(), session=session)
+        wire.place_limit_entry(entry_plan, "audit-short-entry")
+        params = session.calls[-1][2]["params"]
+        self.assertEqual(params["side"], "SELL")
+        self.assertEqual(params["positionSide"], "BOTH")
+        with sqlite3.connect(self.db_path) as conn:
+            state = conn.execute("SELECT direction,status,stop_order_id FROM trade_executions WHERE signal_id=78").fetchone()
+        self.assertEqual(state, ("BEARISH", "PROTECTED", "stop-1"))
+
+    def test_short_hedge_mode_is_explicitly_rejected_before_submission(self):
+        short = {**CANDIDATE, "direction": "BEARISH", "sl": 105, "tp1": 90, "tp2": 85}
+        client = FakeClient()
+        client.is_one_way_mode = lambda: False
+        result = execute_approved_candidate(
+            short, 79, db_path=self.db_path, config=live_config(), client=client,
+        )
+        self.assertEqual(result["status"], "SKIPPED_HEDGE_MODE")
+        self.assertFalse(any(isinstance(call, tuple) and call[0] == "entry" for call in client.calls))
+
     def test_gate_close_never_removes_protection_while_binance_position_is_open(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
