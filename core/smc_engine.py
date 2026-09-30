@@ -6,6 +6,7 @@ from datetime import datetime
 
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.market.snapshot_scope import snapshot_candle_override
+from apex.market.runtime_cache import get_confirmed_candles
 
 from apex.market.source_registry import configured_market_data_providers
 
@@ -399,7 +400,7 @@ def smc_tf(symbol: str, interval: str) -> dict:
     # that mutable bar: it can show a BOS/CHoCH intrabar and disappear before
     # close.  Keep live price handling in market.py and use only confirmed bars
     # for structural direction here.
-    candles = raw_candles[:-1] if len(raw_candles) > 1 else []
+    candles = get_confirmed_candles(raw_candles)
     if len(candles) < 20:
         return {"direction":None,"source":res["source"],"quality":res["quality"],
                 "error":res.get("error",""),"candles":[]}
@@ -870,7 +871,7 @@ def full_smc_analysis(symbol: str, interval: str = "1h") -> dict:
     """
     result = get_candles_smart(symbol, interval, 200)
     raw_candles = result["candles"]
-    candles = raw_candles[:-1] if len(raw_candles) > 1 else []
+    candles = get_confirmed_candles(raw_candles)
     if len(candles) < 20:
         return {"error": "no data", "source": result["source"]}
 
