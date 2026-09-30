@@ -20,7 +20,7 @@ from .runtime import runtime_supervisor
 JOB_COMPONENT = {
     "execution_reconcile": "binance_reconciliation",
     "trade_manager": "manager",
-    "market_intelligence_primary": "market_data",
+    "market_intelligence_primary": "market_intelligence",
     "market_fast": "scanner_fast",
     "market_mtf_1h": "scanner_mtf",
     "market_zone": "scanner_zone",
@@ -66,14 +66,20 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
     @functools.wraps(callback)
     async def run() -> Any:
         component = JOB_COMPONENT.get(job_id)
+        component_required = bool(definition and definition.critical)
         reason_code = f"JOB_FAILED:{job_id}"
         recorder = recorder_for(job_id)
         if recorder is not None:
             recorder.__enter__()
         try:
             result = await asyncio.wait_for(_invoke(callback), timeout=timeout)
+            if result is False:
+                # A lock/admission skip did not verify the previously failing job.
+                if recorder is not None:
+                    recorder.finish("SKIPPED")
+                return result
             if component:
-                runtime_supervisor.mark_component(component, ComponentState.READY)
+                runtime_supervisor.mark_component(component, ComponentState.READY, required=component_required)
                 recover_incident("JOB_TIMEOUT", component)
                 recover_incident("JOB_FAILED", component)
             runtime_supervisor.clear_inhibit(reason_code)
@@ -89,7 +95,7 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
         except asyncio.TimeoutError:
             logging.error("[APEX V3] job=%s status=FAILED_TIMEOUT timeout=%ss", job_id, timeout)
             if component:
-                runtime_supervisor.mark_component(component, ComponentState.DEGRADED, "FAILED_TIMEOUT")
+                runtime_supervisor.mark_component(component, ComponentState.DEGRADED, "FAILED_TIMEOUT", required=component_required)
                 report_incident(
                     "JOB_TIMEOUT", component,
                     "ERROR" if definition and definition.critical else "WARNING",
@@ -112,7 +118,7 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
         except Exception as exc:
             logging.error("[APEX V3] job=%s status=ERROR type=%s", job_id, type(exc).__name__)
             if component:
-                runtime_supervisor.mark_component(component, ComponentState.DEGRADED, type(exc).__name__)
+                runtime_supervisor.mark_component(component, ComponentState.DEGRADED, type(exc).__name__, required=component_required)
                 report_incident(
                     "JOB_FAILED", component,
                     "ERROR" if definition and definition.critical else "WARNING",
