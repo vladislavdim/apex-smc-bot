@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 
 from .snapshot_scope import snapshot_scope_active
+from .runtime_cache import get_confirmed_candles
 
 
 class LegacyAdaptiveIndicators:
@@ -34,7 +35,8 @@ class LegacyAdaptiveIndicators:
 
         result = {}
         try:
-            candles = self._get_candles(symbol, timeframe, 100)
+            # EMA200 needs 200 closed observations plus the venue's open tail.
+            candles = get_confirmed_candles(self._get_candles(symbol, timeframe, 201))
             if not candles or len(candles) < 20:
                 return result
             closes = [candle["close"] for candle in candles]
