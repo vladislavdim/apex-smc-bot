@@ -26,7 +26,9 @@ PRODUCTION_JOBS = (
     JobDefinition("signal_outcome_refresh", "interval:5m", 180, JobPriority.TELEMETRY, False),
     JobDefinition("execution_reconcile", "interval:configured", 45, JobPriority.BINANCE_PROTECTION, True),
     JobDefinition("trade_manager", "cron:*/5+1m", 240, JobPriority.MANAGER, True),
-    JobDefinition("market_intelligence_primary", "cron:10", 240, JobPriority.CRITICAL_MARKET_DATA, True),
+    # Historical zones/pair coverage enrich context; Gate freshness is checked
+    # separately by the critical runtime watchdog and each strategy's inputs.
+    JobDefinition("market_intelligence_primary", "cron:10", 240, JobPriority.STRATEGY_SCANNER, False),
     JobDefinition("market_fast", "cron:8,28,48", 240, JobPriority.STRATEGY_SCANNER, False),
     JobDefinition("market_mtf_1h", "cron:2,24", 240, JobPriority.STRATEGY_SCANNER, False),
     JobDefinition("market_zone", "cron:14,34,54", 240, JobPriority.STRATEGY_SCANNER, False),

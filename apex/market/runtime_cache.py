@@ -50,9 +50,11 @@ def get_global_candles(symbol: str, timeframe: str) -> list:
 
 
 def get_confirmed_candles(candles: list) -> list:
-    """Preserve the transition runtime's exchange-last-row contract."""
-    if not candles or len(candles) < 2:
+    """Honor explicit closure; only unannotated venue rows need drop-last."""
+    if not candles:
         return []
+    if any("is_closed" in row for row in candles):
+        return [row for row in candles if row.get("is_closed") is True]
     return candles[:-1]
 
 

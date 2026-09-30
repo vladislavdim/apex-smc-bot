@@ -184,8 +184,12 @@ def pending_notifications(limit: int = 20) -> list[dict[str, Any]]:
     try:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            """SELECT * FROM incident_notifications WHERE delivered_at IS NULL
-                 ORDER BY notification_id LIMIT ?""",
+            """SELECT n.*,i.started_at,i.resolved_at FROM incident_notifications n
+                 JOIN incidents i ON i.incident_id=n.incident_id
+                 WHERE n.delivered_at IS NULL AND n.incident_id IN (
+                     SELECT incident_id FROM incident_notifications
+                     WHERE delivered_at IS NULL ORDER BY notification_id LIMIT ?
+                 ) ORDER BY n.notification_id""",
             (max(1, min(int(limit), 100)),),
         ).fetchall()
         result = []
@@ -202,14 +206,20 @@ def pending_notifications(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def mark_notification_delivered(notification_id: int) -> bool:
+    return mark_notifications_delivered((notification_id,))
+
+
+def mark_notifications_delivered(notification_ids: tuple[int, ...] | list[int]) -> bool:
+    """Acknowledge one delivered episode atomically, including its recovery."""
     if _CONN_FACTORY is None:
         return False
     conn = _CONN_FACTORY()
     try:
-        cursor = conn.execute(
+        delivered_at = _now()
+        cursor = conn.executemany(
             """UPDATE incident_notifications SET delivered_at=?
                  WHERE notification_id=? AND delivered_at IS NULL""",
-            (_now(), int(notification_id)),
+            [(delivered_at, int(notification_id)) for notification_id in notification_ids],
         )
         conn.commit()
         return bool(cursor.rowcount)
@@ -222,7 +232,7 @@ def mark_notification_delivered(notification_id: int) -> bool:
 
 __all__ = [
     "active_incidents", "configure_incidents", "current_incidents",
-    "mark_notification_delivered",
+    "mark_notification_delivered", "mark_notifications_delivered",
     "open_incident", "pending_notifications", "recover_incident",
     "report_incident", "resolve_incident",
 ]

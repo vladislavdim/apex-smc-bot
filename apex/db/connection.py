@@ -28,7 +28,7 @@ def _connect(
         check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute(f"PRAGMA busy_timeout={int(max(0.1, float(timeout)) * 1000)}")
     if not read_only:
         try:
             # Setting WAL again can require a schema lock even when the

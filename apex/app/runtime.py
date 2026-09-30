@@ -49,7 +49,7 @@ class RuntimeSupervisor:
         "scanner_wyckoff", "state_db", "memory_db", "binance_reconciliation",
         "risk_engine", "manager", "manager_reconciliation", "groq", "telegram",
         "backup", "dashboard_telemetry", "instance_fencing", "restart_guard",
-        "config", "cpu", "memory", "strategy_activation",
+        "config", "cpu", "memory", "strategy_activation", "market_intelligence",
     })
 
     def __init__(self) -> None:
@@ -61,6 +61,7 @@ class RuntimeSupervisor:
         self._instance_id = "unknown"
         self._reason_codes: set[str] = set()
         self._components: dict[str, ComponentHealth] = {}
+        self._component_faults: dict[str, dict[str, ComponentHealth]] = {}
         self._lease_generation: int | None = None
         self._lease_expires_at: datetime | None = None
 
@@ -73,6 +74,7 @@ class RuntimeSupervisor:
             self._release_sha = (release_sha or config.runtime.release_sha).strip()
             self._instance_id = (instance_id or config.runtime.instance_id).strip()
             self._reason_codes.clear()
+            self._component_faults.clear()
             self._components = {
                 name: ComponentHealth(
                     ComponentState.UNKNOWN, self._started_at, "",
@@ -90,6 +92,7 @@ class RuntimeSupervisor:
             self._status = RuntimeStatus.STARTING
             self._reason_codes.clear()
             self._components.clear()
+            self._component_faults.clear()
 
     @property
     def active(self) -> bool:
@@ -147,6 +150,41 @@ class RuntimeSupervisor:
             self._reason_codes.add(str(reason_code))
             self._status = RuntimeStatus.FAILED if failed else RuntimeStatus.NEW_ENTRIES_OFF
 
+    def fail_component(
+        self, component: str, reason_code: str,
+        state: ComponentState | str = ComponentState.FAILED, detail: str = "",
+    ) -> None:
+        """Overlay an independently recoverable fault on the component's base health."""
+        name = str(component).strip().lower()
+        value = state if isinstance(state, ComponentState) else ComponentState(str(state))
+        with self._lock:
+            base = self._components.get(name)
+            required = base.required if base else name in self.REQUIRED_COMPONENTS
+            self._component_faults.setdefault(name, {})[str(reason_code)] = ComponentHealth(
+                value, _utc_now(), str(detail)[:500], required,
+            )
+            self.inhibit_entries(reason_code)
+
+    def recover_component(self, component: str, reason_code: str) -> None:
+        """Clear only this fault; preserve other faults and startup/base failures."""
+        name = str(component).strip().lower()
+        with self._lock:
+            faults = self._component_faults.get(name, {})
+            faults.pop(str(reason_code), None)
+            if not faults:
+                self._component_faults.pop(name, None)
+            self.clear_inhibit(reason_code)
+
+    def _effective_components(self) -> dict[str, ComponentHealth]:
+        components = dict(self._components)
+        for name, faults in self._component_faults.items():
+            # Any unresolved fault blocks admission via its reason code. Prefer
+            # FAILED for the visible health when more than one fault is active.
+            components[name] = max(
+                faults.values(), key=lambda health: health.state is ComponentState.FAILED,
+            )
+        return components
+
     def clear_inhibit(self, reason_code: str) -> None:
         with self._lock:
             self._reason_codes.discard(str(reason_code))
@@ -156,10 +194,13 @@ class RuntimeSupervisor:
             missing = []
             unhealthy = []
             acceptable = {ComponentState.READY, ComponentState.FRESH}
-            for name in sorted(self.REQUIRED_COMPONENTS):
-                health = self._components.get(name)
+            components = self._effective_components()
+            for name in sorted(self.REQUIRED_COMPONENTS | components.keys()):
+                health = components.get(name)
                 if health is None:
                     missing.append(name)
+                elif not health.required:
+                    continue
                 elif health.state not in acceptable:
                     unhealthy.append(f"{name}:{health.state.value}")
             self._reason_codes = {
@@ -179,19 +220,20 @@ class RuntimeSupervisor:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            components = self._effective_components()
             required_bad = any(
                 health.required and health.state in {
                     ComponentState.FAILED, ComponentState.UNAVAILABLE,
                     ComponentState.STALE, ComponentState.DEGRADED,
                 }
-                for health in self._components.values()
+                for health in components.values()
             )
             any_bad = any(
                 health.state in {
                     ComponentState.FAILED, ComponentState.UNAVAILABLE,
                     ComponentState.STALE, ComponentState.DEGRADED,
                 }
-                for health in self._components.values()
+                for health in components.values()
             )
             if required_bad or self._status is RuntimeStatus.FAILED:
                 health_status = "FAILED"
@@ -216,7 +258,7 @@ class RuntimeSupervisor:
                 "fencing_expires_at": self._lease_expires_at.isoformat() if self._lease_expires_at else None,
                 "components": {
                     name: {**asdict(health), "state": health.state.value}
-                    for name, health in sorted(self._components.items())
+                    for name, health in sorted(components.items())
                 },
             }
 

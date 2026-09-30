@@ -17,7 +17,7 @@ class CompatibilityConnectionTests(unittest.TestCase):
             try:
                 conn.execute("CREATE TABLE sample(value TEXT)")
                 self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-                self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+                self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 1000)
             finally:
                 conn.close()
 
@@ -29,7 +29,7 @@ class CompatibilityConnectionTests(unittest.TestCase):
             try:
                 conn.execute("CREATE TABLE sample(value TEXT)")
                 self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-                self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+                self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 1000)
             finally:
                 conn.close()
         self.assertIs(sqlite3.connect, original)
