@@ -35,6 +35,9 @@ _META_TABLE = "brain_persistence_meta"
 # constructor so temporary files cannot retain untracked WAL sidecars.
 _SQLITE_CONNECT = sqlite3.dbapi2.connect
 _BACKUP_RESOURCE_LOCK = threading.Lock()
+# Keep fast compression for small stores; large migration snapshots need a
+# denser representation before Base64 expansion in GitHub's JSON request.
+_DENSE_COMPRESSION_THRESHOLD = 32 * 1024 * 1024
 
 
 class BrainPersistence:
@@ -171,6 +174,9 @@ class BrainPersistence:
         os.close(fd)
         with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=1) as target:
             shutil.copyfileobj(source, target, length=1_048_576)
+        if os.path.getsize(compressed_path) > _DENSE_COMPRESSION_THRESHOLD:
+            with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=6) as target:
+                shutil.copyfileobj(source, target, length=1_048_576)
         return compressed_path
 
     @property
@@ -726,6 +732,8 @@ class BrainPersistence:
                     category, _message = self._github_error(response)
                     if response.status_code in (200, 201):
                         break
+                    if "too large" in _message.lower():
+                        break  # Retrying identical bytes cannot fix a size limit.
                     if response.status_code in (409, 422):
                         refreshed, refreshed_state = self._remote_metadata()
                         refreshed_sha = str((refreshed or {}).get("sha") or "")
@@ -767,7 +775,10 @@ class BrainPersistence:
                             f"{f' ({detail})' if detail else ''}"
                         )
                         return {
-                            "status": "concurrent_update", "saved": False,
+                            "status": (
+                                "backup_failed" if phase not in {"contents_update", "update_ref"}
+                                or "too large" in detail.lower() else "concurrent_update"
+                            ), "saved": False,
                             "error": self._last_error, "branch": self.branch,
                         }
                     category, message = self._github_error(response)

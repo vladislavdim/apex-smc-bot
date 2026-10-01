@@ -3706,7 +3706,15 @@ async def backup_state_db_to_github(reason="scheduled"):
     if _state_backup_async_lock is None:
         _state_backup_async_lock = asyncio.Lock()
     async with _state_backup_async_lock:
-        return await asyncio.to_thread(_STATE_PERSISTENCE.backup, reason)
+        result = await asyncio.to_thread(_STATE_PERSISTENCE.backup, reason)
+        # Scheduled checkpoints can succeed after the bounded startup retry
+        # task has stopped. Only a durable State receipt releases this fence;
+        # unrelated runtime inhibits and component failures remain intact.
+        if result.get("status") in {"saved", "unchanged"}:
+            _V3_RUNTIME.clear_inhibit("STATE_BACKUP_DEFERRED")
+            _v3_recover_incident("STATE_BACKUP_DEFERRED", "backup")
+            _V3_RUNTIME.evaluate_readiness()
+        return result
 
 
 async def restore_memory_db_from_github():

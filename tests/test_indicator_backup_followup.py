@@ -112,6 +112,32 @@ class AuditArchiveTests(unittest.TestCase):
 
 
 class BackupAndTelemetryRegressionTests(unittest.TestCase):
+    def test_scheduled_state_checkpoint_releases_only_its_own_fence(self):
+        import ast
+        import asyncio
+        from types import SimpleNamespace
+        from apex.app.runtime import RuntimeSupervisor
+        source = Path(__file__).resolve().parents[1] / "apex/app/worker.py"
+        node = next(node for node in ast.parse(source.read_text()).body
+                    if isinstance(node, ast.AsyncFunctionDef) and node.name == "backup_state_db_to_github")
+        for status in ("saved", "unchanged", "busy", "stale_remote", "backup_failed", "not_configured"):
+            with self.subTest(status=status):
+                runtime = RuntimeSupervisor()
+                runtime.activate()
+                runtime.inhibit_entries("STATE_BACKUP_DEFERRED")
+                runtime.inhibit_entries("UNRELATED_SAFETY_FENCE")
+                recover = Mock()
+                namespace = {"asyncio": asyncio, "_state_backup_async_lock": None,
+                             "_STATE_PERSISTENCE": SimpleNamespace(backup=Mock(return_value={"status": status})),
+                             "_V3_RUNTIME": runtime, "_v3_recover_incident": recover}
+                exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+                asyncio.run(namespace["backup_state_db_to_github"]("scheduled_after_retries_exhausted"))
+                reasons = runtime.snapshot()["reason_codes"]
+                self.assertIn("UNRELATED_SAFETY_FENCE", reasons)
+                self.assertEqual("STATE_BACKUP_DEFERRED" not in reasons, status in {"saved", "unchanged"})
+                self.assertEqual(recover.called, status in {"saved", "unchanged"})
+                self.assertFalse(runtime.allows_new_entries)
+
     def test_optional_audit_initialization_failure_keeps_state_outbox(self):
         import ast
         import asyncio
