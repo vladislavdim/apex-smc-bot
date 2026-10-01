@@ -28,6 +28,9 @@ JOB_COMPONENT = {
     "market_wyckoff": "scanner_wyckoff",
     "dashboard_telemetry": "dashboard_telemetry",
     "state_backup": "backup",
+    "memory_backup": "memory_backup",
+    "brain_backup": "brain_backup",
+    "audit_backup": "audit_backup",
 }
 
 
@@ -48,6 +51,9 @@ class SchedulerCallbacks:
     alerts: Callable[..., Any]
     state_backup: Callable[..., Any]
     runtime_watchdog: Callable[..., Any]
+    memory_backup: Callable[..., Any] | None = None
+    brain_backup: Callable[..., Any] | None = None
+    audit_backup: Callable[..., Any] | None = None
 
 
 async def _invoke(callback: Callable[..., Any]) -> Any:
@@ -169,7 +175,12 @@ def build_production_scheduler(
     add("keepalive", callbacks.keepalive, "interval", minutes=10)
     add("dashboard_telemetry", callbacks.dashboard_telemetry, "interval", minutes=10)
     add("alerts", callbacks.alerts, "interval", minutes=5)
-    add("state_backup", callbacks.state_backup, "interval", minutes=30, jitter=120)
+    add("state_backup", callbacks.state_backup, "cron", minute="3,33", timezone="UTC")
+    for name, minute in (("memory_backup", "13,43"), ("brain_backup", "23,53"),
+                         ("audit_backup", "9,19,29,39,49,59")):
+        callback = getattr(callbacks, name)
+        if callback is not None:
+            add(name, callback, "cron", minute=minute, timezone="UTC")
     add("runtime_watchdog", callbacks.runtime_watchdog, "interval", seconds=15)
     return scheduler
 

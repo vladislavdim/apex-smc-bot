@@ -9,6 +9,7 @@ def _candles(closes, ranges=None):
     return [
         {
             "close": float(close),
+            "is_closed": True,
             "high": float(close) + ranges[index] / 2,
             "low": float(close) - ranges[index] / 2,
         }
@@ -21,7 +22,7 @@ class LegacyRegimeV2Tests(unittest.TestCase):
         get_candles = Mock(return_value=_candles(range(10)))
         result = LegacyRegimeV2(get_candles).detect("BTCUSDT")
         self.assertEqual(result, {"type": "unknown", "enabled": ["MTF", "ZONE"]})
-        get_candles.assert_called_once_with("BTCUSDT", "4h", 50)
+        get_candles.assert_called_once_with("BTCUSDT", "4h", 51)
 
     def test_volatile_trend_preserves_strategy_allowlist(self):
         closes = [100.0 + index for index in range(50)]

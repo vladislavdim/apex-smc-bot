@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 from apex.market.adaptive_indicators import LegacyAdaptiveIndicators
 
 
-def _candles(count=25):
+def _candles(count=40):
     return [
         {"open": 100.0 + i, "high": 102.0 + i, "low": 99.0 + i,
          "close": 101.0 + i, "volume": 10.0 + i}
@@ -13,7 +13,7 @@ def _candles(count=25):
 
 
 class AdaptiveIndicatorsTests(unittest.TestCase):
-    def test_indicators_preserve_legacy_contract(self):
+    def test_indicators_preserve_api_with_wilder_values(self):
         get_candles = Mock(return_value=_candles())
         ema_value = Mock(side_effect=lambda _closes, period: float(period))
         provider = LegacyAdaptiveIndicators(get_candles, ema_value)
@@ -22,7 +22,7 @@ class AdaptiveIndicatorsTests(unittest.TestCase):
         self.assertEqual(result["atr_med"], 3.0)
         self.assertEqual(result["volatility_factor"], 1.0)
         self.assertEqual((result["ema20"], result["ema50"], result["ema200"]), (20.0, 50.0, 200.0))
-        self.assertEqual(result["avg_vol"], 23.0)
+        self.assertEqual(result["avg_vol"], 37.5)
         self.assertTrue(result["hh_hl"])
         self.assertFalse(result["ll_lh"])
         get_candles.assert_called_once_with("BTCUSDT", "4h", 201)
@@ -43,7 +43,7 @@ class AdaptiveIndicatorsTests(unittest.TestCase):
             first = provider.get_adaptive_params("AAVEUSDT", [{}], "4h")
             second = provider.get_adaptive_params("AAVEUSDT", [{}], "4h")
         self.assertIs(first, second)
-        self.assertEqual(first, {"volatility_factor": 1.0, "adx": 25.0, "adx_strong": False, "adx_weak": False})
+        self.assertEqual(first, {"volatility_factor": 1.0, "adx": None, "adx_strong": False, "adx_weak": False, "indicator_version": "wilder-v1", "indicators_ready": False})
         provider.get_precomputed_indicators.assert_called_once_with("AAVEUSDT", "4h")
 
 

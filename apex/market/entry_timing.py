@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .indicators import average_true_range
+
 
 def check_entry_timing(
     candles: list,
@@ -19,9 +21,7 @@ def check_entry_timing(
     score = 0
     last = candles[-1]
     current_price = last["close"]
-    atr = sum(
-        candle["high"] - candle["low"] for candle in candles[-14:]
-    ) / min(14, len(candles))
+    atr = average_true_range(candles, min(14, len(candles) - 1))
     average_volume = (
         sum(candle.get("volume", 0) for candle in candles[-20:]) / 20
         if len(candles) >= 20 else 1

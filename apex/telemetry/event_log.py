@@ -20,6 +20,8 @@ import threading
 import time
 import uuid
 import copy
+from contextlib import closing
+from apex.db.audit_db import migrate_audit
 from datetime import datetime, timezone
 from typing import Any, Callable
 from apex.config.settings import ApexConfig
@@ -133,8 +135,15 @@ def _runtime_scan_context() -> dict[str, Any]:
 
 def _connect() -> sqlite3.Connection:
     conn = _connect_compatibility_db(DB_PATH, timeout=10, check_same_thread=False)
-    _migrate_state(conn)
-    return conn
+    try:
+        if DB_PATH == _CONFIG.database.state_db_path:
+            _migrate_state(conn)
+        else:
+            migrate_audit(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _payload_text(payload: dict[str, Any]) -> str:
@@ -147,21 +156,32 @@ def _payload_text(payload: dict[str, Any]) -> str:
     compact.pop("historical_zones", None)
     compact.pop("closed_loop_learning", None)
     compact["payload_truncated"] = True
-    return json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)[:_MAX_PAYLOAD_CHARS]
+    encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(encoded) <= _MAX_PAYLOAD_CHARS:
+        return encoded
+    # Slicing encoded JSON loses the closing syntax and makes retry/audit data
+    # unreadable. Preserve correlation fields and an explicitly marked preview.
+    envelope = {key: payload[key] for key in (
+        "attempt_key", "signal_id", "candidate_id", "execution_id", "symbol",
+        "strategy", "direction", "stage", "outcome", "reason", "release_sha",
+    ) if key in payload and isinstance(payload[key], (str, int, float, bool, type(None)))}
+    envelope = {key: value[:1000] if isinstance(value, str) else value for key, value in envelope.items()}
+    envelope.update(payload_truncated=True, original_chars=len(text), payload_preview=text[:6000])
+    return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _persist_event(event: dict[str, Any]) -> None:
     try:
-        conn = _connect()
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        conn.execute("""INSERT OR REPLACE INTO setup_audit_events
-            (event_key,kind,strategy,symbol,occurred_at,payload_json,synced,sync_attempts,last_sync_error)
-            VALUES (?,?,?,?,?,?,COALESCE((SELECT synced FROM setup_audit_events WHERE event_key=?),0),
-                    COALESCE((SELECT sync_attempts FROM setup_audit_events WHERE event_key=?),0),
-                    (SELECT last_sync_error FROM setup_audit_events WHERE event_key=?))""",
-            (event["event_key"], event["kind"], event.get("strategy", ""), event.get("symbol", ""),
-             event["occurred_at"], _payload_text(payload), event["event_key"], event["event_key"], event["event_key"]))
-        conn.commit(); conn.close()
+        with closing(_connect()) as conn:
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            conn.execute("""INSERT OR REPLACE INTO setup_audit_events
+                (event_key,kind,strategy,symbol,occurred_at,payload_json,synced,sync_attempts,last_sync_error)
+                VALUES (?,?,?,?,?,?,COALESCE((SELECT synced FROM setup_audit_events WHERE event_key=?),0),
+                        COALESCE((SELECT sync_attempts FROM setup_audit_events WHERE event_key=?),0),
+                        (SELECT last_sync_error FROM setup_audit_events WHERE event_key=?))""",
+                (event["event_key"], event["kind"], event.get("strategy", ""), event.get("symbol", ""),
+                 event["occurred_at"], _payload_text(payload), event["event_key"], event["event_key"], event["event_key"]))
+            conn.commit()
     except Exception as exc:
         logging.debug("[SetupAudit] local persistence skipped: %s", exc)
 
@@ -174,20 +194,34 @@ def _post_events(events: list[dict[str, Any]]) -> bool:
         return False
     try:
         import requests
-        payload: Any = events[0] if len(events) == 1 else events
-        response = requests.post(url, json=payload,
-            headers={"X-APEX-Ingest-Token": token, "Content-Type": "application/json"}, timeout=4)
-        if 200 <= response.status_code < 300:
-            return True
-        raise RuntimeError(f"HTTP {response.status_code}")
+        batches, batch, size = [], [], 2
+        for event in events:
+            # Match requests' default ensure_ascii=True JSON encoder, including
+            # escaped Cyrillic/emoji; a character count isn't an HTTP byte limit.
+            bounded = {**event, "payload": json.loads(_payload_text(event.get("payload") or {}))}
+            event_size = len(json.dumps(bounded).encode("utf-8")) + 2
+            if batch and size + event_size > 1_800_000:
+                batches.append(batch)
+                batch, size = [], 2
+            batch.append(bounded)
+            size += event_size
+        if batch:
+            batches.append(batch)
+        for batch in batches:
+            payload: Any = batch[0] if len(batch) == 1 else batch
+            response = requests.post(url, json=payload,
+                headers={"X-APEX-Ingest-Token": token, "Content-Type": "application/json"}, timeout=4)
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError(f"HTTP {response.status_code}")
+        return True
     except Exception as exc:
         try:
-            conn = _connect()
-            conn.executemany(
-                "UPDATE setup_audit_events SET sync_attempts=sync_attempts+1,last_sync_error=? WHERE event_key=?",
-                [(str(exc)[:500], event.get("event_key")) for event in events],
-            )
-            conn.commit(); conn.close()
+            with closing(_connect()) as conn:
+                conn.executemany(
+                    "UPDATE setup_audit_events SET sync_attempts=sync_attempts+1,last_sync_error=? WHERE event_key=?",
+                    [(str(exc)[:500], event.get("event_key")) for event in events],
+                )
+                conn.commit()
         except Exception:
             pass
         return False
@@ -199,21 +233,21 @@ def _post_event(event: dict[str, Any]) -> bool:
 
 def _mark_synced(event_key: str) -> None:
     try:
-        conn = _connect()
-        conn.execute("UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?", (event_key,))
-        conn.commit(); conn.close()
+        with closing(_connect()) as conn:
+            conn.execute("UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?", (event_key,))
+            conn.commit()
     except Exception:
         pass
 
 
 def _mark_many_synced(events: list[dict[str, Any]]) -> None:
     try:
-        conn = _connect()
-        conn.executemany(
-            "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
-            [(str(event.get("event_key") or ""),) for event in events],
-        )
-        conn.commit(); conn.close()
+        with closing(_connect()) as conn:
+            conn.executemany(
+                "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
+                [(str(event.get("event_key") or ""),) for event in events],
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -223,10 +257,9 @@ def _flush_unsynced(limit: int = 100) -> None:
     if not integrations.stats_ingest_url or not integrations.stats_ingest_token:
         return
     try:
-        conn = _connect()
-        rows = conn.execute("""SELECT event_key,kind,strategy,symbol,occurred_at,payload_json
-            FROM setup_audit_events WHERE synced=0 ORDER BY occurred_at LIMIT ?""", (int(limit),)).fetchall()
-        conn.close()
+        with closing(_connect()) as conn:
+            rows = conn.execute("""SELECT event_key,kind,strategy,symbol,occurred_at,payload_json
+                FROM setup_audit_events WHERE synced=0 ORDER BY occurred_at LIMIT ?""", (int(limit),)).fetchall()
         events = []
         for key, kind, strategy, symbol, occurred_at, payload_json in rows:
             try:
@@ -242,14 +275,15 @@ def _flush_unsynced(limit: int = 100) -> None:
             batch = events[offset:offset + 20]
             if not _post_events(batch):
                 break
-            conn = _connect()
-            conn.executemany(
-                "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
-                [(event["event_key"],) for event in batch],
-            )
-            conn.commit(); conn.close()
+            with closing(_connect()) as conn:
+                conn.executemany(
+                    "UPDATE setup_audit_events SET synced=1,last_sync_error=NULL WHERE event_key=?",
+                    [(event["event_key"],) for event in batch],
+                )
+                conn.commit()
     except Exception:
         return
+
 
 
 def _process_event_batch(event: dict[str, Any]) -> int:
@@ -536,6 +570,8 @@ def emit_decision_event(candidate: dict[str, Any], outcome: str, stage: str, rea
     try:
         strategy = str(candidate.get("scan_type") or candidate.get("grade") or candidate.get("strategy") or "UNKNOWN").upper()
         payload = {"attempt_key": _candidate_attempt_key(candidate), "symbol": candidate.get("symbol"), "strategy": strategy,
+                   "signal_id": candidate.get("signal_id") or candidate.get("id") or (evidence or {}).get("signal_id"),
+                   "candidate_id": candidate.get("candidate_id"), "execution_id": (evidence or {}).get("execution_id"),
                    "timeframe": candidate.get("timeframe"), "direction": candidate.get("direction"), "outcome": str(outcome).upper(),
                    "stage": str(stage), "reason": str(reason)[:2000], "entry": candidate.get("entry"), "sl": candidate.get("sl"),
                    "tp1": candidate.get("tp1") or candidate.get("tp"), "tp2": candidate.get("tp2"), "tp3": candidate.get("tp3"),
@@ -575,4 +611,3 @@ __all__ = [
     "emit_decision_event", "emit_event", "emit_groq_review_event",
     "emit_scan_event", "take_last_completed_attempt",
 ]
-

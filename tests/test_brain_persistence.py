@@ -481,7 +481,7 @@ class BrainPersistenceTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
             bot_source = source.read()
-        self.assertIn('state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m")', bot_source)
+        self.assertIn('state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m", store="state")', bot_source)
         self.assertIn('backup=_v3_maintenance_and_backup', bot_source)
         with open(os.path.join(root, "apex/app/shutdown.py"), encoding="utf-8") as source:
             shutdown_source = source.read()
@@ -494,7 +494,7 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertIn('remote_name="apex_memory.db"', bot_source)
         self.assertIn('_BRAIN_PERSISTENCE = _BrainPersistence(', bot_source)
         self.assertGreaterEqual(bot_source.count('compression="gzip"'), 2)
-        self.assertIn("backup_memory_db_to_github(reason)", bot_source)
+        self.assertIn('"memory": backup_memory_db_to_github', bot_source)
         self.assertNotIn("github_size > local_size * 2", bot_source)
 
 

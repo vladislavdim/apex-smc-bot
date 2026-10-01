@@ -41,7 +41,10 @@ PRODUCTION_JOBS = (
     JobDefinition("dashboard_telemetry", "interval:10m", 60, JobPriority.TELEMETRY, False),
     # A durable backup is operationally important but not trading-safety critical.
     # A slow GitHub snapshot must not inhibit otherwise valid new entries.
-    JobDefinition("state_backup", "interval:30m", 300, JobPriority.STATE_BACKUP, False),
+    JobDefinition("state_backup", "cron:3,33", 300, JobPriority.STATE_BACKUP, False),
+    JobDefinition("memory_backup", "cron:13,43", 300, JobPriority.STATE_BACKUP, False),
+    JobDefinition("brain_backup", "cron:23,53", 300, JobPriority.STATE_BACKUP, False),
+    JobDefinition("audit_backup", "cron:9,19,29,39,49,59", 300, JobPriority.TELEMETRY, False),
     JobDefinition("live_learning", "interval:1h", 300, JobPriority.LEARNING, False),
 )
 

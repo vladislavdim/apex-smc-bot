@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from .indicators import average_true_range
 
 
 class AccumulationAnalysis:
@@ -128,9 +129,7 @@ class AccumulationAnalysis:
             pump_target_percent = None
             pump_logic = ""
             try:
-                atr_1h = sum(
-                    candle["high"] - candle["low"] for candle in candles_1h[-14:]
-                ) / 14
+                atr_1h = average_true_range(candles_1h, 14)
                 highs = ", ".join(str(round(candle["high"], 6)) for candle in candles_1h[-12:])
                 lows = ", ".join(str(round(candle["low"], 6)) for candle in candles_1h[-12:])
                 prompt = (
@@ -161,9 +160,7 @@ class AccumulationAnalysis:
             except Exception as exc:
                 logging.debug("[AccumGroq] %s: %s", symbol, exc)
                 try:
-                    fallback_atr = sum(
-                        candle["high"] - candle["low"] for candle in candles_1h[-14:]
-                    ) / 14
+                    fallback_atr = average_true_range(candles_1h, 14)
                     pump_target = round(high_max + fallback_atr * 2, 6)
                     pump_target_percent = round(
                         (pump_target - price_now) / price_now * 100, 1

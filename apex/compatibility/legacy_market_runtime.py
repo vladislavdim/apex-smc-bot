@@ -1308,8 +1308,7 @@ def _swing_build_ltf_entry(symbol: str, direction: str, tp: float) -> dict:
         out["structure_event"] = event
         out["structure_ok"] = True
 
-        h1_ranges = [max(0.0, float(c["high"]) - float(c["low"])) for c in c1h[-14:]]
-        atr1h = sum(h1_ranges) / len(h1_ranges) if h1_ranges else 0.0
+        atr1h = average_true_range(c1h, 14)
         if atr1h <= 0:
             return out
 
@@ -1443,7 +1442,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         prev    = candles[-2]
 
         # ATR для фильтра и стопа
-        atr = sum(highs[i] - lows[i] for i in range(-14, 0)) / 14
+        atr = average_true_range(candles, 14)
         _ap_sw = get_adaptive_params(symbol, candles)
         _vf_sw = _ap_sw["volatility_factor"]
 
@@ -2085,7 +2084,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
             return _audit_fail('ZONE_DETECT_ZONE_SETUP_R7797', 'Достаточно 4H истории (≥40 закрытых свечей)', locals(), 'not candles or len(candles) < 40', 7797)
 
         price = raw_candles[-1]["close"]
-        atr = sum(c["high"] - c["low"] for c in candles[-14:]) / 14
+        atr = average_true_range(candles, 14)
         _ap_zone = get_adaptive_params(symbol, candles)
         _vf_zone = _ap_zone["volatility_factor"]
 
@@ -3565,7 +3564,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         # Проверяем что цена в зоне 4h OB или FVG
         in_zone = False
         zone_desc = ""
-        atr_4h = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14
+        atr_4h = average_true_range(candles_4h, 14)
         _ap_fast = get_adaptive_params(symbol, candles_4h)
         _zone_tol = atr_4h * _ap_fast["volatility_factor"] * 0.5
 
@@ -3627,7 +3626,7 @@ def detect_fast_deal(symbol: str) -> dict | None:
         if _audit_test('FAST_DETECT_FAST_DEAL_G9254', (not candles_15m or len(candles_15m) < 10), 'FAST: enough closed 15m trigger candles', 'not candles_15m or len(candles_15m) < 10', 9254):
             return _audit_fail('FAST_DETECT_FAST_DEAL_R9255', 'FAST: enough closed 15m trigger candles', locals(), 'not candles_15m or len(candles_15m) < 10', 9255)
 
-        atr_15m = sum(c["high"] - c["low"] for c in candles_15m[-14:]) / 14
+        atr_15m = average_true_range(candles_15m, 14)
 
         # LTF location is mandatory: recent retest of a real 15m OB/FVG.
         _fast_ob_15m = find_ob(candles_15m, direction)
@@ -3951,7 +3950,7 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
         # ── Precomputed indicators — без повторных расчётов ──
         _ind = get_precomputed_indicators(symbol, timeframe)
         price = _ind.get("price", candles[-1]["close"])
-        atr = _ind.get("atr", sum(c["high"] - c["low"] for c in candles[-14:]) / 14)
+        atr = _ind.get("atr", average_true_range(candles, 14))
         ema20 = _ind.get("ema20", price)
         ema50 = _ind.get("ema50", price)
         hh_hl = _ind.get("hh_hl", False)

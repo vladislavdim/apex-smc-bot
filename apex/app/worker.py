@@ -7,6 +7,7 @@ being split from this composition root into ``apex.app`` and domain packages.
 from apex.telemetry.event_log import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
 import asyncio
 import functools
+from apex.market.indicators import average_true_range
 import html
 import logging
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
@@ -402,7 +403,23 @@ _MEMORY_PERSISTENCE = _BrainPersistence(
     _V3_CONFIG.integrations.github_token,
     _V3_CONFIG.integrations.memory_backup_branch,
     remote_name="apex_memory.db",
+    compression="gzip",
 )
+# Diagnostic history has its own file and backup; State remains safety-critical.
+from apex.db.audit_db import audit_path as _audit_path, migrate_audit as _migrate_audit
+from apex.db.audit_db import stage_legacy_events as _stage_audit, retire_legacy_events as _retire_audit
+from apex.telemetry import event_log as _audit_event_log
+from contextlib import closing as _closing
+from apex.db.connection import connect_compatibility as _audit_connect
+_AUDIT_PERSISTENCE = _BrainPersistence(
+    _audit_path(_V3_CONFIG.database.state_db_path),
+    _V3_CONFIG.integrations.github_backup_repo,
+    _V3_CONFIG.integrations.github_token,
+    _V3_CONFIG.integrations.memory_backup_branch,
+    remote_name="apex_audit.db",
+    compression="gzip",
+)
+_audit_store_ready = False
 _brain_backup_async_lock = None
 _state_backup_async_lock = None
 _memory_backup_async_lock = None
@@ -3060,7 +3077,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
         try:
             _ob_check = find_ob(candles, direction)
             _fvg_check = find_fvg(candles, direction)
-            _atr_check = sum(candles[-i]["high"] - candles[-i]["low"] for i in range(1, 15)) / 14
+            _atr_check = average_true_range(candles, 14)
             _ap_mtf = get_adaptive_params(symbol, candles)
             _vf_mtf = _ap_mtf["volatility_factor"]
             _in_ob = (_ob_check and
@@ -3294,7 +3311,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
 
         # OTE/структурный entry обязан быть рядом с текущей ценой. Не
         # отправляем отложенный сетап как будто это вход прямо сейчас.
-        _atr_entry = sum(c["high"] - c["low"] for c in candles[-14:]) / min(14, len(candles))
+        _atr_entry = average_true_range(candles, 14)
         if _audit_test('MTF_FULL_SCAN_RAW_G4824', (abs(price - entry) > _atr_entry * 0.75), 'отправляем отложенный сетап как будто это вход прямо сейчас.', 'abs(price - entry) > _atr_entry * 0.75', 4824):
             logging.debug(f"[MTF] {symbol}: entry слишком далеко от текущей цены")
             return _audit_fail('MTF_FULL_SCAN_RAW_R4826', 'отправляем отложенный сетап как будто это вход прямо сейчас.', locals(), 'abs(price - entry) > _atr_entry * 0.75', 4826)
@@ -3371,9 +3388,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             _ob_str = f"OB: {ob['bottom']:.6f}–{ob['top']:.6f}" if ob else "OB: нет"
             _fvg_str = f"FVG: {fvg['bottom']:.6f}–{fvg['top']:.6f}" if fvg else "FVG: нет"
             # ATR
-            _candle_h = [c["high"] for c in candles[-14:]]
-            _candle_l = [c["low"] for c in candles[-14:]]
-            _atr_mtf = sum(_candle_h[i] - _candle_l[i] for i in range(len(_candle_h))) / len(_candle_h)
+            _atr_mtf = average_true_range(candles, 14)
             # Volume
             _vol_last = candles[-1].get("volume", 0)
             _vol_avg = sum(c.get("volume", 0) for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
@@ -3720,64 +3735,97 @@ async def backup_memory_db_to_github(reason="scheduled"):
         return await asyncio.to_thread(_MEMORY_PERSISTENCE.backup, reason)
 
 
-async def _v3_maintenance_and_backup(reason="safety_30m"):
-    """Maintain bounded V3 stores, then checkpoint compatibility state."""
+async def _v3_prepare_audit_store():
+    """Optional verified restore; on failure the State outbox stays authoritative."""
+    global _audit_store_ready
+    if _audit_store_ready:
+        return True
+    try:
+        result = await asyncio.to_thread(_AUDIT_PERSISTENCE.restore)
+        if result.get("reason") == "REMOTE_MISSING" or not _AUDIT_PERSISTENCE.configured:
+            with _closing(_audit_connect(_AUDIT_PERSISTENCE.db_path)) as conn:
+                _migrate_audit(conn)
+            if _AUDIT_PERSISTENCE.configured:
+                result = await asyncio.to_thread(_AUDIT_PERSISTENCE.initialize, "initial_audit_store")
+                if result.get("status") in {"remote_exists", "concurrent_initialize"}:
+                    result = await asyncio.to_thread(_AUDIT_PERSISTENCE.restore)
+        _audit_store_ready = not _AUDIT_PERSISTENCE.configured or bool(result.get("ready"))
+        if _audit_store_ready:
+            _audit_event_log.DB_PATH = _AUDIT_PERSISTENCE.db_path
+    except Exception as exc:
+        _audit_store_ready = False
+        result = {"status": f"audit_prepare_failed:{type(exc).__name__}"}
+        logging.warning("[AuditPersistence] initialization deferred: %s", type(exc).__name__)
+    _V3_RUNTIME.mark_component(
+        "audit_backup", _V3_COMPONENT_STATE.READY if _audit_store_ready else _V3_COMPONENT_STATE.DEGRADED,
+        str(result.get("status") or "unknown"), required=False,
+    )
+    return _audit_store_ready
+
+
+async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
+    """Back up independently scheduled stores; shutdown can still request all."""
+    if store == "all":
+        results = {}
+        for name in ("state", "memory", "brain", "audit"):
+            results[name] = await _v3_maintenance_and_backup(reason, store=name)
+        return results
+
     def maintain():
-        state = _v3_connect_state(_V3_CONFIG)
-        try:
-            state_report = _v3_maintain_state(
-                state, _V3_CONFIG.database.state_db_path,
-                telemetry_days=_V3_CONFIG.operational.state_telemetry_retention_days,
-                resolved_incident_days=_V3_CONFIG.operational.resolved_incident_retention_days,
-            )
-        finally:
-            state.close()
+        if store == "state":
+            with _closing(_v3_connect_state(_V3_CONFIG)) as state:
+                return _v3_maintain_state(
+                    state, _V3_CONFIG.database.state_db_path,
+                    telemetry_days=_V3_CONFIG.operational.state_telemetry_retention_days,
+                    resolved_incident_days=_V3_CONFIG.operational.resolved_incident_retention_days,
+                )
+        if store == "memory":
+            with _closing(_v3_connect_memory(_V3_CONFIG)) as memory:
+                return _v3_maintain_memory(
+                    memory, _V3_CONFIG.database.memory_db_path,
+                    context_days=_V3_CONFIG.operational.memory_context_retention_days,
+                )
+        return {}
+
+    if store in {"memory", "brain", "audit"}:
         resource = _v3_memory_snapshot(
             watch_ratio=_V3_CONFIG.operational.memory_watch_ratio,
             degraded_ratio=_V3_CONFIG.operational.memory_degraded_ratio,
             stop_ratio=_V3_CONFIG.operational.memory_stop_ratio,
             limit_bytes=_V3_CONFIG.operational.memory_limit_bytes,
         )
-        memory_report = {"status": "SKIPPED_MEMORY_PRESSURE", "resource_state": resource.state}
-        if resource.state not in {"DEGRADED", "NEW_ENTRIES_OFF"}:
-            memory = _v3_connect_memory(_V3_CONFIG)
-            try:
-                memory_report = _v3_maintain_memory(
-                    memory, _V3_CONFIG.database.memory_db_path,
-                    context_days=_V3_CONFIG.operational.memory_context_retention_days,
-                )
-            finally:
-                memory.close()
-        return {"state": state_report, "memory": memory_report}
-
+        if resource.state in {"DEGRADED", "NEW_ENTRIES_OFF"}:
+            return False
     maintenance = await asyncio.to_thread(maintain)
-    state_backup = await backup_state_db_to_github(reason)
-    memory_backup = {"status": "skipped_memory_pressure"}
-    if maintenance["memory"].get("status") != "SKIPPED_MEMORY_PRESSURE":
-        memory_backup = await backup_memory_db_to_github(reason)
-    backup = await backup_db_to_github(reason)
-    if _STATE_PERSISTENCE.configured and state_backup.get("status") not in {"saved", "unchanged"}:
-        raise RuntimeError(f"state_backup_{state_backup.get('status') or 'failed'}")
-    if _BRAIN_PERSISTENCE.configured and backup.get("status") not in {"saved", "unchanged"}:
-        raise RuntimeError(f"compatibility_backup_{backup.get('status') or 'failed'}")
-    if _MEMORY_PERSISTENCE.configured and memory_backup.get("status") not in {
-        "saved", "unchanged", "skipped_memory_pressure",
-    }:
-        _V3_RUNTIME.mark_component(
-            "memory_db", _V3_COMPONENT_STATE.DEGRADED,
-            f"memory backup {memory_backup.get('status') or 'failed'}", required=False,
+    receipts = {}
+    if store == "audit":
+        if not await _v3_prepare_audit_store():
+            raise RuntimeError("audit_restore_unavailable")
+        if _AUDIT_PERSISTENCE.configured:
+            receipts = await asyncio.to_thread(
+                _stage_audit, _V3_CONFIG.database.state_db_path, _AUDIT_PERSISTENCE.db_path,
+            )
+        result = await asyncio.to_thread(_AUDIT_PERSISTENCE.backup, reason)
+        # Never remove source rows before the exact audit copy is durable.
+        retired = await asyncio.to_thread(
+            _retire_audit, _V3_CONFIG.database.state_db_path, receipts, result,
         )
-        _v3_report_incident(
-            "MEMORY_BACKUP_UNAVAILABLE", "memory_db", "WARNING",
-            {"status": memory_backup.get("status") or "failed"},
-        )
-    elif memory_backup.get("status") in {"saved", "unchanged"}:
+        result["archived_state_events"] = retired
+    else:
+        callback = {"state": backup_state_db_to_github, "memory": backup_memory_db_to_github,
+                    "brain": backup_db_to_github}[store]
+        result = await callback(reason)
+    status = result.get("status")
+    logging.info("[Backup] store=%s status=%s duration=%s size=%s upload=%s archived=%s",
+                 store, status, result.get("duration_seconds"), result.get("size"),
+                 result.get("upload_size"), result.get("archived_state_events", 0))
+    if status == "busy":
+        return False
+    if status not in {"saved", "unchanged", "not_configured"}:
+        raise RuntimeError(f"{store}_backup_{status or 'failed'}")
+    if store == "memory":
         _v3_recover_incident("MEMORY_BACKUP_UNAVAILABLE", "memory_db")
-    return {
-        "maintenance": maintenance, "state_backup": state_backup,
-        "memory_backup": memory_backup, "compatibility_backup": backup,
-        "items_processed": 4,
-    }
+    return {"maintenance": maintenance, "backup": result, "items_processed": 1}
 
 
 async def _v3_state_startup_checkpoint():
@@ -3846,7 +3894,7 @@ async def _v3_memory_startup_checkpoint():
         "saved", "unchanged",
     }:
         _V3_RUNTIME.mark_component(
-            "memory_db", _V3_COMPONENT_STATE.DEGRADED,
+            "memory_backup", _V3_COMPONENT_STATE.DEGRADED,
             f"startup backup {result.get('status') or 'failed'}", required=False,
         )
     return result
@@ -4273,7 +4321,10 @@ def _build_v3_scheduler():
             keepalive=keepalive_heartbeat,
             dashboard_telemetry=_v3_emit_dashboard_telemetry,
             alerts=_v3_alerts_job,
-            state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m"),
+            state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m", store="state"),
+            memory_backup=functools.partial(_v3_maintenance_and_backup, "memory_30m", store="memory"),
+            brain_backup=functools.partial(_v3_maintenance_and_backup, "brain_30m", store="brain"),
+            audit_backup=functools.partial(_v3_maintenance_and_backup, "audit_10m", store="audit"),
             runtime_watchdog=_v3_runtime_watchdog,
         ),
         execution_reconcile_seconds=_auto_trade_reconcile_seconds(),
@@ -4333,6 +4384,7 @@ async def _initialize_production_runtime(transport: str):
     _memory_restore = await restore_memory_db_from_github()
     _v3_db_status = await asyncio.to_thread(_v3_prepare_databases)
     _V3_RUNTIME.mark_component("state_db", _V3_COMPONENT_STATE.READY, json.dumps(_v3_db_status))
+    await _v3_prepare_audit_store()
     _v3_publish_strategy_activation_health()
     _memory_ready = (
         not _MEMORY_PERSISTENCE.configured or bool(_memory_restore.get("ready"))
