@@ -2,21 +2,57 @@
 
 from __future__ import annotations
 
+import math
+
+INDICATOR_VERSION = "wilder-v1"
+
+
+def true_ranges(candles: list) -> list[float]:
+    """One TR per transition; reject corrupt OHLC rather than invent values."""
+    values = []
+    for candle in candles:
+        high, low, close = (float(candle[key]) for key in ("high", "low", "close"))
+        if not all(math.isfinite(value) for value in (high, low, close)) or high < low:
+            raise ValueError("invalid OHLC")
+        values.append((high, low, close))
+    return [max(high - low, abs(high - previous[2]), abs(low - previous[2]))
+            for previous, (high, low, _close) in zip(values, values[1:])]
+
 
 def average_true_range(candles: list, period: int = 14) -> float | None:
-    """Return ATR from completed candles without inventing a price level."""
+    """Wilder ATR, seeded with the first period true ranges (TA-Lib convention)."""
     if not candles or period <= 0 or len(candles) < period + 1:
         return None
-    true_ranges = []
-    for index in range(1, len(candles)):
-        candle = candles[index]
-        previous_close = float(candles[index - 1]["close"])
-        true_ranges.append(max(
-            float(candle["high"]) - float(candle["low"]),
-            abs(float(candle["high"]) - previous_close),
-            abs(float(candle["low"]) - previous_close),
-        ))
-    return sum(true_ranges[-period:]) / period
+    ranges = true_ranges(candles)
+    value = sum(ranges[:period]) / period
+    for current in ranges[period:]:
+        value = (value * (period - 1) + current) / period
+    return value
+
+
+def average_directional_index(candles: list, period: int = 14) -> float | None:
+    """Wilder ADX with a 2*period-1 lookback and TA-Lib's DM seed."""
+    if period < 2 or len(candles) < 2 * period:
+        return None
+    ranges = true_ranges(candles)
+    positive, negative = [], []
+    for previous, current in zip(candles, candles[1:]):
+        up = float(current["high"]) - float(previous["high"])
+        down = float(previous["low"]) - float(current["low"])
+        positive.append(up if up > down and up > 0 else 0.0)
+        negative.append(down if down > up and down > 0 else 0.0)
+    plus, minus, tr = (sum(series[:period - 1]) for series in (positive, negative, ranges))
+    dx = []
+    for index in range(period - 1, len(ranges)):
+        plus = plus - plus / period + positive[index]
+        minus = minus - minus / period + negative[index]
+        tr = tr - tr / period + ranges[index]
+        total = plus + minus
+        dx.append(100.0 * abs(plus - minus) / total if tr > 0 and total > 0 else 0.0)
+    value = sum(dx[:period]) / period
+    for current in dx[period:]:
+        value = (value * (period - 1) + current) / period
+    return value
 
 
 def ema_value(values: list, period: int) -> float | None:
@@ -30,4 +66,4 @@ def ema_value(values: list, period: int) -> float | None:
     return value
 
 
-__all__ = ["average_true_range", "ema_value"]
+__all__ = ["INDICATOR_VERSION", "true_ranges", "average_true_range", "average_directional_index", "ema_value"]

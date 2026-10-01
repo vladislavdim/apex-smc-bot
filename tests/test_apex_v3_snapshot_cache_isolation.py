@@ -78,8 +78,8 @@ def test_core_smc_engine_reads_the_snapshot_without_external_sources():
 
 
 def test_snapshot_evaluation_bypasses_derived_provider_caches():
-    live_rows = list(_rows(25, volume=10.0))
-    snapshot_rows = _rows(25, volume=30.0)
+    live_rows = list(_rows(30, volume=10.0))
+    snapshot_rows = _rows(30, volume=30.0)
     live_candles = Mock(return_value=live_rows)
 
     def candles(symbol, timeframe, limit):

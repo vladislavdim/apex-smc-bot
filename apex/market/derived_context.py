@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from .indicators import average_true_range, ema_value
+from .runtime_cache import get_confirmed_candles
 
 
 class LegacyDerivedContext:
@@ -60,22 +62,19 @@ class LegacyDerivedContext:
         ):
             return self._regime_cache[symbol]
         try:
-            candles = self._get_candles(symbol, "1h", 50)
-            if len(candles) < 20:
+            candles = get_confirmed_candles(self._get_candles(symbol, "1h", 51))
+            if len(candles) < 21:
                 return {"mode": "UNKNOWN", "direction": "NONE", "confidence": 0}
             closes = [candle["close"] for candle in candles]
-            highs = [candle["high"] for candle in candles]
-            lows = [candle["low"] for candle in candles]
-            ranges = [highs[index] - lows[index] for index in range(len(candles))]
-            average_atr = sum(ranges[-14:]) / 14
+            average_atr = average_true_range(candles, 14)
             atr_percent = average_atr / closes[-1] * 100
             average_20 = sum(closes[-20:]) / 20
             std_20 = (
                 sum((value - average_20) ** 2 for value in closes[-20:]) / 20
             ) ** 0.5
             bb_width = std_20 * 4 / average_20 * 100
-            ema_9 = sum(closes[-9:]) / 9
-            ema_21 = sum(closes[-21:]) / 21
+            ema_9 = ema_value(closes, 9)
+            ema_21 = ema_value(closes, 21)
             direction = "BULLISH" if ema_9 > ema_21 else "BEARISH"
             streak = 1
             for index in range(len(candles) - 2, max(len(candles) - 8, 0), -1):

@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -33,6 +34,7 @@ _META_TABLE = "brain_persistence_meta"
 # Snapshot and read-only validation connections must use the original DB-API
 # constructor so temporary files cannot retain untracked WAL sidecars.
 _SQLITE_CONNECT = sqlite3.dbapi2.connect
+_BACKUP_RESOURCE_LOCK = threading.Lock()
 
 
 class BrainPersistence:
@@ -167,7 +169,7 @@ class BrainPersistence:
             dir=os.path.dirname(path), prefix="brain-backup-", suffix=".db.gz"
         )
         os.close(fd)
-        with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=6) as target:
+        with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=1) as target:
             shutil.copyfileobj(source, target, length=1_048_576)
         return compressed_path
 
@@ -364,7 +366,8 @@ class BrainPersistence:
         try:
             for statement in connection.iterdump():
                 lowered = statement.lower()
-                if "brain_persistence_meta" in lowered or "heartbeat" in lowered:
+                table = re.match(r'(?:create table(?: if not exists)?|insert into) ["\[]?([^"\] (]+)', lowered)
+                if table and table.group(1) in {"brain_persistence_meta", "heartbeat", "runtime_heartbeats"}:
                     continue
                 digest.update(statement.encode("utf-8", "surrogatepass"))
                 digest.update(b"\n")
@@ -495,6 +498,14 @@ class BrainPersistence:
                 finally:
                     target.close()
                     source.close()
+                compact = _SQLITE_CONNECT(temp_path, timeout=15)
+                try:
+                    pages = int(compact.execute("PRAGMA page_count").fetchone()[0])
+                    free = int(compact.execute("PRAGMA freelist_count").fetchone()[0])
+                    if pages and free / pages >= 0.2:
+                        compact.execute("VACUUM")
+                finally:
+                    compact.close()
                 self._integrity(temp_path)
                 logical_hash = self._logical_hash(temp_path)
                 now = datetime.now(timezone.utc).isoformat()
@@ -557,6 +568,19 @@ class BrainPersistence:
                     os.unlink(temp_path)
 
     def backup(self, reason: str = "scheduled") -> dict[str, Any]:
+        # A cancelled asyncio.to_thread keeps running. Never accumulate blocked
+        # snapshot threads or run several compression/upload jobs simultaneously.
+        if not _BACKUP_RESOURCE_LOCK.acquire(blocking=False):
+            return {"status": "busy", "saved": False}
+        started = time.monotonic()
+        try:
+            result = self._backup_locked(reason)
+            result["duration_seconds"] = round(time.monotonic() - started, 3)
+            return result
+        finally:
+            _BACKUP_RESOURCE_LOCK.release()
+
+    def _backup_locked(self, reason: str = "scheduled") -> dict[str, Any]:
         """Upload one consistent snapshot if data changed and this instance is current."""
         with self._lock:
             if not self.configured:
@@ -603,6 +627,14 @@ class BrainPersistence:
                 finally:
                     target.close()
                     source.close()
+                compact = _SQLITE_CONNECT(temp_path, timeout=15)
+                try:
+                    pages = int(compact.execute("PRAGMA page_count").fetchone()[0])
+                    free = int(compact.execute("PRAGMA freelist_count").fetchone()[0])
+                    if pages and free / pages >= 0.2:
+                        compact.execute("VACUUM")
+                finally:
+                    compact.close()
                 self._integrity(temp_path)
                 logical_hash = self._logical_hash(temp_path)
                 if logical_hash == self._last_content_hash:

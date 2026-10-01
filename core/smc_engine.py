@@ -7,6 +7,7 @@ from datetime import datetime
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.market.snapshot_scope import snapshot_candle_override
 from apex.market.runtime_cache import get_confirmed_candles
+from apex.market.indicators import average_true_range
 
 from apex.market.source_registry import configured_market_data_providers
 
@@ -2041,7 +2042,9 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
         entry = current
 
         # ATR для fallback
-        atr = sum(c["high"] - c["low"] for c in candles_4h[-14:]) / 14 if len(candles_4h) >= 14 else range_size * 0.02
+        atr = average_true_range(candles_4h, 14)
+        if atr is None:
+            return None
 
         if direction == "BULLISH":
             # SL: под нижней границей боковика + буфер 2% (не весь диапазон)
