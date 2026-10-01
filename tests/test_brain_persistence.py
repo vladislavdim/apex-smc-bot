@@ -329,6 +329,36 @@ class BrainPersistenceTests(unittest.TestCase):
         with sqlite3.connect(restored_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0], 21)
 
+    def test_oversized_payload_is_not_a_concurrent_update_and_is_not_retried(self):
+        _make_db(self.remote, knowledge_rows=1)
+        session = _GitHubSession(_bytes(self.remote), sha="base")
+        manager = self._manager(session)
+        manager.restore()
+        with patch.object(session, "put", return_value=_Response(
+            status_code=422, payload={"message": "Sorry, your input was too large to process."}
+        )) as put, patch("apex.db.backup.time.sleep") as sleep:
+            result = manager.backup("size_limit")
+        self.assertEqual(result["status"], "backup_failed")
+        self.assertFalse(result["saved"])
+        self.assertIn("too large", result["error"])
+        self.assertEqual(put.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(manager.status()["remote_blob_sha"], "base")
+
+    def test_large_gzip_snapshot_uses_dense_compression_and_roundtrips(self):
+        _make_db(self.remote, knowledge_rows=20)
+        session = _GitHubSession(_bytes(self.remote))
+        manager = BrainPersistence(self.local, "owner/repo", "token", session=session, compression="gzip")
+        with patch("apex.db.backup._DENSE_COMPRESSION_THRESHOLD", 1), patch(
+            "apex.db.backup.gzip.open", wraps=gzip.open
+        ) as opened:
+            result = manager._compressed_snapshot(self.remote)
+        try:
+            self.assertEqual(gzip.decompress(_bytes(result)), _bytes(self.remote))
+            self.assertEqual([c.kwargs.get("compresslevel") for c in opened.call_args_list], [1, 6])
+        finally:
+            os.unlink(result)
+
     def test_unchanged_database_does_not_create_another_commit(self):
         _make_db(self.remote, knowledge_rows=1)
         session = _GitHubSession(_bytes(self.remote))
