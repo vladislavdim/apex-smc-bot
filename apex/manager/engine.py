@@ -529,7 +529,7 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
     after a restart.
     """
     if _MANAGER_STATE_FACTORY is not None:
-        positions = _manager_state_repository().active(limit=5000)
+        positions = _manager_state_repository().unclosed(limit=5000)
         signal_ids = [int(row["signal_id"]) for row in positions]
         lifecycles = SignalLifecycleRepository(_MANAGER_STATE_FACTORY).get_many(signal_ids)
         executions = ExecutionRepository(_MANAGER_STATE_FACTORY).get_many(signal_ids)

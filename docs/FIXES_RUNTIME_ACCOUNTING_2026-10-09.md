@@ -1,0 +1,16 @@
+# Runtime and accounting recovery — 2026-10-09
+
+Signals 468 (ZRO SHORT), 469 (PIEVERSE LONG) and 470 (PENGU LONG) were blocked by runtime instance fencing before Binance entry submission. Their later SL records were analytical candle outcomes, not confirmed exchange losses.
+
+Changes:
+
+- Separate confirmed execution accounting from analytical `trade_event`. Only canonical ledger entries and fully accounted exits enter live financial statistics. Net win/loss uses net R after costs. Pending funding is not final net PnL. Event timestamps follow actual fills, retries deduplicate, and financial events have an independent bounded fetch window. Old persisted dashboard caches are invalidated by a projection version.
+- Reconcile both ACTIVE and CLOSING Manager rows. Proven skipped/blocked executions with no entry close as NOT_OPENED, without invented PnL. Ambiguous and actual submitted entries remain fenced for exchange reconciliation.
+- Convert database failures on worker readiness into controlled 503 responses; bound connection, statement and lock waits. Require fresh occurrence as well as fresh receipt for worker heartbeats. Seed and lock the shared lease atomically on first acquisition. Backend HTTP failures no longer masquerade as lease-owner conflicts; worker clears obsolete conflicting reason codes.
+- Retain the exact pending CAS upload receipt. If GitHub committed but acknowledgement was lost, recover only the matching Git blob SHA and parent. Snapshot again on a later cycle before retiring newly staged Audit rows. A foreign blob still blocks writes.
+- Correct Manager list filtering and net R display. Show inhibited entries and their runtime reasons in the overview.
+- Owner-scoped read-only production diagnostics in CI for this repair branch fetch bounded, redacted logs for the two verified services. No order, deploy, service mutation or credential export is performed by diagnostics.
+
+Validation before publication: 971 pytest tests passed; 820 unittest tests passed; five strategy parity fixtures unchanged; production authority and release-ready verification passed; workflow YAML and dashboard JavaScript checked. Regression cases include analytical SL without any fill, funding pending, net-negative TP, duplicate events, backend timeout, lost acknowledgement followed by additional local rows, foreign backup writes, and CLOSING with skipped/submitted/protected executions.
+
+Deployment must be verified separately. The original remote brain/Audit snapshots are stale; obtain production diagnostics and preserve unsaved local data before restarting a disposable worker. Do not bypass instance fencing or place real exchange orders for validation.

@@ -744,3 +744,38 @@ def test_live_execution_that_never_opened_is_not_managed_as_actual_position(tmp_
     assert state["manager_state"] == "CLOSED"
     assert state["close_result"] == "NOT_OPENED:SKIPPED_BELOW_MIN_NOTIONAL"
     assert state["realized_r"] is None
+
+
+@pytest.mark.parametrize("execution_status,quantity,order_id,expected", [
+    ("SKIPPED_NO_BALANCE", 0, "", "CLOSED"),
+    ("BLOCKED_RUNTIME_NOT_READY", 0, "", "CLOSED"),
+    ("PROTECTED", 1, "entry-1", "CLOSING"),
+    ("SUBMITTING", 0, "", "CLOSING"),
+])
+def test_state_closing_reconciles_only_proven_non_open(tmp_path, execution_status, quantity, order_id, expected):
+    db_path = _db(tmp_path)
+    register_pending_signals(db_path)
+    state_path = str(tmp_path / "state.db")
+    def factory():
+        return sqlite3.connect(state_path)
+    conn = factory(); migrate_state(conn); conn.close()
+    import_legacy_manager(lambda: sqlite3.connect(db_path), factory, refresh=True)
+    ExecutionRepository(factory).register({
+        "signal_id": 1, "mode": "live", "symbol": "BTCUSDT", "direction": "BULLISH",
+        "status": execution_status, "quantity": quantity, "entry_order_id": order_id,
+        "entry": 100, "sl": 95, "tp1": 110, "tp2": 115,
+    })
+    SignalLifecycleRepository(factory).import_row({"signal_id": 1, "status": "closed", "result": "sl"})
+    with sqlite3.connect(state_path) as conn:
+        conn.execute("UPDATE manager_positions SET status='CLOSING',manager_state='RECONCILIATION_REQUIRED'")
+    configure_manager_state(factory)
+    try:
+        reconcile_manager_states_from_signals(db_path)
+        state = load_state(1, db_path)
+    finally:
+        configure_manager_state(None)
+    assert state["status"] == expected
+    assert state["realized_r"] is None
+    if expected == "CLOSED":
+        assert state["close_result"].startswith("NOT_OPENED:")
+        assert state["reconciliation_reason"] is None

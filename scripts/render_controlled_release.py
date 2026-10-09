@@ -80,7 +80,7 @@ class RenderReleaseClient:
         payload = self._request("GET", f"/services/{service_id}/deploys/{deploy_id}")
         return dict(payload.get("deploy") or payload)
 
-    def recent_logs(self, service_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    def recent_logs(self, service_id: str, *, limit: int = 50, text: str = "") -> list[dict[str, Any]]:
         """Return bounded application logs without exposing the API credential."""
         service = self.service(service_id)
         owner = service.get("owner") if isinstance(service.get("owner"), dict) else {}
@@ -96,6 +96,7 @@ class RenderReleaseClient:
                 "type": "app",
                 "direction": "backward",
                 "limit": max(1, min(int(limit), 100)),
+                **({"text": text} if text else {}),
             },
         )
         rows = payload.get("logs") if isinstance(payload, dict) else payload
@@ -223,6 +224,7 @@ def disable_auto_deploy(client: RenderReleaseClient) -> dict[str, str]:
 
 
 _SECRET_LOG_PATTERNS = (
+    re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+(?::[^\s/@]*)?@"),
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(r"(?i)(api\.telegram\.org/bot)[^/\s]+"),
     re.compile(r"(?i)((?:token|api[_-]?key|secret|password)\s*[:=]\s*)[^\s,;]+"),
@@ -237,10 +239,11 @@ def sanitize_log_message(value: Any) -> str:
     return message
 
 
-def print_worker_diagnostics(client: RenderReleaseClient) -> None:
+def print_worker_diagnostics(client: RenderReleaseClient, *, service_id: str = "", filtered: bool = False) -> None:
     """Best-effort bounded diagnostics for a failed worker readiness check."""
     try:
-        rows = client.recent_logs(EXPECTED_SERVICES["worker"][0])
+        options = {"limit": 100, "text": "/(Backup|Persistence|instance_fencing|runtime_lease|OperationalError|Traceback|ERROR|stale instance|FATAL)/"} if filtered else {}
+        rows = client.recent_logs(service_id or EXPECTED_SERVICES["worker"][0], **options)
     except Exception as exc:
         print(f"Render worker diagnostics unavailable: {type(exc).__name__}")
         return
@@ -261,10 +264,17 @@ def main() -> int:
     parser.add_argument("--worker-ready-url", default="https://apex-strategy-stats-web.onrender.com/health/worker")
     parser.add_argument("--confirmation", default=os.environ.get("APEX_RELEASE_CONFIRMATION", ""))
     parser.add_argument("--disable-only", action="store_true")
+    parser.add_argument("--diagnostics-only", action="store_true")
     args = parser.parse_args()
     if args.confirmation != "DEPLOY_APEX_PRODUCTION":
         raise ReleaseError("exact confirmation DEPLOY_APEX_PRODUCTION is required")
     client = RenderReleaseClient(os.environ.get("RENDER_API_KEY", ""))
+    if args.diagnostics_only:
+        for service_id, name in EXPECTED_SERVICES.values():
+            verify_service(client.service(service_id), service_id=service_id, expected_name=name)
+            print(f"APEX read-only diagnostics: {name}")
+            print_worker_diagnostics(client, service_id=service_id, filtered=True)
+        return 0
     if args.disable_only:
         disabled = disable_auto_deploy(client)
         print(f"APEX auto deploy disabled: {','.join(sorted(disabled))}")

@@ -66,6 +66,22 @@ class _HistorySession(_GitHubSession):
         return _Response(payload={"sha": self.sha, "size": len(self.content)})
 
 
+class _LostAcknowledgementSession(_GitHubSession):
+    fail_confirmation = False
+
+    def get(self, url, **kwargs):
+        if self.fail_confirmation and self.puts:
+            raise TimeoutError("metadata temporarily unavailable")
+        return super().get(url, **kwargs)
+
+    def put(self, url, **kwargs):
+        response = super().put(url, **kwargs)
+        self.sha = hashlib.sha1(f"blob {len(self.content)}\0".encode() + self.content).hexdigest()
+        if len(self.puts) == 1:
+            raise TimeoutError("response lost after commit")
+        return _Response(payload={"content": {"sha": self.sha}})
+
+
 class _TransientConflictSession(_GitHubSession):
     def put(self, _url, *, headers, json, timeout):
         if not self.puts:
@@ -210,6 +226,44 @@ class BrainPersistenceTests(unittest.TestCase):
             "token",
             session=session,
         )
+
+    def test_lost_ack_recovers_own_exact_blob(self):
+        _make_db(self.remote)
+        session = _LostAcknowledgementSession(_bytes(self.remote))
+        manager = self._manager(session)
+        manager.restore()
+        with sqlite3.connect(self.local) as conn:
+            conn.execute("INSERT INTO knowledge(topic) VALUES('new')")
+        result = manager.backup()
+        self.assertEqual(result["status"], "saved")
+        self.assertTrue(result["recovered_acknowledgement"])
+        self.assertEqual(manager.backup()["status"], "unchanged")
+
+    def test_delayed_ack_recovery_snapshots_new_local_rows(self):
+        _make_db(self.remote)
+        session = _LostAcknowledgementSession(_bytes(self.remote)); session.fail_confirmation = True
+        manager = self._manager(session); manager.restore()
+        with sqlite3.connect(self.local) as conn:
+            conn.execute("INSERT INTO knowledge(topic) VALUES('first')")
+        self.assertEqual(manager.backup()["status"], "backup_failed")
+        with sqlite3.connect(self.local) as conn:
+            conn.execute("INSERT INTO knowledge(topic) VALUES('second')")
+        session.fail_confirmation = False
+        result = manager.backup()
+        self.assertEqual(result["status"], "saved")
+        self.assertEqual(result["generation"], 2)
+        self.assertEqual(result["counts"]["knowledge"], 3)
+
+    def test_lost_ack_never_adopts_a_foreign_write(self):
+        _make_db(self.remote)
+        session = _LostAcknowledgementSession(_bytes(self.remote)); session.fail_confirmation = True
+        manager = self._manager(session); manager.restore()
+        with sqlite3.connect(self.local) as conn:
+            conn.execute("INSERT INTO knowledge(topic) VALUES('new')")
+        manager.backup()
+        session.fail_confirmation = False; session.sha = "foreign-blob"
+        self.assertEqual(manager.backup()["status"], "stale_remote")
+        self.assertEqual(len(session.puts), 1)
 
     def test_restore_always_uses_remote_even_when_local_is_larger(self):
         _make_db(self.local, knowledge_rows=200)

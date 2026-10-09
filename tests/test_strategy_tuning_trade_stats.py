@@ -36,7 +36,7 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
     def test_trade_telemetry_is_passive_and_dashboard_only(self):
         self.assertIn("_emit_trade_stats_event", self.market)
         self.assertIn('"trade_event"', self.market)
-        self.assertIn('"trade_stats":trade_stats', self.stats)
+        self.assertIn('"accounting_basis":"CONFIRMED_BINANCE_FILLS"', self.stats)
         self.assertIn("Статистика реальных сделок", self.dashboard)
         self.assertIn("realized_r", self.stats)
         self.assertIn("pnl_pct", self.stats)
@@ -45,15 +45,15 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
         events = [
             {
                 "event_key": "trade:1:open:open",
-                "kind": "trade_event",
+                "kind": "execution_accounting",
                 "strategy": "FAST",
                 "symbol": "BTCUSDT",
                 "occurred_at": "2026-09-03T10:00:00+00:00",
-                "payload": {"action": "OPEN", "signal_id": 1},
+                "payload": {"action": "OPEN", "signal_id": 1, "accounting_basis": "CONFIRMED_ENTRY_FILLS"},
             },
             {
                 "event_key": "trade:1:close:tp1",
-                "kind": "trade_event",
+                "kind": "execution_accounting",
                 "strategy": "FAST",
                 "symbol": "BTCUSDT",
                 "occurred_at": "2026-09-03T11:00:00+00:00",
@@ -61,6 +61,7 @@ class StrategyTuningTradeStatsTests(unittest.TestCase):
                     "action": "CLOSE",
                     "signal_id": 1,
                     "result": "tp1",
+                    "accounting_basis": "confirmed_fills_after_commissions_and_funding",
                     "pnl_pct": 2.5,
                     "realized_r": 2.0,
                 },

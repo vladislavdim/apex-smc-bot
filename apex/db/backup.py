@@ -77,6 +77,30 @@ class BrainPersistence:
         self._last_restore_at = ""
         self._last_backup_at = ""
         self._last_error = ""
+        self._pending_upload: dict[str, Any] | None = None
+
+    @staticmethod
+    def _blob_sha(path: str) -> str:
+        digest = hashlib.sha1()
+        digest.update(f"blob {os.path.getsize(path)}\0".encode("ascii"))
+        with open(path, "rb") as source:
+            for chunk in iter(lambda: source.read(1_048_576), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _accept_pending_upload(self, remote_sha: str) -> dict[str, Any] | None:
+        """Recover only the exact bytes of our own CAS write, never a foreign head."""
+        pending = self._pending_upload
+        if (not pending or pending["blob_sha"] != remote_sha
+                or pending["parent_sha"] != self._remote_blob_sha):
+            return None
+        self._remote_blob_sha = remote_sha
+        self._generation = pending["generation"]
+        self._last_content_hash = pending["content_hash"]
+        self._last_backup_at = pending["backed_up_at"]
+        self._last_error = ""
+        self._pending_upload = None
+        return {**pending["receipt"], "recovered_acknowledgement": True}
 
     @property
     def configured(self) -> bool:
@@ -607,6 +631,10 @@ class BrainPersistence:
                 if state != "ok" or metadata is None:
                     raise RuntimeError("remote brain.db disappeared after restore")
                 current_sha = str(metadata["sha"])
+                # A previous upload may have committed before its response was
+                # lost. Adopt only its exact Git blob; then snapshot again so
+                # newly staged Audit rows cannot be retired on an older receipt.
+                self._accept_pending_upload(current_sha)
                 if current_sha != self._remote_blob_sha:
                     # Another Render instance saved a newer generation.  Never
                     # retry with its SHA: doing so would recreate the rollback.
@@ -667,6 +695,17 @@ class BrainPersistence:
                 self._integrity(temp_path)
                 snapshot_size = os.path.getsize(temp_path)
                 upload_path = self._compressed_snapshot(temp_path)
+                expected_blob_sha = self._blob_sha(upload_path)
+                self._pending_upload = {
+                    "blob_sha": expected_blob_sha, "parent_sha": current_sha,
+                    "generation": generation, "content_hash": logical_hash,
+                    "backed_up_at": now,
+                    "receipt": {"status": "saved", "saved": True,
+                                "blob_sha": expected_blob_sha,
+                                "generation": generation, "size": snapshot_size,
+                                "upload_size": os.path.getsize(upload_path),
+                                "counts": self._counts(temp_path), "backed_up_at": now},
+                }
                 message = (
                     f"{self.remote_name} backup {now[:16].replace('T', ' ')} "
                     f"g{generation} [{str(reason)[:32]}] [skip ci]"
@@ -737,6 +776,9 @@ class BrainPersistence:
                     if response.status_code in (409, 422):
                         refreshed, refreshed_state = self._remote_metadata()
                         refreshed_sha = str((refreshed or {}).get("sha") or "")
+                        recovered = self._accept_pending_upload(refreshed_sha)
+                        if recovered:
+                            return recovered
                         if refreshed_state != "ok" or refreshed_sha != current_sha:
                             self._last_error = (
                                 f"concurrent update: restored {current_sha[:12]}, "
@@ -798,6 +840,7 @@ class BrainPersistence:
                 self._last_content_hash = logical_hash
                 self._last_backup_at = now
                 self._last_error = ""
+                self._pending_upload = None
                 return {
                     "status": "saved",
                     "saved": True,
@@ -809,6 +852,16 @@ class BrainPersistence:
                     "backed_up_at": now,
                 }
             except Exception as exc:
+                if self._pending_upload:
+                    try:
+                        metadata, state = self._remote_metadata()
+                        recovered = self._accept_pending_upload(
+                            str((metadata or {}).get("sha") or "") if state == "ok" else ""
+                        )
+                        if recovered:
+                            return recovered
+                    except Exception:
+                        pass  # Keep the exact pending receipt for the next cycle.
                 self._last_error = str(exc)
                 return {"status": "backup_failed", "saved": False, "error": str(exc)}
             finally:

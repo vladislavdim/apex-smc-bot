@@ -205,6 +205,19 @@ class ManagerRepository:
         finally:
             conn.close()
 
+    def unclosed(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        """Include CLOSING owners when repairing proven non-open executions."""
+        conn = self._conn_factory()
+        try:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(
+                """SELECT * FROM manager_positions WHERE status!='CLOSED'
+                   ORDER BY updated_at,signal_id LIMIT ?""",
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()]
+        finally:
+            conn.close()
+
     def confirm_reconciliation(self, signal_id: int, target_state: str) -> bool:
         """Resolve one exchange-verified cutover state idempotently."""
         target = str(target_state or "").upper()
@@ -263,6 +276,7 @@ class ManagerRepository:
                 """UPDATE manager_positions
                       SET status='CLOSED',manager_state='CLOSED',close_result=?,
                           exit_price=NULL,realized_pct=NULL,realized_r=NULL,
+                          reconciliation_reason=NULL,current_r=0,position_fraction=0,
                           last_event='EXECUTION_NOT_OPENED',last_action='HOLD',
                           closed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
                     WHERE signal_entity_id=? AND status!='CLOSED'""",
