@@ -257,7 +257,7 @@ def print_worker_diagnostics(client: RenderReleaseClient, *, service_id: str = "
             print(f"{timestamp} {message}".strip())
 
 
-def print_database_diagnostics(client: RenderReleaseClient) -> None:
+def print_database_diagnostics(client: RenderReleaseClient) -> dict[str, Any]:
     """Inspect only the configured dashboard DB; never print connection secrets."""
     connection = None
     try:
@@ -272,6 +272,8 @@ def print_database_diagnostics(client: RenderReleaseClient) -> None:
             resource = resource.get("postgres") or resource
             safe = {key: resource.get(key) for key in ("id", "status", "suspended", "expiresAt")}
             print(f"Configured dashboard database: {safe}")
+            if str(safe.get("status")) == "suspended" or str(safe.get("suspended")) == "suspended":
+                return safe
             info = client._request("GET", f"/postgres/{match.group(1)}/connection-info")
             url = info.get("externalConnectionString") or url
         import psycopg2
@@ -282,11 +284,13 @@ def print_database_diagnostics(client: RenderReleaseClient) -> None:
             print(f"Runtime lease (read only): {cursor.fetchall()}")
             cursor.execute("SELECT kind, MAX(occurred_at), MAX(received_at) FROM apex_stats_events WHERE kind IN ('runtime_health','worker_heartbeat') GROUP BY kind")
             print(f"Runtime heartbeat timestamps (read only): {cursor.fetchall()}")
+        return {"status": "available"}
     except Exception as exc:
         print(f"Dashboard DB diagnostics unavailable: {type(exc).__name__}: {sanitize_log_message(exc)}")
     finally:
         if connection is not None:
             connection.close()
+    return {"status": "unavailable"}
 
 
 def main() -> int:
@@ -312,6 +316,9 @@ def main() -> int:
         disabled = disable_auto_deploy(client)
         print(f"APEX auto deploy disabled: {','.join(sorted(disabled))}")
         return 0
+    database = print_database_diagnostics(client)
+    if database.get("status") != "available":
+        raise ReleaseError("Production PostgreSQL is unavailable; restore and verify the configured database before restarting workers")
     try:
         result = controlled_release(
             client,

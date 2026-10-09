@@ -170,5 +170,6 @@ class ExecutionLedgerTests(unittest.TestCase):
         result = actual_result(self.path, self.snap)
         self.assertEqual(result["funding_quote"], -0.2)
         self.assertAlmostEqual(result["net_r"], 0.98)
+        self.assertAlmostEqual(result["realized_pct"], 9.8)
         self.assertEqual(result["accounting_basis"], "confirmed_fills_after_commissions_and_funding")
         self.assertEqual(reconcile_funding_one(self.path, Client(), now=1001), "DEFERRED")

@@ -511,6 +511,26 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertEqual(commit_body["parents"], ["commit-v1"])
         self.assertEqual(session.patches[0][1], {"sha": "commit-v2", "force": False})
 
+    def test_oversized_git_api_blob_uses_native_transport(self):
+        _make_db(self.local, knowledge_rows=2)
+        session = _GitDatabaseSession()
+        manager = self._manager(session)
+        original_post = session.post
+
+        def reject_blob(url, **kwargs):
+            if url.endswith("/git/blobs"):
+                return _Response(status_code=422, payload={"message": "Sorry, your input was too large to process."})
+            return original_post(url, **kwargs)
+
+        session.post = reject_blob
+        with patch("apex.db.git_snapshot.push_snapshot", return_value=_Response(status_code=201)) as push:
+            result = manager._upload_via_git_database(snapshot_path=self.local,
+                current_blob_sha="a" * 40, message="large backup")
+        self.assertEqual(result.status_code, 201)
+        self.assertEqual(push.call_args.kwargs["expected_blob_sha"], "a" * 40)
+        self.assertEqual(push.call_args.kwargs["snapshot_path"], self.local)
+        self.assertEqual(session.patches, [])
+
     def test_generation_survives_restart_and_advances_monotonically(self):
         _make_db(self.remote, knowledge_rows=1)
         session = _GitHubSession(_bytes(self.remote), sha="base")
