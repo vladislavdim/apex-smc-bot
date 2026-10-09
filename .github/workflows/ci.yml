@@ -16,6 +16,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  production-diagnostics:
+    # Read-only incident investigation, scoped to this owner-authored repair.
+    # No deploy, env mutation, secret export or exchange operation is performed.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/runtime-accounting-recovery-20261009' && github.event.pull_request.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests psycopg2-binary
+      - name: Read bounded redacted logs for the two verified services
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          APEX_RELEASE_CONFIRMATION: DEPLOY_APEX_PRODUCTION
+        run: python scripts/render_controlled_release.py --sha "${{ github.sha }}" --diagnostics-only
   test:
     runs-on: ubuntu-latest
     steps:

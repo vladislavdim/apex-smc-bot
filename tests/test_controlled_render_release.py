@@ -61,6 +61,12 @@ class ReadySession:
 
 
 class ControlledRenderReleaseTests(unittest.TestCase):
+    def test_cli_never_deploys_with_suspended_database(self):
+        with patch.dict("os.environ", {"APEX_RELEASE_CONFIRMATION": "DEPLOY_APEX_PRODUCTION", "RENDER_API_KEY": "test"}), patch("sys.argv", ["release", "--sha", "a" * 40]), patch.object(release, "RenderReleaseClient"), patch.object(release, "print_database_diagnostics", return_value={"status": "suspended"}), patch.object(release, "controlled_release") as deploy:
+            with self.assertRaisesRegex(release.ReleaseError, "PostgreSQL is unavailable"):
+                release.main()
+        deploy.assert_not_called()
+
     def test_disable_only_never_triggers_a_deploy(self):
         client = FakeClient()
         result = release.disable_auto_deploy(client)

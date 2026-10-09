@@ -332,7 +332,10 @@ def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *
     payload_data.setdefault("service_instance", SERVICE_INSTANCE or "unknown")
     payload_data.setdefault("deploy_id", DEPLOY_ID)
     event = {"event_key": key, "kind": str(kind), "strategy": str(strategy or "").upper(),
-             "symbol": str(symbol or "").upper(), "occurred_at": _utc_now(),
+             "symbol": str(symbol or "").upper(),
+             "occurred_at": (str(payload_data["occurred_at"])
+                             if kind == "execution_accounting" and payload_data.get("occurred_at")
+                             else _utc_now()),
              "payload": payload_data}
     try:
         _ensure_worker(); _EVENT_QUEUE.put_nowait(event)

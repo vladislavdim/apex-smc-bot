@@ -555,6 +555,7 @@ def _emit_trade_stats_event(action, sig_id, symbol, signal_type, direction, entr
                 realized_r = round(signed / risk, 3)
         strategy = str(signal_type or "UNKNOWN").upper()
         payload = {
+            "track": "SIGNAL_ANALYTICS", "accounting_basis": "CANDLE_BARRIERS",
             "action": str(action or "").upper(), "signal_id": int(sig_id),
             "symbol": str(symbol or "").upper(), "strategy": strategy,
             "direction": str(direction or "").upper(), "entry": entry_f or None,

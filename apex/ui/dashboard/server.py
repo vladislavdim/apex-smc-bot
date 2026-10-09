@@ -56,7 +56,10 @@ MAX_DASHBOARD_EVENTS = 5_000
 def _connect():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
-    return psycopg2.connect(DATABASE_URL, connect_timeout=8)
+    return psycopg2.connect(
+        DATABASE_URL, connect_timeout=2,
+        options="-c statement_timeout=2000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=5000",
+    )
 
 
 def ensure_schema() -> None:
@@ -144,6 +147,15 @@ def runtime_lease(raw: Any) -> tuple[dict[str, Any], int]:
     conn = _connect()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # SELECT FOR UPDATE cannot lock an absent row. Seed it atomically
+            # before locking so simultaneous first acquisitions serialize.
+            if action == "acquire":
+                cur.execute(
+                    """INSERT INTO apex_runtime_lease
+                       (lease_key,instance_id,release_sha,generation,expires_at)
+                       VALUES(%s,'',%s,0,NOW()) ON CONFLICT(lease_key) DO NOTHING""",
+                    (lease_key, release_sha),
+                )
             cur.execute(
                 "SELECT * FROM apex_runtime_lease WHERE lease_key=%s FOR UPDATE",
                 (lease_key,),
@@ -220,20 +232,27 @@ def worker_readiness(expected_sha: str, *, max_age_seconds: int = 90) -> tuple[d
     sha = str(expected_sha or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         return {"ready": False, "status": "INVALID_RELEASE_SHA"}, 400
-    conn = _connect()
+    conn = None
     try:
+        conn = _connect()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """SELECT occurred_at,received_at,payload FROM apex_stats_events
                    WHERE kind='runtime_status'
                      AND LOWER(payload->>'release_sha')=%s
                      AND received_at >= NOW() - (%s * INTERVAL '1 second')
+                     AND occurred_at >= NOW() - (%s * INTERVAL '1 second')
                    ORDER BY received_at DESC LIMIT 1""",
-                (sha, max(15, min(int(max_age_seconds), 300))),
+                (sha, max(15, min(int(max_age_seconds), 300)),
+                 max(15, min(int(max_age_seconds), 300))),
             )
             row = cur.fetchone()
+    except Exception as exc:
+        logging.warning("[readiness] backend unavailable: %s", type(exc).__name__)
+        return {"ready": False, "status": "WORKER_BACKEND_UNAVAILABLE", "release_sha": sha[:12]}, 503
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     if not row:
         return {"ready": False, "status": "WORKER_HEARTBEAT_MISSING", "release_sha": sha[:12]}, 503
     payload = row["payload"] if isinstance(row["payload"], dict) else {}
@@ -316,6 +335,16 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
                 [*params, MAX_DASHBOARD_EVENTS],
             )
             rows = cur.fetchall()
+            # High-volume detector audits must not evict the financial ledger
+            # events from the same bounded dashboard window.
+            cur.execute(
+                "SELECT event_key,kind,strategy,symbol,occurred_at,payload "
+                "FROM apex_stats_events WHERE " + " AND ".join(where) +
+                " AND kind='execution_accounting' ORDER BY occurred_at DESC LIMIT %s",
+                [*params, MAX_DASHBOARD_EVENTS],
+            )
+            existing = {r["event_key"] for r in rows}
+            rows.extend(r for r in cur.fetchall() if r["event_key"] not in existing)
     finally: conn.close()
     return [{"event_key": r["event_key"], "kind": r["kind"], "strategy": r["strategy"], "symbol": r["symbol"],
              "occurred_at": r["occurred_at"].isoformat(), "payload": r["payload"] if isinstance(r["payload"], dict) else {}} for r in rows]
@@ -492,7 +521,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
     active_release = available_releases[0] if release == "latest" and available_releases else str(release or "").strip()
     if active_release:
         events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
-    attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]; market_data_events=[]; ltf_watch_events=[]
+    attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]; analytical_events=[]; market_data_events=[]; ltf_watch_events=[]
     manager_events=[]; operational_snapshots=[]; incident_snapshots=[]
     for e in events:
         p=e["payload"]; key=str(p.get("attempt_key") or "")
@@ -501,7 +530,14 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         elif e["kind"]=="groq_review" and key: reviews[key]={**p,"occurred_at":e["occurred_at"]}
         elif e["kind"]=="decision" and key: decisions[key].append({**p,"occurred_at":e["occurred_at"]})
         elif e["kind"]=="scan_event": scan_events.append({**p,"occurred_at":e["occurred_at"]})
-        elif e["kind"]=="trade_event": trade_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
+        elif e["kind"]=="trade_event": analytical_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
+        elif e["kind"]=="execution_accounting":
+            action = str(p.get("action") or "").upper()
+            basis = p.get("accounting_basis")
+            if ((action == "OPEN" and basis == "CONFIRMED_ENTRY_FILLS")
+                    or (action == "CLOSE" and basis == "confirmed_fills_after_commissions_and_funding"
+                        and _num(p.get("realized_r")) is not None)):
+                trade_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":p.get("occurred_at") or e["occurred_at"]})
         elif e["kind"]=="market_data": market_data_events.append({**p,"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
         elif e["kind"]=="ltf_watch": ltf_watch_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
         elif e["kind"]=="manager_event": manager_events.append({**p,"strategy":e["strategy"],"symbol":e["symbol"],"occurred_at":e["occurred_at"]})
@@ -536,10 +572,16 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
             if d in {"WAIT","REJECT"}:
                 for x in g.get("reasons",[]) if isinstance(g.get("reasons"),list) else []: groq_reasons[_reason(str(x))]+=1
                 for x in g.get("risks",[]) if isinstance(g.get("risks"),list) else []: groq_risks[_reason(str(x))]+=1
+    # Idempotent projections, including older telemetry retries with new keys.
+    financial = {}
+    for t in sorted(trade_events, key=lambda x: x.get("occurred_at", "")):
+        if t.get("signal_id") is not None:
+            financial[(str(t["signal_id"]), t["action"])] = t
+    trade_events = list(financial.values())
     opened=[t for t in trade_events if str(t.get("action") or "").upper()=="OPEN"]
     closed=[t for t in trade_events if str(t.get("action") or "").upper()=="CLOSE"]
-    wins=[t for t in closed if str(t.get("result") or "").lower() in {"tp1","tp2","tp3"}]
-    losses=[t for t in closed if str(t.get("result") or "").lower()=="sl"]
+    wins=[t for t in closed if float(t["realized_r"]) > 0]
+    losses=[t for t in closed if float(t["realized_r"]) < 0]
     pnl_vals=[float(t["pnl_pct"]) for t in closed if _num(t.get("pnl_pct")) is not None]
     r_vals=[float(t["realized_r"]) for t in closed if _num(t.get("realized_r")) is not None]
     trade_by_strategy=defaultdict(lambda:{"opened":0,"closed":0,"wins":0,"losses":0,"pnl_pct":0.0,"r_sum":0.0,"r_n":0})
@@ -547,7 +589,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         trade_by_strategy[str(t.get("strategy") or "UNKNOWN")]["opened"]+=1
     for t in closed:
         st=str(t.get("strategy") or "UNKNOWN"); d=trade_by_strategy[st]; d["closed"]+=1
-        res=str(t.get("result") or "").lower()
+        res="tp1" if float(t["realized_r"]) > 0 else "sl" if float(t["realized_r"]) < 0 else "breakeven"
         if res in {"tp1","tp2","tp3"}: d["wins"]+=1
         elif res=="sl": d["losses"]+=1
         pv=_num(t.get("pnl_pct")); rv=_num(t.get("realized_r"))
@@ -872,6 +914,11 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
     system_state = "CRITICAL" if any(str(x.get("severity") or "").upper() == "CRITICAL" for x in incidents) else (
         "DEGRADED" if market_data["failed"] or manager_failures or incidents else "HEALTHY"
     )
+    runtime = latest_v2.get("runtime_health") or {}
+    if runtime.get("reason_codes"):
+        observability_reasons.extend(str(code) for code in runtime["reason_codes"])
+    if runtime and (runtime.get("ready") is not True or runtime.get("new_entries") == "OFF"):
+        system_state = "DEGRADED" if system_state != "CRITICAL" else system_state
     system_overview = {
         "state": system_state, "market_data_ok": market_data["ok"],
         "market_data_total": market_data["total"], "open_trades": max(0, len(opened)-len(closed)),
@@ -895,7 +942,7 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
     legacy_pending_ltf = {"pending_ltf":sum(r.get("outcome")=="PENDING_LTF" for r in joined)}
     reviews_n=sum(groq_counts.values()); delivered_attempts=sum(1 for r in joined if any(str(d.get("stage") or "").lower()=="delivered" or str(d.get("outcome") or "").upper()=="ACCEPT" for d in r.get("decisions",[])))
     delivered_signal_ids = {
-        str(t.get("signal_id")) for t in opened if t.get("signal_id") not in (None, "")
+        str(t.get("signal_id")) for t in analytical_events if t.get("signal_id") not in (None, "")
     }
     delivered = max(delivered_attempts, len(delivered_signal_ids), len(opened))
     return {"period_days":days,"baseline":"production-live-v3","baseline_utc":STATS_BASELINE_UTC.isoformat(),"generated_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -919,7 +966,9 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
       "failures_by_strategy":{k:[{"label":a,"count":b} for a,b in v.most_common(30)] for k,v in by_strategy.items()},
       "criterion_stats":[{"strategy":k[0],"label":k[1],"pass":v.get("PASS",0),"fail":v.get("FAIL",0),"total":v.get("PASS",0)+v.get("FAIL",0)} for k,v in sorted(checks.items(),key=lambda x:sum(x[1].values()),reverse=True)[:300]],
       "groq":{"decisions":dict(groq_counts),"reasons":[{"label":k,"count":v} for k,v in groq_reasons.most_common(30)],"risks":[{"label":k,"count":v} for k,v in groq_risks.most_common(30)],"avg_confidence":{k:(sum(v)/len(v) if v else None) for k,v in conf.items()}},
-      "trade_stats":trade_stats,"catalog":STRATEGY_CATALOG,"rows":joined[start:start+page_size],"pagination":{"page":page,"page_size":page_size,"total":total,"pages":max(1,(total+page_size-1)//page_size)}}
+      "trade_stats":{**trade_stats,"accounting_basis":"CONFIRMED_BINANCE_FILLS"},
+      "signal_analytics":{"closed":sum(str(t.get("action")).upper()=="CLOSE" for t in analytical_events),"scope":"CANDLE_BARRIERS_NOT_EXCHANGE_PNL"},
+      "catalog":STRATEGY_CATALOG,"rows":joined[start:start+page_size],"pagination":{"page":page,"page_size":page_size,"total":total,"pages":max(1,(total+page_size-1)//page_size)}}
 
 
 def _runtime_release_sha() -> str:
@@ -1127,7 +1176,7 @@ def _cached_dashboard(key: tuple[Any, ...], *, fresh_only: bool) -> dict[str, An
 
 def _persistent_cache_key(key: tuple[Any, ...]) -> str:
     return hashlib.sha256(
-        json.dumps(key, ensure_ascii=True, default=str, separators=(",", ":")).encode()
+        json.dumps(("confirmed-accounting-v2", key), ensure_ascii=True, default=str, separators=(",", ":")).encode()
     ).hexdigest()
 
 

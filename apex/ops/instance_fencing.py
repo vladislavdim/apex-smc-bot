@@ -31,7 +31,7 @@ def _post_json(
             value = json.loads(exc.read().decode("utf-8"))
         except Exception as parse_exc:
             raise LeaseError(f"runtime_lease_http_{exc.code}") from parse_exc
-        if isinstance(value, Mapping):
+        if exc.code == 409 and isinstance(value, Mapping) and value.get("reason"):
             return value
         raise LeaseError(f"runtime_lease_http_{exc.code}") from exc
     except Exception as exc:

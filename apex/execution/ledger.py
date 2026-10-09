@@ -550,7 +550,7 @@ def actual_result(path, snapshot, candles=None, *, authoritative_snapshot=False)
     result.update(status="CLOSED" if fees_known else "FEES_UNRESOLVED", gross_r=float(gross/risk),
                   net_r=float(net/risk) if fees_known else None,
                   gross_pct=float(gross/entry_value*100),
-                  realized_pct=float((gross-fee)/entry_value*100) if fees_known else None,
+                  realized_pct=float(net/entry_value*100) if fees_known and funding_known else None,
                   entry=float(entry_value/entry_qty), exit_price=float(exit_value/exit_qty),
                   exit_reason=exits[-1]["kind"], duration_seconds=(exits[-1]["time_ms"]-entries[0]["time_ms"])/1000,
                   accounting_basis=(

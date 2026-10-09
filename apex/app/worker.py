@@ -437,6 +437,12 @@ def _v3_confirmed_accounting(signal_id: int):
     except Exception:
         return {"status": "UNVERIFIED_EXECUTION"}
     accounting = actual_result(DB_PATH, snapshot, authoritative_snapshot=True)
+    from apex.telemetry.execution_accounting import confirmed_execution_events
+    for event in confirmed_execution_events(snapshot, accounting):
+        _emit_stats_event(
+            "execution_accounting", snapshot.strategy, snapshot.symbol, event,
+            event_key=f"execution:{signal_id}:{event['action'].lower()}",
+        )
     if str(accounting.get("status") or "").upper() in {"CLOSED", "FEES_UNRESOLVED"}:
         repository = _V3ManagerRepository(lambda: _v3_connect_state(_V3_CONFIG))
         result = str(accounting.get("exit_reason") or "filled").lower()
@@ -4159,6 +4165,7 @@ async def _v3_refresh_runtime_lease(*, acquire: bool = False) -> bool:
             )
             return True
         _V3_RUNTIME.clear_instance_lease()
+        _V3_RUNTIME.clear_inhibit("INSTANCE_LEASE_HELD")
         _V3_RUNTIME.mark_component("instance_fencing", _V3_COMPONENT_STATE.UNAVAILABLE, str(exc))
         _V3_RUNTIME.inhibit_entries("INSTANCE_LEASE_UNAVAILABLE")
         return False
@@ -4176,6 +4183,7 @@ async def _v3_refresh_runtime_lease(*, acquire: bool = False) -> bool:
         f"reason={state.reason}; generation={state.generation}; expires_at={state.expires_at}",
     )
     _V3_RUNTIME.clear_instance_lease()
+    _V3_RUNTIME.clear_inhibit("INSTANCE_LEASE_UNAVAILABLE")
     _V3_RUNTIME.inhibit_entries("INSTANCE_LEASE_HELD")
     # Render deploys overlap old/new workers by design. Never steal a valid
     # lease, but retry exactly after the holder TTL instead of leaving the new
