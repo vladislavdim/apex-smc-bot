@@ -14,3 +14,9 @@ Changes:
 Validation before publication: 971 pytest tests passed; 820 unittest tests passed; five strategy parity fixtures unchanged; production authority and release-ready verification passed; workflow YAML and dashboard JavaScript checked. Regression cases include analytical SL without any fill, funding pending, net-negative TP, duplicate events, backend timeout, lost acknowledgement followed by additional local rows, foreign backup writes, and CLOSING with skipped/submitted/protected executions.
 
 Deployment must be verified separately. The original remote brain/Audit snapshots are stale; obtain production diagnostics and preserve unsaved local data before restarting a disposable worker. Do not bypass instance fencing or place real exchange orders for validation.
+
+## Additional production evidence and repair
+
+CI read-only Render diagnostics on 2026-10-09 confirmed brain backup `create_blob HTTP 422` with GitHub's `input was too large` error, and repeated Audit `stale_remote`. These are distinct faults. The backup now falls back to bounded-memory native Git transport for oversized API blobs, preserves the gzip format, checks the exact previous file SHA, and never forces the branch ref. A real local bare-repository regression verifies preservation of unrelated files and rejection of a stale writer. Snapshots above GitHub's 100 MiB compressed-file limit fail explicitly.
+
+Canonical realized percentage now includes confirmed funding, consistent with net R; financial telemetry consumes that value without adding funding twice. Production database diagnostics inspect the exact configured database using read-only connections and emit no credentials. Worker replacement remains unsafe until unsaved local brain/Audit data is preserved or persistence of its disk is verified.

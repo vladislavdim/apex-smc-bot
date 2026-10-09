@@ -265,6 +265,16 @@ class BrainPersistence:
             if blob_payload_path and os.path.exists(blob_payload_path):
                 os.unlink(blob_payload_path)
         if blob_response.status_code not in (200, 201):
+            _category, detail = self._github_error(blob_response)
+            if blob_response.status_code == 422 and "too large" in detail.lower():
+                from apex.db.git_snapshot import push_snapshot
+                return push_snapshot(
+                    remote_url=f"https://github.com/{self.repository}.git",
+                    branch=self.branch, remote_name=self.remote_name,
+                    snapshot_path=snapshot_path, expected_blob_sha=current_blob_sha,
+                    message=message, token=self.token,
+                    timeout=max(self.timeout, 90),
+                )
             return tagged(blob_response, "create_blob")
         new_blob_sha = str((blob_response.json() or {}).get("sha") or "")
         if not new_blob_sha:

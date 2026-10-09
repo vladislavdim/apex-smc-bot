@@ -42,7 +42,7 @@ def test_funding_pending_is_not_final_net_pnl():
                   "exit_time": 1791419000000, "status": "CLOSED", "net_r": 1,
                   "accounting_basis": "confirmed_fills_after_commissions_funding_pending"}
     assert [e["action"] for e in confirmed_execution_events(snapshot, accounting)] == ["OPEN"]
-    accounting.update(accounting_basis="confirmed_fills_after_commissions_and_funding", realized_pct=1, funding_quote=-.1, entry=100)
+    accounting.update(accounting_basis="confirmed_fills_after_commissions_and_funding", realized_pct=.9, funding_quote=-.1, entry=100)
     events = confirmed_execution_events(snapshot, accounting)
     assert events[-1]["pnl_pct"] == pytest.approx(.9)
     accounting["entry_state"] = "UNFILLED"

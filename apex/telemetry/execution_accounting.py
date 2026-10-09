@@ -26,11 +26,7 @@ def confirmed_execution_events(snapshot: Any, accounting: Mapping[str, Any]) -> 
     if not math.isfinite(net_r):
         return events
     closed_at = datetime.fromtimestamp(float(accounting["exit_time"]) / 1000, timezone.utc).isoformat()
-    # Ledger's realized_pct excludes funding; include it explicitly in net %.
     net_pct = accounting.get("realized_pct")
-    if net_pct is not None and accounting.get("funding_quote") is not None:
-        value = float(accounting.get("entry") or snapshot.entry) * quantity
-        net_pct = float(net_pct) + float(accounting["funding_quote"]) / value * 100 if value > 0 else None
     events.append({**common, "action": "CLOSE", "occurred_at": closed_at,
                    "accounting_basis": accounting["accounting_basis"],
                    "result": "win" if net_r > 0 else "loss" if net_r < 0 else "breakeven",

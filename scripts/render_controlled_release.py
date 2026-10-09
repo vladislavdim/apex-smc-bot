@@ -257,6 +257,38 @@ def print_worker_diagnostics(client: RenderReleaseClient, *, service_id: str = "
             print(f"{timestamp} {message}".strip())
 
 
+def print_database_diagnostics(client: RenderReleaseClient) -> None:
+    """Inspect only the configured dashboard DB; never print connection secrets."""
+    connection = None
+    try:
+        rows = client._request("GET", f"/services/{EXPECTED_SERVICES['web'][0]}/env-vars")
+        env = {str((row.get("envVar") or row).get("key") or ""):
+               str((row.get("envVar") or row).get("value") or "") for row in rows}
+        url = env.get("DATABASE_URL", "")
+        host = urlparse(url).hostname or ""
+        match = re.match(r"(dpg-[a-z0-9]+-[a-z])(?:\.|$)", host)
+        if match:
+            resource = client._request("GET", f"/postgres/{match.group(1)}")
+            resource = resource.get("postgres") or resource
+            safe = {key: resource.get(key) for key in ("id", "status", "suspended", "expiresAt")}
+            print(f"Configured dashboard database: {safe}")
+            info = client._request("GET", f"/postgres/{match.group(1)}/connection-info")
+            url = info.get("externalConnectionString") or url
+        import psycopg2
+        connection = psycopg2.connect(url, connect_timeout=5,
+            options="-c default_transaction_read_only=on -c statement_timeout=5000")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT lease_key, release_sha, generation, expires_at, updated_at, expires_at > NOW() FROM apex_runtime_lease")
+            print(f"Runtime lease (read only): {cursor.fetchall()}")
+            cursor.execute("SELECT kind, MAX(occurred_at), MAX(received_at) FROM apex_stats_events WHERE kind IN ('runtime_health','worker_heartbeat') GROUP BY kind")
+            print(f"Runtime heartbeat timestamps (read only): {cursor.fetchall()}")
+    except Exception as exc:
+        print(f"Dashboard DB diagnostics unavailable: {type(exc).__name__}: {sanitize_log_message(exc)}")
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sha", required=True)
@@ -273,7 +305,8 @@ def main() -> int:
         for service_id, name in EXPECTED_SERVICES.values():
             verify_service(client.service(service_id), service_id=service_id, expected_name=name)
             print(f"APEX read-only diagnostics: {name}")
-            print_worker_diagnostics(client, service_id=service_id, filtered=True)
+            print_worker_diagnostics(client, service_id=service_id, filtered=(name != "apex-strategy-stats-web"))
+        print_database_diagnostics(client)
         return 0
     if args.disable_only:
         disabled = disable_auto_deploy(client)
