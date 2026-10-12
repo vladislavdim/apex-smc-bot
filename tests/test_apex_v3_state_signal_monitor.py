@@ -45,6 +45,23 @@ class StateSignalMonitorTests(unittest.TestCase):
             lambda *args, **kwargs: self.events.append((args, kwargs)),
         )
 
+    def test_long_outage_backfills_barrier_even_without_current_quote(self):
+        from datetime import timezone
+        now = datetime(2026,10,12,tzinfo=timezone.utc)
+        activated = now - timedelta(days=5)
+        self.seed(activated_at=activated.isoformat())
+        calls = []
+        def historical(symbol, start, end):
+            calls.append((symbol,start,end))
+            return [{'timestamp': start, 'open':100, 'high':101, 'low':94, 'close':96, 'volume':1, 'is_closed':True}]
+        monitor = StateSignalMonitor(self.repository, lambda:{},
+            lambda *_: self.fail('recent history must not skip five days'),
+            lambda *args, **kwargs: self.events.append((args,kwargs)),
+            get_historical_candles=historical)
+        self.assertEqual(monitor.check(now=now)[0]['result'], 'sl')
+        self.assertEqual(calls[0][1], int(activated.timestamp()))
+        self.assertLessEqual(calls[0][2]-calls[0][1],999*300)
+
     def test_ambiguous_active_bar_closes_stop_first_once(self):
         self.seed()
         monitor = self.monitor(100, {"low": 94, "high": 111})

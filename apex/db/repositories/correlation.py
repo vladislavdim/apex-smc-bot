@@ -128,6 +128,19 @@ class TradeCorrelationRepository:
         finally:
             conn.close()
 
+    def legacy_candidates(self, signal_id: int) -> list[dict[str, Any]]:
+        """Resolve a historical numeric ID without assuming the current release."""
+        from apex.domain.ids import derived_id
+        conn = self._conn_factory()
+        try:
+            releases = conn.execute('SELECT DISTINCT release_sha FROM trade_correlation LIMIT 1001').fetchall()
+            if len(releases)>1000:
+                raise CorrelationError('legacy_release_lookup_limit')
+        finally:
+            conn.close()
+        return [row for release in releases
+                if (row := self.get(derived_id('candidate', release[0], int(signal_id)))) is not None]
+
     def pending_outcomes(self) -> list[dict[str, Any]]:
         conn = self._conn_factory()
         try:

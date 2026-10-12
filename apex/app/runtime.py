@@ -119,6 +119,17 @@ class RuntimeSupervisor:
             self._lease_generation = int(generation)
             self._lease_expires_at = parsed.astimezone(timezone.utc)
 
+    @property
+    def owns_exchange_management(self) -> bool:
+        """Keep protection available during entry inhibits, but fence other owners."""
+        with self._lock:
+            return not self._active or (
+                'GRACEFUL_SHUTDOWN' not in self._reason_codes
+                and self._lease_generation is not None
+                and self._lease_expires_at is not None
+                and self._lease_expires_at > datetime.now(timezone.utc)
+            )
+
     def clear_instance_lease(self) -> None:
         with self._lock:
             self._lease_generation = None

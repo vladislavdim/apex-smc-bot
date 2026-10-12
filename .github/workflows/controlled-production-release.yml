@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           SHA="$(git rev-parse HEAD)"
           test "$SHA" = "${{ inputs.release_sha }}"
-          git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --filter=blob:none --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$SHA" origin/main
           echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"
 
@@ -99,7 +99,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install release dependency
-        run: pip install requests
+        run: pip install requests psycopg2-binary
 
       - name: Disable commit deploys and release web then worker
         run: >-

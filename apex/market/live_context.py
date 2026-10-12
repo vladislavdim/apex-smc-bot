@@ -63,6 +63,12 @@ def fetch_live_context(client: GateMarketClient, symbol: str, *, as_of: int) -> 
 
     microstructure: dict[str, Any] = {}
     try:
+        multiplier = client.contract_multiplier(symbol)
+    except Exception:
+        multiplier = None
+    try:
+        if multiplier is None:
+            raise ValueError("contract_multiplier_unavailable")
         trades = client.public_trades(symbol)
         if trades.received_at > as_of:
             raise ValueError("received_after_as_of")
@@ -72,7 +78,7 @@ def fetch_live_context(client: GateMarketClient, symbol: str, *, as_of: int) -> 
             for row in trade_rows
         ]
         microstructure["cvd_real"] = {
-            **real_cvd(trade_rows, source="gate_rest_trades"),
+            **real_cvd(trade_rows, source="gate_rest_trades", contract_multiplier=multiplier),
             "received_at": trades.received_at,
             "event_time": max(event_times) if event_times else None,
             "point_in_time": True,
@@ -83,11 +89,13 @@ def fetch_live_context(client: GateMarketClient, symbol: str, *, as_of: int) -> 
         microstructure["cvd_real"] = _unknown("CVD_REAL", "gate", code)
 
     try:
+        if multiplier is None:
+            raise ValueError("contract_multiplier_unavailable")
         book_response = client.order_book(symbol)
         if book_response.received_at > as_of:
             raise ValueError("received_after_as_of")
         book_payload = book_response.payload if isinstance(book_response.payload, Mapping) else {}
-        book = GateOrderBook(symbol)
+        book = GateOrderBook(symbol, contract_multiplier=multiplier)
         book.snapshot(
             book_payload.get("bids", book_payload.get("b")),
             book_payload.get("asks", book_payload.get("a")),
@@ -97,6 +105,7 @@ def fetch_live_context(client: GateMarketClient, symbol: str, *, as_of: int) -> 
         # A REST snapshot is visible liquidity at one instant, never a historical stop map.
         microstructure["visible_orderbook"] = {
             **book.features(now=float(book_response.received_at)),
+            "source": "gate_rest_orderbook",
             "received_at": book_response.received_at,
             "availability": "FORWARD_ONLY",
             "point_in_time": True,

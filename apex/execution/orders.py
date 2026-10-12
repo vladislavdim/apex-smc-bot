@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import calendar
+from contextlib import closing
 import math
 import logging
 import re
@@ -286,7 +287,10 @@ class SymbolRules:
 
 def _decimal(value: Any) -> Decimal:
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
+        if not result.is_finite():
+            raise ValueError("non-finite decimal")
+        return result
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError(f"invalid decimal value: {value!r}") from exc
 
@@ -436,6 +440,7 @@ class BinanceFuturesClient:
         if signed:
             headers["X-MBX-APIKEY"] = self.config.api_key
 
+        uncertain_post = signed and method.upper() == "POST" and path in {"/fapi/v1/order", "/fapi/v1/algoOrder"}
         max_attempts = max(1, attempts if attempts is not None else self.config.retries)
         last_error: Exception | None = None
         for attempt in range(max_attempts):
@@ -443,6 +448,10 @@ class BinanceFuturesClient:
                 # Another client or worker may have opened the process-wide
                 # breaker since this request began.
                 _ensure_binance_circuit_closed()
+                if signed and method.upper() in {"POST", "DELETE", "PUT"}:
+                    from apex.app.runtime import runtime_supervisor
+                    if not runtime_supervisor.owns_exchange_management:
+                        raise RuntimeError("exchange mutation blocked by instance ownership")
                 payload = dict(base_payload)
                 if signed:
                     payload["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
@@ -498,7 +507,7 @@ class BinanceFuturesClient:
                     if error_code == -1021 and signed and attempt < max_attempts - 1:
                         self._sync_server_time()
                         continue
-                    if error.retryable and attempt < max_attempts - 1:
+                    if error.retryable and attempt < max_attempts - 1 and not uncertain_post:
                         retry_after = min(float(response.headers.get("Retry-After", "1") or 1), 5.0)
                         time.sleep(max(0.25, retry_after))
                         continue
@@ -508,56 +517,41 @@ class BinanceFuturesClient:
                 raise
             except (_RequestException, ValueError, KeyError) as exc:
                 last_error = exc
+                if uncertain_post:
+                    break
                 if attempt < max_attempts - 1:
                     time.sleep(min(0.5 * (2 ** attempt), 2.0))
         raise RuntimeError(f"Binance Futures request failed safely: {last_error}")
 
     def _submit_standard_order(self, params: dict[str, Any]):
-        """Recover an ambiguous POST by its unique client order id."""
-        symbol = str(params["symbol"])
-        client_id = str(params["newClientOrderId"])
-        last_error: Exception | None = None
-        for attempt in range(self.config.retries):
+        """Recover one ambiguous POST by ID; an unavailable lookup is not absence."""
+        try:
+            return self._request('POST', '/fapi/v1/order', params, signed=True, attempts=1)
+        except Exception as exc:
             try:
-                return self._request(
-                    "POST", "/fapi/v1/order", params, signed=True, attempts=1,
-                )
-            except Exception as exc:
-                last_error = exc
-                try:
-                    recovered = self.query_order_by_client_id(symbol, client_id)
-                    if recovered and recovered.get("orderId"):
-                        return recovered
-                except Exception:
-                    pass
-                if isinstance(exc, BinanceAPIError) and not exc.retryable:
-                    raise
-                if attempt < self.config.retries - 1:
-                    time.sleep(min(0.5 * (2 ** attempt), 2.0))
-        raise RuntimeError(f"ambiguous Binance order submission: {last_error}")
+                recovered = self.query_order_by_client_id(str(params['symbol']), str(params['newClientOrderId']))
+                if recovered and recovered.get('orderId'):
+                    return recovered
+            except Exception:
+                pass
+            if isinstance(exc, BinanceAPIError) and not exc.retryable:
+                raise
+            raise RuntimeError(f'ambiguous Binance order submission: {exc}') from exc
 
     def _submit_algo_order(self, params: dict[str, Any]):
-        """Submit current Binance conditional order API idempotently."""
-        client_id = str(params["clientAlgoId"])
-        last_error: Exception | None = None
-        for attempt in range(self.config.retries):
+        """Recover an uncertain protective order before another submission."""
+        try:
+            return self._request('POST', '/fapi/v1/algoOrder', params, signed=True, attempts=1)
+        except Exception as exc:
             try:
-                return self._request(
-                    "POST", "/fapi/v1/algoOrder", params, signed=True, attempts=1,
-                )
-            except Exception as exc:
-                last_error = exc
-                try:
-                    recovered = self.query_algo_order(client_algo_id=client_id)
-                    if recovered and recovered.get("algoId"):
-                        return recovered
-                except Exception:
-                    pass
-                if isinstance(exc, BinanceAPIError) and not exc.retryable:
-                    raise
-                if attempt < self.config.retries - 1:
-                    time.sleep(min(0.5 * (2 ** attempt), 2.0))
-        raise RuntimeError(f"ambiguous Binance algo submission: {last_error}")
+                recovered = self.query_algo_order(client_algo_id=str(params['clientAlgoId']))
+                if recovered and recovered.get('algoId'):
+                    return recovered
+            except Exception:
+                pass
+            if isinstance(exc, BinanceAPIError) and not exc.retryable:
+                raise
+            raise RuntimeError(f'ambiguous Binance algo submission: {exc}') from exc
 
     def symbol_rules(self, symbol: str) -> SymbolRules:
         with _symbol_rules_lock:
@@ -630,15 +624,28 @@ class BinanceFuturesClient:
         rows = self._request("GET", "/fapi/v3/positionRisk", signed=True)
         if isinstance(rows, dict):
             rows = [rows]
-        return [row for row in rows if abs(float(row.get("positionAmt", 0) or 0)) > 0]
+        if not isinstance(rows, list) or any(not isinstance(row, dict) or "positionAmt" not in row for row in rows):
+            raise RuntimeError("position snapshot malformed")
+        return [row for row in rows if abs(_decimal(row["positionAmt"])) > 0]
 
     def realized_pnl_since(self, start_time_ms: int) -> float:
-        rows = self.income_history(limit=1000, start_time=start_time_ms)
-        return sum(
-            float(row.get("income", 0) or 0)
-            for row in rows
-            if row.get("incomeType") == "REALIZED_PNL" and row.get("asset", "USDT") == "USDT"
-        )
+        total = 0.0
+        for page in range(1, 11):
+            rows = self.income_history(limit=1000, start_time=start_time_ms, page=page)
+            if not isinstance(rows, list):
+                raise RuntimeError("income history is not complete")
+            for row in rows:
+                if row.get("incomeType") not in {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}:
+                    continue
+                if row.get("asset", "USDT") != "USDT":
+                    raise RuntimeError("daily income asset unresolved")
+                value = float(row.get("income", 0) or 0)
+                if not math.isfinite(value):
+                    raise RuntimeError("daily income is not finite")
+                total += value
+            if len(rows) < 1000:
+                return total
+        raise RuntimeError("daily income pagination limit reached")
 
     def mark_price(self, symbol: str) -> float:
         result = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
@@ -655,7 +662,9 @@ class BinanceFuturesClient:
         rows = self._request("GET", "/fapi/v3/positionRisk", {"symbol": symbol}, signed=True)
         if isinstance(rows, dict):
             rows = [rows]
-        return any(abs(float(row.get("positionAmt", 0) or 0)) > 0 for row in rows)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) or "positionAmt" not in row for row in rows):
+            raise RuntimeError("position snapshot malformed")
+        return any(abs(_decimal(row["positionAmt"])) > 0 for row in rows)
 
     def has_open_orders(self, symbol: str) -> bool:
         regular = self._request("GET", "/fapi/v1/openOrders", {"symbol": symbol}, signed=True)
@@ -945,8 +954,8 @@ def execute_manager_review(
         facts = update.get("facts") if isinstance(update.get("facts"), Mapping) else {}
         if manager_row:
             manager_state = str(
-                facts.get("manager_state_before")
-                or (manager_row.get("manager_state") if isinstance(manager_row, Mapping) else manager_row[0])
+                (manager_row.get("manager_state") if isinstance(manager_row, Mapping) else manager_row[0])
+                or facts.get("manager_state_before")
                 or "PROTECTED"
             )
             valid_transition, _ = validate_transition(manager_state, action)
@@ -958,16 +967,19 @@ def execute_manager_review(
             if action == "PARTIAL_EXIT" and int(partial_done or 0):
                 return {"signal_id": signal_id, "status": "DUPLICATE_SKIPPED", "action": action}
     except sqlite3.Error:
-        manager_row = None
+        return {"signal_id": signal_id, "status": "MANAGER_STATE_UNAVAILABLE", "action": action}
     if not config.live_armed or config.kill_switch:
         return {"signal_id": signal_id, "status": "LIVE_NOT_ARMED", "action": action}
     if signal_id <= 0:
         return {"signal_id": signal_id, "status": "INVALID_MANAGER_ACTION", "action": action}
+    from apex.app.runtime import runtime_supervisor
+    if not runtime_supervisor.owns_exchange_management:
+        return {"signal_id": signal_id, "status": "BLOCKED_INSTANCE_OWNERSHIP", "action": action}
     try:
         confidence = float(review.get("confidence") or 0)
     except (TypeError, ValueError):
         confidence = 0.0
-    if confidence < 0.70:
+    if not math.isfinite(confidence) or not 0.70 <= confidence <= 1:
         return {"signal_id": signal_id, "status": "BLOCKED_LOW_CONFIDENCE", "action": action}
 
     snapshot = cached_execution_snapshot(signal_id, db_path)
@@ -994,6 +1006,7 @@ def execute_manager_review(
     if not _claim_manager_action(db_path, action_key, signal_id, action, requested_level):
         return {"signal_id": signal_id, "status": "DUPLICATE_SKIPPED", "action": action}
 
+    market_submitted = False
     try:
         client = client or BinanceFuturesClient(config)
         symbol = str(snapshot["symbol"])
@@ -1049,13 +1062,17 @@ def execute_manager_review(
             quantity = _floor_step(quantity * _decimal(config.tp1_fraction), rules.step_size)
             if quantity < rules.min_qty:
                 raise RuntimeError("partial quantity below exchange minimum")
+        _finish_manager_action(db_path, action_key, "SUBMITTING")
+        market_submitted = True
         order = client.emergency_close(
             symbol, direction, _plain_decimal(quantity), f"apex_mx_{signal_id}_{action_key[:8]}",
         )
         order_id = _required_remote_order_id(order, "manager market reduction")
+        _register_market_exit(db_path, signal_id, symbol, direction, order_id,
+                              "PARTIAL_EXIT" if action == "PARTIAL_EXIT" else "CLOSE")
         order_status = str(order.get("status") or "").upper()
         executed_quantity = _decimal(order.get("executedQty") or order.get("cumQty") or "0")
-        if order_status != "FILLED" or executed_quantity <= 0:
+        if order_status != "FILLED" or executed_quantity < quantity:
             raise RuntimeError(
                 f"manager market action not fill-confirmed: {order_status or 'UNKNOWN'}"
             )
@@ -1092,9 +1109,10 @@ def execute_manager_review(
         outward_action = "EXIT" if action == "CLOSE" else action
         return {"signal_id": signal_id, "status": "EXECUTED", "action": outward_action, "order_id": order_id}
     except Exception as exc:
-        _finish_manager_action(db_path, action_key, "ERROR", error=str(exc))
+        failure_status = "SUBMISSION_UNCONFIRMED" if market_submitted else "ERROR"
+        _finish_manager_action(db_path, action_key, failure_status, error=str(exc))
         logging.error("[AutoTrading] manager action signal=%s action=%s failed safely: %s", signal_id, action, exc)
-        return {"signal_id": signal_id, "status": "ERROR", "action": action, "error": str(exc)}
+        return {"signal_id": signal_id, "status": failure_status, "action": action, "error": str(exc)}
 
 
 def _live_reconcile_rows(db_path: str) -> list[Mapping[str, Any]]:
@@ -1159,7 +1177,7 @@ def _live_reconcile_rows(db_path: str) -> list[Mapping[str, Any]]:
         signal_pending = str(row["signal_result"]) == "pending"
         if status in {"SUBMITTING", "UNPROTECTED_POSITION", "ENTRY_PENDING", "PROTECTED_NO_TP", "CLEANUP_PENDING", "STOP_REPLACEMENT_PENDING"}:
             actionable.append(row)
-        elif status == "PROTECTED" and (not signal_pending or int(row["signal_id"]) in cutover_ids):
+        elif status == "PROTECTED":
             actionable.append(row)
     return actionable
 
@@ -1622,7 +1640,10 @@ def _execute_approved_candidate(
         # Preserve the immutable plan and deterministic client ID for reconciliation.
         return _store_execution(
             db_path, signal_id, config, candidate,
-            "SUBMITTING" if submission_started else "ERROR", plan, error=str(exc),
+            ("BLOCKED_EXCHANGE_REJECTED" if isinstance(exc, BinanceAPIError)
+             and exc.code in {-1111, -1100, -1102, -1013, -1121, -2019, -4164, -4003, -4014, -4023}
+             else "SUBMITTING" if submission_started else "ERROR"),
+            plan, error=str(exc),
         )
 
 
@@ -1678,6 +1699,37 @@ def _required_remote_order_id(response: Mapping[str, Any], label: str) -> str:
     return order_id
 
 
+def _register_market_exit(db_path, signal_id, symbol, direction, order_id, kind="CLOSE"):
+    from apex.execution.ledger import register_order
+    side = "SELL" if str(direction).upper() in {"BULLISH", "LONG", "BUY"} else "BUY"
+    try:
+        register_order(db_path, signal_id, symbol, kind, order_id, side)
+    except Exception:
+        append_recovery(db_path, {"kind": "ledger_order", "values": {
+            "signal_id": signal_id, "symbol": symbol, "kind": kind,
+            "remote_id": str(order_id), "standard_id": str(order_id),
+            "is_algo": False, "expected_side": side,
+        }})
+        raise
+
+
+def _owned_emergency_close(row, client, db_path, quantity):
+    """Persist intent before submission; recover lost acknowledgements by ID."""
+    signal_id = int(row['signal_id'])
+    action_key = f'emergency:{signal_id}'
+    client_id = f'apex_x_{signal_id}'
+    if _claim_manager_action(db_path, action_key, signal_id, 'CLOSE', None):
+        response = client.emergency_close(str(row['symbol']), str(row['direction']),
+                                          _plain_decimal(quantity), client_id)
+    else:
+        # Never blindly retry a market close after a timeout or a restart.
+        response = client.query_order_by_client_id(str(row['symbol']), client_id)
+    order_id = _required_remote_order_id(response, 'emergency close')
+    _finish_manager_action(db_path, action_key, 'SUBMITTED', order_id=order_id)
+    _register_market_exit(db_path, signal_id, str(row['symbol']), str(row['direction']), order_id)
+    return response
+
+
 def _install_brackets(
     row: sqlite3.Row, client: BinanceFuturesClient, config: ExecutionConfig,
     db_path: str, filled_quantity: Decimal,
@@ -1700,7 +1752,7 @@ def _install_brackets(
         stop_id = _required_remote_order_id(stop, "protective stop")
     except Exception as stop_error:
         try:
-            closed = client.emergency_close(symbol, direction, _plain_decimal(quantity), f"apex_x_{signal_id}")
+            closed = _owned_emergency_close(row, client, db_path, quantity)
             if str(closed.get("status", "")).upper() != "FILLED" or _decimal(closed.get("executedQty", "0")) < quantity:
                 raise RuntimeError("emergency close not fill-confirmed")
             status = "EMERGENCY_CLOSED"
@@ -1811,9 +1863,15 @@ def _retry_missing_take_profits(
 
 
 def _cleanup_protective_orders(
-    row: sqlite3.Row, client: BinanceFuturesClient, db_path: str,
+    row: sqlite3.Row, client: BinanceFuturesClient, db_path: str, *, flat_verified=False,
 ) -> dict[str, Any]:
-    """Cancel only this signal's surviving algo orders after it is closed."""
+    """Cancel surviving protection only after an authoritative flat snapshot."""
+    if not flat_verified and any(
+        str(item.get("symbol", "")).upper() == str(row["symbol"]).upper()
+        and abs(_decimal(item.get("positionAmt", "0"))) > 0
+        for item in client.open_positions()
+    ):
+        return {"status": "AWAITING_BINANCE_CLOSE", "signal_id": int(row["signal_id"])}
     signal_id = int(row["signal_id"])
     errors = []
     for field in ("stop_order_id", "tp1_order_id", "tp2_order_id"):
@@ -1916,6 +1974,9 @@ def reconcile_live_executions(
         logging.debug("[AutoTrading] reconciliation already in progress; tick skipped")
         return []
     try:
+        from apex.app.runtime import runtime_supervisor
+        if not runtime_supervisor.owns_exchange_management:
+            return [{"status": "BLOCKED_INSTANCE_OWNERSHIP", "signal_id": 0}]
         outcomes = _reconcile_live_executions_unlocked(
             db_path=db_path, config=config, client=client,
         )
@@ -1940,6 +2001,42 @@ def reconcile_live_executions(
         _reconcile_process_lock.release()
 
 
+def _recover_manager_market_action(db_path, client):
+    repository = _execution_state_repository()
+    if repository is None:
+        return []
+    actions = repository.uncertain_market_actions()
+    outcomes = []
+    for action in actions:
+        signal_id, key = int(action['signal_id']), str(action['action_key'])
+        try:
+            response = client.query_order_by_client_id(str(action['symbol']), f'apex_mx_{signal_id}_{key[:8]}')
+            order_id = _required_remote_order_id(response, 'recovered Manager close')
+            _register_market_exit(db_path, signal_id, str(action['symbol']), str(action['direction']),
+                                  order_id, str(action['action']))
+            fill_confirmed = (str(response.get('status') or '').upper() == 'FILLED'
+                and _decimal(response.get('executedQty') or 0)>0
+                and (response.get('origQty') is None or _decimal(response['executedQty'])>=_decimal(response['origQty'])))
+            if fill_confirmed and str(action['action']) == 'CLOSE':
+                fill_confirmed = not any(str(row.get('symbol') or '').upper()==str(action['symbol']).upper()
+                    and abs(_decimal(row['positionAmt']))>0 for row in client.open_positions())
+            if fill_confirmed:
+                _finish_manager_action(db_path, key, 'EXECUTED', order_id=order_id)
+                if str(action['action']) == 'CLOSE':
+                    _update_execution(db_path, signal_id, 'CLEANUP_PENDING')
+                if _MANAGER_CONFIRM_CALLBACK is not None:
+                    _MANAGER_CONFIRM_CALLBACK(signal_id, str(action['action']), 'EXECUTED', db_path)
+                outcomes.append({'signal_id':signal_id,'status':'MANAGER_ACTION_RECOVERED'})
+            elif str(response.get('status') or '').upper() in {'REJECTED','CANCELED','EXPIRED'} and _decimal(response.get('executedQty') or 0)==0:
+                _finish_manager_action(db_path, key, 'ERROR', order_id=order_id, error='confirmed unfilled cancellation')
+            else:
+                outcomes.append({'signal_id':signal_id,'status':'SUBMISSION_UNCONFIRMED'})
+        except Exception as exc:
+            _finish_manager_action(db_path, key, 'SUBMISSION_UNCONFIRMED', error=str(exc))
+            outcomes.append({'signal_id':signal_id,'status':'RECONCILE_ERROR'})
+    return outcomes
+
+
 def _reconcile_live_executions_unlocked(
     *, db_path: str = DB_PATH, config: ExecutionConfig | None = None,
     client: BinanceFuturesClient | None = None,
@@ -1949,10 +2046,11 @@ def _reconcile_live_executions_unlocked(
     if not config.live_armed:
         return []
     rows = _live_reconcile_rows(db_path)
-    if not rows:
+    repository = _execution_state_repository()
+    if not rows and (repository is None or not repository.uncertain_market_actions()):
         return []
     client = client or BinanceFuturesClient(config)
-    outcomes = []
+    outcomes = _recover_manager_market_action(db_path, client)
     protected_cutover_ids = _reconciliation_required_signal_ids(db_path)
     # One bounded, batched position snapshot confirms every already-protected
     # cutover row. Existing protective orders are deliberately not queried,
@@ -1961,16 +2059,12 @@ def _reconcile_live_executions_unlocked(
     position_snapshot_available = True
     if any(
         row["status"] in {"PROTECTED", "PROTECTED_NO_TP"}
-        and (
-            str(row["signal_result"]) != "pending"
-            or int(row["signal_id"]) in protected_cutover_ids
-        )
         for row in rows
     ):
         try:
             open_position_symbols = {
                 str(item.get("symbol") or "").upper() for item in client.open_positions()
-                if abs(float(item.get("positionAmt") or 0)) > 0
+                if abs(_decimal(item["positionAmt"])) > 0
             }
         except Exception as exc:
             position_snapshot_available = False
@@ -1979,6 +2073,23 @@ def _reconcile_live_executions_unlocked(
         try:
             signal_pending = str(row["signal_result"]) == "pending"
             if row["status"] == "UNPROTECTED_POSITION":
+                repository = _execution_state_repository()
+                if repository is not None:
+                    previous_close = repository.latest_action(int(row['signal_id']), ('CLOSE',))
+                else:
+                    with closing(_connect(db_path)) as connection:
+                        previous_close = connection.execute(
+                            "SELECT action_key FROM manager_execution_actions WHERE action_key=?",
+                            (f"emergency:{row['signal_id']}",)).fetchone()
+                if previous_close is not None:
+                    key = (previous_close.get('action_key') if isinstance(previous_close, Mapping) else previous_close[0])
+                    if key == f"emergency:{row['signal_id']}":
+                        response = _owned_emergency_close(row, client, db_path, _decimal(row['quantity']))
+                        if (str(response.get('status') or '').upper() == 'FILLED'
+                                and _decimal(response.get('executedQty') or 0) >= _decimal(row['quantity'])):
+                            _update_execution(db_path, int(row['signal_id']), 'EMERGENCY_CLOSED')
+                            outcomes.append({'status':'EMERGENCY_CLOSED','signal_id':row['signal_id']})
+                            continue
                 positions = client.open_positions()
                 quantity = sum(
                     (abs(_decimal(item.get("positionAmt", "0"))) for item in positions
@@ -1988,7 +2099,7 @@ def _reconcile_live_executions_unlocked(
                 if quantity > 0:
                     outcomes.append(_install_brackets(row, client, config, db_path, quantity))
                 else:
-                    outcomes.append(_cleanup_protective_orders(row, client, db_path))
+                    outcomes.append(_cleanup_protective_orders(row, client, db_path, flat_verified=True))
                 continue
             if row["status"] == "STOP_REPLACEMENT_PENDING":
                 outcomes.append(_reconcile_stop_replacement(row, client, db_path))
@@ -1996,7 +2107,7 @@ def _reconcile_live_executions_unlocked(
             if row["status"] == "CLEANUP_PENDING":
                 outcomes.append(_cleanup_protective_orders(row, client, db_path))
                 continue
-            if row["status"] in {"PROTECTED", "PROTECTED_NO_TP"} and not signal_pending:
+            if row["status"] in {"PROTECTED", "PROTECTED_NO_TP"}:
                 if not position_snapshot_available:
                     outcomes.append({
                         "status": "RECONCILE_ERROR", "signal_id": row["signal_id"],
@@ -2004,12 +2115,12 @@ def _reconcile_live_executions_unlocked(
                     })
                     continue
                 if str(row["symbol"]).upper() in open_position_symbols:
-                    outcomes.append({
-                        "status": "AWAITING_BINANCE_CLOSE", "signal_id": row["signal_id"],
-                    })
+                    if not signal_pending:
+                        outcomes.append({"status": "AWAITING_BINANCE_CLOSE", "signal_id": row["signal_id"]})
+                        continue
+                else:
+                    outcomes.append(_cleanup_protective_orders(row, client, db_path, flat_verified=True))
                     continue
-                outcomes.append(_cleanup_protective_orders(row, client, db_path))
-                continue
             if row["status"] == "PROTECTED":
                 if int(row["signal_id"]) in protected_cutover_ids:
                     protected = bool(str(row["stop_order_id"] or ""))
@@ -2072,10 +2183,10 @@ def _reconcile_live_executions_unlocked(
                     close_quantity = _floor_step(filled, rules.step_size)
                     if close_quantity <= 0:
                         raise RuntimeError("expired entry filled below executable quantity")
-                    client.emergency_close(
-                        str(row["symbol"]), str(row["direction"]),
-                        _plain_decimal(close_quantity), f"apex_x_{row['signal_id']}",
-                    )
+                    closed = _owned_emergency_close(row, client, db_path, close_quantity)
+                    if (str(closed.get("status") or "").upper() != "FILLED"
+                            or _decimal(closed.get("executedQty") or 0) < close_quantity):
+                        raise RuntimeError("emergency close not fill-confirmed")
                     _update_execution(
                         db_path, int(row["signal_id"]), "EMERGENCY_CLOSED",
                         quantity=float(close_quantity), last_error="signal expired at entry fill",

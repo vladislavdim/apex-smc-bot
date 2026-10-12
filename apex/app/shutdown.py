@@ -26,7 +26,7 @@ async def _call(hook: Hook | None, *args: Any, **kwargs: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
-    """Fence entries immediately, release the production lease, then clean up.
+    """Fence entries, persist the final snapshot, then release the lease.
 
     Shutdown is deliberately best-effort: failure of fencing release, final
     persistence, the shutdown marker, or market cleanup must not prevent the
@@ -38,10 +38,10 @@ async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
     except Exception:
         pass
 
-    # Release first after local entry fencing so a rolling replacement is not
-    # held behind cleanup that can include a slow remote persistence call.
+    # Persist the shutdown marker before the final snapshot. The worker keeps
+    # renewing its lease until all stores have had their final backup attempt.
     try:
-        await _call(deps.release_lease)
+        await _call(deps.record_shutdown, deps.state_db_path, why, instance_id=deps.instance_id)
     except BaseException:
         pass
 
@@ -55,8 +55,12 @@ async def shutdown_production(deps: ShutdownDependencies, reason: str) -> None:
     except BaseException:
         pass
 
+    try:
+        await _call(deps.release_lease)
+    except BaseException:
+        pass
+
     for hook, args, kwargs in (
-        (deps.record_shutdown, (deps.state_db_path, why), {"instance_id": deps.instance_id}),
         (deps.stop_market, (), {}),
     ):
         try:

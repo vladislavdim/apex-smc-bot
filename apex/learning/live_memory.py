@@ -26,6 +26,48 @@ class LiveMemoryRepository:
     def __init__(self, conn_factory: Callable[[], sqlite3.Connection]) -> None:
         self._conn_factory = conn_factory
 
+    def manager_context(self, query: Mapping[str, Any]) -> list[dict[str, Any]]:
+        from apex.learning.similarity import similar_cases
+        conn = self._conn_factory()
+        try:
+            return similar_cases(conn, query, limit=5)
+        finally:
+            conn.close()
+
+    def record_manager_prediction(self, event_id: str, signal_id: str, action: str,
+                                  confidence: float, context: Mapping[str, Any]) -> bool:
+        conn = self._conn_factory()
+        try:
+            cursor = conn.execute("""INSERT OR IGNORE INTO live_manager_predictions
+                (manager_event_id,candidate_id,action,confidence,context_json)
+                SELECT ?,candidate_id,?,?,? FROM live_candidates
+                WHERE signal_id=? AND executed=1""",
+                (event_id, action, confidence, _payload(context), signal_id))
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def dashboard_summary(self) -> dict[str, Any]:
+        from apex.learning.statistics import strategy_statistics
+        conn = self._conn_factory()
+        try:
+            strategies = strategy_statistics(conn)
+            predictions = conn.execute("""SELECT p.action,COUNT(*),COUNT(o.outcome_id),
+                AVG(p.confidence),AVG(o.net_r),SUM(CASE WHEN o.net_r>0 THEN 1 ELSE 0 END)
+                FROM live_manager_predictions p LEFT JOIN live_trade_outcomes o
+                ON o.candidate_id=p.candidate_id GROUP BY p.action ORDER BY p.action""").fetchall()
+            return {'scope': 'CONFIRMED_LIVE_ONLY', 'source': 'MEMORY', 'authority': 'ADVISORY',
+                'samples': sum(row['samples'] for row in strategies), 'strategies': strategies,
+                'manager_predictions': {'target': 'OBSERVED_TRADE_RESULT',
+                    'measures_action_effectiveness': False,
+                    'by_action': [{'action': row[0], 'calls': row[1], 'resolved': row[2],
+                        'avg_confidence': row[3], 'avg_trade_net_r': row[4],
+                        'trade_win_rate': row[5]/row[2] if row[2] else None,
+                        'confidence': 'INSUFFICIENT' if row[2]<30 else 'OBSERVATIONAL'} for row in predictions]}}
+        finally:
+            conn.close()
+
     def record_candidate(
         self,
         candidate: Candidate,

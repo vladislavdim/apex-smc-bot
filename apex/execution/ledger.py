@@ -115,6 +115,8 @@ def connect(path):
             status TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS confirmed_execution_funding_poll (
             id INTEGER PRIMARY KEY CHECK(id=1), attempted_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS confirmed_execution_funding_attempts (
+            signal_id INTEGER PRIMARY KEY, attempted_at REAL NOT NULL);
     ''')
     return conn
 
@@ -324,19 +326,31 @@ def reconcile_funding_one(path, client, now=None):
             rows = conn.execute(
                 """SELECT e.* FROM trade_executions e
                      WHERE e.mode='live'
+                       AND e.quantity>0
+                       AND EXISTS(SELECT 1 FROM confirmed_execution_fills f
+                                  WHERE f.signal_id=e.signal_id AND f.kind='ENTRY')
+                       AND EXISTS(SELECT 1 FROM confirmed_execution_fills f
+                                  WHERE f.signal_id=e.signal_id AND f.kind!='ENTRY')
+                       AND ABS((SELECT SUM(CASE WHEN kind='ENTRY' THEN CAST(qty AS REAL)
+                                                ELSE -CAST(qty AS REAL) END)
+                                FROM confirmed_execution_fills f WHERE f.signal_id=e.signal_id))<1e-12
+                       AND ABS((SELECT SUM(CAST(qty AS REAL)) FROM confirmed_execution_fills f
+                                WHERE f.signal_id=e.signal_id AND f.kind='ENTRY')-e.quantity)<1e-12
                        AND NOT EXISTS (
                            SELECT 1 FROM confirmed_execution_funding_coverage c
                             WHERE c.signal_id=e.signal_id
                        )
-                     ORDER BY e.signal_id LIMIT 50"""
+                     ORDER BY COALESCE((SELECT attempted_at FROM confirmed_execution_funding_attempts a
+                       WHERE a.signal_id=e.signal_id),0),e.signal_id LIMIT 50"""
             ).fetchall()
     selected = None
     for row in rows:
-        result = actual_result(
-            path, ExecutionSnapshot.from_mapping(dict(row)),
-            authoritative_snapshot=repository is not None,
-        )
-        if str(result.get("status")) == "CLOSED" and result.get("entry_time") is not None and result.get("exit_time") is not None:
+        try:
+            result = actual_result(path, ExecutionSnapshot.from_mapping(dict(row)),
+                                   authoritative_snapshot=repository is not None)
+        except (ValueError, TypeError):
+            continue
+        if str(result.get("status")) in {"CLOSED", "FEES_UNRESOLVED"} and result.get("entry_time") is not None and result.get("exit_time") is not None:
             selected = (row, result)
             break
     if selected is None:
@@ -356,6 +370,12 @@ def reconcile_funding_one(path, client, now=None):
                 "INSERT OR REPLACE INTO confirmed_execution_funding_poll VALUES(1,?)", (now,)
             )
     row, result = selected
+    if repository is not None:
+        repository.record_funding_attempt(int(row["signal_id"]), now)
+    else:
+        with closing(connect(path)) as conn, conn:
+            conn.execute("INSERT OR REPLACE INTO confirmed_execution_funding_attempts VALUES(?,?)",
+                         (int(row["signal_id"]), now))
     try:
         client = client() if callable(client) else client
         income = client.income_history(

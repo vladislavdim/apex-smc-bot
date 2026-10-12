@@ -6,6 +6,7 @@ import os
 import hashlib
 import hmac
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Mapping
 
@@ -37,7 +38,10 @@ def _float(env: Mapping[str, str], key: str, default: float) -> float:
     if value is None or str(value).strip() == "":
         return default
     try:
-        return float(value)
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non_finite")
+        return parsed
     except (TypeError, ValueError):
         raise ConfigParseError(f"{key}_INVALID") from None
 

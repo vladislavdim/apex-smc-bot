@@ -75,3 +75,31 @@ def retire_legacy_events(state_path: str, receipts: dict[str, str], backup_resul
                             tuple(row[:6]) + (row[9],),
                         ).rowcount
     return removed
+
+
+def merge_audit_snapshot(local_path: str, remote_path: str) -> int:
+    """Union diagnostics only; conflicting immutable evidence is never replaced."""
+    merged = 0
+    with closing(connect_compatibility(remote_path, read_only=True)) as source, \
+            closing(connect_compatibility(local_path)) as target:
+        tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if tables - {"setup_audit_events", "brain_persistence_meta", "sqlite_sequence"}:
+            raise RuntimeError("audit merge contains non-audit tables")
+        migrate_audit(target)
+        cursor = source.execute(f"SELECT {_COLUMNS} FROM setup_audit_events")
+        with target:
+            for row in cursor:
+                local = target.execute(f"SELECT {_COLUMNS} FROM setup_audit_events WHERE event_key=?", (row[0],)).fetchone()
+                if local is not None and tuple(local[:6]) != tuple(row[:6]):
+                    if str(row[1]) not in {"runtime_status", "incident_snapshot", "apex_v2_snapshot", "apex_v3_snapshot", "worker_heartbeat"}:
+                        raise RuntimeError("audit immutable event conflict")
+                    if str(row[4]) == str(local[4]):
+                        raise RuntimeError("audit mutable event same-time conflict")
+                    if str(row[4]) < str(local[4]):
+                        continue
+                elif local is not None:
+                    target.execute("UPDATE setup_audit_events SET synced=MIN(synced,?) WHERE event_key=?", (row[6],row[0]))
+                    continue
+                target.execute(f"INSERT OR REPLACE INTO setup_audit_events ({_COLUMNS}) VALUES ({','.join('?' for _ in range(10))})", tuple(row))
+                merged += 1
+    return merged

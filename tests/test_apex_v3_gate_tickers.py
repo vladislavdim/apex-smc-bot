@@ -28,10 +28,10 @@ class GateTickerProviderTests(unittest.TestCase):
         self.assertIs(second, first)
         get.assert_called_once()
 
-    def test_price_failure_returns_last_cache(self):
+    def test_price_failure_does_not_return_expired_cache(self):
         gate_tickers._price_cache = {"BTCUSDT": {"price": 1}}
         with patch("apex.market.gate_tickers._request_get", side_effect=RuntimeError):
-            self.assertEqual(gate_tickers.get_live_prices()["BTCUSDT"]["price"], 1)
+            self.assertEqual(gate_tickers.get_live_prices(), {})
 
     def test_liquid_universe_is_bounded_and_cached(self):
         response = Mock()

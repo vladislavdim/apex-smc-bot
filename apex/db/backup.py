@@ -218,6 +218,12 @@ class BrainPersistence:
         commit is parented to the branch head observed immediately before the
         upload and the final ref update is never forced.
         """
+        if os.path.getsize(snapshot_path) >= 8 * 1024 * 1024:
+            from apex.db.git_snapshot import push_snapshot
+            return push_snapshot(remote_url=f"https://github.com/{self.repository}.git",
+                branch=self.branch, remote_name=self.remote_name, snapshot_path=snapshot_path,
+                expected_blob_sha=current_blob_sha, message=message, token=self.token,
+                timeout=max(self.timeout, 90))
         def tagged(response: Any, phase: str) -> Any:
             setattr(response, "_apex_backup_phase", phase)
             return response
@@ -645,6 +651,23 @@ class BrainPersistence:
                 # lost. Adopt only its exact Git blob; then snapshot again so
                 # newly staged Audit rows cannot be retired on an older receipt.
                 self._accept_pending_upload(current_sha)
+                if current_sha != self._remote_blob_sha and self.remote_name == "apex_audit.db":
+                    # Audit is an event union, not trading state. Merge only this
+                    # isolated outbox after validating the exact current blob.
+                    content = self._download_remote(self.branch)
+                    actual_sha = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
+                    if actual_sha != current_sha:
+                        raise RuntimeError("audit remote changed during merge")
+                    with tempfile.NamedTemporaryFile(dir=os.path.dirname(self.db_path), suffix=".db") as remote:
+                        self._write_downloaded_snapshot(content, remote)
+                        remote.flush()
+                        self._integrity(remote.name)
+                        from apex.db.audit_db import merge_audit_snapshot
+                        merge_audit_snapshot(self.db_path, remote.name)
+                        remote_generation = self._read_meta(remote.name)[0]
+                    self._generation = max(self._generation, remote_generation)
+                    self._remote_blob_sha = current_sha
+                    self._last_content_hash = ""
                 if current_sha != self._remote_blob_sha:
                     # Another Render instance saved a newer generation.  Never
                     # retry with its SHA: doing so would recreate the rollback.
@@ -758,6 +781,9 @@ class BrainPersistence:
                     }
 
                 def put_snapshot():
+                    if os.path.getsize(upload_path) >= 8 * 1024 * 1024:
+                        return self._upload_via_git_database(snapshot_path=upload_path,
+                                                            current_blob_sha=current_sha, message=message)
                     if not streaming:
                         return self.session.put(
                             self.contents_url, headers=self._headers(), json=upload,

@@ -14,6 +14,7 @@ import html
 import hashlib
 import json
 import sqlite3
+import math
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.db.repositories.manager_messages import ManagerMessageRepository
 from apex.db.repositories.manager import ManagerRepository
@@ -96,6 +97,13 @@ MANAGEMENT_MATRIX = {
         "let_run": "phase progression and structure both confirm continuation",
     },
 }
+
+_MANAGER_MEMORY_FACTORY = None
+
+
+def configure_manager_memory(connection_factory=None):
+    global _MANAGER_MEMORY_FACTORY
+    _MANAGER_MEMORY_FACTORY = connection_factory
 
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
@@ -558,7 +566,7 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
                 continue
             status = str(execution.get("status") or "")
             if (
-                float(execution.get("quantity") or 0) <= 0
+                (float(execution.get("quantity") or 0) <= 0 or status == "BLOCKED_EXCHANGE_REJECTED")
                 and not str(execution.get("entry_order_id") or "")
                 and (status.startswith(("SKIPPED_", "BLOCKED_"))
                      or status in {"DISABLED", "LIVE_NOT_ARMED"})
@@ -590,7 +598,7 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
                      FROM trade_manager_state m JOIN trade_executions te ON te.signal_id=m.signal_id
                     WHERE COALESCE(m.status,'ACTIVE')!='CLOSED'
                       AND te.mode='live'
-                      AND COALESCE(te.quantity,0)<=0
+                      AND (COALESCE(te.quantity,0)<=0 OR te.status='BLOCKED_EXCHANGE_REJECTED')
                       AND COALESCE(te.entry_order_id,'')=''
                       AND (te.status LIKE 'SKIPPED_%' OR te.status LIKE 'BLOCKED_%'
                            OR te.status IN ('DISABLED','LIVE_NOT_ARMED'))"""
@@ -694,12 +702,13 @@ def r_multiple(direction: str, entry: float, sl: float, price: float) -> float:
     return round(move / risk, 4)
 
 
-def _closed_candles(candles: list[Any]) -> list[dict[str, Any]]:
+def _closed_candles(candles: list[Any], timeframe: str | None = None) -> list[dict[str, Any]]:
     clean: list[dict[str, Any]] = []
     for raw in candles or []:
         try:
             if isinstance(raw, dict):
                 clean.append({
+                    **{key: raw[key] for key in ("is_closed", "close_time", "closed_at") if key in raw},
                     "timestamp": raw.get("timestamp", raw.get("time", raw.get("open_time"))),
                     "open": float(raw["open"]),
                     "high": float(raw["high"]),
@@ -721,6 +730,15 @@ def _closed_candles(candles: list[Any]) -> list[dict[str, Any]]:
             continue
     # Exchange candle loaders normally include the mutable edge candle. The
     # manager reasons about close-confirmed structure only.
+    if timeframe is not None:
+        from apex.market.candles import confirmed_candles
+        from apex.market.freshness import assess_candles
+        rows = list(confirmed_candles(clean, timeframe))
+        if assess_candles(timeframe, rows).status != "FRESH":
+            return []
+        return [{**row, "timestamp": row["open_time"]} for row in rows]
+    if any("is_closed" in row for row in clean):
+        return [row for row in clean if row.get("is_closed") is True]
     return clean[:-1] if len(clean) >= 3 else []
 
 
@@ -728,8 +746,9 @@ def build_structure_facts(
     candles: list[Any],
     trade_direction: str,
     last_reviewed_candle: Any = None,
+    *, timeframe: str | None = None,
 ) -> dict[str, Any]:
-    closed = _closed_candles(candles)
+    closed = _closed_candles(candles, timeframe)
     if len(closed) < 15:
         return {"closed_candle": False, "new_management_candle": False}
     analysis = analyze_market_structure(closed, swing_lookback=3, max_break_age=1)
@@ -905,9 +924,13 @@ def _parse_review(raw: Any, facts: dict[str, Any], state: dict[str, Any]) -> dic
         action = "HOLD"
         parsed_ok = False
     try:
-        confidence = max(0.0, min(1.0, float(obj.get("confidence") or 0)))
+        confidence = float(obj.get("confidence") or 0)
+        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("invalid_confidence")
     except (TypeError, ValueError):
         confidence = 0.0
+        action = "HOLD"
+        parsed_ok = False
 
     # Groq cannot invent levels. Returned values are accepted only if they
     # exactly match a deterministic level supplied in facts (within tolerance).
@@ -1364,6 +1387,15 @@ def persist_review(
                 "summary": str(review.get("reason") or ""),
             },
         )
+        if _MANAGER_MEMORY_FACTORY is not None and review.get("groq_called"):
+            try:
+                from apex.learning.live_memory import LiveMemoryRepository
+                LiveMemoryRepository(_MANAGER_MEMORY_FACTORY).record_manager_prediction(
+                    manager_event_id, str(state["signal_entity_id"]), str(review.get("action") or "HOLD"),
+                    float(review.get("confidence") or 0),
+                    {"events": events, "target": "CONFIRMED_TRADE_CONTEXT", "reason": review.get("reason")})
+            except Exception:
+                facts["learning_prediction_unavailable"] = True
         return
     ensure_trade_manager_schema(db_path)
     conn = _connect(db_path)
@@ -1629,7 +1661,8 @@ def manager_cycle(
         except Exception as exc:
             candles = []
             candle_error = f"{type(exc).__name__}: {exc}"
-        facts = build_structure_facts(candles, state["direction"], state.get("last_reviewed_candle"))
+        facts = build_structure_facts(candles, state["direction"], state.get("last_reviewed_candle"),
+                                      timeframe=state["management_tf"] if _MANAGER_STATE_FACTORY else None)
         data_available = bool(facts.get("closed_candle"))
         failure_reason = candle_error or (
             f"expected >=16 candles, received {len(candles)}" if not data_available else ""
@@ -1657,7 +1690,8 @@ def manager_cycle(
             try:
                 progress_candles = get_candles(symbol, progress_tf, 120) or []
                 progress_facts = build_structure_facts(
-                    progress_candles, state["direction"], state.get("last_progress_candle")
+                    progress_candles, state["direction"], state.get("last_progress_candle"),
+                    timeframe=progress_tf if _MANAGER_STATE_FACTORY else None,
                 )
             except Exception:
                 progress_facts = {"new_management_candle": False}
@@ -1676,6 +1710,15 @@ def manager_cycle(
         facts["manager_state_before"] = str(state.get("manager_state") or "PROTECTED")
         facts["management_matrix"] = management_matrix(state.get("strategy"))
         facts["similar_scenarios"] = []
+        if _MANAGER_MEMORY_FACTORY is not None:
+            try:
+                from apex.learning.live_memory import LiveMemoryRepository
+                from apex.domain.enums import Direction
+                facts["similar_scenarios"] = LiveMemoryRepository(_MANAGER_MEMORY_FACTORY).manager_context({
+                    "strategy": strategy, "symbol": symbol,
+                    "direction": Direction.normalize(state["direction"]).value})
+            except Exception:
+                facts["learning_context_unavailable"] = True
         if str(state.get("status") or "ACTIVE").upper() == "CLOSED":
             continue
         if execution_context is not None:

@@ -117,6 +117,9 @@ class LiveLearningBridge:
         snapshot_id: str | None = None,
     ) -> str | None:
         """Register one delivered production signal; unsupported legacy types are ignored."""
+        previous = self._correlation(signal_id)
+        if previous is not None:
+            return str(previous["candidate_id"])
         row = self._signal(signal_id)
         try:
             strategy = Strategy(str(row.get("signal_type") or row.get("grade") or "").upper())
@@ -169,12 +172,24 @@ class LiveLearningBridge:
         )
         return candidate_id
 
+    def _correlation(self, signal_id: int) -> dict[str, Any] | None:
+        execution = self.executions.get(signal_id)
+        if execution and execution.get("candidate_id"):
+            correlation = self.correlations.get(str(execution["candidate_id"]))
+            if correlation and correlation.get("signal_id") != execution.get("signal_entity_id"):
+                raise LiveBridgeError("execution_correlation_identity_conflict")
+            return correlation
+        matches = self.correlations.legacy_candidates(signal_id)
+        if len(matches)>1:
+            raise LiveBridgeError("legacy_signal_correlation_ambiguous")
+        return matches[0] if matches else None
+
     def sync_execution(self, signal_id: int) -> dict[str, Any]:
         """Advance execution/position IDs without treating an entry order as a fill."""
-        canonical_signal_id = _stable_id("sig", self.release_sha, signal_id)
-        correlation = self.correlations.get_by_signal(canonical_signal_id)
+        correlation = self._correlation(signal_id)
         if correlation is None:
             raise LiveBridgeError("signal_correlation_missing")
+        canonical_signal_id = str(correlation["signal_id"])
         row: Mapping[str, Any] | None = self.executions.get(signal_id)
         if row is None:
             # Compatibility is recovery-only for executions created before the
@@ -241,9 +256,7 @@ class LiveLearningBridge:
                 conn.close()
         results: list[dict[str, Any]] = []
         for signal_id in signal_ids:
-            if self.correlations.get_by_signal(
-                _stable_id("sig", self.release_sha, signal_id)
-            ) is None:
+            if self._correlation(signal_id) is None:
                 # Pre-V3 trades remain managed and reconciled, but are not
                 # silently relabelled as V3 learning evidence.
                 continue
@@ -272,9 +285,7 @@ class LiveLearningBridge:
         accounting: Mapping[str, Any],
     ) -> str:
         """Persist only complete Binance accounting; UNKNOWN funding is a hard stop."""
-        correlation = self.correlations.get_by_signal(
-            _stable_id("sig", self.release_sha, signal_id)
-        )
+        correlation = self._correlation(signal_id)
         if correlation is None or not correlation.get("execution_id") or not correlation.get("position_id"):
             raise LiveBridgeError("trade_correlation_incomplete")
         if str(accounting.get("status") or "").upper() != "CLOSED":
@@ -285,7 +296,8 @@ class LiveLearningBridge:
         if accounting.get("funding_quote") is None:
             raise LiveBridgeError("funding_unresolved")
         candidate_metadata = self.memory.candidate_metadata(str(correlation["candidate_id"]))
-        outcome_id = _stable_id("out", self.release_sha, correlation["execution_id"])
+        outcome_release = str(correlation["release_sha"])
+        outcome_id = _stable_id("out", outcome_release, correlation["execution_id"])
         closed_at = datetime.fromtimestamp(float(accounting["exit_time"]) / 1000, tz=timezone.utc)
         outcome = TradeOutcome(
             outcome_id=outcome_id,
@@ -304,7 +316,7 @@ class LiveLearningBridge:
             strategy=str(candidate_metadata["strategy"]),
             symbol=str(candidate_metadata["symbol"]),
             direction=Direction.normalize(candidate_metadata["direction"]).value,
-            release_sha=self.release_sha,
+            release_sha=outcome_release,
             confirmed_position=True,
             gross_r=float(accounting["gross_r"]),
             context={
@@ -330,7 +342,7 @@ class LiveLearningBridge:
                 state_execution = self.executions.get_by_candidate(correlation["candidate_id"])
                 signal_id = (
                     int(state_execution["signal_id"]) if state_execution is not None
-                    else self._legacy_signal_id(correlation["candidate_id"])
+                    else self._legacy_signal_id(correlation["candidate_id"], str(correlation["release_sha"]))
                 )
                 accounting = accounting_loader(signal_id)
                 recorded.append(self.record_confirmed_outcome(signal_id, accounting))
@@ -338,7 +350,7 @@ class LiveLearningBridge:
                 continue
         return recorded
 
-    def _legacy_signal_id(self, candidate_id: str) -> int:
+    def _legacy_signal_id(self, candidate_id: str, release_sha: str | None = None) -> int:
         """Resolve the compatibility row only at the migration boundary."""
         conn = connect_compatibility(self.compatibility_db_path, timeout=20)
         try:
@@ -347,7 +359,7 @@ class LiveLearningBridge:
             conn.close()
         for row in rows:
             signal_id = int(row[0])
-            if _candidate_id(self.release_sha, signal_id) == str(candidate_id):
+            if _candidate_id(release_sha or self.release_sha, signal_id) == str(candidate_id):
                 return signal_id
         raise LiveBridgeError("legacy_signal_mapping_missing")
 

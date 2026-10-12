@@ -110,6 +110,16 @@ class GateMarketClient:
         self._lock_guard = threading.Lock()
         self._key_locks: dict[tuple[str, tuple[tuple[str, str], ...]], threading.Lock] = {}
 
+    def contract_multiplier(self, symbol: str) -> float:
+        contract = gate_contract(symbol)
+        endpoint = f"/futures/usdt/contracts/{contract}"
+        self._cache_ttls[endpoint] = 3600.0
+        response = self._get(endpoint, {}, purpose="context", source="gate_derivatives")
+        value = float(response.payload.get("quanto_multiplier") or 0)
+        if not isfinite(value) or value <= 0:
+            raise GateTransportError("contract_multiplier_unavailable")
+        return value
+
     def _get(
         self, endpoint: str, params: Mapping[str, Any], *, purpose: str, source: str = "gate",
     ) -> GateResponse:
@@ -132,11 +142,14 @@ class GateMarketClient:
         with self._lock_guard:
             self._cache.clear()
 
-    def candles(self, symbol: str, interval: str, *, limit: int = 1000) -> GateResponse:
+    def candles(self, symbol: str, interval: str, *, limit: int = 1000,
+                from_time: int | None = None, to_time: int | None = None) -> GateResponse:
         gate_interval = GATE_INTERVALS.get(str(interval), str(interval))
         return self._get(
             "/futures/usdt/candlesticks",
-            {"contract": gate_contract(symbol), "interval": gate_interval, "limit": min(2000, max(2, int(limit)))},
+            {"contract": gate_contract(symbol), "interval": gate_interval,
+             **({"limit": min(2000, max(2, int(limit)))} if from_time is None else
+                {"from": int(from_time), "to": int(to_time) if to_time is not None else int(self._clock())})},
             purpose="candles",
         )
 

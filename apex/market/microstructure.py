@@ -66,7 +66,7 @@ class GateOrderBook:
             return False
         if int(end) <= self.last_update_id:
             return True
-        if int(start) != self.last_update_id + 1 or int(end) < int(start):
+        if int(start) > self.last_update_id + 1 or int(end) < int(start):
             self.status = "RESYNC_REQUIRED"
             self.resync_count += 1
             return False

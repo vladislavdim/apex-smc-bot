@@ -252,7 +252,7 @@ class ApexV3InfrastructureTests(unittest.TestCase):
         memory = sqlite3.connect(":memory:")
         self.assertEqual(migrate_state(state), tuple(range(1, 26)))
         self.assertEqual(migrate_state(state), ())
-        self.assertEqual(migrate_memory(memory), (1, 2, 3))
+        self.assertEqual(migrate_memory(memory), (1, 2, 3, 4))
         self.assertEqual(migrate_memory(memory), ())
         self.assertIsNotNone(state.execute("SELECT 1 FROM job_runs LIMIT 1").description)
         self.assertIsNotNone(state.execute("SELECT 1 FROM setup_audit_events LIMIT 1").description)
@@ -466,7 +466,7 @@ class ApexV3InfrastructureTests(unittest.TestCase):
                VALUES('old','BTCUSDT','1h','BOS','2026-09-11T00:00:00+00:00','{}','Gate','PRIMARY_MARKET')"""
         )
         memory.commit()
-        self.assertEqual(migrate_memory(memory), (3,))
+        self.assertEqual(migrate_memory(memory), (3, 4))
         self.assertEqual(
             memory.execute("SELECT event_id FROM live_market_events").fetchone()[0],
             "old",
