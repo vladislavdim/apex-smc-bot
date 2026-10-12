@@ -47,6 +47,10 @@ def append_recovery(compatibility_path: str, event: Mapping[str, Any]) -> Path:
 
 def _apply(repository: ExecutionRepository, event: Mapping[str, Any]) -> None:
     kind = str(event.get("kind") or "")
+    if kind == "ledger_order":
+        from apex.db.repositories.execution_ledger import ExecutionLedgerRepository
+        ExecutionLedgerRepository(repository._conn_factory).register_order(event["values"])
+        return
     if kind == "execution_snapshot":
         values = dict(event.get("values") or {})
         signal_id = int(values["signal_id"])

@@ -52,6 +52,51 @@ _DASHBOARD_PERSIST_CHECKED: set[str] = set()
 MAX_DASHBOARD_EVENTS = 5_000
 
 
+class EventWindow(list):
+    financial_totals = None
+    truncated = False
+
+
+def _financial_totals(cur, where, params):
+    valid_number = r'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]{1,2})?$'
+    cur.execute("""WITH owned AS (
+        SELECT DISTINCT ON (payload->>'signal_id',UPPER(payload->>'action'))
+          strategy,UPPER(payload->>'action') AS action,payload
+        FROM apex_stats_events WHERE """ + " AND ".join(where) + """
+          AND kind='execution_accounting' AND payload->>'signal_id' IS NOT NULL
+        ORDER BY payload->>'signal_id',UPPER(payload->>'action'),occurred_at DESC,received_at DESC
+      ), valid AS (
+        SELECT strategy,action,
+          CASE WHEN LENGTH(payload->>'realized_r')<=64 AND payload->>'realized_r' ~ %s THEN (payload->>'realized_r')::double precision END AS r,
+          CASE WHEN LENGTH(payload->>'pnl_pct')<=64 AND payload->>'pnl_pct' ~ %s THEN (payload->>'pnl_pct')::double precision END AS pct
+        FROM owned WHERE (action='OPEN' AND payload->>'accounting_basis'='CONFIRMED_ENTRY_FILLS')
+          OR (action='CLOSE' AND payload->>'accounting_basis'='confirmed_fills_after_commissions_and_funding'
+                            AND LENGTH(payload->>'realized_r')<=64 AND payload->>'realized_r' ~ %s)
+      ) SELECT COALESCE(strategy,'UNKNOWN') AS strategy,
+          COUNT(*) FILTER(WHERE action='OPEN') AS opened,
+          COUNT(*) FILTER(WHERE action='CLOSE') AS closed,
+          COUNT(*) FILTER(WHERE action='CLOSE' AND r>0) AS wins,
+          COUNT(*) FILTER(WHERE action='CLOSE' AND r<0) AS losses,
+          COALESCE(SUM(r) FILTER(WHERE action='CLOSE'),0) AS r_sum,
+          COALESCE(SUM(pct) FILTER(WHERE action='CLOSE'),0) AS pnl_sum,
+          COUNT(pct) FILTER(WHERE action='CLOSE') AS pnl_n
+        FROM valid GROUP BY strategy""", [*params, valid_number, valid_number, valid_number])
+    rows = [dict(row) for row in cur.fetchall()]
+    result = {key: sum(int(row[key]) for row in rows) for key in ('opened','closed','wins','losses')}
+    decided = result['wins'] + result['losses']
+    pnl_n = sum(int(row['pnl_n']) for row in rows)
+    pnl = sum(float(row['pnl_sum']) for row in rows)
+    result.update(win_rate=round(result['wins']/decided*100,1) if decided else None,
+                  pnl_pct=round(pnl,3), avg_pnl_pct=round(pnl/pnl_n,3) if pnl_n else None,
+                  avg_r=round(sum(float(row['r_sum']) for row in rows)/result['closed'],3) if result['closed'] else None,
+                  by_strategy=[{key:row[key] for key in ('strategy','opened','closed','wins','losses')} |
+                    {'win_rate':round(row['wins']/(row['wins']+row['losses'])*100,1) if row['wins']+row['losses'] else None,
+                     'pnl_pct':round(float(row['pnl_sum']),3),
+                     'avg_r':round(float(row['r_sum'])/row['closed'],3) if row['closed'] else None} for row in rows],
+                  scope='COMPLETE_FILTERED_CONFIRMED_LEDGER')
+    return result
+
+
 
 def _connect():
     if not DATABASE_URL:
@@ -313,7 +358,7 @@ def _market_freshness(last_success: Any, timeframe: Any, now: datetime) -> dict[
     return {"freshness_status": "FRESH" if age <= sla else "STALE", "age_seconds": age, "freshness_sla_seconds": sla}
 
 
-def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: str = "") -> list[dict[str, Any]]:
+def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: str = "", *, release_sha: str = "") -> list[dict[str, Any]]:
     days = max(1, min(int(days), 30)); where: list[str] = []; params: list[Any] = []
     if from_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", from_date):
         where.append("occurred_at >= GREATEST(%s::date, %s::timestamptz)"); params.extend([from_date, STATS_BASELINE_UTC])
@@ -325,6 +370,9 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
     operational = "'market_data','incident_snapshot','runtime_status','apex_v2_snapshot','apex_v3_snapshot'"
     if strategy: where.append(f"(strategy=%s OR kind IN ({operational}))"); params.append(strategy.upper())
     if symbol: where.append(f"(symbol=%s OR kind IN ({operational}))"); params.append(symbol.upper())
+    if release_sha:
+        where.append("payload->>'release_sha'=%s")
+        params.append(release_sha)
     conn = _connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -332,9 +380,11 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
                 "SELECT event_key,kind,strategy,symbol,occurred_at,payload "
                 "FROM apex_stats_events WHERE " + " AND ".join(where) +
                 " ORDER BY occurred_at DESC LIMIT %s",
-                [*params, MAX_DASHBOARD_EVENTS],
+                [*params, MAX_DASHBOARD_EVENTS + 1],
             )
             rows = cur.fetchall()
+            truncated = len(rows) > MAX_DASHBOARD_EVENTS
+            rows = rows[:MAX_DASHBOARD_EVENTS]
             # High-volume detector audits must not evict the financial ledger
             # events from the same bounded dashboard window.
             cur.execute(
@@ -345,9 +395,12 @@ def _fetch(days: int, strategy: str, symbol: str, from_date: str = "", to_date: 
             )
             existing = {r["event_key"] for r in rows}
             rows.extend(r for r in cur.fetchall() if r["event_key"] not in existing)
+            totals = _financial_totals(cur, where, params)
     finally: conn.close()
-    return [{"event_key": r["event_key"], "kind": r["kind"], "strategy": r["strategy"], "symbol": r["symbol"],
-             "occurred_at": r["occurred_at"].isoformat(), "payload": r["payload"] if isinstance(r["payload"], dict) else {}} for r in rows]
+    result = EventWindow({"event_key": r["event_key"], "kind": r["kind"], "strategy": r["strategy"], "symbol": r["symbol"],
+             "occurred_at": r["occurred_at"].isoformat(), "payload": r["payload"] if isinstance(r["payload"], dict) else {}} for r in rows)
+    result.financial_totals, result.truncated = totals, truncated
+    return result
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:
@@ -520,7 +573,10 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
             market_success_history[key] = timestamp
     active_release = available_releases[0] if release == "latest" and available_releases else str(release or "").strip()
     if active_release:
-        events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
+        if isinstance(events, EventWindow):
+            events = _fetch(days, strategy, symbol, from_date, to_date, release_sha=active_release)
+        else:
+            events = [e for e in events if str((e.get("payload") or {}).get("release_sha") or "").strip() == active_release]
     attempts=[]; reviews={}; decisions=defaultdict(list); scan_events=[]; trade_events=[]; analytical_events=[]; market_data_events=[]; ltf_watch_events=[]
     manager_events=[]; operational_snapshots=[]; incident_snapshots=[]
     for e in events:
@@ -606,6 +662,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
         "pnl_pct":round(sum(pnl_vals),3) if pnl_vals else 0.0,"avg_pnl_pct":round(sum(pnl_vals)/len(pnl_vals),3) if pnl_vals else None,
         "avg_r":round(sum(r_vals)/len(r_vals),3) if r_vals else None,"by_strategy":trade_rows,
         "recent":sorted(closed,key=lambda x:x.get("occurred_at",""),reverse=True)[:50]}
+    if getattr(events, "financial_totals", None) is not None:
+        trade_stats.update(events.financial_totals)
 
     funnels = _observed_funnels(joined)
     bos_age_stats = {}
@@ -966,6 +1024,8 @@ def _build_dashboard_uncached(days: int = 1, strategy: str = "", symbol: str = "
       "failures_by_strategy":{k:[{"label":a,"count":b} for a,b in v.most_common(30)] for k,v in by_strategy.items()},
       "criterion_stats":[{"strategy":k[0],"label":k[1],"pass":v.get("PASS",0),"fail":v.get("FAIL",0),"total":v.get("PASS",0)+v.get("FAIL",0)} for k,v in sorted(checks.items(),key=lambda x:sum(x[1].values()),reverse=True)[:300]],
       "groq":{"decisions":dict(groq_counts),"reasons":[{"label":k,"count":v} for k,v in groq_reasons.most_common(30)],"risks":[{"label":k,"count":v} for k,v in groq_risks.most_common(30)],"avg_confidence":{k:(sum(v)/len(v) if v else None) for k,v in conf.items()}},
+      "telemetry_window":{"truncated":bool(getattr(events,"truncated",False)),"limit":MAX_DASHBOARD_EVENTS,
+                          "scope":"RECENT_DIAGNOSTICS","financial_totals":"COMPLETE_FILTERED_LEDGER"},
       "trade_stats":{**trade_stats,"accounting_basis":"CONFIRMED_BINANCE_FILLS"},
       "signal_analytics":{"closed":sum(str(t.get("action")).upper()=="CLOSE" for t in analytical_events),"scope":"CANDLE_BARRIERS_NOT_EXCHANGE_PNL"},
       "catalog":STRATEGY_CATALOG,"rows":joined[start:start+page_size],"pagination":{"page":page,"page_size":page_size,"total":total,"pages":max(1,(total+page_size-1)//page_size)}}
@@ -1176,7 +1236,7 @@ def _cached_dashboard(key: tuple[Any, ...], *, fresh_only: bool) -> dict[str, An
 
 def _persistent_cache_key(key: tuple[Any, ...]) -> str:
     return hashlib.sha256(
-        json.dumps(("confirmed-accounting-v2", key), ensure_ascii=True, default=str, separators=(",", ":")).encode()
+        json.dumps(("confirmed-accounting-v3", key), ensure_ascii=True, default=str, separators=(",", ":")).encode()
     ).hexdigest()
 
 

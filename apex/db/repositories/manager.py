@@ -490,12 +490,15 @@ class ManagerRepository:
             # confirmation is accepted only by ``confirm_action`` below.
             conn.execute(
                 """UPDATE manager_positions SET
+                    manager_state=CASE WHEN ?=1 AND manager_state IN ('PROTECTED','MANAGING')
+                      THEN 'TP1_REACHED' ELSE manager_state END,
                     last_price=?,best_price=?,current_r=?,tp1_seen=?,tp2_seen=?,tp3_seen=?,
                     manager_target=?,proposed_protect_level=?,last_event=?,last_action=?,
                     last_confidence=?,last_reviewed_candle=?,no_progress_bars=?,
                     progress_anchor_r=?,last_progress_candle=?,updated_at=CURRENT_TIMESTAMP
                    WHERE signal_entity_id=?""",
                 (
+                    int(bool(observation.get("tp1_seen"))),
                     observation.get("last_price"), observation.get("best_price"),
                     float(observation.get("current_r") or 0),
                     int(bool(observation.get("tp1_seen"))), int(bool(observation.get("tp2_seen"))),

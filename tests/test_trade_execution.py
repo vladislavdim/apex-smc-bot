@@ -567,9 +567,10 @@ class TradeExecutionTests(unittest.TestCase):
             self.db_path, 901, "PROTECTED", stop_order_id="stop-901",
         )
 
-        # Legacy says closed, but a missing State projection must not make a
-        # protected execution actionable or cancel exchange protection.
-        self.assertEqual(trade_execution._live_reconcile_rows(self.db_path), [])
+        # Missing State remains pending; Binance must independently confirm flat
+        # before protection is removed.
+        rows = trade_execution._live_reconcile_rows(self.db_path)
+        self.assertEqual(rows[0]["signal_result"], "pending")
 
         SignalLifecycleRepository(factory).import_row({
             "signal_id": 901,
@@ -609,9 +610,10 @@ class TradeExecutionTests(unittest.TestCase):
                 "UPDATE trade_executions SET status='ENTRY_PENDING' WHERE signal_id=905"
             )
 
-        # A stale compatibility status cannot make State-owned protection look
-        # like an entry that needs another Binance reconciliation pass.
-        self.assertEqual(trade_execution._live_reconcile_rows(self.db_path), [])
+        # State protection is selected for a batched position check, never
+        # misclassified as an entry because of stale compatibility data.
+        rows = trade_execution._live_reconcile_rows(self.db_path)
+        self.assertEqual(rows[0]["status"], "PROTECTED")
 
         SignalLifecycleRepository(factory).import_row({
             "signal_id": 905, "status": "closed", "result": "sl",
@@ -938,30 +940,23 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(retry_client.calls, [])
         self.assertEqual(throttled["account"]["wallet_balance"], 42.5)
 
-    def test_protected_order_is_visible_but_not_polled_while_signal_is_open(self):
+    def test_protected_order_uses_batched_position_check_while_signal_is_open(self):
         trade_execution.ensure_execution_schema(self.db_path)
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO trade_executions
-                   (signal_id, mode, symbol, direction, status)
-                   VALUES (501, 'live', 'BTCUSDT', 'BULLISH', 'PROTECTED')"""
-            )
-
-        with patch.object(
-            trade_execution,
-            "BinanceFuturesClient",
-            side_effect=AssertionError("protected order was polled without a state change"),
-        ) as client_class:
-            outcomes = reconcile_live_executions(
-                db_path=self.db_path,
-                config=live_config(),
-            )
-            status = execution_status(self.db_path, config=live_config())
-
+            conn.execute("""INSERT INTO trade_executions
+                (signal_id,mode,symbol,direction,status)
+                VALUES(501,'live','BTCUSDT','BULLISH','PROTECTED')""")
+        from unittest.mock import Mock
+        client = Mock()
+        client.open_positions.return_value = [{'symbol': 'BTCUSDT', 'positionAmt': '1'}]
+        outcomes = reconcile_live_executions(db_path=self.db_path, config=live_config(), client=client)
+        status = execution_status(self.db_path, config=live_config())
         self.assertEqual(outcomes, [])
-        self.assertEqual(status["live_active_count"], 1)
-        self.assertEqual(status["live_reconcile_pending"], 0)
-        client_class.assert_not_called()
+        self.assertEqual(status['live_active_count'], 1)
+        self.assertEqual(status['live_reconcile_pending'], 1)
+        client.open_positions.assert_called_once()
+        client.query_order.assert_not_called()
+        client.cancel_algo_order.assert_not_called()
 
     def test_environment_caps_leverage_and_risk(self):
         config = ExecutionConfig.from_env({
@@ -1311,7 +1306,7 @@ class TradeExecutionTests(unittest.TestCase):
             {"signal_id": 73, "review": {"action": "EXIT", "confidence": .9}},
             db_path=self.db_path, config=live_config(), client=client,
         )
-        self.assertEqual(result["status"], "ERROR")
+        self.assertEqual(result["status"], "SUBMISSION_UNCONFIRMED")
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(conn.execute("SELECT result FROM signals WHERE id=73").fetchone()[0], "pending")
 

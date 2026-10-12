@@ -369,6 +369,8 @@ if _TRADE_EXECUTION_OK:
 _configure_execution_ledger_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_message_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_state(lambda: _v3_connect_state(_V3_CONFIG))
+from apex.manager.engine import configure_manager_memory as _configure_manager_memory
+_configure_manager_memory(lambda: _v3_connect_memory(_V3_CONFIG))
 _configure_strategy_decision_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_dashboard_state(lambda: _v3_connect_state(_V3_CONFIG))
 _v3_configure_incidents(lambda: _v3_connect_state(_V3_CONFIG))
@@ -1663,6 +1665,9 @@ async def auto_scan_job():
         _V3StateSignalMonitor(
             _V3SignalLifecycleRepository(lambda: _v3_connect_state(_V3_CONFIG)),
             get_live_prices, get_candles, _v3_emit_trade_stats_event,
+            get_historical_candles=lambda symbol, start, end: _v3_normalize_gate_candles(
+                _get_v3_strategy_snapshot_provider().client.candles(
+                    symbol, "5m", from_time=start, to_time=end).payload),
         ).check
     )
     await _v3_refresh_signal_lifecycle_mirror()
@@ -1688,6 +1693,7 @@ async def auto_scan_job():
 
 _auto_trade_reconcile_task = None
 _trade_manager_task = None
+_production_scheduler = None
 _market_scan_lock = asyncio.Lock()
 _active_market_scan = None
 _active_market_scan_started = 0.0
@@ -1786,6 +1792,10 @@ async def _run_auto_trade_reconcile_once():
         return
     try:
         outcomes = await asyncio.to_thread(_reconcile_live_executions, db_path=DB_PATH)
+        if any(str(item.get("status") or "") in {
+            "RECONCILE_ERROR", "UNPROTECTED_POSITION", "SUBMISSION_UNCONFIRMED", "BLOCKED_INSTANCE_OWNERSHIP"
+        } for item in outcomes):
+            raise RuntimeError("execution reconciliation has unresolved exchange state")
         for outcome in outcomes:
             logging.info(
                 "[AutoTrading] reconcile signal=%s status=%s",
@@ -1818,6 +1828,7 @@ async def _run_auto_trade_reconcile_once():
     except Exception as exc:
         # Exchange failures must never stop scanners or Telegram handlers.
         logging.error("[AutoTrading] reconciliation failed safely: %s", exc)
+        raise
 
 
 async def auto_trade_reconcile_job():
@@ -1825,8 +1836,9 @@ async def auto_trade_reconcile_job():
     global _auto_trade_reconcile_task
     if _auto_trade_reconcile_task and not _auto_trade_reconcile_task.done():
         logging.debug("[AutoTrading] previous reconciliation still running; tick skipped")
-        return
+        return False
     _auto_trade_reconcile_task = asyncio.create_task(_run_auto_trade_reconcile_once())
+    return await asyncio.shield(_auto_trade_reconcile_task)
 
 
 async def _run_trade_manager_once():
@@ -1958,6 +1970,7 @@ async def _run_trade_manager_once():
     except Exception as exc:
         # Management is advisory and must never stop scanners or Telegram.
         logging.warning("[TradeManager] cycle failed safely: %s", exc)
+        raise
 
 
 async def trade_manager_job():
@@ -1965,8 +1978,9 @@ async def trade_manager_job():
     global _trade_manager_task
     if _trade_manager_task and not _trade_manager_task.done():
         logging.debug("[TradeManager] previous cycle still running; tick skipped")
-        return
+        return False
     _trade_manager_task = asyncio.create_task(_run_trade_manager_once())
+    return await asyncio.shield(_trade_manager_task)
 
 
 def pick_best_signal(signals: list) -> dict | None:
@@ -3782,7 +3796,11 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
     if store == "all":
         results = {}
         for name in ("state", "memory", "brain", "audit"):
-            results[name] = await _v3_maintenance_and_backup(reason, store=name)
+            try:
+                results[name] = await _v3_maintenance_and_backup(reason, store=name)
+            except Exception as exc:
+                results[name] = {"status": "backup_failed", "error_type": type(exc).__name__}
+                logging.error("[Backup] final %s backup failed: %s", name, type(exc).__name__)
         return results
 
     def maintain():
@@ -3965,12 +3983,16 @@ async def _v3_startup_reconcile_and_market_check():
                     "Binance account and balance endpoint verified; "
                     f"wallet={float(_balance.get('wallet_balance', 0.0)):.2f} USDT"
                 )
-            await asyncio.to_thread(
+            reconciliation = await asyncio.to_thread(
                 _reconcile_live_executions,
                 db_path=DB_PATH,
                 config=_execution_config,
                 client=_execution_client,
             )
+            if any(str(item.get("status") or "") in {
+                "RECONCILE_ERROR", "UNPROTECTED_POSITION", "SUBMISSION_UNCONFIRMED", "BLOCKED_INSTANCE_OWNERSHIP"
+            } for item in reconciliation):
+                raise RuntimeError("startup reconciliation unresolved")
             await asyncio.to_thread(_v3_sync_live_learning)
             _V3_RUNTIME.mark_component(
                 "binance_reconciliation", _V3_COMPONENT_STATE.READY, _account_detail
@@ -4376,6 +4398,7 @@ async def _delete_webhook_safely() -> None:
 
 async def _initialize_production_runtime(transport: str):
     """Run the one production bootstrap for webhook and polling transports."""
+    global _production_scheduler
     _V3_RUNTIME.activate(
         release_sha=_V3_CONFIG.runtime.release_sha,
         instance_id=_V3_CONFIG.runtime.instance_id,
@@ -4505,19 +4528,52 @@ async def _initialize_production_runtime(transport: str):
     logging.warning("[APEX V3] runtime=%s", _V3_RUNTIME.snapshot())
     asyncio.create_task(_warmup_market_cache())
     logging.info("APEX запущен (%s mode)", transport)
+    _production_scheduler = scheduler
     return scheduler
 
 
 async def _shutdown_production_runtime(reason: str) -> None:
-    await shutdown_production(ShutdownDependencies(
-        runtime=_V3_RUNTIME,
-        state_db_path=_V3_CONFIG.database.state_db_path,
-        instance_id=_V3_CONFIG.runtime.instance_id,
-        release_lease=_v3_release_runtime_lease,
-        record_shutdown=_v3_record_shutdown,
-        backup=_v3_maintenance_and_backup,
-        stop_market=_stop_market_intelligence if _MARKET_INTELLIGENCE_OK else None,
-    ), reason)
+    _V3_RUNTIME.inhibit_entries("GRACEFUL_SHUTDOWN")
+    if _production_scheduler is not None:
+        try:
+            _production_scheduler.pause()
+        except Exception:
+            logging.warning("[Shutdown] scheduler pause unavailable")
+    # A cancelled to_thread still runs. Drain mutation owners before releasing
+    # the lease or taking the final snapshots; Render may enforce its own grace.
+    pending = [task for task in (_auto_trade_reconcile_task, _trade_manager_task, _active_market_scan)
+               if task is not None and not task.done()]
+    async def keep_lease():
+        client = _v3_get_lease_client()
+        while client.configured and client.state.granted:
+            await asyncio.sleep(max(5, client.ttl_seconds / 3))
+            try:
+                await asyncio.to_thread(client.renew)
+            except Exception:
+                break
+    renewal = asyncio.create_task(keep_lease())
+    try:
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        from apex.app.scheduler import drain_production_jobs
+        await drain_production_jobs()
+        if _production_scheduler is not None:
+            try:
+                _production_scheduler.shutdown(wait=True)
+            except Exception:
+                logging.warning("[Shutdown] scheduler stop unavailable")
+        await shutdown_production(ShutdownDependencies(
+            runtime=_V3_RUNTIME,
+            state_db_path=_V3_CONFIG.database.state_db_path,
+            instance_id=_V3_CONFIG.runtime.instance_id,
+            release_lease=_v3_release_runtime_lease,
+            record_shutdown=_v3_record_shutdown,
+            backup=_v3_maintenance_and_backup,
+            stop_market=_stop_market_intelligence if _MARKET_INTELLIGENCE_OK else None,
+        ), reason)
+    finally:
+        renewal.cancel()
+        await asyncio.gather(renewal, return_exceptions=True)
 
 
 def _v3_token_snapshot():

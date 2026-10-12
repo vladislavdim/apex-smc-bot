@@ -23,11 +23,12 @@ class StateSignalMonitor:
     def __init__(self, repository: SignalLifecycleRepository,
                  get_prices: Callable[[], dict[str, Any]],
                  get_candles: Callable[[str, str, int], list[dict[str, Any]]],
-                 emit_stats: Callable[..., Any]) -> None:
+                 emit_stats: Callable[..., Any], *, get_historical_candles=None) -> None:
         self.repository = repository
         self.get_prices = get_prices
         self.get_candles = get_candles
         self.emit_stats = emit_stats
+        self.get_historical_candles = get_historical_candles
 
     def check(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or datetime.now(timezone.utc)
@@ -38,9 +39,9 @@ class StateSignalMonitor:
             symbol = str(row["symbol"])
             raw = prices.get(symbol)
             current = raw.get("price") if isinstance(raw, dict) else raw
-            if current is None:
+            if current is None and str(row["status"]) == "waiting_entry":
                 continue
-            current = float(current)
+            current = float(current) if current is not None else float(row["entry"])
             signal_id = int(row["signal_id"])
             direction = str(row["direction"])
             strategy = str(row["signal_type"]).upper()
@@ -75,12 +76,16 @@ class StateSignalMonitor:
             # Five-minute bars; request enough history to bridge a normal outage.
             needed = min(1000, max(3, int(elapsed / 300) + 3))
             try:
-                candles = self.get_candles(symbol, "5m", needed)
+                if self.get_historical_candles is not None and elapsed > 600:
+                    start = int(since // 300) * 300
+                    candles = self.get_historical_candles(symbol, start, min(int(now_epoch),start+999*300))
+                else:
+                    candles = self.get_candles(symbol, "5m", needed)
             except Exception:
                 candles = []
             ordered = []
             for candle in candles or []:
-                if not isinstance(candle, dict):
+                if not isinstance(candle, dict) or candle.get("is_closed") is False:
                     continue
                 opened = candle_open_time(candle)
                 bar_close = candle_close_time(candle, "5m") if opened is not None else None
@@ -90,6 +95,9 @@ class StateSignalMonitor:
             ordered.sort(key=lambda item: item[0])
             # If the requested history is truncated, never skip an unknown bar.
             if ordered and ordered[0][0] > since + 600:
+                from apex.telemetry.incidents import report_incident
+                report_incident("SIGNAL_HISTORY_GAP", "market_data", "WARNING",
+                                {"signal_id": signal_id, "cursor": since, "first_close": ordered[0][0]})
                 continue
             # Legacy tests/data without timestamps use the current interval only.
             if not ordered and candles and all(candle_open_time(c) is None for c in candles):
@@ -98,6 +106,8 @@ class StateSignalMonitor:
                 # A point quote cannot prove a barrier was missed during an outage.
                 continue
             for bar_close, candle in ordered:
+                if bar_close is not None and cursor is not None and bar_close > float(cursor)+300:
+                    break
                 low = min(float(candle["low"]), current) if bar_close is None else float(candle["low"])
                 high = max(float(candle["high"]), current) if bar_close is None else float(candle["high"])
                 tp1_hit = bool(row["tp1_hit"])

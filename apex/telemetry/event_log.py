@@ -176,11 +176,16 @@ def _persist_event(event: dict[str, Any]) -> None:
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
             conn.execute("""INSERT OR REPLACE INTO setup_audit_events
                 (event_key,kind,strategy,symbol,occurred_at,payload_json,synced,sync_attempts,last_sync_error)
-                VALUES (?,?,?,?,?,?,COALESCE((SELECT synced FROM setup_audit_events WHERE event_key=?),0),
+                VALUES (?,?,?,?,?,?,CASE WHEN
+                        (SELECT payload_json FROM setup_audit_events WHERE event_key=?)=?
+                        AND (SELECT occurred_at FROM setup_audit_events WHERE event_key=?)=?
+                        THEN COALESCE((SELECT synced FROM setup_audit_events WHERE event_key=?),0)
+                        ELSE 0 END,
                         COALESCE((SELECT sync_attempts FROM setup_audit_events WHERE event_key=?),0),
                         (SELECT last_sync_error FROM setup_audit_events WHERE event_key=?))""",
                 (event["event_key"], event["kind"], event.get("strategy", ""), event.get("symbol", ""),
-                 event["occurred_at"], _payload_text(payload), event["event_key"], event["event_key"], event["event_key"]))
+                 event["occurred_at"], _payload_text(payload), event["event_key"], _payload_text(payload),
+                 event["event_key"], event["occurred_at"], event["event_key"], event["event_key"], event["event_key"]))
             conn.commit()
     except Exception as exc:
         logging.debug("[SetupAudit] local persistence skipped: %s", exc)

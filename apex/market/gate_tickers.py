@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from core.pair_universe import (
@@ -73,7 +74,7 @@ def get_live_prices() -> dict[str, dict]:
                         ticker.get("volume_24h_quote")
                         or ticker.get("volume_24h_settle") or 0
                     )
-                    if price > 0:
+                    if price > 0 and all(math.isfinite(x) for x in (price, change, volume)):
                         market[symbol] = {
                             "price": price, "change": round(change, 2),
                             "volume": volume,
@@ -87,8 +88,9 @@ def get_live_prices() -> dict[str, dict]:
                 return _price_cache
     except Exception as exc:
         logging.warning("Gate Futures prices unavailable: %s", exc)
-    logging.error("Gate Futures prices unavailable; using last cache")
-    return _price_cache if _price_cache else {}
+    logging.error("Gate Futures prices unavailable; expired cache withheld")
+    # Never return an unbounded display cache to trading consumers.
+    return {}
 
 
 def get_all_market_pairs() -> list[str]:

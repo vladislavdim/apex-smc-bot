@@ -56,6 +56,21 @@ class SchedulerCallbacks:
     audit_backup: Callable[..., Any] | None = None
 
 
+_RUNNING_JOBS: set[asyncio.Task] = set()
+
+
+def _job_finished(task: asyncio.Task) -> None:
+    _RUNNING_JOBS.discard(task)
+    if not task.cancelled():
+        task.exception()  # retrieve late failures after a scheduler timeout
+
+
+async def drain_production_jobs() -> None:
+    """Call after scheduler.pause(); a timed-out to_thread still owns writes."""
+    while _RUNNING_JOBS:
+        await asyncio.gather(*tuple(_RUNNING_JOBS), return_exceptions=True)
+
+
 async def _invoke(callback: Callable[..., Any]) -> Any:
     if inspect.iscoroutinefunction(callback):
         return await callback()
@@ -78,7 +93,10 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
         if recorder is not None:
             recorder.__enter__()
         try:
-            result = await asyncio.wait_for(_invoke(callback), timeout=timeout)
+            work = asyncio.create_task(_invoke(callback))
+            _RUNNING_JOBS.add(work)
+            work.add_done_callback(_job_finished)
+            result = await asyncio.wait_for(asyncio.shield(work), timeout=timeout)
             if result is False:
                 # A lock/admission skip did not verify the previously failing job.
                 if recorder is not None:

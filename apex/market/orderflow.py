@@ -15,7 +15,7 @@ def _number(value: Any) -> float | None:
 
 
 def real_cvd(
-    trades: Iterable[Mapping[str, Any]], *, source: str = "gate_ws",
+    trades: Iterable[Mapping[str, Any]], *, source: str = "gate_ws", contract_multiplier: float = 1.0,
 ) -> dict[str, Any]:
     buy = sell = 0.0
     count = 0
@@ -25,7 +25,7 @@ def real_cvd(
         if size is None or price is None or price <= 0:
             continue
         side = str(row.get("side") or ("buy" if size > 0 else "sell")).lower()
-        notional = abs(size) * price
+        notional = abs(size) * price * contract_multiplier
         if side in {"buy", "bid", "b"}:
             buy += notional
         elif side in {"sell", "ask", "s"}:

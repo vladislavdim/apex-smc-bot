@@ -111,10 +111,19 @@ def _migration_003(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE live_manager_predictions (
+        manager_event_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL,
+        action TEXT NOT NULL, confidence REAL, context_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(candidate_id) REFERENCES live_candidates(candidate_id))""")
+
+
 MEMORY_MIGRATIONS = (
     Migration(1, "live_memory_core", _migration_001),
     Migration(2, "live_only_learning", _migration_002),
     Migration(3, "independent_level_events", _migration_003),
+    Migration(4, "confirmed_manager_predictions", _migration_004),
 )
 
 

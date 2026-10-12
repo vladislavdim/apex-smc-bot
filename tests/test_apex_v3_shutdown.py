@@ -23,7 +23,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
             record_shutdown=marker, backup=backup, stop_market=stop,
         )
         await shutdown_production(deps, 'polling_shutdown')
-        self.assertEqual(events, ['GRACEFUL_SHUTDOWN', 'lease', 'backup'])
+        self.assertEqual(events, ['GRACEFUL_SHUTDOWN', 'backup', 'lease'])
         marker.assert_called_once_with('state.db', 'polling_shutdown', instance_id='worker')
         stop.assert_awaited_once()
 

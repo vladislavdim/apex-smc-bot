@@ -22,6 +22,8 @@ class FakeGate:
         self.calls.append((endpoint, dict(params), timeout))
         if endpoint in self.failures:
             raise TimeoutError(endpoint)
+        if endpoint == "BTC_USDT":
+            return {"quanto_multiplier": "1"}
         if endpoint == "contract_stats":
             return [{"time": 1000, "open_interest": "5", "lsr_account": "1.2", "long_liq_usd": "20", "short_liq_usd": "10"}]
         if endpoint == "funding_rate":

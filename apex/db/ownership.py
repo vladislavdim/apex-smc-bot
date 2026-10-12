@@ -37,6 +37,7 @@ STATE_TABLES = frozenset({
 })
 
 MEMORY_TABLES = frozenset({
+    "live_manager_predictions",
     "live_candidates",
     "live_context_observations",
     "live_market_events",

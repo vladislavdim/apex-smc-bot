@@ -61,6 +61,23 @@ class LiveLearningBridgeTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_open_position_and_outcome_survive_release_change(self):
+        self.bridge.register_signal(7)
+        with sqlite3.connect(self.compat) as conn:
+            conn.execute("INSERT INTO trade_executions VALUES(3,7,'live','BTCUSDT','PROTECTED',1,'entry-1','stop-1')")
+        original = self.bridge.sync_execution(7)
+        config = ApexConfig.from_env({'RENDER_GIT_COMMIT': 'b'*40,
+            'APEX_COMPAT_DB_PATH': self.compat, 'APEX_STATE_DB_PATH': self.state,
+            'APEX_MEMORY_DB_PATH': self.memory})
+        updated = LiveLearningBridge(config, compatibility_db_path=self.compat,
+            state_factory=lambda: _CONNECT(self.state), memory_factory=lambda: _CONNECT(self.memory))
+        self.assertEqual(updated.sync_execution(7)['position_id'], original['position_id'])
+        outcome = updated.record_confirmed_outcome(7, {'status': 'CLOSED', 'entry':100,
+            'exit_price':110, 'gross_r':2, 'net_r':1.88, 'fees_quote':0.5,
+            'funding_quote':0.1, 'exit_time':1789000000000})
+        with sqlite3.connect(self.memory) as conn:
+            self.assertEqual(conn.execute('SELECT release_sha FROM live_trade_outcomes WHERE outcome_id=?', (outcome,)).fetchone()[0], 'a'*40)
+
     def test_register_is_idempotent_and_preserves_review_metadata(self):
         candidate_id = self.bridge.register_signal(7, groq={"decision": "APPROVE"})
         self.assertEqual(candidate_id, self.bridge.register_signal(7))

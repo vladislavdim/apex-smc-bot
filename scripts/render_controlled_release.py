@@ -285,6 +285,9 @@ def print_database_diagnostics(client: RenderReleaseClient) -> dict[str, Any]:
             cursor.execute("SELECT kind, MAX(occurred_at), MAX(received_at) FROM apex_stats_events WHERE kind IN ('runtime_health','worker_heartbeat') GROUP BY kind")
             print(f"Runtime heartbeat timestamps (read only): {cursor.fetchall()}")
         return {"status": "available"}
+    except ModuleNotFoundError as exc:
+        print(f"Dashboard DB local dependency missing: {type(exc).__name__}")
+        return {"status": "dependency_missing"}
     except Exception as exc:
         print(f"Dashboard DB diagnostics unavailable: {type(exc).__name__}: {sanitize_log_message(exc)}")
     finally:

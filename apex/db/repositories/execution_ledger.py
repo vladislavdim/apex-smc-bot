@@ -272,11 +272,22 @@ class ExecutionLedgerRepository:
             rows = conn.execute(
                 """SELECT e.* FROM executions e
                      WHERE e.mode='live'
+                       AND e.quantity>0
+                       AND EXISTS(SELECT 1 FROM execution_fills f
+                                  WHERE f.signal_entity_id=e.signal_entity_id AND f.kind='ENTRY')
+                       AND EXISTS(SELECT 1 FROM execution_fills f
+                                  WHERE f.signal_entity_id=e.signal_entity_id AND f.kind!='ENTRY')
+                       AND ABS((SELECT SUM(CASE WHEN kind='ENTRY' THEN CAST(qty AS REAL)
+                                                ELSE -CAST(qty AS REAL) END)
+                                FROM execution_fills f WHERE f.signal_entity_id=e.signal_entity_id))<1e-12
+                       AND ABS((SELECT SUM(CAST(qty AS REAL)) FROM execution_fills f
+                                WHERE f.signal_entity_id=e.signal_entity_id AND f.kind='ENTRY')-e.quantity)<1e-12
                        AND NOT EXISTS(
                            SELECT 1 FROM execution_funding_coverage c
                             WHERE c.signal_entity_id=e.signal_entity_id
                        )
-                     ORDER BY e.signal_id LIMIT ?""",
+                     ORDER BY COALESCE((SELECT CAST(value_json AS REAL) FROM runtime_state
+                       WHERE key='funding_attempt:' || e.signal_id),0), e.signal_id LIMIT ?""",
                 (max(1, min(int(limit), 500)),),
             ).fetchall()
             return [dict(row) for row in rows]
@@ -297,6 +308,16 @@ class ExecutionLedgerRepository:
                      WHERE exchange_order_id IS NOT NULL"""
             ).fetchall()]
             return executions, actions
+        finally:
+            conn.close()
+
+    def record_funding_attempt(self, signal_id: int, now: float) -> None:
+        conn = self._conn_factory()
+        try:
+            conn.execute("INSERT INTO runtime_state(key,value_json) VALUES(?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+                         (f"funding_attempt:{int(signal_id)}", json.dumps(float(now))))
+            conn.commit()
         finally:
             conn.close()
 

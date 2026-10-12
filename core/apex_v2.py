@@ -700,6 +700,17 @@ def dashboard_snapshot(db_path: str = DB_PATH, *, require_state: bool = False) -
         if state_conn is not None:
             state_conn.close()
 
+    if require_state:
+        try:
+            from apex.db.connection import connect_memory
+            from apex.learning.live_memory import LiveMemoryRepository
+            result["learning"] = LiveMemoryRepository(lambda: connect_memory(config, read_only=True)).dashboard_summary()
+            result["groq_calibration"] = result["learning"]["manager_predictions"]
+        except Exception as exc:
+            result["learning"] = {"scope": "CONFIRMED_LIVE_ONLY", "source": "MEMORY",
+                                  "status": "UNAVAILABLE", "error_type": type(exc).__name__}
+            result["groq_calibration"] = {"status": "UNAVAILABLE"}
+
     live_mode = config.execution.mode
     enabled = config.execution.enabled
     confirmed = config.execution.live_confirmation == "ENABLE_LIVE_BINANCE_FUTURES"

@@ -243,11 +243,15 @@ class ExecutionRepository:
             row = conn.execute(
                 """SELECT
                        COALESCE(SUM(COALESCE(risk_usdt,0)),0),
-                       COALESCE(SUM(CASE WHEN direction=? THEN COALESCE(risk_usdt,0) ELSE 0 END),0)
+                       COALESCE(SUM(CASE WHEN
+                         CASE WHEN direction IN ('LONG','BUY','BULLISH') THEN 'BULLISH'
+                              WHEN direction IN ('SHORT','SELL','BEARISH') THEN 'BEARISH'
+                              ELSE direction END = ?
+                         THEN COALESCE(risk_usdt,0) ELSE 0 END),0)
                      FROM executions
                     WHERE mode='live' AND status IN (%s)"""
                 % ",".join("?" for _ in normalized),
-                (side, *normalized),
+                ('BULLISH' if side in {'LONG','BUY','BULLISH'} else 'BEARISH' if side in {'SHORT','SELL','BEARISH'} else side, *normalized),
             ).fetchone()
             return {
                 "portfolio_risk_usdt": float(row[0] or 0.0),
@@ -341,6 +345,18 @@ class ExecutionRepository:
                 (int(signal_id), *normalized),
             ).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def uncertain_market_actions(self) -> list[dict[str, Any]]:
+        conn = self._conn_factory()
+        try:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute("""SELECT a.*,e.symbol,e.direction
+                FROM execution_actions a JOIN executions e ON e.signal_id=a.signal_id
+                WHERE a.action IN ('PARTIAL_EXIT','CLOSE')
+                AND a.status IN ('SUBMITTING','SUBMISSION_UNCONFIRMED')
+                AND LENGTH(a.action_key)=32 ORDER BY a.updated_at,a.action_key LIMIT 1""").fetchall()]
         finally:
             conn.close()
 
