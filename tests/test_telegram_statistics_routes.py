@@ -17,7 +17,7 @@ class StatisticsRoutingTests(unittest.TestCase):
         deps=SimpleNamespace(config=SimpleNamespace(integrations=SimpleNamespace(
             telegram_only=True,webhook_url='https://old.example')))
         with patch('apex.app.bootstrap._acquire_process_lock',return_value=object()), \
-             patch('apex.app.bootstrap._run_polling',return_value='poll') as polling, \
+             patch('apex.app.bootstrap._run_polling',new_callable=Mock,return_value='poll') as polling, \
              patch('apex.app.bootstrap.asyncio.run') as run, \
              patch('apex.app.bootstrap.build_webhook_application') as webhook:
             run_production(deps)
