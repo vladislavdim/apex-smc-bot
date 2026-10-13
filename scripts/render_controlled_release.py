@@ -53,6 +53,8 @@ class RenderReleaseClient:
         )
         if response.status_code not in {200, 201, 202}:
             raise ReleaseError(f"Render {method} {path} failed with HTTP {response.status_code}")
+        if response.status_code == 202 and not getattr(response, "content", b"present"):
+            return {}
         return response.json()
 
     def service(self, service_id: str) -> dict[str, Any]:

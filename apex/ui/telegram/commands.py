@@ -21,6 +21,8 @@ class CommandDependencies:
     main_menu: Callable[[], Any]
     pairs_keyboard: Callable[[str], Any]
     live_stats: Callable[[], str]
+    general_stats: Callable[[], str] | None = None
+    statistics_markup: Callable[[], Any] | None = None
 
 
 class TelegramCommandHandlers:
@@ -137,11 +139,12 @@ class TelegramCommandHandlers:
         if not self._authorized(message):
             return
         try:
-            text = await asyncio.to_thread(self.dependencies.live_stats)
+            text = await asyncio.to_thread(self.dependencies.general_stats or self.dependencies.live_stats)
         except Exception as exc:
             logging.error("Telegram live stats: %s", exc)
             text = "⚠️ Реальная статистика временно недоступна."
-        await message.answer(text, parse_mode="HTML")
+        options = {"reply_markup": self.dependencies.statistics_markup()} if self.dependencies.statistics_markup else {}
+        await message.answer(text, parse_mode="HTML", **options)
 
 
 @dataclass(frozen=True)

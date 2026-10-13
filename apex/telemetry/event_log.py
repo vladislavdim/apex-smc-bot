@@ -192,6 +192,8 @@ def _persist_event(event: dict[str, Any]) -> None:
 
 
 def _post_events(events: list[dict[str, Any]]) -> bool:
+    if _CONFIG.integrations.telegram_only:
+        return False
     integrations = ApexConfig.from_env().integrations
     url = integrations.stats_ingest_url
     token = integrations.stats_ingest_token
@@ -258,6 +260,8 @@ def _mark_many_synced(events: list[dict[str, Any]]) -> None:
 
 
 def _flush_unsynced(limit: int = 100) -> None:
+    if _CONFIG.integrations.telegram_only:
+        return
     integrations = ApexConfig.from_env().integrations
     if not integrations.stats_ingest_url or not integrations.stats_ingest_token:
         return

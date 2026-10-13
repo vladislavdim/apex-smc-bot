@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -64,6 +65,7 @@ class RuntimeSupervisor:
         self._component_faults: dict[str, dict[str, ComponentHealth]] = {}
         self._lease_generation: int | None = None
         self._lease_expires_at: datetime | None = None
+        self._lease_deadline: float | None = None
 
     def activate(self, *, release_sha: str = "", instance_id: str = "") -> None:
         config = ApexConfig.from_env()
@@ -84,6 +86,7 @@ class RuntimeSupervisor:
             }
             self._lease_generation = None
             self._lease_expires_at = None
+            self._lease_deadline = None
 
     def deactivate(self) -> None:
         """Disable the compatibility fence (used by isolated legacy tests)."""
@@ -106,6 +109,7 @@ class RuntimeSupervisor:
                 self._lease_generation is not None
                 and self._lease_expires_at is not None
                 and self._lease_expires_at > datetime.now(timezone.utc)
+                and self._lease_deadline is not None and time.monotonic() < self._lease_deadline
             )
             return (not self._active) or (
                 self._status is RuntimeStatus.READY and not self._reason_codes and lease_valid
@@ -118,6 +122,8 @@ class RuntimeSupervisor:
         with self._lock:
             self._lease_generation = int(generation)
             self._lease_expires_at = parsed.astimezone(timezone.utc)
+            remaining = max(0.0, (self._lease_expires_at - datetime.now(timezone.utc)).total_seconds())
+            self._lease_deadline = time.monotonic() + remaining
 
     @property
     def owns_exchange_management(self) -> bool:
@@ -128,12 +134,14 @@ class RuntimeSupervisor:
                 and self._lease_generation is not None
                 and self._lease_expires_at is not None
                 and self._lease_expires_at > datetime.now(timezone.utc)
+                and self._lease_deadline is not None and time.monotonic() < self._lease_deadline
             )
 
     def clear_instance_lease(self) -> None:
         with self._lock:
             self._lease_generation = None
             self._lease_expires_at = None
+            self._lease_deadline = None
 
     def transition(self, status: RuntimeStatus | str, reason_code: str = "") -> None:
         target = status if isinstance(status, RuntimeStatus) else RuntimeStatus(str(status))

@@ -581,7 +581,7 @@ def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Сделки", callback_data="menu_trades"),
          InlineKeyboardButton(text="👀 Наблюдаемые", callback_data="menu_watchlist")],
-        [InlineKeyboardButton(text="📈 Статистика", callback_data="menu_stats"),
+        [InlineKeyboardButton(text="📊 Общая статистика", callback_data="menu_stats"),
          InlineKeyboardButton(text="📊 Рынок сейчас", callback_data="menu_market")],
         [InlineKeyboardButton(text="🛡 Система", callback_data="menu_system"),
          InlineKeyboardButton(text="📚 Live Learning", callback_data="menu_live_learning")],
@@ -764,6 +764,29 @@ def _v3_system_dashboard() -> str:
     return _format_system_status(snapshot)
 
 
+def _v3_general_statistics(period="all", strategy="ALL"):
+    from apex.ui.telegram.statistics import general_statistics, format_general_statistics
+    return format_general_statistics(general_statistics(
+        _V3_CONFIG, period, strategy, runtime=_V3_RUNTIME.public_snapshot()))
+
+
+def _v3_statistics_markup():
+    from apex.ui.telegram.statistics import statistics_keyboard
+    return statistics_keyboard(InlineKeyboardButton, InlineKeyboardMarkup)
+
+
+def _v3_log_release_health():
+    snapshot = _V3_RUNTIME.public_snapshot()
+    logging.warning("[APEX Release Ready] %s", json.dumps({
+        "release_sha": _V3_CONFIG.runtime.release_sha,
+        "ready": bool(snapshot.get("ready")),
+        "status": snapshot.get("status") or snapshot.get("runtime_status"),
+        "telegram_only": _V3_CONFIG.integrations.telegram_only,
+        "lease_backend": _V3_CONFIG.integrations.runtime_lease_backend,
+        "auto_trading_enabled": _V3_CONFIG.execution.enabled,
+    }, sort_keys=True))
+
+
 _v3_state_callback_handlers = _V3StateCallbackHandlers(
     _V3StateCallbackDependencies(
         edit_message=_edit_message,
@@ -804,7 +827,8 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
         fetch_strategy_stats=lambda: _fetch_strategy_stats(DB_PATH),
         format_strategy_stats=_format_strategy_stats,
         system_dashboard=_v3_system_dashboard,
-        stats_url=_V3_CONFIG.integrations.stats_url,
+        stats_url="" if _V3_CONFIG.integrations.telegram_only else _V3_CONFIG.integrations.stats_url,
+        general_statistics=_v3_general_statistics,
         button=InlineKeyboardButton,
         markup=InlineKeyboardMarkup,
     )
@@ -904,6 +928,8 @@ _v3_command_handlers = _V3TelegramCommandHandlers(
         live_stats=lambda: _format_live_learning(
             lambda: _v3_connect_memory(_V3_CONFIG)
         ),
+        general_stats=_v3_general_statistics,
+        statistics_markup=_v3_statistics_markup,
     )
 )
 
@@ -4130,6 +4156,7 @@ async def _v3_runtime_watchdog():
         await _v3_probe_gate_freshness()
         await _v3_refresh_runtime_lease()
         _V3_RUNTIME.evaluate_readiness()
+        _v3_log_release_health()
         _v3_recover_incident("RUNTIME_WATCHDOG_FAILED", "runtime")
         public = _V3_RUNTIME.public_snapshot()
         # The unauthenticated worker endpoint returns only the 12-character
@@ -4160,6 +4187,16 @@ def _v3_get_lease_client():
     global _V3_LEASE_CLIENT
     if _V3_LEASE_CLIENT is None:
         runtime = _V3_RUNTIME.snapshot()
+        if _V3_CONFIG.integrations.runtime_lease_backend == "github":
+            from apex.ops.github_fencing import GithubInstanceLeaseClient
+            _V3_LEASE_CLIENT = GithubInstanceLeaseClient(
+                _V3_CONFIG.integrations.github_backup_repo,
+                _V3_CONFIG.integrations.github_token,
+                str(runtime.get("instance_id") or ""),
+                str(runtime.get("release_sha") or ""),
+                ttl_seconds=_V3_CONFIG.operational.runtime_lease_ttl_seconds,
+            )
+            return _V3_LEASE_CLIENT
         _V3_LEASE_CLIENT = _V3InstanceLeaseClient(
             _v3_derive_lease_url(
                 _V3_CONFIG.integrations.runtime_lease_url,
@@ -4526,6 +4563,7 @@ async def _initialize_production_runtime(transport: str):
             _v3_recover_deferred_state_checkpoint(_checkpoint, _memory_checkpoint)
         )
     logging.warning("[APEX V3] runtime=%s", _V3_RUNTIME.snapshot())
+    _v3_log_release_health()
     asyncio.create_task(_warmup_market_cache())
     logging.info("APEX запущен (%s mode)", transport)
     _production_scheduler = scheduler
