@@ -103,11 +103,21 @@ def validate_config(config: ApexConfig, *, raise_on_error: bool = False) -> Vali
         or not config.strategies.parity_verdict_path
     ):
         errors.append("SNAPSHOT_STRATEGY_PROOF_PATHS_MISSING")
-    if bool(config.integrations.stats_ingest_url) != bool(config.integrations.stats_ingest_token):
+    if config.integrations.runtime_lease_backend not in {"http", "github"}:
+        errors.append("RUNTIME_LEASE_BACKEND_INVALID")
+    if config.integrations.telegram_only and config.integrations.runtime_lease_backend != "github":
+        errors.append("TELEGRAM_ONLY_SHARED_FENCING_REQUIRED")
+    if config.integrations.runtime_lease_backend == "github" and (
+        not config.integrations.github_token or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", config.integrations.github_backup_repo
+        )
+    ):
+        errors.append("GITHUB_LEASE_CONFIG_MISSING")
+    if not config.integrations.telegram_only and bool(config.integrations.stats_ingest_url) != bool(config.integrations.stats_ingest_token):
         errors.append("STATS_INGEST_CONFIG_INCOMPLETE")
-    if config.integrations.runtime_lease_url and not config.integrations.stats_ingest_token:
+    if config.integrations.runtime_lease_backend == "http" and config.integrations.runtime_lease_url and not config.integrations.stats_ingest_token:
         errors.append("RUNTIME_LEASE_TOKEN_MISSING")
-    if config.integrations.webhook_url and not re.fullmatch(
+    if not config.integrations.telegram_only and config.integrations.webhook_url and not re.fullmatch(
         r"[A-Za-z0-9_-]{32,256}", config.integrations.telegram_webhook_secret
     ):
         errors.append("WEBHOOK_SECRET_INVALID")

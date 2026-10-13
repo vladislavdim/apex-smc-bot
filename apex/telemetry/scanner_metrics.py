@@ -184,6 +184,8 @@ def ensure_control_schema(db_path: str = DB_PATH) -> None:
     if "last_run_id" not in coverage_columns:
         conn.execute("ALTER TABLE scan_coverage_pairs ADD COLUMN last_run_id INTEGER")
     conn.commit()
+    from apex.telemetry.scan_statistics import ensure_scan_statistics
+    ensure_scan_statistics(conn)
     conn.close()
 
 

@@ -37,6 +37,7 @@ class StateCallbackDependencies:
     stats_url: str
     button: Callable[..., Any]
     markup: Callable[..., Any]
+    general_statistics: Callable[[str, str], str] | None = None
 
 
 class StateCallbackHandlers:
@@ -53,6 +54,9 @@ class StateCallbackHandlers:
                 "Главное меню 👇",
                 reply_markup=self.dependencies.main_menu(),
             )
+            return True
+        if self.dependencies.general_statistics is not None and (data == "menu_stats" or data.startswith("stats:")):
+            await self._general_statistics(callback, data)
             return True
         if data == "menu_trade_manager":
             await self._manager(callback)
@@ -94,6 +98,20 @@ class StateCallbackHandlers:
             await self._system(callback)
             return True
         return False
+
+    async def _general_statistics(self, callback, data):
+        from apex.ui.telegram.statistics import PERIODS, STRATEGIES, statistics_keyboard
+        period, strategy = ('all', 'ALL') if data == 'menu_stats' else tuple(data.split(':')[1:]) if data.count(':') == 2 else ('', '')
+        if period not in PERIODS or strategy not in ('ALL', *STRATEGIES):
+            await callback.answer('Неизвестный фильтр статистики')
+            return
+        try:
+            text = await asyncio.to_thread(self.dependencies.general_statistics, period, strategy)
+        except Exception as exc:
+            logging.error('Telegram general statistics: %s', type(exc).__name__)
+            text = '⚠️ Общая статистика временно недоступна. Попробуйте обновить.'
+        await self.dependencies.edit_message(callback.message, text, parse_mode='HTML',
+            reply_markup=statistics_keyboard(self.dependencies.button, self.dependencies.markup, period, strategy))
 
     async def _system(self, callback: Any) -> None:
         try:

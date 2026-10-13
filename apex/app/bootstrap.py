@@ -121,7 +121,7 @@ def run_production(deps: ProductionDependencies, *, max_polling_restarts: int = 
         logging.error("Другой инстанс уже запущен — выходим")
         return
     # Keep the descriptor bound to this frame until the selected transport exits.
-    webhook_url = deps.config.integrations.webhook_url
+    webhook_url = "" if getattr(deps.config.integrations, "telegram_only", False) else deps.config.integrations.webhook_url
     if webhook_url:
         app = build_webhook_application(deps)
         logging.info("Запуск в webhook режиме на порту %s", deps.config.runtime.port)

@@ -172,6 +172,8 @@ class IntegrationSettings:
     github_repo: str = ""
     github_token: str = field(default="", repr=False)
     backup_branch: str = "brain-backups"
+    telegram_only: bool = False
+    runtime_lease_backend: str = "http"
     state_backup_branch: str = "apex-state-backups"
     memory_backup_branch: str = "apex-memory-backups"
     github_file: str = "bot.py"
@@ -316,7 +318,8 @@ class ApexConfig:
                 event_loop_lag_sla_ms=_int(source, "APEX_EVENT_LOOP_LAG_SLA_MS", 500),
                 gate_timeout_seconds=_float(source, "APEX_GATE_TIMEOUT_SECONDS", 8.0),
                 execution_reconcile_seconds=_int(source, "AUTO_TRADING_RECONCILE_SECONDS", 30),
-                runtime_lease_ttl_seconds=_int(source, "APEX_RUNTIME_LEASE_TTL_SECONDS", 60),
+                runtime_lease_ttl_seconds=_int(source, "APEX_RUNTIME_LEASE_TTL_SECONDS",
+                    180 if source.get("APEX_RUNTIME_LEASE_BACKEND", "http").strip().lower() == "github" else 60),
                 fast_concurrency=_int(source, "APEX_FAST_CONCURRENCY", 6),
                 state_telemetry_retention_days=_int(source, "APEX_STATE_TELEMETRY_RETENTION_DAYS", 30),
                 memory_context_retention_days=_int(source, "APEX_MEMORY_CONTEXT_RETENTION_DAYS", 365),
@@ -389,6 +392,8 @@ class ApexConfig:
                 github_backup_repo=str(source.get("GITHUB_BACKUP_REPO") or source.get("GITHUB_REPO", "")).strip(),
                 github_repo=str(source.get("GITHUB_REPO", "")).strip(),
                 github_token=str(source.get("GITHUB_TOKEN", "")).strip(),
+                telegram_only=_bool(source, "APEX_TELEGRAM_ONLY"),
+                runtime_lease_backend=str(source.get("APEX_RUNTIME_LEASE_BACKEND", "http")).strip().lower(),
                 backup_branch=str(source.get("BRAIN_BACKUP_BRANCH", "brain-backups")).strip(),
                 state_backup_branch=str(source.get(
                     "APEX_STATE_BACKUP_BRANCH", "apex-state-backups"

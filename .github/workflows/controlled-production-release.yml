@@ -11,6 +11,10 @@ on:
         description: Type DEPLOY_APEX_PRODUCTION
         required: true
         type: string
+      telegram_only:
+        description: Release only Telegram worker with GitHub fencing; no PostgreSQL
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -102,6 +106,13 @@ jobs:
         run: pip install requests psycopg2-binary
 
       - name: Disable commit deploys and release web then worker
+        if: ${{ !inputs.telegram_only }}
         run: >-
           python scripts/render_controlled_release.py
+          --sha "${{ needs.verify.outputs.release_sha }}"
+
+      - name: Cold cutover to Telegram-only worker and verify shared ownership
+        if: ${{ inputs.telegram_only }}
+        run: >-
+          python scripts/render_telegram_release.py
           --sha "${{ needs.verify.outputs.release_sha }}"

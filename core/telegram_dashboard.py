@@ -88,7 +88,8 @@ def format_scanner_dashboard(data: dict[str, Any]) -> str:
             f"SL подряд {int(state.get('consecutive_losses') or 0)} · "
             f"риск ×{float(state.get('live_risk_multiplier') or 0):.1f}"
         )
-    stats_url = ApexConfig.from_env().integrations.stats_url
+    integrations = ApexConfig.from_env().integrations
+    stats_url = "" if integrations.telegram_only else integrations.stats_url
     if stats_url:
         safe_url = html.escape(stats_url, quote=True)
         lines.extend(["", f'<a href="{safe_url}">📊 Полная статистика</a>'])
