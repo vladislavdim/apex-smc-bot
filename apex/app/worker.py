@@ -4551,7 +4551,9 @@ async def _shutdown_production_runtime(reason: str) -> None:
             logging.warning("[Shutdown] scheduler pause unavailable")
     # A cancelled to_thread still runs. Drain mutation owners before releasing
     # the lease or taking the final snapshots; Render may enforce its own grace.
-    pending = [task for task in (_auto_trade_reconcile_task, _trade_manager_task, _active_market_scan)
+    # _active_market_scan is a display name, not an asyncio Task. Market
+    # callbacks are awaited by drain_production_jobs below.
+    pending = [task for task in (_auto_trade_reconcile_task, _trade_manager_task)
                if task is not None and not task.done()]
     async def keep_lease():
         client = _v3_get_lease_client()
