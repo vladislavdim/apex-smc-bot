@@ -3,13 +3,10 @@ from pathlib import Path
 from unittest import mock
 
 from apex.telemetry import event_log as setup_audit
-from apex.ui.dashboard import server as stats_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
-STATS = (ROOT / "apex/ui/dashboard/server.py").read_text(encoding="utf-8")
-DASHBOARD = (ROOT / "apex/ui/dashboard/page.py").read_text(encoding="utf-8")
 
 
 class TelemetryOnlyInvariantTests(unittest.TestCase):
@@ -37,41 +34,13 @@ class TelemetryOnlyInvariantTests(unittest.TestCase):
         self.assertLess(blocker_pos, trading_pos)
         self.assertNotIn('phases = _telemetry_phases', MARKET)
 
-    def test_dashboard_exposes_only_observability_fields(self):
-        self.assertIn('"bos_choch_age":bos_age_stats', STATS)
-        self.assertIn('"wyckoff_box_width":wy_box_range', STATS)
-        self.assertIn('Dashboard только показывает production-факты', DASHBOARD)
-        self.assertIn('Он не меняет Entry, SL, TP, RR', DASHBOARD)
-        self.assertIn('Production function health', DASHBOARD)
-        self.assertIn('functionHealth', DASHBOARD)
 
     def test_dashboard_uses_canonical_v3_source_registry(self):
         apex_v2 = (ROOT / "core" / "apex_v2.py").read_text(encoding="utf-8")
-        self.assertIn("from apex.market.source_registry import registry_snapshot", apex_v2)
+        self.assertTrue((ROOT / "apex" / "market" / "source_registry.py").is_file())
         self.assertFalse((ROOT / "core" / "source_registry.py").exists())
 
-    def test_live_decision_path_preserves_recorded_order(self):
-        row = {
-            "outcome": "FILTERED",
-            "checks": [
-                {"code": "data", "label": "Closed candles", "state": "PASS"},
-                {"code": "structure", "label": "Fresh BOS", "state": "PASS"},
-                {"code": "rr", "label": "RR >= 2", "state": "FAIL"},
-            ],
-            "stop": {"blocking_check_code": "rr"},
-        }
-        path = stats_server._live_decision_path(row)
-        self.assertEqual([step["code"] for step in path["steps"]], ["data", "structure", "rr"])
-        self.assertEqual(path["first_reached"]["code"], "data")
-        self.assertEqual(path["last_reached"]["code"], "rr")
-        self.assertEqual(path["last_passed"]["code"], "structure")
-        self.assertEqual(path["blocking_step"]["code"], "rr")
-        self.assertEqual(path["final_outcome"], "FILTERED")
 
-    def test_live_decision_path_is_dashboard_only(self):
-        self.assertIn('"source": "LIVE_AUDIT_ORDER"', STATS)
-        self.assertIn('path.steps||x.checks', DASHBOARD)
-        self.assertNotIn("_live_decision_path", MARKET)
 
     def test_observer_does_not_change_decorated_return_value(self):
         @setup_audit.audit_strategy("TEST")

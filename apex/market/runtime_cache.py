@@ -10,7 +10,7 @@ from .snapshot_scope import snapshot_candle_override
 _CANDLES: dict[str, list] = {}
 _UPDATED_AT: dict[str, float] = {}
 _TTL_SECONDS = 60
-_MAX_ENTRIES = 512
+_MAX_ENTRIES = 64
 
 
 def prune_global_candles(*, force: bool = False) -> int:
@@ -37,6 +37,7 @@ def update_global_candles(symbol: str, timeframe: str, candles: list) -> None:
     key = f"{symbol}:{timeframe}"
     _CANDLES[key] = candles
     _UPDATED_AT[key] = time.time()
+    prune_global_candles()
 
 
 def get_global_candles(symbol: str, timeframe: str) -> list:

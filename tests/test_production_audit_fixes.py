@@ -14,7 +14,6 @@ from apex.execution.orders import (
     configure_execution_state,
 )
 from apex.ui.telegram.system import format_system_status
-from core.apex_v2 import dashboard_snapshot, emit_dashboard_snapshot
 
 
 class ProductionAuditFixTests(unittest.TestCase):
@@ -96,48 +95,7 @@ class ProductionAuditFixTests(unittest.TestCase):
         self.assertIn("+2.50 USDT", text)
         self.assertIn("FRESH", text)
 
-    def test_dashboard_prefers_state_execution_and_balance(self):
-        repo = ExecutionRepository(self.factory)
-        repo.register({
-            "signal_id": 21, "mode": "live", "symbol": "SOLUSDT",
-            "direction": "BULLISH", "status": "ENTRY_PENDING",
-            "entry": 100.0, "sl": 95.0, "tp1": 110.0, "tp2": 115.0,
-            "quantity": 1.0, "risk_usdt": 5.0, "balance_usdt": 1000.0,
-            "leverage": 5,
-        })
-        with self.factory() as conn:
-            conn.execute(
-                """INSERT INTO execution_account_cache(
-                       exchange,wallet_balance,available_balance,
-                       cross_unrealized_pnl,fetched_at_epoch,attempted_at_epoch,last_error
-                   ) VALUES('binance_futures',1000,900,12.5,2000000000,2000000000,'')"""
-            )
-            conn.commit()
-        env = {
-            "APEX_COMPAT_DB_PATH": self.compat_path,
-            "APEX_STATE_DB_PATH": self.state_path,
-        }
-        with patch.dict(os.environ, env, clear=False):
-            snap = dashboard_snapshot(self.compat_path, require_state=True)
-        self.assertEqual(snap["execution_health"]["source"], "APEX_STATE_DB")
-        self.assertEqual(snap["execution_health"]["statuses"]["ENTRY_PENDING"], 1)
-        self.assertEqual(snap["execution_health"]["account"]["wallet_balance"], 1000.0)
-        with patch.dict(os.environ, env, clear=False), patch("core.setup_audit.emit_event") as emit:
-            self.assertTrue(emit_dashboard_snapshot(self.compat_path, require_state=True))
-        self.assertEqual(emit.call_args.args[0], "apex_v3_snapshot")
-        self.assertEqual(emit.call_args.args[3]["telemetry_schema"], "APEX_V3")
-        self.assertEqual(emit.call_args.args[3]["manager_db"]["source"], "APEX_STATE_DB")
 
-    def test_production_dashboard_rejects_missing_state_instead_of_legacy_fallback(self):
-        with patch.dict(os.environ, {
-            "APEX_COMPAT_DB_PATH": self.compat_path,
-            "APEX_STATE_DB_PATH": self.state_path + ".missing",
-        }, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "dashboard_state_projection_unavailable"):
-                dashboard_snapshot(self.compat_path, require_state=True)
-            with patch("core.setup_audit.emit_event") as emit:
-                self.assertFalse(emit_dashboard_snapshot(self.compat_path, require_state=True))
-                emit.assert_not_called()
 
 
 if __name__ == "__main__":

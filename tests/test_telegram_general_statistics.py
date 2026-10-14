@@ -77,3 +77,13 @@ class GeneralStatisticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             general_statistics(self.config,'all',"FAST' OR 1=1")
 
+
+    def test_all_history_totals_exceed_old_diagnostic_window_and_deduplicate_positions(self):
+        with sqlite3.connect(self.memory) as conn:
+            conn.executemany("INSERT INTO live_trade_outcomes(outcome_id,position_id,strategy,symbol,direction,net_r,fees,funding,closed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                [(str(i),str(i),'FAST','BTCUSDT','LONG',-.02,.01,.01,'2026-10-13T00:00:00Z') for i in range(6001)])
+            conn.execute("INSERT OR IGNORE INTO live_trade_outcomes(outcome_id,position_id,strategy,symbol,direction,net_r,closed_at) VALUES('retry','0','FAST','BTCUSDT','LONG',99,'2026-10-13T00:00:00Z')")
+        result=general_statistics(self.config)
+        self.assertEqual(result['trades'][0]['closed'],6001)
+        self.assertEqual(result['trades'][0]['losses'],6001)
+        self.assertAlmostEqual(result['trades'][0]['net_r'],-120.02)

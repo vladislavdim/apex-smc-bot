@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
 import json
 import threading
 import time
@@ -93,6 +94,7 @@ class GateMarketClient:
         timeout: float = 8.0,
         clock: Callable[[], float] = time.time,
         cache_ttls: Mapping[str, float] | None = None,
+        max_cache_entries: int = 128,
     ) -> None:
         self._get_json = get_json
         self._base_url = base_url.rstrip("/")
@@ -106,14 +108,16 @@ class GateMarketClient:
             "/futures/usdt/order_book": 2.0,
             **dict(cache_ttls or {}),
         }
-        self._cache: dict[tuple[str, tuple[tuple[str, str], ...]], GateResponse] = {}
+        self._max_cache_entries = max(1, int(max_cache_entries))
+        self._cache = OrderedDict()
         self._lock_guard = threading.Lock()
-        self._key_locks: dict[tuple[str, tuple[tuple[str, str], ...]], threading.Lock] = {}
+        # Fixed stripes retain same-key singleflight without retaining every
+        # historical request key (candle windows include changing timestamps).
+        self._key_locks = tuple(threading.Lock() for _ in range(64))
 
     def contract_multiplier(self, symbol: str) -> float:
         contract = gate_contract(symbol)
         endpoint = f"/futures/usdt/contracts/{contract}"
-        self._cache_ttls[endpoint] = 3600.0
         response = self._get(endpoint, {}, purpose="context", source="gate_derivatives")
         value = float(response.payload.get("quanto_multiplier") or 0)
         if not isfinite(value) or value <= 0:
@@ -125,18 +129,30 @@ class GateMarketClient:
     ) -> GateResponse:
         authorize(source, purpose)
         key = (endpoint, tuple(sorted((str(name), str(value)) for name, value in params.items())))
-        with self._lock_guard:
-            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        key_lock = self._key_locks[hash(key) % len(self._key_locks)]
         with key_lock:
             now = int(self._clock())
-            cached = self._cache.get(key)
-            ttl = max(0.0, float(self._cache_ttls.get(endpoint, 0.0)))
-            if cached is not None and now - cached.received_at <= ttl:
-                return cached
+            with self._lock_guard:
+                for old_key, old_response in list(self._cache.items()):
+                    if now - old_response.received_at > self._ttl(old_key[0]):
+                        self._cache.pop(old_key, None)
+                cached = self._cache.get(key)
+                if cached is not None and now - cached.received_at <= self._ttl(endpoint):
+                    self._cache.move_to_end(key)
+                    return cached
             payload = self._get_json(f"{self._base_url}{endpoint}", params, self._timeout)
             response = GateResponse(endpoint, int(self._clock()), payload)
-            self._cache[key] = response
+            with self._lock_guard:
+                if self._ttl(endpoint) > 0:
+                    self._cache[key] = response
+                    self._cache.move_to_end(key)
+                    while len(self._cache) > self._max_cache_entries:
+                        self._cache.popitem(last=False)
             return response
+
+    def _ttl(self, endpoint: str) -> float:
+        fallback = 3600.0 if endpoint.startswith('/futures/usdt/contracts/') else 0.0
+        return max(0.0, float(self._cache_ttls.get(endpoint, fallback)))
 
     def clear_cache(self) -> None:
         with self._lock_guard:

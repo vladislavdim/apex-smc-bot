@@ -1,4 +1,4 @@
-"""Overview projection from the production dashboard snapshot."""
+"""Overview projection from the production UI snapshot."""
 from __future__ import annotations
 from typing import Any, Mapping
 

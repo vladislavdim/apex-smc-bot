@@ -9,7 +9,7 @@ def project(payload: Mapping[str, Any]) -> dict[str, Any]:
             "integrations": payload.get("integration_health") or {},
             "incidents": payload.get("incidents") or [],
             "versions": payload.get("versions") or {},
-            "dashboard_cache": payload.get("dashboard_cache") or {}}
+            "UI_cache": payload.get("UI_cache") or {}}
 
 
 __all__ = ["project"]

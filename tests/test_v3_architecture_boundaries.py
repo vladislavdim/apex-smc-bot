@@ -8,15 +8,15 @@ REQUIRED=(
 "apex/manager/events.py","apex/manager/playbooks.py","apex/manager/structure.py","apex/manager/reconcile.py",
 "apex/learning/outcomes.py","apex/learning/execution_quality.py","apex/learning/groq_performance.py",
 "apex/telemetry/metrics.py","apex/telemetry/health.py","apex/ops/graceful_shutdown.py","apex/app/shutdown.py",
-"apex/ui/dashboard/api.py","apex/ui/dashboard/auth.py","apex/ui/dashboard/overview.py","apex/ui/dashboard/strategies.py",
-"apex/ui/dashboard/trades.py","apex/ui/dashboard/manager.py","apex/ui/dashboard/execution.py","apex/ui/dashboard/market.py",
-"apex/ui/dashboard/learning.py","apex/ui/dashboard/health.py","scripts/verify_release.py","scripts/migrate_v3.py","scripts/inspect_state.py")
+"apex/ui/readmodels/api.py","apex/ui/readmodels/overview.py","apex/ui/readmodels/strategies.py",
+"apex/ui/readmodels/trades.py","apex/ui/readmodels/manager.py","apex/ui/readmodels/execution.py","apex/ui/readmodels/market.py",
+"apex/ui/readmodels/learning.py","apex/ui/readmodels/health.py","scripts/verify_release.py","scripts/migrate_v3.py","scripts/inspect_state.py")
 
 def test_required_v3_surfaces_exist():
     missing=[p for p in REQUIRED if not (ROOT/p).is_file()]
     assert not missing,missing
 
 def test_launchers_stay_thin():
-    for name in ("bot.py","stats_server.py"):
+    for name in ("bot.py",):
         lines=[x for x in (ROOT/name).read_text().splitlines() if x.strip() and not x.lstrip().startswith("#")]
         assert len(lines)<30,(name,len(lines))

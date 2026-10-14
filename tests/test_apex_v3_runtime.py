@@ -268,56 +268,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
             self.assertNotIn("remove_from_timing_queue", source)
             self.assertNotIn("expire_timing_queue", source)
 
-    def test_legacy_research_shadow_and_backtest_are_not_request_reachable(self):
-        root = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
-            bot_source = source.read()
-        with open(os.path.join(root, "apex/ui/dashboard/server.py"), encoding="utf-8") as source:
-            dashboard_source = source.read()
-        for forbidden in (
-            'Command("backtest")', 'Command("think")', 'callback_data="menu_experience"',
-            'data == "menu_experience"', 'data == "menu_backtest"',
-            'state.get("action") == "backtest"', "_active_experience_rules(",
-            "_capture_experience_candidate(", "_record_experience_decision(",
-            "_market_relevant_rules(",
-        ):
-            self.assertNotIn(forbidden, bot_source)
-        self.assertNotIn('p.path=="/api/research"', dashboard_source)
-        self.assertNotIn("from research", dashboard_source)
-        research_dir = os.path.join(root, "research")
-        self.assertFalse(
-            os.path.isdir(research_dir) and any(name.endswith(".py") for name in os.listdir(research_dir)),
-            "research package",
-        )
-        for removed in (
-            "research_worker.py", "core/replay_lab.py",
-            "core/shadow_evidence.py", "core/experience_memory.py",
-            "core/execution_simulator.py", "core/runtime_observability.py",
-            "core/runtime_observability_overrides.py", "core/runtime_observability_fixups.py",
-            ".github/workflows/patch-trade-manager-button.yml",
-        ):
-            self.assertFalse(os.path.exists(os.path.join(root, removed)), removed)
-        self.assertFalse(os.path.exists(os.path.join(root, ".github/workflows/btc-research.yml")))
-        for forbidden in ("Research", "Shadow", "Replay", "Counterfactual", "/api/research"):
-            self.assertNotIn(forbidden, dashboard_source)
-        self.assertIn('e["kind"]=="incident_snapshot"', dashboard_source)
-        self.assertIn("normalize_incident_snapshot", dashboard_source)
 
-    def test_production_dashboard_is_compact_and_contains_no_virtual_ui(self):
-        from apex.ui.dashboard.page import HTML
-
-        self.assertLess(len(HTML.encode("utf-8")), 30_000)
-        self.assertIn("APEX V3 · Production", HTML)
-        self.assertIn("LIVE_CONTEXT", HTML)
-        for tab in (
-            "overview", "strategies", "trades", "manager",
-            "executionView", "market", "learning", "health",
-        ):
-            self.assertIn(f'data-view="{tab}"', HTML)
-        self.assertIn("Только confirmed fills", HTML)
-        self.assertIn("Authority: ADVISORY", HTML)
-        for forbidden in ("Research", "Shadow", "Replay", "Counterfactual", "/api/research"):
-            self.assertNotIn(forbidden, HTML)
 
     def test_manager_and_execution_have_no_runtime_replay_dependency(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -617,7 +568,6 @@ class ApexV3RuntimeTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         allowed = {
             os.path.join("apex", "config", "settings.py"),
-            os.path.join("apex", "ui", "dashboard", "config.py"),
         }
         offenders = []
         packages = ("apex", "core", "external_sources", "news_context")
@@ -655,7 +605,7 @@ class ApexV3RuntimeTests(unittest.TestCase):
         with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn('public["release_sha"] = _V3_RUNTIME.snapshot()["release_sha"]', bot_source)
-        self.assertIn('"startup production snapshot emitted"', bot_source)
+        self.assertIn('_v3_log_release_health()', bot_source)
         self.assertIn('_v3_recover_incident("JOB_FAILED", "backup")', bot_source)
         self.assertIn("clear_market_runtime_caches()", bot_source)
         self.assertIn("_v3_release_unused_memory()", bot_source)

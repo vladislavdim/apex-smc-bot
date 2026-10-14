@@ -31,6 +31,8 @@ def push_snapshot(*, remote_url: str, branch: str, remote_name: str,
                GIT_AUTHOR_EMAIL="apex-backup@localhost", GIT_COMMITTER_NAME="APEX Backup",
                GIT_COMMITTER_EMAIL="apex-backup@localhost")
     settings = [("pack.threads", "1"), ("pack.windowMemory", "16m"),
+                ("pack.window", "0"), ("pack.deltaCacheSize", "8m"),
+                ("core.deltaBaseCacheLimit", "16m"),
                 ("http.followRedirects", "false")]
     if token:
         if not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+\.git", remote_url):
@@ -58,7 +60,9 @@ def push_snapshot(*, remote_url: str, branch: str, remote_name: str,
             return result
         run("check-ref-format", f"refs/heads/{branch}")
         run("init", "--bare", ".")
-        run("fetch", "--depth=1", "--no-tags", remote_url, f"refs/heads/{branch}")
+        # We need trees and the previous blob's identity, never its contents.
+        # Fetching all snapshots in the branch can exhaust a 512 MiB worker.
+        run("fetch", "--depth=1", "--filter=blob:none", "--no-tags", remote_url, f"refs/heads/{branch}")
         observed = run("ls-tree", "FETCH_HEAD", "--", remote_name).stdout.decode().split()
         if len(observed) < 3 or observed[2] != expected_blob_sha:
             return response(409)

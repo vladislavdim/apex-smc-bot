@@ -13,7 +13,6 @@ def _imports(path: Path):
 
 def test_launchers_are_thin():
     assert len(Path("bot.py").read_text().splitlines()) < 30
-    assert len(Path("stats_server.py").read_text().splitlines()) < 40
 
 
 def test_required_v3_surfaces_exist():
@@ -27,7 +26,7 @@ def test_required_v3_surfaces_exist():
         "apex/manager/structure.py", "apex/manager/reconcile.py", "apex/learning/outcomes.py",
         "apex/learning/execution_quality.py", "apex/learning/groq_performance.py", "apex/telemetry/metrics.py",
         "apex/telemetry/health.py", "apex/ops/graceful_shutdown.py", "apex/quality/groq_gate.py",
-        "apex/quality/groq_calibration.py", "apex/ui/dashboard/api.py", "apex/ui/dashboard/auth.py",
+        "apex/quality/groq_calibration.py", "apex/ui/readmodels/api.py",
         "apex/ui/telegram/app.py", "apex/ui/telegram/menu.py", "apex/ui/telegram/formatters.py",
         "scripts/verify_release.py", "scripts/inspect_state.py",
     ]
@@ -50,7 +49,7 @@ def test_protection_owner_is_execution():
 
 
 def test_dashboard_has_exact_production_tabs():
-    from apex.ui.dashboard.api import PROJECTORS
+    from apex.ui.readmodels.api import PROJECTORS
     assert tuple(PROJECTORS) == ("overview","strategies","trades","manager","execution","market","learning","health")
 
 

@@ -22,16 +22,30 @@ equal. Unknown responses, corruption and excessive clock skew fail closed.
 Local mutation authority expires forty seconds before shared ownership, covering
 bounded clock skew and in-flight exchange request timeouts.
 
-Use the Controlled Production Release workflow with `telegram_only=true` and
-the tested full main commit SHA. The Telegram release verifies the existing
+Use the Controlled Production Release workflow with the tested full main commit SHA. The Telegram release verifies the existing
 worker identity and backup configuration, suspends the old worker for a cold
 backend cutover, temporarily disables trading, configures the new backend and
 verifies fresh ready evidence for the exact release. It then restores the
 original trading-enabled setting, if it was enabled, and verifies the final
 deployment. Failure leaves trading disabled until repaired. No database plan,
-payment, exchange-account setting or external dashboard deployment is changed.
+payment or exchange-account setting is changed. After worker readiness is proven,
+the retired dashboard service is suspended and its commit deploys are disabled.
+Its database is retained; permanent deletion is a separate action.
 
 Telegram-only mode persists Audit events locally and does not attempt external
 dashboard ingestion. Existing diagnostic backups remain in place; no expired
 database is deleted. SQLite snapshots and the ownership branch are independent
 files and branches, so a diagnostic backup cannot overwrite a runtime lease.
+
+
+The HTTP dashboard, its HTML and PostgreSQL dependency have been removed.
+Telegram reads local State/Memory/Brain directly. Pure formatting projections
+live in `apex.ui.readmodels`; they have no server, HTML or database connection.
+
+Memory controls bound Gate responses and same-key locks, prune expired candles
+and cap the router, shared and SMC candle stores at 64 entries. Candle history
+returned to strategies is not shortened. Git snapshot uploads fetch trees only
+and avoid downloading old database blobs. The resource guard accounts for child
+processes using cgroup working set as well as Python RSS. Job start/end resource
+records identify residual spikes. Readiness logs emit on transitions and once
+per five minutes rather than as warnings every fifteen seconds.

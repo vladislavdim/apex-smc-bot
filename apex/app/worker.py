@@ -153,7 +153,6 @@ from apex.manager.engine import (
 )
 from core.apex_v2 import (
     ensure_apex_v2_schema as _ensure_apex_v2_schema,
-    emit_dashboard_snapshot as _emit_apex_v2_dashboard_snapshot,
     portfolio_risk_snapshot as _apex_portfolio_risk_snapshot,
     store_portfolio_snapshot as _store_apex_portfolio_snapshot,
     store_market_state as _store_apex_market_state,
@@ -546,11 +545,6 @@ def _v3_sync_signal_lifecycle():
     )
 
 
-def _v3_emit_dashboard_telemetry() -> None:
-    if not _emit_apex_v2_dashboard_snapshot(DB_PATH, require_state=True):
-        raise RuntimeError("dashboard_state_projection_unavailable")
-
-
 async def _v3_refresh_signal_lifecycle_mirror():
     return await _v3_refresh_cutover(
         _V3_LIFECYCLE_CUTOVER, _v3_sync_signal_lifecycle,
@@ -775,16 +769,32 @@ def _v3_statistics_markup():
     return statistics_keyboard(InlineKeyboardButton, InlineKeyboardMarkup)
 
 
+_v3_last_release_health = None
+_v3_last_release_log_at = 0.0
+
+
 def _v3_log_release_health():
+    global _v3_last_release_health, _v3_last_release_log_at
     snapshot = _V3_RUNTIME.public_snapshot()
-    logging.warning("[APEX Release Ready] %s", json.dumps({
+    value = {
         "release_sha": _V3_CONFIG.runtime.release_sha,
         "ready": bool(snapshot.get("ready")),
         "status": snapshot.get("status") or snapshot.get("runtime_status"),
         "telegram_only": _V3_CONFIG.integrations.telegram_only,
         "lease_backend": _V3_CONFIG.integrations.runtime_lease_backend,
         "auto_trading_enabled": _V3_CONFIG.execution.enabled,
-    }, sort_keys=True))
+    }
+    now = time.monotonic()
+    if value != _v3_last_release_health or now - _v3_last_release_log_at >= 300:
+        logger = logging.getLogger("apex.release")
+        logger.setLevel(logging.INFO)
+        memory = _v3_memory_snapshot(limit_bytes=_V3_CONFIG.operational.memory_limit_bytes)
+        logger.info("[APEX Release Ready] %s", json.dumps({**value, "memory": {
+            "rss_bytes": memory.rss_bytes, "service_bytes": memory.service_bytes,
+            "working_set_bytes": memory.working_set_bytes, "limit_bytes": memory.limit_bytes,
+        }}, sort_keys=True))
+        _v3_last_release_health = value
+        _v3_last_release_log_at = now
 
 
 _v3_state_callback_handlers = _V3StateCallbackHandlers(
@@ -1614,7 +1624,6 @@ async def _send_signal(sd):
             await _v3_refresh_execution_state_mirror()
         except Exception as exc:
             logging.error("[APEX V3] execution State mirror requires reconcile: %s", exc)
-        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     if _run_id:
         await asyncio.to_thread(
@@ -4100,20 +4109,25 @@ async def _v3_runtime_watchdog():
             limit_bytes=_V3_CONFIG.operational.memory_limit_bytes,
         )
         detail = (
-            f"rss={snapshot.rss_bytes} limit={snapshot.limit_bytes} "
+            f"rss={snapshot.rss_bytes} service={snapshot.service_bytes} working_set={snapshot.working_set_bytes} limit={snapshot.limit_bytes} "
             f"ratio={snapshot.ratio:.3f} state={snapshot.state}"
         )
-        if snapshot.state in {"DEGRADED", "NEW_ENTRIES_OFF"}:
+        if snapshot.state in {"WATCH", "DEGRADED", "NEW_ENTRIES_OFF"}:
             if not _v3_memory_relief_active:
                 cleared = clear_market_runtime_caches()
+                _get_v3_strategy_snapshot_provider().client.clear_cache()
                 trimmed = _v3_release_unused_memory()
                 _v3_memory_relief_active = True
                 logging.warning(
                     "[ResourceGuard] optional caches released=%s malloc_trim=%s",
                     cleared, trimmed,
                 )
-            _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.DEGRADED, detail, required=False)
-            _V3_RUNTIME.inhibit_entries(f"RESOURCE_MEMORY_{snapshot.state}")
+            _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.READY if snapshot.state == "WATCH" else _V3_COMPONENT_STATE.DEGRADED, detail, required=False)
+            if snapshot.state != "WATCH":
+                _V3_RUNTIME.inhibit_entries(f"RESOURCE_MEMORY_{snapshot.state}")
+            else:
+                _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_DEGRADED")
+                _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_NEW_ENTRIES_OFF")
             _v3_report_incident(
                 "MEMORY_PRESSURE", "memory", "ERROR" if snapshot.state == "NEW_ENTRIES_OFF" else "WARNING",
                 {"rss_bytes": snapshot.rss_bytes, "limit_bytes": snapshot.limit_bytes, "ratio": snapshot.ratio},
@@ -4327,7 +4341,6 @@ async def market_intelligence_job():
             },
             DB_PATH,
         )
-        await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     try:
         return await _run_market_scan_exclusive("market_intelligence", refresh, 210)
     except Exception as exc:
@@ -4394,7 +4407,6 @@ def _build_v3_scheduler():
             market_wyckoff=auto_wyckoff_scan,
             market_ltf_watch=auto_ltf_watch_scan,
             keepalive=keepalive_heartbeat,
-            dashboard_telemetry=_v3_emit_dashboard_telemetry,
             alerts=_v3_alerts_job,
             state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m", store="state"),
             memory_backup=functools.partial(_v3_maintenance_and_backup, "memory_30m", store="memory"),
@@ -4501,13 +4513,6 @@ async def _initialize_production_runtime(transport: str):
     _manager_registration = await _v3_refresh_manager_state_mirror()
     logging.info("[APEX V3] Manager registration mirror: %s", _manager_registration)
     _rebuild_strategy_risk_states(DB_PATH)
-    _dashboard_snapshot_ok = _emit_apex_v2_dashboard_snapshot(DB_PATH, require_state=True)
-    _V3_RUNTIME.mark_component(
-        "dashboard_telemetry",
-        _V3_COMPONENT_STATE.READY if _dashboard_snapshot_ok else _V3_COMPONENT_STATE.FAILED,
-        "startup production snapshot emitted" if _dashboard_snapshot_ok
-        else "State dashboard snapshot unavailable", required=False,
-    )
     start_db_writer()
     _checkpoint = await _brain_startup_checkpoint()
     _state_checkpoint = await _v3_state_startup_checkpoint()
@@ -4534,7 +4539,6 @@ async def _initialize_production_runtime(transport: str):
         _v3_recover_incident("JOB_FAILED", "backup")
         _v3_recover_incident("JOB_TIMEOUT", "backup")
     await _v3_startup_reconcile_and_market_check()
-    await asyncio.to_thread(_emit_apex_v2_dashboard_snapshot, DB_PATH, require_state=True)
     if transport == "polling":
         threading.Thread(target=run_server, daemon=True).start()
     asyncio.create_task(_start_market_intelligence_background())

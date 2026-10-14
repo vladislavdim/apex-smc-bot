@@ -69,6 +69,10 @@ def prune_candle_cache(*, force=False):
             stale.append(key)
     for key in stale:
         _candle_cache.pop(key, None)
+    overflow = max(0, len(_candle_cache) - 64)
+    for key, _ in sorted(list(_candle_cache.items()), key=lambda row: row[1][1])[:overflow]:
+        _candle_cache.pop(key, None)
+        stale.append(key)
     return len(stale)
 
 def _init_tables():
@@ -342,6 +346,7 @@ def get_candles_smart(symbol: str, interval: str = "1h", limit: int = 200) -> di
                        "quality":quality,"is_synthetic":is_synth,"error":"",
                        "symbol":symbol,"interval":interval}
                 _candle_cache[ck] = (res, time.time())
+                prune_candle_cache()
                 if attempts > 1:
                     _learn_fact(f"{symbol}/{interval}: нашли через {src} (попыток:{attempts})", "|".join(all_errors))
                     logging.info(f"[SMC] ✅ {symbol} {interval} → {src} ({attempts} попыток)")
@@ -655,7 +660,7 @@ def get_premium_discount(candles: list) -> dict:
 def find_ob_fvg_chain(candles: list, direction: str) -> dict | None:
     """
     OB → FVG → OB цепочка — самый сильный SMC сетап.
-    Когда Order Block подтверждён FVG который подтверждён следующим OB — 
+    Когда Order Block подтверждён FVG который подтверждён следующим OB —
     вероятность отработки значительно выше одиночного OB.
     """
     obs = []
