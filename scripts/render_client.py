@@ -17,7 +17,9 @@ TERMINAL_FAILURES = {"build_failed", "update_failed", "canceled", "deactivated"}
 
 
 class ReleaseError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class RenderReleaseClient:
@@ -41,7 +43,8 @@ class RenderReleaseClient:
             **kwargs,
         )
         if response.status_code not in {200, 201, 202}:
-            raise ReleaseError(f"Render {method} {path} failed with HTTP {response.status_code}")
+            raise ReleaseError(f"Render {method} {path} failed with HTTP {response.status_code}",
+                               status_code=response.status_code)
         if response.status_code == 202 and not getattr(response, "content", b"present"):
             return {}
         return response.json()

@@ -103,3 +103,28 @@ class TelegramReleaseTests(unittest.TestCase):
             result=release.controlled_telegram_release(client,commit_sha='a'*40,retire_dashboard=True)
         self.assertTrue(result['dashboard_suspended'])
         self.assertEqual(sum(event[0]=='web_suspend' for event in client.events),1)
+
+    def test_already_deleted_dashboard_does_not_break_a_future_worker_release(self):
+        client=Client('false')
+        original=client.service
+        def service(identifier):
+            if identifier==release.EXPECTED_SERVICES['web'][0]:
+                raise release.ReleaseError('missing',status_code=404)
+            return original(identifier)
+        client.service=service
+        with patch.object(release,'wait_stopped'),patch.object(release,'wait_ready',return_value={'ready':True}):
+            result=release.controlled_telegram_release(client,commit_sha='a'*40,retire_dashboard=True)
+        self.assertTrue(result['dashboard_deleted'])
+        self.assertFalse(any(release.EXPECTED_SERVICES['web'][0] in str(event) for event in client.events))
+
+    def test_dashboard_credential_failure_is_not_mistaken_for_deletion(self):
+        client=Client('false')
+        original=client.service
+        def service(identifier):
+            if identifier==release.EXPECTED_SERVICES['web'][0]:
+                raise release.ReleaseError('forbidden',status_code=403)
+            return original(identifier)
+        client.service=service
+        with patch.object(release,'wait_stopped'),patch.object(release,'wait_ready',return_value={'ready':True}):
+            with self.assertRaises(release.ReleaseError):
+                release.controlled_telegram_release(client,commit_sha='a'*40,retire_dashboard=True)

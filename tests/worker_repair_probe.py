@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as directory:
             return {'saved':True}
         with patch.object(worker,'_v3_maintenance_and_backup',store_backup):
             result = await original('render_sigterm',store='all')
-        assert stores == ['state','memory','brain','audit']
+        assert stores == ['state','memory','brain']
         assert result['state']['status'] == 'backup_failed'
-        assert result['audit']['saved'] is True
+        assert result['brain']['saved'] is True
     asyncio.run(verify())
