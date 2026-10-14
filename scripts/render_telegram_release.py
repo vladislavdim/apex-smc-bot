@@ -121,7 +121,15 @@ def controlled_telegram_release(client, *, commit_sha, retire_dashboard=False):
     result = {'commit_sha':commit_sha,'worker_deploy_id':deploy['id'],'worker_health':ready}
     if retire_dashboard:
         web_id, web_name = EXPECTED_SERVICES['web']
-        web = client.service(web_id)
+        try:
+            web = client.service(web_id)
+        except ReleaseError as exc:
+            if exc.status_code != 404:
+                raise
+            # Absence of the exact retired ID is success. Never recreate it or
+            # suppress credential, network, or other identity-check failures.
+            result['dashboard_deleted'] = True
+            return result
         verify_service({**web, 'suspended':'not_suspended'}, service_id=web_id, expected_name=web_name)
         if web.get('type') != 'web_service':
             raise ReleaseError('dashboard retirement requires the verified web service')
