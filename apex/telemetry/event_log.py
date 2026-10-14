@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import queue
 import re
 import sqlite3
@@ -21,7 +22,7 @@ import time
 import uuid
 import copy
 from contextlib import closing
-from apex.db.audit_db import migrate_audit
+from apex.db.audit_db import audit_path, migrate_audit
 from datetime import datetime, timezone
 from typing import Any, Callable
 from apex.config.settings import ApexConfig
@@ -31,8 +32,32 @@ DB_PATH = _CONFIG.database.state_db_path
 RELEASE_SHA = _CONFIG.runtime.release_sha
 SERVICE_INSTANCE = _CONFIG.runtime.instance_id
 DEPLOY_ID = _CONFIG.runtime.deploy_id
-_MAX_PAYLOAD_CHARS = 60000
+_MAX_PAYLOAD_CHARS = 20000
 _EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=128)
+_LOCAL_AUDIT_MAX_ROWS = 1000
+_LOCAL_AUDIT_DAYS = 3
+
+
+def _prune_local_audit() -> None:
+    if (not _CONFIG.integrations.telegram_only
+            or os.path.abspath(DB_PATH) != os.path.abspath(audit_path(_CONFIG.database.state_db_path))):
+        return
+    try:
+        with closing(_connect()) as conn:
+            conn.execute("DELETE FROM setup_audit_events WHERE julianday(occurred_at) < julianday('now', ?)",
+                (f'-{_LOCAL_AUDIT_DAYS} days',))
+            conn.execute("DELETE FROM setup_audit_events WHERE rowid NOT IN "
+                "(SELECT rowid FROM setup_audit_events ORDER BY rowid DESC LIMIT ?)", (_LOCAL_AUDIT_MAX_ROWS,))
+            conn.commit()
+            conn.execute('PRAGMA wal_checkpoint(PASSIVE)')
+            # Reclaim disposable diagnostic pages when deletion frees a
+            # substantial portion; this isolated database holds no statistics.
+            pages = conn.execute('PRAGMA page_count').fetchone()[0]
+            free = conn.execute('PRAGMA freelist_count').fetchone()[0]
+            if pages and free / pages >= 0.25:
+                conn.execute('VACUUM')
+    except Exception as exc:
+        logging.debug('Local diagnostic retention deferred: %s', type(exc).__name__)
 _WORKER_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _TLS = threading.local()
@@ -320,6 +345,7 @@ def _worker() -> None:
         now = time.monotonic()
         if now - last_retry >= 30.0:
             _flush_unsynced(100)
+            _prune_local_audit()
             last_retry = now
 
 

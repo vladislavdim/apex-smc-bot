@@ -11,3 +11,7 @@ setup_audit.db-shm
 apex_state.db*
 apex_memory.db*
 apex_execution_recovery.jsonl
+apex_audit.db*
+.coverage
+.pytest_cache/
+.ruff_cache/

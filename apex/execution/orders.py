@@ -269,9 +269,13 @@ class ExecutionConfig:
 
     @property
     def live_armed(self) -> bool:
+        return self.enabled and self.live_management_armed
+
+    @property
+    def live_management_armed(self) -> bool:
+        """Existing live fills still require protection when new entries stop."""
         return (
-            self.enabled
-            and self.mode == "live"
+            self.mode == "live"
             and self.live_confirmation == LIVE_CONFIRMATION
             and bool(self.api_key and self.api_secret)
         )
@@ -968,7 +972,7 @@ def execute_manager_review(
                 return {"signal_id": signal_id, "status": "DUPLICATE_SKIPPED", "action": action}
     except sqlite3.Error:
         return {"signal_id": signal_id, "status": "MANAGER_STATE_UNAVAILABLE", "action": action}
-    if not config.live_armed or config.kill_switch:
+    if not config.live_management_armed:
         return {"signal_id": signal_id, "status": "LIVE_NOT_ARMED", "action": action}
     if signal_id <= 0:
         return {"signal_id": signal_id, "status": "INVALID_MANAGER_ACTION", "action": action}
@@ -1970,6 +1974,9 @@ def reconcile_live_executions(
     also polls. A non-blocking process lock prevents both paths from creating
     duplicate protective orders. A skipped call is retried on the next tick.
     """
+    config = config or ExecutionConfig.from_env()
+    if not config.live_management_armed:
+        return []
     if not _reconcile_process_lock.acquire(blocking=False):
         logging.debug("[AutoTrading] reconciliation already in progress; tick skipped")
         return []
@@ -1981,7 +1988,7 @@ def reconcile_live_executions(
             db_path=db_path, config=config, client=client,
         )
         active_config = config or ExecutionConfig.from_env()
-        if active_config.live_armed:
+        if active_config.live_management_armed:
             try:
                 from apex.execution.ledger import (
                     reconcile_funding_one, reconcile_one, register_execution_orders,
@@ -2043,7 +2050,7 @@ def _reconcile_live_executions_unlocked(
 ) -> list[dict[str, Any]]:
     """Protect filled live entries and cancel entries whose signal expired."""
     config = config or ExecutionConfig.from_env()
-    if not config.live_armed:
+    if not config.live_management_armed:
         return []
     rows = _live_reconcile_rows(db_path)
     repository = _execution_state_repository()
@@ -2407,7 +2414,7 @@ def execution_status(
         summary["live_reconcile_pending"] = len(_live_reconcile_rows(db_path))
     except Exception as exc:
         summary["error"] = str(exc)
-    if config.live_armed:
+    if config.live_management_armed:
         if refresh_balance:
             summary["account"] = _cached_live_balance_status(
                 db_path,

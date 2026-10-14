@@ -1610,14 +1610,14 @@ def detect_rsi_macd_divergence(candles: list, direction: str) -> dict:
             rsi_low_now    = rsi[-1]  > rsi[-5]
             if price_low_now and rsi_low_now:
                 score += 2
-                signals.append(f"📈 RSI Bullish Divergence — цена↓ RSI↑ (+8)")
+                signals.append("📈 RSI Bullish Divergence — цена↓ RSI↑ (+8)")
         # Bearish divergence: цена растёт, RSI падает
         elif direction == "BEARISH":
             price_high_now = closes[-1] > closes[-5]
             rsi_high_now   = rsi[-1]  < rsi[-5]
             if price_high_now and rsi_high_now:
                 score += 2
-                signals.append(f"📉 RSI Bearish Divergence — цена↑ RSI↓ (+8)")
+                signals.append("📉 RSI Bearish Divergence — цена↑ RSI↓ (+8)")
 
         # Перекупленность/перепроданность
         last_rsi = rsi[-1]
@@ -1654,18 +1654,18 @@ def detect_rsi_macd_divergence(candles: list, direction: str) -> dict:
                 # Bullish crossover: MACD пересекает сигнальную снизу вверх
                 if direction == "BULLISH" and macd_prev < sig_prev and macd_now > sig_now:
                     score += 2
-                    signals.append(f"📈 MACD Bullish Crossover — подтверждение разворота (+8)")
+                    signals.append("📈 MACD Bullish Crossover — подтверждение разворота (+8)")
                 # Bearish crossover
                 elif direction == "BEARISH" and macd_prev > sig_prev and macd_now < sig_now:
                     score += 2
-                    signals.append(f"📉 MACD Bearish Crossover — подтверждение разворота (+8)")
+                    signals.append("📉 MACD Bearish Crossover — подтверждение разворота (+8)")
                 # MACD дивергенция с ценой
                 if direction == "BULLISH" and closes[-1] < closes[-5] and macd_line[-1] > macd_line[-5]:
                     score += 1
-                    signals.append(f"📈 MACD Bullish Divergence — цена↓ MACD↑ (+5)")
+                    signals.append("📈 MACD Bullish Divergence — цена↓ MACD↑ (+5)")
                 elif direction == "BEARISH" and closes[-1] > closes[-5] and macd_line[-1] < macd_line[-5]:
                     score += 1
-                    signals.append(f"📉 MACD Bearish Divergence — цена↑ MACD↓ (+5)")
+                    signals.append("📉 MACD Bearish Divergence — цена↑ MACD↓ (+5)")
 
     weight = score * 4  # score 1 = +4, score 4 = +16
     return {
@@ -1723,16 +1723,16 @@ def calculate_vwap(candles: list) -> dict:
     # Сигнал
     if current > upper_band:
         signal = "BEARISH"  # перекуплен выше VWAP+2σ
-        desc = f"Цена выше VWAP+2σ — перекуплен, возможен откат"
+        desc = "Цена выше VWAP+2σ — перекуплен, возможен откат"
     elif current < lower_band:
         signal = "BULLISH"  # перепродан ниже VWAP-2σ
-        desc = f"Цена ниже VWAP-2σ — перепродан, возможен отскок"
+        desc = "Цена ниже VWAP-2σ — перепродан, возможен отскок"
     elif current > vwap:
         signal = "BULLISH"
-        desc = f"Цена выше VWAP — бычий контроль"
+        desc = "Цена выше VWAP — бычий контроль"
     else:
         signal = "BEARISH"
-        desc = f"Цена ниже VWAP — медвежий контроль"
+        desc = "Цена ниже VWAP — медвежий контроль"
 
     # Близко к VWAP — зона интереса (±0.5%)
     near_vwap = abs(deviation_pct) < 0.5
@@ -2014,11 +2014,11 @@ def detect_mega_trade(candles_4h: list, candles_1d: list, symbol: str = "") -> d
             direction = "BEARISH"
         elif breakout_up:
             score += 3
-            signals.append(f"⬆️ Пробой вверх (объём слабый, вес снижен)")
+            signals.append("⬆️ Пробой вверх (объём слабый, вес снижен)")
             direction = "BULLISH"
         elif breakout_down:
             score += 3
-            signals.append(f"⬇️ Пробой вниз (объём слабый, вес снижен)")
+            signals.append("⬇️ Пробой вниз (объём слабый, вес снижен)")
             direction = "BEARISH"
 
         # Если нет направления — определяем по позиции в диапазоне

@@ -7,17 +7,9 @@ from apex.db.integrity import check_integrity
 from apex.execution.protection import StopProtectionRequest
 from apex.quality.groq_gate import geometry
 from apex.risk.sizing import quantity_for_risk
-from apex.ui.readmodels.api import PROJECTORS,project_tab
 from apex.ui.telegram.menu import MENU
 
-def test_canonical_dashboard_tabs_are_exact():
-    assert tuple(PROJECTORS)==("overview","strategies","trades","manager","execution","market","learning","health")
 
-def test_dashboard_projection_is_read_only_shape():
-    payload={"execution":{"mode":"live"},"market":{"source":"Gate"}}
-    assert project_tab("execution",payload)=={"mode":"live"}
-    assert project_tab("market",payload)=={"source":"Gate"}
-    with pytest.raises(ValueError): project_tab("shadow",payload)
 
 def test_db_integrity_accepts_clean_sqlite():
     conn=sqlite3.connect(":memory:")

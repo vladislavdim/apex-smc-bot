@@ -1,4 +1,4 @@
-"""Controlled Telegram-only release with a cold shared-lease backend cutover.
+"""Controlled Telegram release: one pinned deploy for an already fenced worker.
 
 Only the verified worker is changed. Trading is temporarily disabled while
 the previous process is stopped and the new GitHub-fenced worker is verified.
@@ -100,13 +100,24 @@ def controlled_telegram_release(client, *, commit_sha, retire_dashboard=False):
     changed=client.set_auto_deploy(service_id,False)
     if changed.get('autoDeploy')!='no' and changed.get('autoDeployTrigger')!='off':
         raise ReleaseError('worker automatic deployment was not disabled')
-    print('Telegram release: stopping the verified previous worker before lease migration',flush=True)
-    client._request('POST',f'/services/{service_id}/suspend')
-    wait_stopped(client,service_id,shutdown_seconds=shutdown_seconds)
-    for key,value in {'AUTO_TRADING_ENABLED':'false','APEX_TELEGRAM_ONLY':'true',
-                      'APEX_RUNTIME_LEASE_BACKEND':'github','APEX_RUNTIME_LEASE_TTL_SECONDS':'180'}.items():
-        set_environment(client,service_id,key,value)
-    client._request('POST',f'/services/{service_id}/resume')
+    # A backend migration must stop the old owner. Subsequent releases already
+    # share the same CAS lease, so a pinned rolling deploy avoids the extra boot
+    # caused by resume(). Never roll across different ownership backends.
+    fenced = (environment.get('APEX_RUNTIME_LEASE_BACKEND') == 'github'
+              and environment.get('APEX_TELEGRAM_ONLY', '').lower() == 'true'
+              and service.get('suspended') != 'suspended')
+    if not fenced:
+        print('Telegram release: stopping the previous worker before lease migration', flush=True)
+        client._request('POST', f'/services/{service_id}/suspend')
+        wait_stopped(client, service_id, shutdown_seconds=shutdown_seconds)
+    desired = {'AUTO_TRADING_ENABLED': 'false', 'APEX_TELEGRAM_ONLY': 'true',
+               'APEX_RUNTIME_LEASE_BACKEND': 'github', 'APEX_RUNTIME_LEASE_TTL_SECONDS': '180',
+               'PYTHON_VERSION': (Path(__file__).resolve().parents[1] / '.python-version').read_text().strip()}
+    for key, value in desired.items():
+        if environment.get(key) != value:
+            set_environment(client, service_id, key, value)
+    if not fenced:
+        client._request('POST', f'/services/{service_id}/resume')
     started=datetime.now(timezone.utc)
     deploy=client.trigger(service_id,commit_sha)
     client.wait_live(service_id,deploy['id'])

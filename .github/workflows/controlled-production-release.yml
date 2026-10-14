@@ -46,7 +46,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version-file: '.python-version'
           cache: pip
 
       - name: Install dependencies
@@ -58,6 +58,8 @@ jobs:
           python scripts/verify_v3_completion.py --release-ready
           python scripts/verify_production_authority.py
           python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+          python -m ruff check . --select F821,F822,F823
+          python -m pip_audit -r requirements.txt
           python -m pytest -q
           python -m unittest discover -s tests -q
           TELEGRAM_TOKEN=123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
@@ -88,12 +90,12 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version-file: '.python-version'
 
       - name: Install release dependency
         run: pip install requests
 
-      - name: Cold cutover to Telegram-only worker and verify shared ownership
+      - name: Deploy Telegram-only worker and verify shared ownership
         run: >-
           python scripts/render_telegram_release.py
           --sha "${{ needs.verify.outputs.release_sha }}"

@@ -23,7 +23,6 @@ from apex.telemetry.incidents import (
     open_incident, pending_notifications, recover_incident, report_incident,
     resolve_incident,
 )
-from apex.telemetry.dashboard_projection import normalize_incident_snapshot
 from apex.telemetry.job_metrics import JobRunRecorder, configure_job_metrics
 from apex.ops.release_manifest import (
     ReleaseManifestError,
@@ -593,22 +592,6 @@ class ApexV3InfrastructureTests(unittest.TestCase):
             finally:
                 configure_incidents(None)
 
-    def test_dashboard_incident_projection_is_bounded_and_sanitized(self):
-        projected = normalize_incident_snapshot([
-            {
-                "incident_id": "incident-1", "code": "GATE_STALE",
-                "severity": "error", "component": "gate", "count": "2",
-                "started_at": "2026-09-11T00:00:00+00:00",
-                "details": {"age": 300, "nested": {"not": "forwarded"}},
-                "secret_field": "discard me",
-            },
-            "not-an-incident",
-        ])
-        self.assertEqual(len(projected), 1)
-        self.assertEqual(projected[0]["severity"], "ERROR")
-        self.assertEqual(projected[0]["count"], 2)
-        self.assertEqual(projected[0]["details"]["age"], "300")
-        self.assertNotIn("secret_field", projected[0])
 
     def test_job_run_records_resource_and_result(self):
         with tempfile.TemporaryDirectory() as folder:

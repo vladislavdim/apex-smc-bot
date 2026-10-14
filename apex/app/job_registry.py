@@ -43,7 +43,6 @@ PRODUCTION_JOBS = (
     JobDefinition("state_backup", "cron:3,33", 300, JobPriority.STATE_BACKUP, False),
     JobDefinition("memory_backup", "cron:13,43", 300, JobPriority.STATE_BACKUP, False),
     JobDefinition("brain_backup", "cron:23,53", 300, JobPriority.STATE_BACKUP, False),
-    JobDefinition("live_learning", "interval:1h", 300, JobPriority.LEARNING, False),
 )
 
 JOB_BY_ID = {job.id: job for job in PRODUCTION_JOBS}

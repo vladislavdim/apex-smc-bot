@@ -135,7 +135,7 @@ def run_production(deps: ProductionDependencies, *, max_polling_restarts: int = 
             attempt = restart_count + 1
             logging.error("Polling упал (%s/%s): %s", attempt, max_polling_restarts, exc)
             if attempt >= max_polling_restarts:
-                return
+                raise SystemExit(1) from exc
             time.sleep(10)
             logging.info("Перезапускаем polling...")
         else:

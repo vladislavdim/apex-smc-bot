@@ -1,6 +1,6 @@
 services:
   - type: worker
-    name: apex-smc-bot
+    name: apex-smc-bot-1
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py

@@ -15,6 +15,7 @@ _EMPTY_MEMORY = {
 
 
 def get_user_memory(user_id: int) -> dict:
+    conn = None
     try:
         conn = get_db_conn(timeout=30)
         row = conn.execute(
@@ -22,7 +23,6 @@ def get_user_memory(user_id: int) -> dict:
                       deposit,risk_percent FROM user_memory WHERE user_id=?""",
             (user_id,),
         ).fetchone()
-        conn.close()
         if row:
             return {
                 "name": row[0] or "", "profile": row[1] or "",
@@ -30,8 +30,11 @@ def get_user_memory(user_id: int) -> dict:
                 "messages": row[4] or 0, "deposit": row[5] or 0,
                 "risk": row[6] or 1.0,
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("UI context storage failed: %s", type(exc).__name__)
+    finally:
+        if conn is not None:
+            conn.close()
     return dict(_EMPTY_MEMORY)
 
 
@@ -39,6 +42,7 @@ def update_user_memory(
     user_id: int, name: str = "", profile=None, preferences=None,
     coins=None, deposit=None, risk=None,
 ) -> None:
+    conn = None
     try:
         conn = get_db_conn(timeout=30)
         now = datetime.now().isoformat()
@@ -75,12 +79,15 @@ def update_user_memory(
                 ),
             )
         conn.commit()
-        conn.close()
     except Exception as exc:
         logging.error("Memory error: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def save_chat_log(user_id: int, role: str, content: str) -> None:
+    conn = None
     try:
         conn = get_db_conn(timeout=30)
         conn.execute(
@@ -89,12 +96,15 @@ def save_chat_log(user_id: int, role: str, content: str) -> None:
             (user_id, role, content[:2000]),
         )
         conn.commit()
-        conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("UI context storage failed: %s", type(exc).__name__)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def get_chat_history(user_id: int, limit: int = 15) -> list:
+    conn = None
     try:
         conn = get_db_conn(timeout=30)
         rows = conn.execute(
@@ -102,10 +112,12 @@ def get_chat_history(user_id: int, limit: int = 15) -> list:
                ORDER BY id DESC LIMIT ?""",
             (user_id, limit),
         ).fetchall()
-        conn.close()
         return list(reversed(rows))
     except Exception:
         return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 __all__ = [

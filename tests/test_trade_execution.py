@@ -802,6 +802,47 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "PAPER_PENDING_ENTRY")
         self.assertAlmostEqual(result["plan"]["risk_budget"], 2.5)
 
+    def test_entries_disabled_keeps_reconciliation_and_manager_exit(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT, closed_at TEXT)")
+            conn.execute("INSERT INTO signals (id,result) VALUES (772,'pending')")
+        client = FakeClient(balance=1000, entry_status="FILLED")
+        initial = execute_approved_candidate(CANDIDATE, 772, db_path=self.db_path, config=live_config(), client=client)
+        self.assertEqual(initial['status'], 'PROTECTED')
+        stopped = live_config(enabled=False, kill_switch=True)
+        self.assertFalse(stopped.live_armed)
+        self.assertTrue(stopped.live_management_armed)
+        client.open_positions = lambda: [{"symbol":"BTCUSDT", "positionAmt":"0.49"}]
+        with patch.object(trade_execution, '_reconcile_live_executions_unlocked', return_value=[]) as reconcile:
+            reconcile_live_executions(db_path=self.db_path,config=stopped,client=client)
+        reconcile.assert_called_once()
+        before = len(client.calls)
+        blocked = execute_approved_candidate(CANDIDATE, 773, db_path=self.db_path, config=stopped, client=client)
+        self.assertEqual(blocked['status'], 'DISABLED')
+        self.assertEqual(len(client.calls), before)
+        result = execute_manager_review({'signal_id':772, 'review':{'action':'EXIT','confidence':.9}},
+                                        db_path=self.db_path,config=stopped,client=client)
+        self.assertEqual(result['status'], 'EXECUTED')
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute('SELECT result FROM signals WHERE id=772').fetchone()[0], 'manager_exit')
+
+    def test_disabled_entries_still_protect_a_previously_submitted_fill(self):
+        client = FakeClient(balance=1000, entry_status='NEW')
+        submitted = execute_approved_candidate(CANDIDATE, 775, db_path=self.db_path, config=live_config(), client=client)
+        self.assertEqual(submitted['status'], 'ENTRY_PENDING')
+        client.entry_status = 'FILLED'
+        result = reconcile_live_executions(db_path=self.db_path,config=live_config(enabled=False),client=client)
+        self.assertEqual(result[0]['status'], 'PROTECTED')
+        with sqlite3.connect(self.db_path) as conn:
+            row=conn.execute('SELECT stop_order_id,status FROM trade_executions WHERE signal_id=775').fetchone()
+        self.assertEqual(row, ('stop-1','PROTECTED'))
+
+    def test_unarmed_reconciliation_never_checks_owner_or_exchange(self):
+        from apex.app.runtime import RuntimeSupervisor
+        with patch.object(RuntimeSupervisor,'owns_exchange_management',new_callable=__import__('unittest.mock',fromlist=['PropertyMock']).PropertyMock,side_effect=AssertionError('unarmed owner check')):
+            for cfg in (live_config(enabled=False,api_key=''), ExecutionConfig()):
+                self.assertEqual(reconcile_live_executions(db_path=self.db_path,config=cfg,client=FakeClient()), [])
+
     def test_default_configuration_is_disabled_paper(self):
         config = ExecutionConfig.from_env({})
         self.assertFalse(config.enabled)

@@ -29,6 +29,11 @@ with tempfile.TemporaryDirectory() as directory:
             result=await worker._v3_startup_reconcile_and_market_check()
             calls = [c for c in runtime.mark_component.call_args_list if c.args[0]=='binance_reconciliation']
             assert calls and calls[-1].args[1].value != 'READY'
+        with patch.object(worker, 'get_all_market_pairs', return_value=['BTCUSDT','ETHUSDT']), patch.object(worker, 'full_scan_raw', return_value=None), patch.object(worker, 'detect_accumulation', return_value=None):
+            signals, accumulations, scope = await worker.deep_market_scan(limit=80,with_summary=True)
+        assert scope == {'scope':2,'attempted':2,'checked':2,'failed':0}
+        summary = worker.format_deep_scan_result([],[],{'scope':80,'attempted':2,'checked':1,'failed':1})
+        assert 'частичный' in summary and '1/80' in summary
         stores=[]
         original=worker._v3_maintenance_and_backup
         async def store_backup(reason,*,store='all'):

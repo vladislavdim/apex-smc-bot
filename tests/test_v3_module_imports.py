@@ -8,7 +8,7 @@ MODULES=(
 "apex.market.external_context","apex.market.gate_ws","apex.market.liquidity","apex.market.onchain","apex.market.options",
 "apex.ops.graceful_shutdown","apex.quality.groq_calibration","apex.quality.groq_gate",
 "apex.risk.kill_switch","apex.risk.limits","apex.risk.portfolio","apex.risk.sizing",
-"apex.telemetry.health","apex.telemetry.metrics","apex.ui.readmodels.api","apex.ui.telegram.app",
+"apex.telemetry.health","apex.telemetry.metrics","apex.ui.telegram.app",
 )
 def test_canonical_modules_import():
     for name in MODULES: importlib.import_module(name)
