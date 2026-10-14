@@ -122,3 +122,31 @@ def test_technical_audit_starts_locally_without_restore_or_archiving():
             assert conn.execute("SELECT name FROM sqlite_master WHERE name='setup_audit_events'").fetchone()
     assert '_AUDIT_PERSISTENCE' not in source
     assert 'audit_backup=' not in source
+
+
+def test_shutdown_with_active_scan_name_drains_jobs_before_final_backup():
+    import ast, asyncio, logging
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import Mock, AsyncMock
+    node = next(n for n in ast.parse(Path('apex/app/worker.py').read_text()).body
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == '_shutdown_production_runtime')
+    order = []
+    async def drain():
+        order.append('drain')
+    async def finish(*args):
+        order.append('backup')
+    namespace = {'asyncio': asyncio, 'logging': logging, '_V3_RUNTIME': Mock(),
+        '_production_scheduler': Mock(), '_auto_trade_reconcile_task': None,
+        '_trade_manager_task': None, '_active_market_scan': 'MTF_1H',
+        '_v3_get_lease_client': lambda: SimpleNamespace(configured=False),
+        '_V3_CONFIG': SimpleNamespace(database=SimpleNamespace(state_db_path='state.db'),
+                                    runtime=SimpleNamespace(instance_id='test')),
+        'ShutdownDependencies': lambda **values: values, 'shutdown_production': finish,
+        '_v3_release_runtime_lease': AsyncMock(), '_v3_record_shutdown': Mock(),
+        '_v3_maintenance_and_backup': AsyncMock(), '_MARKET_INTELLIGENCE_OK': False}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'worker-shutdown', 'exec'), namespace)
+    with patch('apex.app.scheduler.drain_production_jobs', side_effect=drain):
+        asyncio.run(namespace['_shutdown_production_runtime']('deploy'))
+    assert order == ['drain', 'backup']
+    namespace['_production_scheduler'].shutdown.assert_called_once_with(wait=True)
