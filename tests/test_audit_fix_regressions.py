@@ -139,6 +139,14 @@ class StorageRegressions(unittest.TestCase):
         import subprocess, sys
         result = subprocess.run([sys.executable, 'tests/swing_positive_probe.py'], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr[-4000:])
+    def test_backup_stage_logs_are_visible_when_root_logging_is_warning(self):
+        import subprocess, sys
+        code = "import logging; logging.basicConfig(level=logging.WARNING); from apex.db.snapshot_io import snapshot_stage; stage=snapshot_stage('probe'); stage.__enter__(); stage.__exit__(None,None,None)"
+        result = subprocess.run([sys.executable,'-c',code], capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('phase=peak',result.stderr)
+        self.assertIn('stage=probe',result.stderr)
+
     def test_fatal_polling_exits_nonzero_after_shutdown(self):
         shutdown = AsyncMock()
         deps = SimpleNamespace(config=SimpleNamespace(integrations=SimpleNamespace(telegram_only=True)),
