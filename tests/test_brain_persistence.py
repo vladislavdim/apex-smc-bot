@@ -531,6 +531,26 @@ class BrainPersistenceTests(unittest.TestCase):
         self.assertEqual(push.call_args.kwargs["snapshot_path"], self.local)
         self.assertEqual(session.patches, [])
 
+    def test_large_backup_does_not_build_unused_base64_payload(self):
+        _make_db(self.remote, knowledge_rows=1)
+        session = _GitHubSession(_bytes(self.remote), sha="a" * 40)
+        manager = self._manager(session)
+        self.assertTrue(manager.restore()["ready"])
+        with sqlite3.connect(self.local) as connection:
+            connection.execute("CREATE TABLE large_binary (value BLOB)")
+            connection.execute("INSERT INTO large_binary VALUES (?)", (os.urandom(9 * 1024 * 1024),))
+
+        def uploaded(**kwargs):
+            session.sha = manager._blob_sha(kwargs["snapshot_path"])
+            return _Response(status_code=201, payload={"content": {"sha": session.sha}})
+
+        with patch("apex.db.git_snapshot.push_snapshot", side_effect=uploaded) as push, \
+             patch("apex.db.backup.base64.b64encode", side_effect=AssertionError("unused JSON payload")):
+            result = manager.backup("large_native")
+        self.assertTrue(result["saved"], result)
+        self.assertEqual(push.call_count, 1)
+        self.assertEqual(session.puts, [])
+
     def test_generation_survives_restart_and_advances_monotonically(self):
         _make_db(self.remote, knowledge_rows=1)
         session = _GitHubSession(_bytes(self.remote), sha="base")

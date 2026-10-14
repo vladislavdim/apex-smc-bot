@@ -750,8 +750,14 @@ class BrainPersistence:
                 # a disk-backed streaming JSON body; injected test transports
                 # keep the small legacy dictionary contract.
                 streaming = bool(requests is not None and isinstance(self.session, requests.Session))
+                native_git = os.path.getsize(upload_path) >= 8 * 1024 * 1024
                 upload = None
-                if streaming:
+                if native_git:
+                    # The Git transport consumes the file directly. Building
+                    # an unused Base64 JSON copy fills the container page cache
+                    # and, for injected transports, retains multiple RAM copies.
+                    pass
+                elif streaming:
                     fd, payload_path = tempfile.mkstemp(
                         dir=os.path.dirname(temp_path), prefix="brain-upload-", suffix=".json"
                     )
@@ -781,7 +787,7 @@ class BrainPersistence:
                     }
 
                 def put_snapshot():
-                    if os.path.getsize(upload_path) >= 8 * 1024 * 1024:
+                    if native_git:
                         return self._upload_via_git_database(snapshot_path=upload_path,
                                                             current_blob_sha=current_sha, message=message)
                     if not streaming:

@@ -33,6 +33,8 @@ def push_snapshot(*, remote_url: str, branch: str, remote_name: str,
     settings = [("pack.threads", "1"), ("pack.windowMemory", "16m"),
                 ("pack.window", "0"), ("pack.deltaCacheSize", "8m"),
                 ("core.deltaBaseCacheLimit", "16m"),
+                # Stream binary snapshots rather than buffering whole blobs.
+                ("core.bigFileThreshold", "1m"),
                 ("http.followRedirects", "false")]
     if token:
         if not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+\.git", remote_url):
