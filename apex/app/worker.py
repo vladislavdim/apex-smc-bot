@@ -406,20 +406,13 @@ _MEMORY_PERSISTENCE = _BrainPersistence(
     remote_name="apex_memory.db",
     compression="gzip",
 )
-# Diagnostic history has its own file and backup; State remains safety-critical.
+# Detailed diagnostics stay local; State, Memory and Brain retain their backups.
 from apex.db.audit_db import audit_path as _audit_path, migrate_audit as _migrate_audit
-from apex.db.audit_db import stage_legacy_events as _stage_audit, retire_legacy_events as _retire_audit
 from apex.telemetry import event_log as _audit_event_log
 from contextlib import closing as _closing
 from apex.db.connection import connect_compatibility as _audit_connect
-_AUDIT_PERSISTENCE = _BrainPersistence(
-    _audit_path(_V3_CONFIG.database.state_db_path),
-    _V3_CONFIG.integrations.github_backup_repo,
-    _V3_CONFIG.integrations.github_token,
-    _V3_CONFIG.integrations.memory_backup_branch,
-    remote_name="apex_audit.db",
-    compression="gzip",
-)
+_AUDIT_DB_PATH = _audit_path(_V3_CONFIG.database.state_db_path)
+_audit_event_log.DB_PATH = _AUDIT_DB_PATH
 _audit_store_ready = False
 _brain_backup_async_lock = None
 _state_backup_async_lock = None
@@ -3799,29 +3792,20 @@ async def backup_memory_db_to_github(reason="scheduled"):
 
 
 async def _v3_prepare_audit_store():
-    """Optional verified restore; on failure the State outbox stays authoritative."""
+    """Local diagnostic log only; statistics and trading state have own backups."""
     global _audit_store_ready
     if _audit_store_ready:
         return True
     try:
-        result = await asyncio.to_thread(_AUDIT_PERSISTENCE.restore)
-        if result.get("reason") == "REMOTE_MISSING" or not _AUDIT_PERSISTENCE.configured:
-            with _closing(_audit_connect(_AUDIT_PERSISTENCE.db_path)) as conn:
-                _migrate_audit(conn)
-            if _AUDIT_PERSISTENCE.configured:
-                result = await asyncio.to_thread(_AUDIT_PERSISTENCE.initialize, "initial_audit_store")
-                if result.get("status") in {"remote_exists", "concurrent_initialize"}:
-                    result = await asyncio.to_thread(_AUDIT_PERSISTENCE.restore)
-        _audit_store_ready = not _AUDIT_PERSISTENCE.configured or bool(result.get("ready"))
-        if _audit_store_ready:
-            _audit_event_log.DB_PATH = _AUDIT_PERSISTENCE.db_path
+        with _closing(_audit_connect(_AUDIT_DB_PATH)) as conn:
+            _migrate_audit(conn)
+        _audit_event_log.DB_PATH = _AUDIT_DB_PATH
+        _audit_store_ready = True
     except Exception as exc:
-        _audit_store_ready = False
-        result = {"status": f"audit_prepare_failed:{type(exc).__name__}"}
-        logging.warning("[AuditPersistence] initialization deferred: %s", type(exc).__name__)
+        logging.warning("[AuditLog] local initialization deferred: %s", type(exc).__name__)
     _V3_RUNTIME.mark_component(
-        "audit_backup", _V3_COMPONENT_STATE.READY if _audit_store_ready else _V3_COMPONENT_STATE.DEGRADED,
-        str(result.get("status") or "unknown"), required=False,
+        "audit_log", _V3_COMPONENT_STATE.READY if _audit_store_ready else _V3_COMPONENT_STATE.DEGRADED,
+        "local diagnostic log" if _audit_store_ready else "local log unavailable", required=False,
     )
     return _audit_store_ready
 
@@ -3830,7 +3814,7 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
     """Back up independently scheduled stores; shutdown can still request all."""
     if store == "all":
         results = {}
-        for name in ("state", "memory", "brain", "audit"):
+        for name in ("state", "memory", "brain"):
             try:
                 results[name] = await _v3_maintenance_and_backup(reason, store=name)
             except Exception as exc:
@@ -3854,7 +3838,7 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
                 )
         return {}
 
-    if store in {"memory", "brain", "audit"}:
+    if store in {"memory", "brain"}:
         resource = _v3_memory_snapshot(
             watch_ratio=_V3_CONFIG.operational.memory_watch_ratio,
             degraded_ratio=_V3_CONFIG.operational.memory_degraded_ratio,
@@ -3864,24 +3848,9 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
         if resource.state in {"DEGRADED", "NEW_ENTRIES_OFF"}:
             return False
     maintenance = await asyncio.to_thread(maintain)
-    receipts = {}
-    if store == "audit":
-        if not await _v3_prepare_audit_store():
-            raise RuntimeError("audit_restore_unavailable")
-        if _AUDIT_PERSISTENCE.configured:
-            receipts = await asyncio.to_thread(
-                _stage_audit, _V3_CONFIG.database.state_db_path, _AUDIT_PERSISTENCE.db_path,
-            )
-        result = await asyncio.to_thread(_AUDIT_PERSISTENCE.backup, reason)
-        # Never remove source rows before the exact audit copy is durable.
-        retired = await asyncio.to_thread(
-            _retire_audit, _V3_CONFIG.database.state_db_path, receipts, result,
-        )
-        result["archived_state_events"] = retired
-    else:
-        callback = {"state": backup_state_db_to_github, "memory": backup_memory_db_to_github,
-                    "brain": backup_db_to_github}[store]
-        result = await callback(reason)
+    callback = {"state": backup_state_db_to_github, "memory": backup_memory_db_to_github,
+                "brain": backup_db_to_github}[store]
+    result = await callback(reason)
     status = result.get("status")
     logging.info("[Backup] store=%s status=%s duration=%s size=%s upload=%s archived=%s",
                  store, status, result.get("duration_seconds"), result.get("size"),
@@ -4411,7 +4380,6 @@ def _build_v3_scheduler():
             state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m", store="state"),
             memory_backup=functools.partial(_v3_maintenance_and_backup, "memory_30m", store="memory"),
             brain_backup=functools.partial(_v3_maintenance_and_backup, "brain_30m", store="brain"),
-            audit_backup=functools.partial(_v3_maintenance_and_backup, "audit_10m", store="audit"),
             runtime_watchdog=_v3_runtime_watchdog,
         ),
         execution_reconcile_seconds=_auto_trade_reconcile_seconds(),

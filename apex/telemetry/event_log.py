@@ -32,7 +32,7 @@ RELEASE_SHA = _CONFIG.runtime.release_sha
 SERVICE_INSTANCE = _CONFIG.runtime.instance_id
 DEPLOY_ID = _CONFIG.runtime.deploy_id
 _MAX_PAYLOAD_CHARS = 60000
-_EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=10000)
+_EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=128)
 _WORKER_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _TLS = threading.local()
@@ -174,6 +174,7 @@ def _persist_event(event: dict[str, Any]) -> None:
     try:
         with closing(_connect()) as conn:
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            payload_json = _payload_text(payload)
             conn.execute("""INSERT OR REPLACE INTO setup_audit_events
                 (event_key,kind,strategy,symbol,occurred_at,payload_json,synced,sync_attempts,last_sync_error)
                 VALUES (?,?,?,?,?,?,CASE WHEN
@@ -184,7 +185,7 @@ def _persist_event(event: dict[str, Any]) -> None:
                         COALESCE((SELECT sync_attempts FROM setup_audit_events WHERE event_key=?),0),
                         (SELECT last_sync_error FROM setup_audit_events WHERE event_key=?))""",
                 (event["event_key"], event["kind"], event.get("strategy", ""), event.get("symbol", ""),
-                 event["occurred_at"], _payload_text(payload), event["event_key"], _payload_text(payload),
+                 event["occurred_at"], payload_json, event["event_key"], payload_json,
                  event["event_key"], event["occurred_at"], event["event_key"], event["event_key"], event["event_key"]))
             conn.commit()
     except Exception as exc:
@@ -347,6 +348,7 @@ def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *
                              else _utc_now()),
              "payload": payload_data}
     try:
+        event["payload"] = json.loads(_payload_text(payload_data))
         _ensure_worker(); _EVENT_QUEUE.put_nowait(event)
     except Exception:
         pass

@@ -81,3 +81,44 @@ def test_candle_router_evicts_old_pairs_without_truncating_strategy_history():
         assert router.get_candles(f'PAIR{symbol}USDT','1h',10)==rows
     assert len(router.cache)==64
     assert router.get_candles('PAIR0USDT','1h',10)==rows
+
+
+def test_optional_diagnostic_queue_has_bounded_detached_payloads():
+    import queue
+    from apex.telemetry import event_log
+    events=queue.Queue(maxsize=128)
+    payload={'score':7,'context':[{'value':'x'*1000} for _ in range(200)]}
+    with patch.object(event_log,'_EVENT_QUEUE',events),patch.object(event_log,'_ensure_worker'):
+        for number in range(200):
+            event_log.emit_event('strategy_attempt','FAST','BTCUSDT',payload,event_key=str(number))
+    payload['score']=99
+    assert events.qsize()==128
+    saved=events.get_nowait()['payload']
+    assert saved['score']==7 and saved.get('payload_truncated') is True
+    assert 'context' not in saved
+
+
+def test_technical_audit_starts_locally_without_restore_or_archiving():
+    import ast, asyncio, logging, sqlite3, tempfile
+    from pathlib import Path
+    from contextlib import closing
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from apex.db.audit_db import migrate_audit
+    from apex.domain.enums import ComponentState
+    source=Path('apex/app/worker.py').read_text()
+    node=next(n for n in ast.parse(source).body if isinstance(n,ast.AsyncFunctionDef) and n.name=='_v3_prepare_audit_store')
+    with tempfile.TemporaryDirectory() as directory:
+        target=str(Path(directory)/'audit.db')
+        events=SimpleNamespace(DB_PATH='state.db')
+        namespace={'asyncio':asyncio,'logging':logging,'_audit_store_ready':False,
+            '_AUDIT_DB_PATH':target,'_audit_event_log':events,'_closing':closing,
+            '_audit_connect':sqlite3.connect,'_migrate_audit':migrate_audit,
+            '_V3_RUNTIME':Mock(),'_V3_COMPONENT_STATE':ComponentState}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'worker-audit','exec'),namespace)
+        assert asyncio.run(namespace['_v3_prepare_audit_store']())
+        assert events.DB_PATH==target
+        with sqlite3.connect(target) as conn:
+            assert conn.execute("SELECT name FROM sqlite_master WHERE name='setup_audit_events'").fetchone()
+    assert '_AUDIT_PERSISTENCE' not in source
+    assert 'audit_backup=' not in source

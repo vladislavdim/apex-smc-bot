@@ -138,7 +138,7 @@ class BackupAndTelemetryRegressionTests(unittest.TestCase):
                 self.assertEqual(recover.called, status in {"saved", "unchanged"})
                 self.assertFalse(runtime.allows_new_entries)
 
-    def test_optional_audit_initialization_failure_keeps_state_outbox(self):
+    def test_failed_local_audit_initialization_does_not_switch_event_destination(self):
         import ast
         import asyncio
         import logging
@@ -151,7 +151,7 @@ class BackupAndTelemetryRegressionTests(unittest.TestCase):
         persistence = SimpleNamespace(configured=True, db_path="audit.db",
             restore=Mock(return_value={"reason": "REMOTE_MISSING", "ready": False}))
         namespace = {"asyncio": asyncio, "logging": logging, "_audit_store_ready": False,
-                     "_AUDIT_PERSISTENCE": persistence, "_audit_event_log": events,
+                     "_AUDIT_DB_PATH": "audit.db", "_audit_event_log": events,
                      "_closing": closing, "_audit_connect": Mock(side_effect=sqlite3.OperationalError("locked")),
                      "_V3_RUNTIME": Mock(), "_V3_COMPONENT_STATE": ComponentState}
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
