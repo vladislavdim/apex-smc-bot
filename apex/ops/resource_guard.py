@@ -16,6 +16,26 @@ class MemorySnapshot:
     limit_bytes: int
     ratio: float
     state: str
+    service_bytes: int = 0
+    working_set_bytes: int = 0
+
+
+def _cgroup_memory() -> tuple[int, int]:
+    """Include child processes; exclude only reclaimable inactive file pages."""
+    for usage_path, stat_path in (
+        ('/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.stat'),
+        ('/sys/fs/cgroup/memory/memory.usage_in_bytes', '/sys/fs/cgroup/memory/memory.stat'),
+    ):
+        try:
+            with open(usage_path, encoding='utf-8') as source:
+                usage = int(source.read().strip())
+            with open(stat_path, encoding='utf-8') as source:
+                stats = {row.split()[0]: int(row.split()[1]) for row in source if len(row.split()) == 2}
+            inactive = stats.get('total_inactive_file', stats.get('inactive_file', 0))
+            return max(0, usage), max(0, usage - inactive)
+        except (OSError, ValueError):
+            continue
+    return 0, 0
 
 
 def _rss_bytes() -> int:
@@ -56,7 +76,9 @@ def memory_snapshot(
         raise ValueError("invalid_memory_thresholds")
     rss = _rss_bytes()
     limit = _memory_limit_bytes(limit_bytes)
-    ratio = (rss / limit) if rss and limit else 0.0
+    service, working_set = _cgroup_memory()
+    used = max(rss, working_set)
+    ratio = (used / limit) if used and limit else 0.0
     if not limit:
         state = "UNKNOWN"
     elif ratio > stop_ratio:
@@ -67,7 +89,7 @@ def memory_snapshot(
         state = "WATCH"
     else:
         state = "NORMAL"
-    return MemorySnapshot(rss, limit, ratio, state)
+    return MemorySnapshot(rss, limit, ratio, state, service, working_set)
 
 
 def memory_snapshot_dict() -> dict[str, object]:

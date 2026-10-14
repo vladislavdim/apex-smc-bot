@@ -782,12 +782,20 @@ def ask_groq_cached(prompt, max_tokens=400, cache_key=None):
     """ask_groq с кэшированием — одинаковые запросы не дублируются"""
     key = cache_key or prompt[:80]
     now = time.time()
+    for old_key, updated in list(_groq_cache_time.items()):
+        if now - updated >= GROQ_CACHE_TTL:
+            _groq_cache.pop(old_key, None)
+            _groq_cache_time.pop(old_key, None)
     if key in _groq_cache and now - _groq_cache_time.get(key, 0) < GROQ_CACHE_TTL:
         return _groq_cache[key]
     result = ask_groq(prompt, max_tokens)
     if result:
         _groq_cache[key] = result
         _groq_cache_time[key] = now
+        while len(_groq_cache) > 128:
+            oldest = min(_groq_cache_time, key=_groq_cache_time.get)
+            _groq_cache.pop(oldest, None)
+            _groq_cache_time.pop(oldest, None)
     return result
 
 

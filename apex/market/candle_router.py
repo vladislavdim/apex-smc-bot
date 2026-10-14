@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import threading
 from collections.abc import Callable
 
 from .snapshot_scope import snapshot_candle_override
@@ -23,6 +24,8 @@ class GateCandleRouter:
         last_closed_at: Callable[[list], object],
     ):
         self.cache = cache
+        self._cache_lock = threading.RLock()
+        self._max_cache_entries = 64
         self._get_shared = get_shared
         self._update_shared = update_shared
         self._fetch_gate = fetch_gate
@@ -40,6 +43,20 @@ class GateCandleRouter:
             return 300
         return 600
 
+    def _prune_cache(self):
+        now = time.time()
+        for key, (_, updated) in list(self.cache.items()):
+            if now - updated >= self._cache_ttl(key.rsplit('_', 1)[-1]):
+                self.cache.pop(key, None)
+        overflow = max(0, len(self.cache) - self._max_cache_entries)
+        for key, _ in sorted(list(self.cache.items()), key=lambda row: row[1][1])[:overflow]:
+            self.cache.pop(key, None)
+
+    def _store_cache(self, key, candles):
+        with self._cache_lock:
+            self.cache[key] = (candles, time.time())
+            self._prune_cache()
+
     def get_candles(self, symbol: str, interval: str = "1h", limit: int = 200) -> list:
         requested_limit = max(1, int(limit or 1))
         snapshot_rows = snapshot_candle_override(
@@ -49,9 +66,11 @@ class GateCandleRouter:
             return snapshot_rows
         cache_key = f"{symbol}_{interval}"
         errors = []
-
-        if cache_key in self.cache:
-            cached, timestamp = self.cache[cache_key]
+        with self._cache_lock:
+            self._prune_cache()
+            item = self.cache.get(cache_key)
+        if item is not None:
+            cached, timestamp = item
             if time.time() - timestamp < self._cache_ttl(interval) and len(cached) >= requested_limit:
                 self._record_health(
                     symbol, interval, True, source="Gate cache",
@@ -62,7 +81,7 @@ class GateCandleRouter:
 
         shared = self._get_shared(symbol, interval)
         if shared and len(shared) >= requested_limit:
-            self.cache[cache_key] = (shared, time.time())
+            self._store_cache(cache_key, shared)
             self._record_health(
                 symbol, interval, True, source="Gate shared cache",
                 candle_count=len(shared), cached=True,
@@ -75,7 +94,7 @@ class GateCandleRouter:
                 result = self._fetch_gate(symbol, interval, requested_limit)
                 candles = result.get("candles", []) if isinstance(result, dict) else []
                 if candles and len(candles) >= 3:
-                    self.cache[cache_key] = (candles, time.time())
+                    self._store_cache(cache_key, candles)
                     self._update_shared(symbol, interval, candles)
                     self._record_health(
                         symbol, interval, True, source="Gate SMC adapter",

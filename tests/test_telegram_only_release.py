@@ -79,3 +79,27 @@ class TelegramReleaseTests(unittest.TestCase):
         self.assertIsNone(release.readiness_from_logs([row({**good,'lease_backend':'http'},now)],'a'*40,True,now))
         self.assertIsNone(release.readiness_from_logs([row({**good,'auto_trading_enabled':False},now)],'a'*40,True,now))
         self.assertTrue(release.readiness_from_logs([row(good,now)],'a'*40,True,now)['ready'])
+
+    def test_dashboard_is_suspended_only_after_worker_readiness(self):
+        client=Client('false')
+        web_id,web_name=release.EXPECTED_SERVICES['web']
+        old_service,old_request=client.service,client._request
+        web_suspended=[False]
+        def service(identifier):
+            if identifier==web_id:
+                return {'id':web_id,'name':web_name,'repo':release.EXPECTED_REPOSITORY,
+                    'branch':'main','type':'web_service',
+                    'suspended':'suspended' if web_suspended[0] else 'not_suspended'}
+            return old_service(identifier)
+        def request(method,path,**kwargs):
+            if web_id in path:
+                self.assertIn(('ready',True),client.events)
+                web_suspended[0]=True;client.events.append(('web_suspend',path));return {}
+            return old_request(method,path,**kwargs)
+        client.service,client._request=service,request
+        def ready(*args):
+            client.events.append(('ready',True));return {'ready':True}
+        with patch.object(release,'wait_stopped'),patch.object(release,'wait_ready',side_effect=ready):
+            result=release.controlled_telegram_release(client,commit_sha='a'*40,retire_dashboard=True)
+        self.assertTrue(result['dashboard_suspended'])
+        self.assertEqual(sum(event[0]=='web_suspend' for event in client.events),1)

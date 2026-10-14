@@ -8,7 +8,6 @@ from unittest.mock import patch
 from core.apex_v2 import (
     assess_entry_execution,
     build_trade_thesis,
-    dashboard_snapshot,
     ensure_apex_v2_schema,
     freeze_trade_thesis,
     material_events,
@@ -87,95 +86,8 @@ class ApexV2Tests(unittest.TestCase):
     def test_material_events_are_deduplicated_and_noise_is_ignored(self):
         self.assertEqual(material_events(["BOS", "bos", "NO_CHANGE", "TP1_HIT"]), ["BOS", "TP1_HIT"])
 
-    def test_decisions_and_snapshots_are_idempotent(self):
-        self.assertTrue(record_decision(
-            action_id="a-1", decision_source="GROQ_MANAGER", action="HOLD",
-            signal_id=1, context={"gate": "fresh"}, db_path=self.db_path,
-        ))
-        self.assertFalse(record_decision(
-            action_id="a-1", decision_source="GROQ_MANAGER", action="CLOSE",
-            signal_id=1, context={"gate": "fresh"}, db_path=self.db_path,
-        ))
-        market = store_market_state({"regime": "trend", "btc_direction": "bullish"}, self.db_path)
-        portfolio = portfolio_risk_snapshot([])
-        store_portfolio_snapshot(portfolio, self.db_path)
-        upsert_incident("gate:test", "gate", "warning", "test", db_path=self.db_path)
-        snap = dashboard_snapshot(self.db_path)
-        self.assertEqual(market["regime"], "TREND")
-        self.assertEqual(snap["portfolio"]["risk_state"], "OK")
-        self.assertEqual(len(snap["open_incidents"]), 1)
-        upsert_incident("gate:test", "gate", "warning", "resolved", resolved=True, db_path=self.db_path)
-        self.assertEqual(dashboard_snapshot(self.db_path)["open_incidents"], [])
 
 
-class DashboardProductionSourceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        with open("apex/ui/dashboard/server.py", encoding="utf-8") as handle:
-            cls.stats = handle.read()
-
-    def test_v3_projection_and_read_only_contract_exist(self):
-        self.assertIn("V3_DASHBOARD_HTML", self.stats)
-        self.assertIn("Protected read-only APEX strategy statistics service", self.stats)
-        self.assertNotIn('p.path=="/api/research"', self.stats)
-
-    def test_expired_pending_rows_are_excluded(self):
-        self.assertIn("_not_expired", self.stats)
-        self.assertIn("parsed > now_utc", self.stats)
-
-    def test_rr_catalog_has_no_old_ceiling(self):
-        with open("apex/strategies/specifications.py", encoding="utf-8") as handle:
-            catalog = handle.read()
-        self.assertIn('"TP1 RR is at least 2.0"', catalog)
-        self.assertNotIn('"TP1 RR is between 2.0 and 4.0"', catalog)
-
-    def test_dashboard_joins_v2_snapshot_and_drops_expired_pending(self):
-        from apex.ui.dashboard import server as stats_server
-        release = "abc123"
-        events = [
-            {"event_key": "a", "kind": "attempt", "strategy": "FAST", "symbol": "BNBUSDT",
-             "occurred_at": "2026-09-08T07:48:11+00:00", "payload": {
-                 "release_sha": release, "attempt_key": "a", "strategy": "FAST", "symbol": "BNBUSDT",
-                 "finished_at": "2026-09-08T07:48:11+00:00", "outcome": "FILTERED",
-                 "checks": [], "candidate": {}, "stop": {"label": "rr < 2.0", "snapshot": {
-                     "direction": "BULLISH", "entry": 752.8, "sl": 744.214, "tp1": 754.15,
-                     "current_price": 754.85, "rr": 0.16,
-                 }},
-             }},
-            {"event_key": "l", "kind": "ltf_watch", "strategy": "ZONE", "symbol": "XLMUSDT",
-             "occurred_at": "2026-09-08T08:00:00+00:00", "payload": {
-                 "release_sha": release, "state": "WAITING", "expires_at": "2020-01-01T00:00:00+00:00",
-             }},
-            {"event_key": "v", "kind": "apex_v2_snapshot", "strategy": "SYSTEM", "symbol": "",
-             "occurred_at": "2026-09-08T08:00:00+00:00", "payload": {
-                 "release_sha": release, "versions": {"apex_version": "2.0"},
-                 "portfolio": {"risk_state": "OK", "open_positions": 0},
-                 "execution_mode": {"mode": "paper", "live_armed": False}, "open_incidents": [],
-             }},
-        ]
-        with patch.object(stats_server, "_fetch", return_value=events):
-            result = stats_server._build_dashboard_uncached(release=release)
-        self.assertEqual(result["ltf_watch"]["waiting"], 0)
-        self.assertEqual(result["versions"]["apex_version"], "2.0")
-        self.assertEqual(result["opportunity_review"]["counts"]["TARGET_ALREADY_PASSED"], 1)
-
-    def test_dashboard_switches_to_newer_state_owned_v3_snapshot(self):
-        from apex.ui.dashboard import server as stats_server
-        events = [
-            {"event_key": "old", "kind": "apex_v2_snapshot", "strategy": "SYSTEM",
-             "symbol": "", "occurred_at": "2026-09-08T08:00:00+00:00",
-             "payload": {"execution_health": {"source": "LEGACY"},
-                         "manager_db": {"source": "LEGACY"}}},
-            {"event_key": "new", "kind": "apex_v3_snapshot", "strategy": "SYSTEM",
-             "symbol": "", "occurred_at": "2026-09-08T08:01:00+00:00",
-             "payload": {"telemetry_schema": "APEX_V3",
-                         "execution_health": {"source": "APEX_STATE_DB"},
-                         "manager_db": {"source": "APEX_STATE_DB"}}},
-        ]
-        with patch.object(stats_server, "_fetch", return_value=events):
-            result = stats_server._build_dashboard_uncached()
-        self.assertEqual(result["execution_health"]["source"], "APEX_STATE_DB")
-        self.assertEqual(result["manager_db"]["source"], "APEX_STATE_DB")
 
 
 if __name__ == "__main__":

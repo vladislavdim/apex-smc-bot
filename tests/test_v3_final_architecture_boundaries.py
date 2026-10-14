@@ -7,7 +7,7 @@ from apex.db.integrity import check_integrity
 from apex.execution.protection import StopProtectionRequest
 from apex.quality.groq_gate import geometry
 from apex.risk.sizing import quantity_for_risk
-from apex.ui.dashboard.api import PROJECTORS,project_tab
+from apex.ui.readmodels.api import PROJECTORS,project_tab
 from apex.ui.telegram.menu import MENU
 
 def test_canonical_dashboard_tabs_are_exact():

@@ -29,7 +29,7 @@ class WatchdogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.ratio, 0.95)
 
     def test_memory_guard_uses_central_config_thresholds(self):
-        with patch("apex.ops.resource_guard._rss_bytes", return_value=70), patch(
+        with patch("apex.ops.resource_guard._cgroup_memory", return_value=(0, 0)), patch("apex.ops.resource_guard._rss_bytes", return_value=70), patch(
             "apex.ops.resource_guard._memory_limit_bytes", return_value=100,
         ):
             self.assertEqual(memory_snapshot(watch_ratio=0.50, degraded_ratio=0.60, stop_ratio=0.80).state, "DEGRADED")
@@ -38,7 +38,7 @@ class WatchdogTests(unittest.IsolatedAsyncioTestCase):
             memory_snapshot(watch_ratio=0.8, degraded_ratio=0.7, stop_ratio=0.9)
 
     def test_memory_guard_accepts_the_typed_config_limit(self):
-        with patch("apex.ops.resource_guard._rss_bytes", return_value=70):
+        with patch("apex.ops.resource_guard._cgroup_memory", return_value=(0, 0)), patch("apex.ops.resource_guard._rss_bytes", return_value=70):
             snapshot = memory_snapshot(
                 watch_ratio=0.50,
                 degraded_ratio=0.60,

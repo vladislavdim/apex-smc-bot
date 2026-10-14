@@ -84,11 +84,11 @@ def test_daily_loss_uses_net_commissions_and_funding():
     client.income_history=Mock(return_value=[{'incomeType':'REALIZED_PNL','income':'-9','asset':'USDT'}, {'incomeType':'COMMISSION','income':'-2','asset':'USDT'}, {'incomeType':'FUNDING_FEE','income':'-1','asset':'USDT'}])
     assert client.realized_pnl_since(1)==-12
 
-def test_release_workflow_installs_database_driver():
+def test_release_workflow_has_no_postgresql_dependency():
     import yaml
     workflow=yaml.safe_load(Path('.github/workflows/controlled-production-release.yml').read_text())
     install='\n'.join(s.get('run','') for s in workflow['jobs']['deploy']['steps'])
-    assert 'psycopg2' in install or '-r requirements.txt' in install
+    assert 'pip install requests' in install and 'psycopg2' not in install
 
 def test_nonfinite_daily_loss_config_is_invalid():
     from apex.config.settings import ApexConfig
@@ -123,19 +123,6 @@ def test_tp1_state_transition_is_persisted_in_state_mode(tmp_path):
     finally:
         engine.configure_manager_state(None)
 
-def test_database_driver_failure_is_classified_as_local_dependency_error():
-    spec=importlib.util.spec_from_file_location('apex_audit_release', 'scripts/render_controlled_release.py')
-    release=importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(release)
-    client=Mock()
-    client._request.return_value=[{'envVar':{'key':'DATABASE_URL','value':'postgresql://example.invalid/db'}}]
-    real_import=builtins.__import__
-    def imported(name,*args,**kwargs):
-        if name=='psycopg2': raise ModuleNotFoundError('psycopg2 missing')
-        return real_import(name,*args,**kwargs)
-    with patch('builtins.__import__',side_effect=imported):
-        result=release.print_database_diagnostics(client)
-    assert result['status']!='unavailable'
 
 def test_same_side_exposure_normalizes_direction_aliases(state_factory):
     repository=ExecutionRepository(state_factory)

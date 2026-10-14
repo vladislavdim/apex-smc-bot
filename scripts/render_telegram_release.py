@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from scripts.render_controlled_release import (
+from scripts.render_client import (
     EXPECTED_REPOSITORY, EXPECTED_SERVICES, RenderReleaseClient, ReleaseError, verify_service,
 )
 
@@ -79,7 +79,7 @@ def wait_ready(client, service_id, sha, enabled, not_before, *, timeout=1200):
     raise ReleaseError('Telegram worker did not confirm ready with the requested release and shared GitHub lease')
 
 
-def controlled_telegram_release(client, *, commit_sha):
+def controlled_telegram_release(client, *, commit_sha, retire_dashboard=False):
     if not re.fullmatch(r'[0-9a-f]{40}',commit_sha):
         raise ReleaseError('exact immutable release SHA required')
     service_id,name=EXPECTED_SERVICES['worker']
@@ -118,17 +118,31 @@ def controlled_telegram_release(client, *, commit_sha):
         deploy=client.trigger(service_id,commit_sha)
         client.wait_live(service_id,deploy['id'])
         ready=wait_ready(client,service_id,commit_sha,True,started)
-    return {'commit_sha':commit_sha,'worker_deploy_id':deploy['id'],'worker_health':ready}
+    result = {'commit_sha':commit_sha,'worker_deploy_id':deploy['id'],'worker_health':ready}
+    if retire_dashboard:
+        web_id, web_name = EXPECTED_SERVICES['web']
+        web = client.service(web_id)
+        verify_service({**web, 'suspended':'not_suspended'}, service_id=web_id, expected_name=web_name)
+        if web.get('type') != 'web_service':
+            raise ReleaseError('dashboard retirement requires the verified web service')
+        client.set_auto_deploy(web_id, False)
+        if web.get('suspended') != 'suspended':
+            client._request('POST',f'/services/{web_id}/suspend')
+        if client.service(web_id).get('suspended') != 'suspended':
+            raise ReleaseError('dashboard suspension was not confirmed; worker is ready')
+        result['dashboard_suspended'] = True
+    return result
 
 
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--sha',required=True)
+    parser.add_argument('--retire-dashboard', action='store_true')
     args=parser.parse_args()
     if os.environ.get('APEX_RELEASE_CONFIRMATION')!='DEPLOY_APEX_PRODUCTION':
         raise ReleaseError('exact production confirmation required')
     result=controlled_telegram_release(RenderReleaseClient(os.environ.get('RENDER_API_KEY','')),
-                                      commit_sha=args.sha.lower())
+                                      commit_sha=args.sha.lower(), retire_dashboard=args.retire_dashboard)
     print('APEX Telegram release ready: '+json.dumps(result,sort_keys=True),flush=True)
     return 0
 

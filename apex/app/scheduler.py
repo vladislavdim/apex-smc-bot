@@ -26,7 +26,6 @@ JOB_COMPONENT = {
     "market_zone": "scanner_zone",
     "market_swing": "scanner_swing",
     "market_wyckoff": "scanner_wyckoff",
-    "dashboard_telemetry": "dashboard_telemetry",
     "state_backup": "backup",
     "memory_backup": "memory_backup",
     "brain_backup": "brain_backup",
@@ -47,7 +46,6 @@ class SchedulerCallbacks:
     market_wyckoff: Callable[..., Any]
     market_ltf_watch: Callable[..., Any]
     keepalive: Callable[..., Any]
-    dashboard_telemetry: Callable[..., Any]
     alerts: Callable[..., Any]
     state_backup: Callable[..., Any]
     runtime_watchdog: Callable[..., Any]
@@ -80,6 +78,25 @@ async def _invoke(callback: Callable[..., Any]) -> Any:
     return result
 
 
+async def _measured_invoke(job_id, callback):
+    measured = job_id.startswith('market_') or job_id.endswith('_backup')
+    def record(phase):
+        from apex.ops.resource_guard import memory_snapshot
+        snapshot = memory_snapshot()
+        logger = logging.getLogger('apex.resources')
+        logger.setLevel(logging.INFO)
+        logger.info('[APEX Resources] job=%s phase=%s rss=%s service=%s working_set=%s limit=%s',
+                    job_id, phase, snapshot.rss_bytes, snapshot.service_bytes,
+                    snapshot.working_set_bytes, snapshot.limit_bytes)
+    if measured:
+        record('start')
+    try:
+        return await _invoke(callback)
+    finally:
+        if measured:
+            record('end')
+
+
 def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
     definition = JOB_BY_ID.get(job_id)
     timeout = definition.timeout_seconds if definition else 300
@@ -93,7 +110,7 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
         if recorder is not None:
             recorder.__enter__()
         try:
-            work = asyncio.create_task(_invoke(callback))
+            work = asyncio.create_task(_measured_invoke(job_id, callback))
             _RUNNING_JOBS.add(work)
             work.add_done_callback(_job_finished)
             result = await asyncio.wait_for(asyncio.shield(work), timeout=timeout)
@@ -191,7 +208,6 @@ def build_production_scheduler(
     add("market_intelligence_primary", callbacks.market_intelligence_primary, "cron", minute=10, timezone="UTC")
     add("trade_manager", callbacks.trade_manager, "cron", minute="1,6,11,16,21,26,31,36,41,46,51,56", timezone="UTC")
     add("keepalive", callbacks.keepalive, "interval", minutes=10)
-    add("dashboard_telemetry", callbacks.dashboard_telemetry, "interval", minutes=10)
     add("alerts", callbacks.alerts, "interval", minutes=5)
     add("state_backup", callbacks.state_backup, "cron", minute="3,33", timezone="UTC")
     for name, minute in (("memory_backup", "13,43"), ("brain_backup", "23,53"),

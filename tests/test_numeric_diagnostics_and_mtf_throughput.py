@@ -5,7 +5,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BOT = (ROOT / "apex/app/worker.py").read_text(encoding="utf-8")
 MARKET = (ROOT / "apex" / "compatibility" / "legacy_market_runtime.py").read_text(encoding="utf-8")
-STATS = (ROOT / "apex/ui/dashboard/server.py").read_text(encoding="utf-8")
 
 
 class NumericDiagnosticsAndMtfThroughputTests(unittest.TestCase):
@@ -37,11 +36,6 @@ class NumericDiagnosticsAndMtfThroughputTests(unittest.TestCase):
         self.assertIn('"old_range_under_25"', MARKET)
         self.assertIn('"structural_box_under_25"', MARKET)
 
-    def test_dashboard_aggregates_live_numeric_observations_without_shadow(self):
-        self.assertIn('"numeric_telemetry":numeric_telemetry', STATS)
-        self.assertIn('"wyckoff_observation":wy_observation', STATS)
-        self.assertIn('"wyckoff_accumulation_observation":wy_acc_observation', STATS)
-        self.assertNotIn('"wyckoff_shadow"', STATS)
 
 
 if __name__ == "__main__":
