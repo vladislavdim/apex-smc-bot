@@ -49,7 +49,7 @@ class RuntimeSupervisor:
         "scanner_fast", "scanner_mtf", "scanner_zone", "scanner_swing",
         "scanner_wyckoff", "state_db", "memory_db", "binance_reconciliation",
         "risk_engine", "manager", "manager_reconciliation", "groq", "telegram",
-        "backup", "dashboard_telemetry", "instance_fencing", "restart_guard",
+        "backup", "instance_fencing", "restart_guard",
         "config", "cpu", "memory", "strategy_activation", "market_intelligence",
     })
 

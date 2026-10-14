@@ -8,9 +8,7 @@ REQUIRED=(
 "apex/manager/events.py","apex/manager/playbooks.py","apex/manager/structure.py","apex/manager/reconcile.py",
 "apex/learning/outcomes.py","apex/learning/execution_quality.py","apex/learning/groq_performance.py",
 "apex/telemetry/metrics.py","apex/telemetry/health.py","apex/ops/graceful_shutdown.py","apex/app/shutdown.py",
-"apex/ui/readmodels/api.py","apex/ui/readmodels/overview.py","apex/ui/readmodels/strategies.py",
-"apex/ui/readmodels/trades.py","apex/ui/readmodels/manager.py","apex/ui/readmodels/execution.py","apex/ui/readmodels/market.py",
-"apex/ui/readmodels/learning.py","apex/ui/readmodels/health.py","scripts/verify_release.py","scripts/migrate_v3.py","scripts/inspect_state.py")
+"scripts/verify_release.py","scripts/migrate_v3.py","scripts/inspect_state.py")
 
 def test_required_v3_surfaces_exist():
     missing=[p for p in REQUIRED if not (ROOT/p).is_file()]

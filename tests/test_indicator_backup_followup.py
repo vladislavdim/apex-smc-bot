@@ -189,7 +189,7 @@ class BackupAndTelemetryRegressionTests(unittest.TestCase):
         from types import SimpleNamespace
         config = SimpleNamespace(integrations=SimpleNamespace(stats_ingest_url="https://example.invalid", stats_ingest_token="test"))
         post = Mock(return_value=SimpleNamespace(status_code=200))
-        events = [{"event_key": str(i), "payload": {"text": "я" * 59000}} for i in range(20)]
+        events = [{"event_key": str(i), "payload": {"text": "я" * 59000}} for i in range(100)]
         with patch.object(event_log.ApexConfig, "from_env", return_value=config), patch("requests.post", post):
             self.assertTrue(event_log._post_events(events))
         self.assertGreater(post.call_count, 1)

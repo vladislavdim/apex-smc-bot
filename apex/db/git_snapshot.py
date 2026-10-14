@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 from types import SimpleNamespace
+from apex.db.snapshot_io import discard_file_cache, snapshot_stage
 
 
 def push_snapshot(*, remote_url: str, branch: str, remote_name: str,
@@ -53,8 +54,17 @@ def push_snapshot(*, remote_url: str, branch: str, remote_name: str,
     with tempfile.TemporaryDirectory(prefix="apex-git-backup-") as directory:
         def run(*args, input=None, check=True):
             try:
-                result = subprocess.run(["git", *args], cwd=directory, env=env,
-                                        input=input, capture_output=True, timeout=timeout)
+                with snapshot_stage('git_' + args[0], snapshot_path):
+                    result = subprocess.run(["git", *args], cwd=directory, env=env,
+                                            input=input, capture_output=True, timeout=timeout)
+                for root, _, files in os.walk(directory):
+                    for name in files:
+                        path = os.path.join(root, name)
+                        try:
+                            if os.path.getsize(path) >= 1024 * 1024:
+                                discard_file_cache(path, sync=True)
+                        except OSError:
+                            pass
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError(f"Git snapshot transport unavailable: {type(exc).__name__}") from None
             if check and result.returncode:

@@ -1096,37 +1096,6 @@ def ask_ai(user_id, user_name, user_message):
 
     msg_lower = user_message.lower()
 
-    # ── Триггер глубокого скана всего рынка ──
-    deep_scan_triggers = [
-        "есть сделки", "какие сделки", "что торговать", "что покупать",
-        "что брать", "что входить", "найди сделки", "найди сигналы",
-        "есть сигналы", "какие сигналы", "сканируй рынок", "просканируй",
-        "лучшие монеты", "что памп", "что иксанет", "что даст иксы",
-        "какие монеты", "где входить", "есть ли сделки"
-    ]
-    if any(t in msg_lower for t in deep_scan_triggers):
-        try:
-            loop = asyncio.get_event_loop()
-            signals, accumulations = loop.run_until_complete(deep_market_scan(limit=150))
-            total = 150
-            result_text = format_deep_scan_result(signals, accumulations, total)
-            return result_text
-        except Exception as e:
-            logging.error(f"deep_market_scan in ask_ai: {e}")
-            # Продолжаем как обычный запрос если скан упал
-
-    needs_price = any(kw in msg_lower for kw in [
-        "цена", "курс", "сколько", "почём", "стоит", "биткоин", "btc", "бтк", "бткс",
-        "eth", "эфир", "sol", "соль", "рынок", "памп", "дамп", "упал", "вырос", "сейчас",
-        "bnb", "xrp", "рипл", "dogeусdt", "doge", "avax", "link", "цены", "монет",
-        "торгуется", "котировки", "стоимость", "baidu", "ton", "near", "sui", "apt",
-        "крипта", "альты", "альткоины", "покупать", "продавать", "лонг", "шорт"
-    ])
-    needs_research = any(kw in msg_lower for kw in [
-        "почему", "что случилось", "прогноз", "анализ", "расскажи",
-        "новости", "что думаешь", "объясни", "загугли", "найди", "поищи",
-        "что происходит", "тренд", "перспективы", "будет"
-    ])
 
     # Живые цены берём с того же Gate USD-M venue, что и стратегии.
     live_prices_text = ""
@@ -1206,9 +1175,7 @@ def ask_ai(user_id, user_name, user_message):
 
     # Определяем тип вопроса для точного routing
     q = user_message.lower()
-    is_list_q  = any(w in q for w in ["список", "какие монеты", "по каким", "мониторинг", "отслеживаешь", "какие пары", "видишь монеты", "доступ", "какие данные"])
     is_deal_q  = any(w in q for w in ["сделк", "сигнал", "вход", "выход", "лонг", "шорт", "купить", "продать", "tp", "стоп"])
-    is_price_q = any(w in q for w in ["цена", "курс", "сколько стоит", "почём", "стоимость"])
 
     # ── Триггер анализа конкретной монеты ──
     # "разбор btc", "анализ ton", "посмотри на sol", "что по eth"
@@ -1894,6 +1861,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # ── Groq анализирует реальную картину сетапа (бонус, не блокирует) ──
         _swing_groq_ok = False
+        _swing_ob = None
         try:
             last_candles_summary = []
             for c in candles[-5:]:
@@ -1917,9 +1885,9 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
             candles_str = " | ".join(last_candles_summary)
             # OB/FVG зоны для промпта
-            _sw_ob = find_ob(candles, direction)
+            _swing_ob = find_ob(candles, direction)
             _sw_fvg = find_fvg(candles, direction)
-            _ob_desc = f"OB: {_sw_ob['bottom']:.6f}–{_sw_ob['top']:.6f}" if _sw_ob else "OB: нет"
+            _ob_desc = f"OB: {_swing_ob['bottom']:.6f}–{_swing_ob['top']:.6f}" if _swing_ob else "OB: нет"
             _fvg_desc = f"FVG: {_sw_fvg['bottom']:.6f}–{_sw_fvg['top']:.6f}" if _sw_fvg else "FVG: нет"
             # Volume profile последних 10 свечей
             _vol_10 = [c.get("volume", 0) for c in candles[-10:]]
@@ -2807,24 +2775,24 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         # AR найден
         if "AR" in phases:
             score += 10
-            signals.append(f"✅ AR (Automatic Rally) — кит выкупает")
+            signals.append("✅ AR (Automatic Rally) — кит выкупает")
 
         # ST найден — тест с меньшим объёмом
         if "ST" in phases:
             score += 10
-            signals.append(f"✅ ST (Secondary Test) — объём падает на тесте")
+            signals.append("✅ ST (Secondary Test) — объём падает на тесте")
 
         # Spring найден — самый важный!
         spring_found = phases.get("Spring", {}).get("found", False)
         if spring_found:
             score += 25
-            signals.append(f"🎯 SPRING! Ложный пробой лоу с возвратом")
+            signals.append("🎯 SPRING! Ложный пробой лоу с возвратом")
 
         # SOS найден — подтверждение разворота
         sos_found = phases.get("SOS", {}).get("found", False)
         if sos_found:
             score += 20
-            signals.append(f"💪 SOS (Sign of Strength) — пробой AR с объёмом!")
+            signals.append("💪 SOS (Sign of Strength) — пробой AR с объёмом!")
 
         # ── 4. ОБЪЁМ СЖИМАЕТСЯ В БОКОВИКЕ ──
         all_vols = [c["volume"] for c in candles_1d[-50:-20]]
@@ -2994,7 +2962,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
             pass
 
         if not logic:
-            logic = f"Spring после SC+AR+ST — разворот Wyckoff"
+            logic = "Spring после SC+AR+ST — разворот Wyckoff"
 
         risk   = abs(entry - sl)
         reward = abs(tp - entry)
@@ -3131,25 +3099,25 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
 
         if "BC" in phases:
             score += 15
-            signals.append(f"✅ BC (Buying Climax) — эйфория с объёмом")
+            signals.append("✅ BC (Buying Climax) — эйфория с объёмом")
 
         if "AR" in phases:
             score += 10
-            signals.append(f"✅ AR (Automatic Reaction) — первый откат")
+            signals.append("✅ AR (Automatic Reaction) — первый откат")
 
         if "ST" in phases:
             score += 10
-            signals.append(f"✅ ST (Secondary Test) — объём падает на тесте вершины")
+            signals.append("✅ ST (Secondary Test) — объём падает на тесте вершины")
 
         utad_found = phases.get("UTAD", {}).get("found", False)
         if utad_found:
             score += 25
-            signals.append(f"🎯 UTAD! Ложный пробой хая — ловушка для покупателей")
+            signals.append("🎯 UTAD! Ложный пробой хая — ловушка для покупателей")
 
         sow_found = phases.get("SOW", {}).get("found", False)
         if sow_found:
             score += 20
-            signals.append(f"💪 SOW (Sign of Weakness) — пробой AR вниз с объёмом!")
+            signals.append("💪 SOW (Sign of Weakness) — пробой AR вниз с объёмом!")
 
         # ── 4. ОБЪЁМ СЖИМАЕТСЯ В БОКОВИКЕ ──
         all_vols = [c["volume"] for c in candles_1d[-50:-20]]
@@ -3305,7 +3273,7 @@ def detect_wyckoff_distribution(symbol: str) -> dict | None:
             pass
 
         if not logic:
-            logic = f"UTAD после BC+AR+ST — дистрибуция Wyckoff"
+            logic = "UTAD после BC+AR+ST — дистрибуция Wyckoff"
 
         risk   = abs(sl - entry)
         reward = abs(entry - tp)
@@ -3950,190 +3918,3 @@ def smc_core_check(symbol: str, candles: list, direction: str, timeframe: str = 
     # integration calls it instead of a canonical strategy builder.
     logging.warning("smc_core_check is deprecated; canonical strategy scanner required")
     return None
-
-    # Unreachable legacy implementation retained for source compatibility.
-    try:
-        if not candles or len(candles) < 20:
-            return None
-
-        # ── Precomputed indicators — без повторных расчётов ──
-        _ind = get_precomputed_indicators(symbol, timeframe)
-        price = _ind.get("price", candles[-1]["close"])
-        atr = _ind.get("atr", average_true_range(candles, 14))
-        ema20 = _ind.get("ema20", price)
-        ema50 = _ind.get("ema50", price)
-        hh_hl = _ind.get("hh_hl", False)
-        ll_lh = _ind.get("ll_lh", False)
-        _adx = _ind.get("adx", 20)
-        _vf = _ind.get("volatility_factor", 1.0)
-
-        if atr == 0:
-            return None
-
-        _ap = get_adaptive_params(symbol, candles, timeframe)
-
-        # ── MUST 1: Зона OB/FVG ──
-        ob = find_ob(candles, direction)
-        fvg = find_fvg(candles, direction)
-        in_ob = ob and abs(price - (ob["top"] + ob["bottom"]) / 2) <= atr * _vf
-        in_fvg = fvg and abs(price - (fvg["top"] + fvg["bottom"]) / 2) <= atr * _vf
-        zone = in_ob or in_fvg
-        zone_desc = ""
-        if in_ob and ob:
-            zone_desc = f"OB {smart_price_fmt(ob['bottom'])}-{smart_price_fmt(ob['top'])}"
-        elif in_fvg and fvg:
-            zone_desc = f"FVG {smart_price_fmt(fvg['bottom'])}-{smart_price_fmt(fvg['top'])}"
-
-        if not zone:
-            return None
-
-        # ── MUST 2: Тренд (EMA50 + структура HH/HL + ADX) ──
-        if direction == "BULLISH":
-            # Weak trend (ADX<20): разрешаем LONG даже ниже EMA50 если структура HH/HL
-            if _ap["adx_weak"]:
-                trend = hh_hl or (ema20 > ema50)
-            else:
-                trend = (price > ema50 and ema20 > ema50) or hh_hl
-        else:
-            if _ap["adx_weak"]:
-                trend = ll_lh or (ema20 < ema50)
-            else:
-                trend = (price < ema50 and ema20 < ema50) or ll_lh
-
-        if not trend:
-            return None
-
-        # ── MUST 3: RR (entry/sl/tp из структуры) ──
-        if direction == "BULLISH":
-            entry = smart_round(price)
-            sl_candidate = ob["bottom"] * 0.998 if in_ob and ob else (fvg["bottom"] * 0.998 if in_fvg and fvg else entry - atr * _vf)
-            sl = smart_round(max(sl_candidate, entry * 0.96))  # cap 4%
-        else:
-            entry = smart_round(price)
-            sl_candidate = ob["top"] * 1.002 if in_ob and ob else (fvg["top"] * 1.002 if in_fvg and fvg else entry + atr * _vf)
-            sl = smart_round(min(sl_candidate, entry * 1.04))  # cap 4%
-
-        # TP — ближайшая ликвидность
-        swing_highs, swing_lows = find_swings(candles, lookback=8)
-        try:
-            eqh, eql = find_equal_highs_lows(candles, lookback=30)
-        except Exception:
-            eqh, eql = None, None
-
-        if direction == "BULLISH":
-            tp_candidates = []
-            if swing_highs:
-                tp_candidates += [sh[1] for sh in swing_highs if sh[1] > entry * 1.005]
-            if eqh and eqh > entry * 1.005:
-                tp_candidates.append(eqh)
-            tp1 = smart_round(min(tp_candidates)) if tp_candidates else smart_round(entry + atr * 3)
-            tp2 = smart_round(entry + abs(tp1 - entry) * 1.5)
-        else:
-            tp_candidates = []
-            if swing_lows:
-                tp_candidates += [s[1] for s in swing_lows if s[1] < entry * 0.995]
-            if eql and eql < entry * 0.995:
-                tp_candidates.append(eql)
-            tp1 = smart_round(max(tp_candidates)) if tp_candidates else smart_round(entry - atr * 3)
-            tp2 = smart_round(entry - abs(entry - tp1) * 1.5)
-
-        tp = tp1  # основной TP для RR
-        risk = abs(entry - sl)
-        reward = abs(tp - entry)
-        if risk == 0:
-            return None
-        rr = round(reward / risk, 2)
-        if rr < 2.0:
-            return None
-
-        # ── CONFIRMATIONS (нужно минимум 2 из 4) ──
-        confirmations = 0
-        confirm_details = []
-
-        # 1. Импульс (displacement ≥0.45)
-        try:
-            last = candles[-1]
-            _body = abs(last["close"] - last["open"])
-            _range = last["high"] - last["low"]
-            _disp = _body / _range >= 0.45 if _range > 0 else False
-            _bull_imp = direction == "BULLISH" and last["close"] > last["open"] and _disp
-            _bear_imp = direction == "BEARISH" and last["close"] < last["open"] and _disp
-            if _bull_imp or _bear_imp:
-                confirmations += 1
-                confirm_details.append("impulse")
-        except Exception:
-            pass
-
-        # 2. Ликвидность как цель
-        if (direction == "BULLISH" and eqh and eqh > entry) or \
-           (direction == "BEARISH" and eql and eql < entry):
-            confirmations += 1
-            confirm_details.append("liquidity")
-
-        # 3. Объём выше среднего
-        try:
-            avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19
-            if candles[-1]["volume"] > avg_vol * 1.2:
-                confirmations += 1
-                confirm_details.append("volume")
-        except Exception:
-            pass
-
-        # 4. HTF подтверждает
-        try:
-            htf = smc_on_tf(symbol, "1d")
-            if (direction == "BULLISH" and htf == "BULLISH") or \
-               (direction == "BEARISH" and htf == "BEARISH"):
-                confirmations += 1
-                confirm_details.append("htf_1d")
-        except Exception:
-            pass
-
-        if confirmations < 2:
-            return None
-
-        # ── BTC Correlation Filter ──
-        _btc_corr = {"corr": 0.5, "level": "moderate", "btc_dir": "NEUTRAL"}
-        if symbol != "BTCUSDT":
-            try:
-                _btc_cached = get_global_candles("BTCUSDT", "4h")
-                _btc_corr = get_btc_correlation(symbol, btc_candles=_btc_cached if _btc_cached else None)
-                if _btc_corr["level"] == "high":
-                    # Высокая корреляция — BTC должен подтвердить
-                    if (direction == "BULLISH" and _btc_corr["btc_dir"] == "BEARISH") or \
-                       (direction == "BEARISH" and _btc_corr["btc_dir"] == "BULLISH"):
-                        return None
-                elif _btc_corr["level"] == "moderate":
-                    # Умеренная — не блокируем, но понижаем score
-                    if (direction == "BULLISH" and _btc_corr["btc_dir"] == "BEARISH") or \
-                       (direction == "BEARISH" and _btc_corr["btc_dir"] == "BULLISH"):
-                        confirmations -= 1
-                        if confirmations < 2:
-                            return None
-            except Exception:
-                pass
-
-        _size_mult = 1.0  # Position sizing belongs exclusively to Risk Engine.
-
-        return {
-            "symbol": symbol,
-            "direction": direction,
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "tp1": tp1,
-            "tp2": tp2,
-            "rr": rr,
-            "zone": zone_desc,
-            "score": confirmations,
-            "confirms": confirm_details,
-            "timeframe": timeframe,
-            "adx": _ap["adx"],
-            "volatility_factor": _vf,
-            "btc_corr": _btc_corr.get("corr", 0.5),
-            "size_mult": _size_mult,
-        }
-
-    except Exception as e:
-        logging.warning(f"smc_core_check {symbol}: {e}")
-        return None

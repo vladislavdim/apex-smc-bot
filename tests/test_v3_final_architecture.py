@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib, sqlite3
 import pytest
 
-MODULES=("apex.app.shutdown","apex.config.constants","apex.domain.events","apex.db.integrity","apex.db.repositories.signals","apex.db.repositories.positions","apex.db.repositories.incidents","apex.db.repositories.learning","apex.market.liquidity","apex.market.external_context","apex.market.options","apex.market.onchain","apex.quality.groq_gate","apex.quality.groq_calibration","apex.risk.limits","apex.risk.sizing","apex.risk.portfolio","apex.risk.kill_switch","apex.execution.binance_client","apex.execution.execution_quality","apex.execution.protection","apex.execution.reconcile","apex.manager.events","apex.manager.playbooks","apex.manager.reconcile","apex.manager.structure","apex.learning.outcomes","apex.learning.execution_quality","apex.learning.groq_performance","apex.telemetry.metrics","apex.telemetry.health","apex.ops.graceful_shutdown","apex.ui.readmodels.api","apex.ui.readmodels.overview","apex.ui.readmodels.strategies","apex.ui.readmodels.trades","apex.ui.readmodels.manager","apex.ui.readmodels.execution","apex.ui.readmodels.market","apex.ui.readmodels.learning","apex.ui.readmodels.health","apex.ui.telegram.app","apex.ui.telegram.menu","apex.ui.telegram.scanners","apex.ui.telegram.strategies","apex.ui.telegram.trades","apex.ui.telegram.manager","apex.ui.telegram.execution","apex.ui.telegram.formatters")
+MODULES=("apex.app.shutdown","apex.config.constants","apex.domain.events","apex.db.integrity","apex.db.repositories.signals","apex.db.repositories.positions","apex.db.repositories.incidents","apex.db.repositories.learning","apex.market.liquidity","apex.market.external_context","apex.market.options","apex.market.onchain","apex.quality.groq_gate","apex.quality.groq_calibration","apex.risk.limits","apex.risk.sizing","apex.risk.portfolio","apex.risk.kill_switch","apex.execution.binance_client","apex.execution.execution_quality","apex.execution.protection","apex.execution.reconcile","apex.manager.events","apex.manager.playbooks","apex.manager.reconcile","apex.manager.structure","apex.learning.outcomes","apex.learning.execution_quality","apex.learning.groq_performance","apex.telemetry.metrics","apex.telemetry.health","apex.ops.graceful_shutdown","apex.ui.telegram.app","apex.ui.telegram.menu","apex.ui.telegram.scanners","apex.ui.telegram.strategies","apex.ui.telegram.trades","apex.ui.telegram.manager","apex.ui.telegram.execution","apex.ui.telegram.formatters")
 
 def test_v3_boundary_modules_import_cleanly():
     for name in MODULES: assert importlib.import_module(name) is not None
@@ -30,11 +30,6 @@ def test_database_integrity_primitive():
     try: check_integrity(conn)
     finally: conn.close()
 
-def test_dashboard_projection_is_a_copy():
-    from apex.ui.readmodels.api import project_tab
-    payload={"execution":{"status":"LIVE"}}
-    projected=project_tab("execution",payload); projected["status"]="CHANGED"
-    assert payload["execution"]["status"]=="LIVE"
 
 
 def test_launchers_remain_thin():

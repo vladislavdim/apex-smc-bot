@@ -7,6 +7,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping
 
+DEEP_SCAN_TRIGGERS = (
+    "есть сделки", "какие сделки", "что торговать", "что покупать",
+    "что брать", "что входить", "найди сделки", "найди сигналы",
+    "есть сигналы", "какие сигналы", "сканируй рынок", "просканируй",
+    "лучшие монеты", "что памп", "что иксанет", "что даст иксы",
+    "какие монеты", "где входить", "есть ли сделки",
+)
+
 
 @dataclass(frozen=True)
 class ChatDependencies:
@@ -19,11 +27,14 @@ class ChatDependencies:
     extract_profile: Callable[[int, str, str, str], Any]
     ask_groq: Callable[..., Any]
     send_message: Callable[..., Any]
+    deep_scan: Callable[..., Any] | None = None
+    format_deep_scan: Callable[..., str] | None = None
 
 
 class TelegramChatHandlers:
     def __init__(self, dependencies: ChatDependencies) -> None:
         self.dependencies = dependencies
+        self._deep_scan_lock = asyncio.Lock()
 
     async def member(self, event: Any) -> None:
         try:
@@ -67,6 +78,29 @@ class TelegramChatHandlers:
         user_name = message.from_user.first_name or "трейдер"
         text = message.text
         if not text:
+            return
+        if any(trigger in text.lower() for trigger in DEEP_SCAN_TRIGGERS):
+            if self.dependencies.deep_scan is None or self.dependencies.format_deep_scan is None:
+                await message.answer("⚠️ Сканер временно недоступен. Попробуйте позже.")
+                return
+            if self._deep_scan_lock.locked():
+                await message.answer("⏳ Сканирование уже выполняется. Дождитесь результата.")
+                return
+            async with self._deep_scan_lock:
+                thinking = await message.answer("📡 Проверяю рынок…")
+                try:
+                    result = await asyncio.wait_for(self.dependencies.deep_scan(limit=80), timeout=240)
+                    signals, accumulations = result[:2]
+                    scope = result[2] if len(result) == 3 else 80
+                    await message.answer(self.dependencies.format_deep_scan(signals, accumulations, scope), parse_mode="HTML")
+                except Exception as exc:
+                    logging.warning("Chat deep scan failed: %s", type(exc).__name__)
+                    await message.answer("⚠️ Сканирование не завершилось. Попробуйте позже.")
+                finally:
+                    try:
+                        await thinking.delete()
+                    except Exception:
+                        pass
             return
         state = self.dependencies.user_states.pop(user_id, None)
         if state and state.get("action") == "live_analysis":

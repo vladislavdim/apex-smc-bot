@@ -227,6 +227,21 @@ class BrainPersistenceTests(unittest.TestCase):
             session=session,
         )
 
+    def test_regular_backup_uses_incremental_snapshot_and_preserves_uploaded_content(self):
+        from apex.db import backup
+        _make_db(self.remote)
+        session = _GitHubSession(_bytes(self.remote))
+        manager = self._manager(session)
+        self.assertTrue(manager.restore()['ready'])
+        with sqlite3.connect(self.local) as conn:
+            conn.execute("INSERT INTO knowledge(topic,content) VALUES ('new','retained')")
+        with patch.object(backup,'sqlite_snapshot',wraps=backup.sqlite_snapshot) as snapshot:
+            result = manager.backup()
+        self.assertEqual(result['status'],'saved')
+        snapshot.assert_called_once()
+        self.assertEqual(result['counts']['knowledge'],2)
+        self.assertEqual(manager.backup()['status'],'unchanged')
+
     def test_lost_ack_recovers_own_exact_blob(self):
         _make_db(self.remote)
         session = _LostAcknowledgementSession(_bytes(self.remote))

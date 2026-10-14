@@ -7,22 +7,19 @@ being split from this composition root into ``apex.app`` and domain packages.
 from apex.telemetry.event_log import audit_strategy as _audit_strategy, audit_test as _audit_test, audit_fail as _audit_fail, audit_observe as _audit_observe
 import asyncio
 import functools
+from concurrent.futures import ThreadPoolExecutor
 from apex.market.indicators import average_true_range
 import html
 import logging
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
-import os
-import sqlite3
 import threading
 import time
 import json
 import hashlib
-from datetime import datetime, timedelta, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime, timezone
 
-from groq import Groq
-from aiogram import Bot, Dispatcher, types
+from aiogram import types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
@@ -115,8 +112,7 @@ from apex.compatibility.market_data import (
     multi_tf_analysis, smart_price_fmt, smc_on_tf, update_global_candles,
 )
 from apex.compatibility.market_strategy import (
-    calc_smart_levels, check_alerts, check_entry_timing,
-    check_session_liquidity, detect_breaker_block, detect_fast_deal,
+    calc_smart_levels, check_alerts, check_session_liquidity, detect_breaker_block, detect_fast_deal,
     detect_market_regime_v2, detect_mm_accumulation,
     detect_rsi_macd_divergence, detect_swing_setup,
     detect_wyckoff_distribution, detect_wyckoff_reaccumulation,
@@ -134,7 +130,6 @@ from apex.ui.telegram.manager import (
     fetch_state_manager_trade as _fetch_manager_trade,
     format_manager_dashboard as _format_manager_dashboard,
     format_manager_trade_detail as _format_manager_trade_detail,
-    format_final_trade_card as _format_final_trade_card,
     manager_trade_buttons as _manager_trade_buttons,
 )
 from apex.manager.engine import (
@@ -170,7 +165,6 @@ from apex.quality.setup_evidence import (
 from external_sources.aggregator import collect_external_context as _collect_external_context
 from core.telegram_dashboard import (
     fetch_strategy_stats as _fetch_strategy_stats,
-    fetch_system_health as _fetch_system_health,
     fetch_watchlist as _fetch_watchlist,
     fetch_groq_rejections as _fetch_groq_rejections,
     format_strategy_stats as _format_strategy_stats,
@@ -690,7 +684,7 @@ def scan_diagnostics(symbol):
             lines.append(f"🧠 Режим: {regime['mode']} (уверенность {regime['confidence']}%)")
             if regime["mode"] == "SIDEWAYS" and regime["confidence"] > 85:
                 lines.append("⛔️ Заблокировано: рынок в глубоком боковике")
-            lines.append(f"\n📊 Confluence набрал меньше 25 очков — сигнал слабый")
+            lines.append("\n📊 Confluence набрал меньше 25 очков — сигнал слабый")
 
         lines.append("\n<i>Попробуй через 15-30 мин или выбери другую монету</i>")
         return "\n".join(lines)
@@ -891,6 +885,8 @@ _v3_chat_handlers = _V3TelegramChatHandlers(
         extract_profile=extract_and_save_profile,
         ask_groq=ask_groq,
         send_message=bot.send_message,
+        deep_scan=lambda **kwargs: deep_market_scan(**kwargs, with_summary=True),
+        format_deep_scan=lambda *args: format_deep_scan_result(*args),
     )
 )
 
@@ -962,25 +958,32 @@ _v3_register_telegram_handlers(
 
 # ===== AUTO TASKS =====
 
-async def deep_market_scan(limit=200):
+_manual_scan_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manual-market-scan")
+
+
+async def deep_market_scan(limit=80, *, with_summary=False):
     """
     Глубокий скан всего рынка по запросу пользователя.
     Проверяет Gate USD-M universe, ищет сигналы + накопления.
     Возвращает отсортированный список сигналов.
     """
-    all_pairs = get_all_market_pairs()
+    all_pairs = await asyncio.to_thread(get_all_market_pairs)
     scan_pairs = all_pairs[:limit]
 
     signals = []
     accumulations = []
+    summary = {"scope": len(scan_pairs), "attempted": 0, "checked": 0, "failed": 0}
+    deadline = time.monotonic() + 200
 
-    # Сканируем батчами по 10 монет параллельно
+    # Timed-out synchronous calls keep running; a dedicated pool limits them
+    # to two rather than spawning more work on every subsequent batch.
     async def scan_one(symbol):
+        summary["attempted"] += 1
         try:
             loop = asyncio.get_running_loop()
             # Таймаут 8 сек на монету — не зависаем
             sig = await asyncio.wait_for(
-                loop.run_in_executor(None, full_scan_raw, symbol, "1h"),
+                loop.run_in_executor(_manual_scan_executor, full_scan_raw, symbol, "1h"),
                 timeout=8.0
             )
             if sig and sig.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА", "ХОРОШАЯ",
@@ -988,7 +991,7 @@ async def deep_market_scan(limit=200):
                 signals.append(sig)
             # Накопление — отдельный таймаут
             acc = await asyncio.wait_for(
-                loop.run_in_executor(None, detect_accumulation, symbol),
+                loop.run_in_executor(_manual_scan_executor, detect_accumulation, symbol),
                 timeout=6.0
             )
             if acc and acc.get("score", 0) >= 72:  # поднят порог качества
@@ -998,14 +1001,19 @@ async def deep_market_scan(limit=200):
                     "signal": acc.get("signal", ""),
                     "price": acc.get("price", 0)
                 })
+            summary["checked"] += 1
         except asyncio.TimeoutError:
+            summary["failed"] += 1
             logging.debug(f"deep_scan timeout: {symbol}")
         except Exception as e:
+            summary["failed"] += 1
             logging.debug(f"deep_scan error {symbol}: {e}")
 
-    # Батчи по 10
-    for i in range(0, min(len(scan_pairs), limit), 10):
-        batch = scan_pairs[i:i+10]
+    # Keep manual scans within the same bounded request budget as production.
+    for i in range(0, min(len(scan_pairs), limit), 2):
+        if time.monotonic() >= deadline:
+            break
+        batch = scan_pairs[i:i+2]
         await asyncio.gather(*[scan_one(sym) for sym in batch])
         await asyncio.sleep(0.5)  # Не перегружаем API
 
@@ -1014,20 +1022,27 @@ async def deep_market_scan(limit=200):
     signals.sort(key=lambda x: grade_order.get(x.get("grade", ""), 3))
     accumulations.sort(key=lambda x: x["score"], reverse=True)
 
-    return signals, accumulations
+    return (signals, accumulations, summary) if with_summary else (signals, accumulations)
 
 
 def format_deep_scan_result(signals, accumulations, total_scanned):
     """Форматирует результат глубокого скана для Telegram"""
+    partial = ""
+    if isinstance(total_scanned, dict):
+        summary = total_scanned
+        total_scanned = summary["checked"]
+        if total_scanned < summary["scope"]:
+            partial = (f"⚠️ Скан частичный: проверено {total_scanned}/{summary['scope']}, "
+                       f"ошибок/таймаутов: {summary['failed']}.\n")
     if not signals and not accumulations:
         return (
             f"🔍 <b>Глубокий скан завершён</b>\n"
-            f"Проверено монет: {total_scanned}\n\n"
-            f"😴 Рынок спокоен — нет чётких сетапов\n"
+            f"Проверено монет: {total_scanned}\n{partial}\n"
+            f"По полученным данным подходящих сетапов нет.\n"
             f"Попробуй позже или смени таймфрейм"
         )
 
-    parts = [f"🔍 <b>Глубокий скан</b> | {total_scanned} Gate USD-M монет\n{'━'*24}\n"]
+    parts = [f"🔍 <b>Глубокий скан</b> | {total_scanned} Gate USD-M монет\n{partial}{'━'*24}\n"]
 
     # Сигналы SMC
     if signals:
@@ -1037,8 +1052,6 @@ def format_deep_scan_result(signals, accumulations, total_scanned):
             direction = s.get("direction", "")
             entry = s.get("entry", 0)
             tp1 = s.get("tp1", 0)
-            tp2 = s.get("tp2", 0)
-            tp3 = s.get("tp3", 0)
             sl = s.get("sl", 0)
             grade = s.get("grade", "")
             emoji = "🟢" if "BULL" in direction else "🔴"
@@ -1096,15 +1109,15 @@ def _format_channel_signal(sd: dict) -> str:
     lines = [
         f"{label} | <b>{symbol}</b> — {dir_label}",
         f"📊 Контекст: {tf}",
-        f"",
+        "",
         f"🎯 TP:   <code>{fmt(tp1)}</code>",
         f"💰 Вход: <code>{fmt(entry)}</code>",
         f"🛑 Стоп: <code>{fmt(sl)}</code>",
-        f"",
+        "",
         f"⚡ Риск: {risk}",
         f"⏱ Горизонт: {tf_time}",
-        f"",
-        f"💡 Это аналитика, не совет. Торгуй осознанно",
+        "",
+        "💡 Это аналитика, не совет. Торгуй осознанно",
     ]
     return "\n".join(lines)
 
@@ -1820,10 +1833,11 @@ async def _run_auto_trade_reconcile_once():
         return
     try:
         outcomes = await asyncio.to_thread(_reconcile_live_executions, db_path=DB_PATH)
-        if any(str(item.get("status") or "") in {
+        unresolved = sorted({str(item.get("status") or "") for item in outcomes if str(item.get("status") or "") in {
             "RECONCILE_ERROR", "UNPROTECTED_POSITION", "SUBMISSION_UNCONFIRMED", "BLOCKED_INSTANCE_OWNERSHIP"
-        } for item in outcomes):
-            raise RuntimeError("execution reconciliation has unresolved exchange state")
+        }})
+        if unresolved:
+            raise RuntimeError("execution_reconciliation:" + ",".join(unresolved))
         for outcome in outcomes:
             logging.info(
                 "[AutoTrading] reconcile signal=%s status=%s",
@@ -2011,35 +2025,6 @@ async def trade_manager_job():
     return await asyncio.shield(_trade_manager_task)
 
 
-def pick_best_signal(signals: list) -> dict | None:
-    """
-    Выбирает лучший сигнал из найденных по приоритету и score.
-    WYCKOFF > SWING > MTF > ZONE > FAST
-    """
-    if not signals:
-        return None
-
-    priority_order = {
-        "WYCKOFF": 5,
-        "SWING":   4,
-        "MTF":     3,
-        "ZONE":    2,
-        "FAST":    1,
-    }
-
-    valid = [s for s in signals if s and s.get("rr", 0) >= 2.0]
-    if not valid:
-        return None
-
-    return sorted(
-        valid,
-        key=lambda x: (
-            priority_order.get(x.get("grade", x.get("signal_type", "MTF")), 0),
-            x.get("score", x.get("confluence_score", 0)),
-            x.get("rr", 0)
-        ),
-        reverse=True
-    )[0]
 
 
 _v3_live_strategy_registry = None
@@ -2336,7 +2321,6 @@ async def _auto_scan_swing_impl():
             symbol    = r["symbol"]
             direction = r["direction"]
             dir_label = "🟢LONG" if direction == "BULLISH" else "🔴SHORT"
-            trend_icon = "📈" if direction == "BULLISH" else "📉"
             htf = r.get("htf_dir", "")
             htf_text = f" | 1d: {htf}" if htf else ""
 
@@ -2525,107 +2509,10 @@ async def _auto_zone_scan_impl():
         except Exception as e:
             logging.error(f"[ZoneScan] {r.get('symbol')}: {e}")
 
-async def auto_scan_1d():
-    """Каждый час: скан 1d таймфрейма"""
-    signals = await _scan_tf("1d", pairs_limit=20)
-    logging.info(f"Скан 1d: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=5.0)]
-    for sd in valid:
-        await _send_signal(sd)
-        await asyncio.sleep(1)
 
 
-async def auto_scan_1w():
-    """Каждые 6 часов: скан недельного таймфрейма — долгосрочные сделки"""
-    signals = await _scan_tf("1w", pairs_limit=15)
-    logging.info(f"Скан 1w: сигналов {len(signals)}")
-    valid = [s for s in signals if _is_entry_still_valid(s, max_drift_pct=8.0)]
-    for sd in valid:
-        await _send_signal(sd)
-        await asyncio.sleep(1)
 
 
-async def auto_scan_mega():
-    """Каждые 6 часов: скан мега-сделок на 100-200% на 4h, 1d и 1w таймфреймах"""
-    try:
-        from smc_engine import detect_mega_trade
-    except ImportError:
-        logging.warning("detect_mega_trade не найден в smc_engine")
-        return
-
-    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
-    found = []
-
-    for symbol in pairs:
-        try:
-            candles_4h = get_candles(symbol, "4h", 100)
-            candles_1d = get_candles(symbol, "1d", 60)
-            candles_1w = get_candles(symbol, "1w", 50)
-            if len(candles_4h) < 50 or len(candles_1d) < 30:
-                continue
-            # Используем недельные если доступны, иначе дневные
-            base_candles = candles_1w if len(candles_1w) >= 20 else candles_1d
-            result = detect_mega_trade(candles_4h, base_candles, symbol)
-            if result and result["score"] >= 45:
-                found.append(result)
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            logging.debug(f"auto_scan_mega {symbol}: {e}")
-
-    found.sort(key=lambda x: x["score"], reverse=True)
-    logging.info(f"Мега-скан: найдено {len(found)} сигналов")
-
-    for r in found:
-        try:
-            symbol    = r["symbol"]
-            direction = r["direction"]
-            emoji     = "🟢" if direction == "BULLISH" else "🔴"
-            arrow     = "▲" if direction == "BULLISH" else "▼"
-
-            signals_text = "\n".join(r["signals"])
-
-            push_dir = "↑" if direction == "BULLISH" else "↓"
-            text = (
-                f"<b>{symbol}</b> — strong push {push_dir}\n"
-                f"📊 Контекст: 4h/1d\n"
-                f"\n"
-                f"🎯 TP:  <code>{r['tp1']:.4f}</code>\n"
-                f"💰 Вход: <code>{r['entry']:.4f}</code>\n"
-                f"🛑 Стоп: <code>{r['sl']:.4f}</code>\n"
-                f"\n"
-                f"{'📈' if direction == 'BULLISH' else '📉'} Логика: боковик {r['days_in_range']}д →\n"
-                f"давление → резкий выход {push_dir}\n"
-                f"\n"
-                f"⚡ Риск: низкий\n"
-                f"⏱ Горизонт: 1-2 дня"
-            )
-
-            candidate = {
-                "symbol": symbol,
-                "direction": direction,
-                "scan_type": "MEGA",
-                "grade": "MEGA",
-                "timeframe": "4h",
-                "entry": r["entry"],
-                "sl": r["sl"],
-                "tp1": r["tp1"],
-                "tp2": r.get("tp2", r["tp1"]),
-                "tp3": r.get("tp3", r.get("tp2", r["tp1"])),
-                "rr": abs(r["tp1"] - r["entry"]) / max(abs(r["entry"] - r["sl"]), 1e-12),
-                "estimated_hours": 24 * 14,
-                "confluence_score": r["score"],
-                "regime": "MEGA",
-                "text": text,
-                "technical_evidence": {
-                    "score": r.get("score"),
-                    "days_in_range": r.get("days_in_range"),
-                    "signals": r.get("signals", []),
-                },
-            }
-            await _send_signal(candidate)
-            await asyncio.sleep(2)
-        except Exception as e:
-            logging.error(f"auto_scan_mega send {r.get('symbol')}: {e}")
 
 
 
@@ -3010,46 +2897,7 @@ async def _auto_ltf_watch_scan_impl():
             )
         await asyncio.sleep(0)
 
-async def auto_accumulation_scan():
-    """Каждый час: сканируем Gate USD-M universe на накопление."""
-    try:
-        await asyncio.wait_for(_auto_accumulation_scan_impl(), timeout=210)
-    except asyncio.TimeoutError:
-        logging.warning("[auto_accumulation_scan] таймаут 210с — пропускаем цикл")
-    except Exception as e:
-        logging.error(f"[auto_accumulation_scan] ОШИБКА: {e}")
 
-async def _auto_accumulation_scan_impl():
-    pairs = get_top_pairs(DEFAULT_UNIVERSE_SIZE)
-    found = []
-
-    for symbol in pairs:
-        try:
-            acc = detect_accumulation(symbol)
-            if acc and acc["score"] >= 72:
-                found.append(acc)
-            await asyncio.sleep(0.3)
-        except:
-            pass
-
-    # Сортируем по скору
-    found.sort(key=lambda x: x["score"], reverse=True)
-
-    if found and ADMIN_ID:
-        await bot.send_message(
-            ADMIN_ID,
-            f"📦 <b>Накопления перед пампом: {len(found)}</b>\n"
-            f"Топ монеты по скору накопления:",
-            parse_mode="HTML"
-        )
-        for acc in found[:4]:
-            try:
-                await bot.send_message(ADMIN_ID, format_accumulation(acc), parse_mode="HTML")
-                await asyncio.sleep(1)
-            except:
-                pass
-
-    logging.info(f"Накопление скан: {len(pairs)} пар | найдено: {len(found)}")
 
 
 def scan_all_for_deals(limit=40):
@@ -3244,7 +3092,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
             elif mm_sig == "WEAK_ACCUMULATION":
                 confluence.append(f"📦 MM Слабое накопление (score {mm_score}/4)")
             if mm_acc.get("pre_pump"):
-                confluence.append(f"🚀 PRE-PUMP: объём↑ диапазон↓ лои↑")
+                confluence.append("🚀 PRE-PUMP: объём↑ диапазон↓ лои↑")
         except Exception as _mm_e:
             pass
 
@@ -3966,8 +3814,8 @@ async def _v3_startup_reconcile_and_market_check():
             _execution_config = _ExecutionConfig.from_env()
             _execution_client = None
             _account_detail = "execution disabled or paper"
-            if _execution_config.enabled and _execution_config.mode == "live":
-                if not _execution_config.live_armed:
+            if _execution_config.mode == "live" and (_execution_config.enabled or _execution_config.live_management_armed):
+                if not _execution_config.live_management_armed:
                     raise RuntimeError("live execution is configured but not armed")
                 _execution_client = _BinanceFuturesClient(_execution_config)
                 if not await asyncio.to_thread(_execution_client.is_one_way_mode):
@@ -3993,10 +3841,11 @@ async def _v3_startup_reconcile_and_market_check():
                 config=_execution_config,
                 client=_execution_client,
             )
-            if any(str(item.get("status") or "") in {
+            unresolved = sorted({str(item.get("status") or "") for item in reconciliation if str(item.get("status") or "") in {
                 "RECONCILE_ERROR", "UNPROTECTED_POSITION", "SUBMISSION_UNCONFIRMED", "BLOCKED_INSTANCE_OWNERSHIP"
-            } for item in reconciliation):
-                raise RuntimeError("startup reconciliation unresolved")
+            }})
+            if unresolved:
+                raise RuntimeError("startup reconciliation unresolved:" + ",".join(unresolved))
             await asyncio.to_thread(_v3_sync_live_learning)
             _V3_RUNTIME.mark_component(
                 "binance_reconciliation", _V3_COMPONENT_STATE.READY, _account_detail

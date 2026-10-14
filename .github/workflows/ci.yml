@@ -25,7 +25,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version-file: '.python-version'
           cache: pip
 
       - name: Install dependencies
@@ -33,6 +33,11 @@ jobs:
 
       - name: Compile project
         run: python -m compileall -q -x '(^|/)(\.git|\.venv|venv)/' .
+
+      - name: Undefined names and dependency security
+        run: |
+          python -m ruff check . --select F821,F822,F823
+          python -m pip_audit -r requirements.txt
 
       - name: Full test suite
         run: |

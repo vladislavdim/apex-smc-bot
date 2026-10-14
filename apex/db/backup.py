@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+from apex.db.snapshot_io import copy_stream, discard_file_cache, snapshot_stage, sqlite_snapshot
 import hashlib
 import io
 import json
@@ -197,10 +198,10 @@ class BrainPersistence:
         )
         os.close(fd)
         with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=1) as target:
-            shutil.copyfileobj(source, target, length=1_048_576)
+            copy_stream(source, target)
         if os.path.getsize(compressed_path) > _DENSE_COMPRESSION_THRESHOLD:
             with open(path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=6) as target:
-                shutil.copyfileobj(source, target, length=1_048_576)
+                copy_stream(source, target)
         return compressed_path
 
     @property
@@ -344,6 +345,7 @@ class BrainPersistence:
     def _integrity(path: str) -> None:
         connection = _SQLITE_CONNECT(f"file:{path}?mode=ro", uri=True, timeout=15)
         try:
+            connection.set_progress_handler(lambda: (discard_file_cache(path), 0)[1], 1000)
             result = connection.execute("PRAGMA integrity_check").fetchone()
             tables = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
@@ -410,13 +412,19 @@ class BrainPersistence:
         digest = hashlib.sha256()
         connection = _SQLITE_CONNECT(f"file:{path}?mode=ro", uri=True, timeout=30)
         try:
+            since_eviction = 0
             for statement in connection.iterdump():
                 lowered = statement.lower()
                 table = re.match(r'(?:create table(?: if not exists)?|insert into) ["\[]?([^"\] (]+)', lowered)
                 if table and table.group(1) in {"brain_persistence_meta", "heartbeat", "runtime_heartbeats"}:
                     continue
-                digest.update(statement.encode("utf-8", "surrogatepass"))
+                encoded = statement.encode("utf-8", "surrogatepass")
+                digest.update(encoded)
                 digest.update(b"\n")
+                since_eviction += len(encoded)
+                if since_eviction >= 8 * 1024 * 1024:
+                    discard_file_cache(path)
+                    since_eviction = 0
         finally:
             connection.close()
         return digest.hexdigest()
@@ -470,7 +478,8 @@ class BrainPersistence:
                             target.flush()
                             os.fsync(target.fileno())
                             temp_path = target.name
-                        self._integrity(temp_path)
+                        with snapshot_stage('integrity', temp_path):
+                            self._integrity(temp_path)
                         generation, content_hash, backed_up_at = self._read_meta(temp_path)
                         # Sidecars belong to the disposable pre-restore database
                         # and must not be replayed against the downloaded file.
@@ -540,7 +549,8 @@ class BrainPersistence:
                 source = _SQLITE_CONNECT(self.db_path, timeout=30, check_same_thread=False)
                 target = _SQLITE_CONNECT(temp_path, timeout=30)
                 try:
-                    source.backup(target)
+                    with snapshot_stage('sqlite_snapshot', temp_path):
+                        sqlite_snapshot(source, target, self.db_path, temp_path)
                 finally:
                     target.close()
                     source.close()
@@ -552,8 +562,10 @@ class BrainPersistence:
                         compact.execute("VACUUM")
                 finally:
                     compact.close()
-                self._integrity(temp_path)
-                logical_hash = self._logical_hash(temp_path)
+                with snapshot_stage('integrity', temp_path):
+                    self._integrity(temp_path)
+                with snapshot_stage('logical_hash', temp_path):
+                    logical_hash = self._logical_hash(temp_path)
                 now = datetime.now(timezone.utc).isoformat()
                 target = _SQLITE_CONNECT(temp_path, timeout=15)
                 try:
@@ -567,7 +579,8 @@ class BrainPersistence:
                     target.commit()
                 finally:
                     target.close()
-                self._integrity(temp_path)
+                with snapshot_stage('integrity', temp_path):
+                    self._integrity(temp_path)
                 with open(temp_path, "rb") as snapshot:
                     content = snapshot.read()
                 response = self.session.put(
@@ -690,7 +703,8 @@ class BrainPersistence:
                 source = _SQLITE_CONNECT(self.db_path, timeout=30, check_same_thread=False)
                 target = _SQLITE_CONNECT(temp_path, timeout=30)
                 try:
-                    source.backup(target)
+                    with snapshot_stage('sqlite_snapshot', temp_path):
+                        sqlite_snapshot(source, target, self.db_path, temp_path)
                 finally:
                     target.close()
                     source.close()
@@ -702,8 +716,10 @@ class BrainPersistence:
                         compact.execute("VACUUM")
                 finally:
                     compact.close()
-                self._integrity(temp_path)
-                logical_hash = self._logical_hash(temp_path)
+                with snapshot_stage('integrity', temp_path):
+                    self._integrity(temp_path)
+                with snapshot_stage('logical_hash', temp_path):
+                    logical_hash = self._logical_hash(temp_path)
                 if logical_hash == self._last_content_hash:
                     self._last_error = ""
                     return {"status": "unchanged", "saved": False}
@@ -725,9 +741,12 @@ class BrainPersistence:
                     target.commit()
                 finally:
                     target.close()
-                self._integrity(temp_path)
+                with snapshot_stage('integrity', temp_path):
+                    self._integrity(temp_path)
                 snapshot_size = os.path.getsize(temp_path)
-                upload_path = self._compressed_snapshot(temp_path)
+                with snapshot_stage('compression', temp_path):
+                    upload_path = self._compressed_snapshot(temp_path)
+                discard_file_cache(upload_path, sync=True)
                 expected_blob_sha = self._blob_sha(upload_path)
                 self._pending_upload = {
                     "blob_sha": expected_blob_sha, "parent_sha": current_sha,
@@ -809,7 +828,8 @@ class BrainPersistence:
                 # the same CAS write is safe.  This is common during a Render
                 # rolling deploy because brain/state/memory share the branch.
                 for attempt in range(5):
-                    response = put_snapshot()
+                    with snapshot_stage('upload', upload_path):
+                        response = put_snapshot()
                     category, _message = self._github_error(response)
                     if response.status_code in (200, 201):
                         break

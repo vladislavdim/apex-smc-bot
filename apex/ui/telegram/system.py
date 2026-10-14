@@ -12,7 +12,7 @@ _ORDER = (
     "binance_reconciliation", "manager", "manager_reconciliation",
     "scheduler", "strategy_activation", "scanner_fast", "scanner_mtf",
     "scanner_zone", "scanner_swing", "scanner_wyckoff",
-    "telegram", "dashboard_telemetry", "backup",
+    "telegram", "backup",
     "instance_fencing", "restart_guard", "cpu", "memory",
 )
 
@@ -25,7 +25,7 @@ _LABELS = {
     "strategy_activation": "Strategy activation", "scanner_fast": "Scanner FAST",
     "scanner_mtf": "Scanner MTF", "scanner_zone": "Scanner ZONE",
     "scanner_swing": "Scanner SWING", "scanner_wyckoff": "Scanner WYCKOFF",
-    "telegram": "Telegram", "dashboard_telemetry": "Dashboard",
+    "telegram": "Telegram",
     "backup": "Backup", "instance_fencing": "Fencing",
     "restart_guard": "Restart guard", "cpu": "CPU", "memory": "Memory",
 }

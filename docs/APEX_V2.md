@@ -1,3 +1,5 @@
+> Historical V2 document. The web dashboard was permanently removed on 2026-10-14. Current operation: [Telegram-only](telegram-only-operation.md).
+
 # APEX V2
 
 APEX V2 is the control plane around the existing production strategies and

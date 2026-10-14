@@ -55,6 +55,16 @@ class TelegramReleaseTests(unittest.TestCase):
         self.assertEqual(client.number,1)
         self.assertEqual(client.environment['AUTO_TRADING_ENABLED'],'false')
 
+    def test_fenced_telegram_worker_uses_one_pinned_deploy_without_resume(self):
+        client=Client('false')
+        client.environment.update(APEX_RUNTIME_LEASE_BACKEND='github',APEX_TELEGRAM_ONLY='true')
+        with patch.object(release,'wait_stopped') as stopped, patch.object(release,'wait_ready',return_value={'ready':True}):
+            release.controlled_telegram_release(client,commit_sha='a'*40)
+        stopped.assert_not_called()
+        self.assertEqual(client.number,1)
+        self.assertFalse(any(event[0]=='POST' and event[1].endswith(('/suspend','/resume')) for event in client.events))
+        self.assertEqual(client.environment['PYTHON_VERSION'], '3.11.17')
+
     def test_missing_backup_credentials_blocks_before_mutation(self):
         client=Client(); client.environment.pop('GITHUB_TOKEN')
         with self.assertRaises(release.ReleaseError):

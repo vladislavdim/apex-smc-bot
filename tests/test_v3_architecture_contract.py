@@ -26,8 +26,7 @@ def test_required_v3_surfaces_exist():
         "apex/manager/structure.py", "apex/manager/reconcile.py", "apex/learning/outcomes.py",
         "apex/learning/execution_quality.py", "apex/learning/groq_performance.py", "apex/telemetry/metrics.py",
         "apex/telemetry/health.py", "apex/ops/graceful_shutdown.py", "apex/quality/groq_gate.py",
-        "apex/quality/groq_calibration.py", "apex/ui/readmodels/api.py",
-        "apex/ui/telegram/app.py", "apex/ui/telegram/menu.py", "apex/ui/telegram/formatters.py",
+        "apex/quality/groq_calibration.py", "apex/ui/telegram/app.py", "apex/ui/telegram/menu.py", "apex/ui/telegram/formatters.py",
         "scripts/verify_release.py", "scripts/inspect_state.py",
     ]
     assert not [p for p in required if not Path(p).is_file()]
@@ -48,9 +47,6 @@ def test_protection_owner_is_execution():
     assert "apex.manager" not in source
 
 
-def test_dashboard_has_exact_production_tabs():
-    from apex.ui.readmodels.api import PROJECTORS
-    assert tuple(PROJECTORS) == ("overview","strategies","trades","manager","execution","market","learning","health")
 
 
 def test_execution_protection_transition():
