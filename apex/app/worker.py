@@ -2906,7 +2906,6 @@ def scan_all_for_deals(limit=40):
     Используется кнопкой "🎯 Найти сделки".
     Возвращает список: [{symbol, direction, grade, grade_emoji, entry, sl, tp1, tp2, tp3, text}]
     """
-    import concurrent.futures
     pairs = get_top_pairs(limit)
     found = []
 
@@ -2916,10 +2915,9 @@ def scan_all_for_deals(limit=40):
         except:
             return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(scan_one, pairs))
-
-    for r in results:
+    # Reuse the bounded manual scanner pool across concurrent Telegram users.
+    # A separate pool per request multiplies candle/context allocations.
+    for r in _manual_scan_executor.map(scan_one, pairs):
         if r and r.get("grade") in ("СДЕЛКА", "СИЛЬНЫЙ СИГНАЛ", "МЕГА", "ПРИОРИТЕТ 1", "ПРЕМИУМ СИГНАЛ"):
             found.append(r)
 
@@ -3814,7 +3812,7 @@ async def _v3_startup_reconcile_and_market_check():
             _execution_config = _ExecutionConfig.from_env()
             _execution_client = None
             _account_detail = "execution disabled or paper"
-            if _execution_config.mode == "live" and (_execution_config.enabled or _execution_config.live_management_armed):
+            if _execution_config.mode == "live" and _execution_config.enabled:
                 if not _execution_config.live_management_armed:
                     raise RuntimeError("live execution is configured but not armed")
                 _execution_client = _BinanceFuturesClient(_execution_config)

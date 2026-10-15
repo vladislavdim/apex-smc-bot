@@ -50,6 +50,12 @@ def copy_stream(source, target) -> None:
 
 
 def sqlite_snapshot(source, target, source_path: str, target_path: str) -> None:
+    # WAL writers otherwise make sqlite3_backup restart at page zero on each
+    # external commit. Pin one read snapshot while writers continue in WAL.
+    own_transaction = not source.in_transaction
+    if own_transaction:
+        source.execute('BEGIN')
+        source.execute('SELECT rootpage FROM sqlite_master LIMIT 1').fetchone()
     copied_pages = 0
     def progress(status, remaining, total):
         nonlocal copied_pages
@@ -58,7 +64,11 @@ def sqlite_snapshot(source, target, source_path: str, target_path: str) -> None:
             copied_pages = current
             discard_file_cache(target_path, sync=True)
             discard_file_cache(source_path)
-    source.backup(target, pages=256, progress=progress)
+    try:
+        source.backup(target, pages=256, progress=progress)
+    finally:
+        if own_transaction:
+            source.rollback()
 
 
 def _file_and_anon_bytes():

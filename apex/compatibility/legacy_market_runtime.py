@@ -202,9 +202,8 @@ def init_db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA cache_size=10000")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA mmap_size=268435456")
+    # Use the canonical SQLite defaults: a small page cache and file-backed
+    # temporary sorting, rather than reserving large startup-only caches.
     c = conn.cursor()
 
     c.execute("""CREATE TABLE IF NOT EXISTS signals (

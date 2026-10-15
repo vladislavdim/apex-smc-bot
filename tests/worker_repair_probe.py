@@ -4,6 +4,9 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import asyncio
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
 from unittest.mock import Mock, AsyncMock, patch
 with tempfile.TemporaryDirectory() as directory:
     os.environ.update(TELEGRAM_TOKEN='123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',GROQ_API_KEY='test',
@@ -29,6 +32,25 @@ with tempfile.TemporaryDirectory() as directory:
             result=await worker._v3_startup_reconcile_and_market_check()
             calls = [c for c in runtime.mark_component.call_args_list if c.args[0]=='binance_reconciliation']
             assert calls and calls[-1].args[1].value != 'READY'
+        disabled=ExecutionConfig(enabled=False,mode='live',api_key='key',api_secret='test',live_confirmation='ENABLE_LIVE_BINANCE_FUTURES')
+        with patch.object(worker,'_V3_RUNTIME',Mock()), patch.object(worker,'_TRADE_EXECUTION_OK',True), patch.object(worker,'_BinanceFuturesClient',side_effect=AssertionError('idle account probe')), patch.object(worker,'_execution_status',side_effect=AssertionError('idle balance probe')), patch.object(worker,'_reconcile_live_executions',return_value=[]) as reconcile, patch.object(worker,'_v3_sync_live_learning',return_value={}), patch.object(worker._ExecutionConfig,'from_env',return_value=disabled), patch.object(worker,'_reconcile_manager_states_from_signals',return_value=0), patch.object(worker,'_register_pending_manager_signals',return_value=0), patch.object(worker,'_load_active_manager_states',return_value=[]), patch.object(worker,'_v3_probe_gate_freshness',AsyncMock()):
+            assert await worker._v3_startup_reconcile_and_market_check() is True
+            assert reconcile.call_args.kwargs['config'] is disabled
+            reconcile.return_value=[{'status':'UNPROTECTED_POSITION'}]
+            assert await worker._v3_startup_reconcile_and_market_check() is False
+        active=peak=0
+        lock=threading.Lock()
+        def detect(strategy,symbol,**kwargs):
+            nonlocal active,peak
+            with lock:
+                active+=1
+                peak=max(peak,active)
+            time.sleep(.01)
+            with lock: active-=1
+            return {'symbol':symbol,'grade':'СДЕЛКА'}
+        with patch.object(worker,'get_top_pairs',return_value=['BTCUSDT','ETHUSDT','SOLUSDT']), patch.object(worker,'_v3_strategy_candidate',detect), ThreadPoolExecutor(max_workers=3) as callers:
+            results=list(callers.map(lambda _:worker.scan_all_for_deals(),range(3)))
+        assert peak<=2 and all(len(result)==3 for result in results)
         with patch.object(worker, 'get_all_market_pairs', return_value=['BTCUSDT','ETHUSDT']), patch.object(worker, 'full_scan_raw', return_value=None), patch.object(worker, 'detect_accumulation', return_value=None):
             signals, accumulations, scope = await worker.deep_market_scan(limit=80,with_summary=True)
         assert scope == {'scope':2,'attempted':2,'checked':2,'failed':0}
