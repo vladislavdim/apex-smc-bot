@@ -88,7 +88,9 @@ def snapshot_stage(name: str, *paths: str):
             peak[key] = max(peak[key], amount)
         return current
     def record(phase, current):
-        logging.getLogger('apex.backup.resources').info(
+        logger = logging.getLogger('apex.backup.resources')
+        logger.setLevel(logging.INFO)
+        logger.info(
             '[APEX Backup Stage] stage=%s phase=%s rss=%s service=%s working_set=%s '
             'anon=%s file=%s elapsed=%.2f', name, phase, current['rss'], current['service'],
             current['working_set'], current['anon'], current['file'], time.monotonic() - started)

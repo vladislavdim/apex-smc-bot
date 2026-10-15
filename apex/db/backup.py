@@ -345,7 +345,8 @@ class BrainPersistence:
     def _integrity(path: str) -> None:
         connection = _SQLITE_CONNECT(f"file:{path}?mode=ro", uri=True, timeout=15)
         try:
-            connection.set_progress_handler(lambda: (discard_file_cache(path), 0)[1], 1000)
+            # Integrity checking revisits indexed pages. Evict only between
+            # stages; a VM callback that evicts the whole file causes thrashing.
             result = connection.execute("PRAGMA integrity_check").fetchone()
             tables = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
