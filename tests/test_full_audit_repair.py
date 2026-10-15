@@ -273,6 +273,14 @@ def test_worker_background_health_startup_and_final_backup_regressions():
     assert result.returncode == 0, (result.stdout+result.stderr)[-6000:]
 
 
+def test_wyckoff_spring_complete_geometry_and_volume_explanation():
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, 'tests/wyckoff_positive_probe.py'],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (result.stdout+result.stderr)[-6000:]
+
+
 def test_scheduler_timeout_retains_write_owner_until_shutdown_drain():
     import asyncio
     from dataclasses import replace
