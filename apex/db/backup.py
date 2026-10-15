@@ -16,7 +16,6 @@ import io
 import json
 import os
 import re
-import shutil
 import sqlite3
 import tempfile
 import threading
@@ -186,9 +185,10 @@ class BrainPersistence:
         """Stream a remote raw or gzip snapshot into an open local file."""
         if content[:2] == b"\x1f\x8b":
             with gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as source:
-                shutil.copyfileobj(source, target, length=1_048_576)
+                copy_stream(source, target)
             return
-        target.write(content)
+        with io.BytesIO(content) as source:
+            copy_stream(source, target)
 
     def _compressed_snapshot(self, path: str) -> str:
         if self.compression != "gzip":
