@@ -2769,7 +2769,7 @@ def detect_wyckoff_spring(symbol: str) -> dict | None:
         # SC найден
         if "SC" in phases:
             score += 15
-            signals.append(f"✅ SC (Selling Climax) — паника с объёмом x{phases['SC']['vol']/sum(c['volume'] for c in candles_1d)/len(candles_1d):.1f}")
+            signals.append(f"✅ SC (Selling Climax) — паника с объёмом x{phases['SC']['vol']/(sum(c['volume'] for c in candles_1d)/len(candles_1d)):.1f}")
 
         # AR найден
         if "AR" in phases:
