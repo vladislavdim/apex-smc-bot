@@ -51,6 +51,35 @@ def _worker_case(script):
     subprocess.run([sys.executable, "-c", script], env=env, check=True, timeout=30)
 
 
+def test_skipped_market_scans_do_not_report_strategy_health_as_verified():
+    _worker_case("""
+import asyncio
+from unittest.mock import AsyncMock, Mock, patch
+from apex.app import scheduler, worker
+
+async def verify():
+    skipped = AsyncMock(return_value=False)
+    with patch.object(worker, '_run_market_scan_exclusive', skipped), \
+         patch.object(worker, 'fast_session', return_value='LONDON'), \
+         patch.object(scheduler, 'runtime_supervisor', Mock()) as runtime, \
+         patch.object(scheduler, 'recorder_for', return_value=None):
+        for job_id, callback in (
+            ('market_fast', worker.auto_fast_deal_scan),
+            ('market_mtf_1h', worker.auto_scan_1h),
+            ('market_zone', worker.auto_zone_scan),
+            ('market_swing', worker.auto_scan_swing),
+            ('market_wyckoff', worker.auto_wyckoff_scan),
+        ):
+            assert await scheduler._guarded(job_id, callback)() is False
+        runtime.mark_component.assert_not_called()
+    with patch.object(worker, 'fast_session', return_value=None), \
+         patch.object(worker, '_run_market_scan_exclusive', side_effect=AssertionError('outside session')):
+        assert await worker.auto_fast_deal_scan() is False
+
+asyncio.run(verify())
+""")
+
+
 def test_ambiguous_telegram_signal_is_never_resent():
     _worker_case("""
 import asyncio

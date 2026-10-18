@@ -1794,6 +1794,8 @@ async def _control_scan_outcome(symbol, outcome, reason, detail=None):
 async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
     """Run one heavy market-data job at a time and identify contention."""
     global _active_market_scan, _active_market_scan_started, _active_scan_run_id
+    scan_logger = logging.getLogger("apex.scans")
+    scan_logger.setLevel(logging.INFO)
     if _market_scan_lock.locked():
         elapsed = max(0.0, time.monotonic() - _active_market_scan_started)
         logging.warning(
@@ -1803,6 +1805,7 @@ async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
         await asyncio.to_thread(
             _mark_scan_skipped, name, _active_market_scan or "unknown", elapsed, DB_PATH
         )
+        scan_logger.info("[APEX Scan] strategy=%s status=SKIPPED reason=SCAN_BUSY", _scanner_strategy(name))
         return False
     async with _market_scan_lock:
         _active_market_scan = name
@@ -1813,6 +1816,7 @@ async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
         try:
             await asyncio.wait_for(coroutine_factory(), timeout=timeout)
             await asyncio.to_thread(_finish_scan_control, _active_scan_run_id, "COMPLETED", "", DB_PATH)
+            scan_logger.info("[APEX Scan] strategy=%s status=COMPLETED duration=%.1fs", _scanner_strategy(name), time.monotonic() - _active_market_scan_started)
             return True
         except asyncio.TimeoutError:
             await asyncio.to_thread(
@@ -2183,7 +2187,7 @@ def _v3_strategy_candidates(strategy, symbol, **kwargs):
 async def auto_scan_1h():
     """Раз в час после закрытия свечи: главный MTF-скан на 1h."""
     try:
-        await _run_market_scan_exclusive("auto_scan_1h", _auto_scan_1h_impl, 210)
+        return await _run_market_scan_exclusive("auto_scan_1h", _auto_scan_1h_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_scan_1h] таймаут 210с — пропускаем цикл")
         raise
@@ -2269,7 +2273,7 @@ async def _auto_scan_1h_impl():
 async def auto_scan_swing():
     """Каждые 30 мин: swing сканер на 4h — торговля от экстремумов"""
     try:
-        await _run_market_scan_exclusive("auto_scan_swing", _auto_scan_swing_impl, 210)
+        return await _run_market_scan_exclusive("auto_scan_swing", _auto_scan_swing_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_scan_swing] таймаут 210с — пропускаем цикл")
         raise
@@ -2397,7 +2401,7 @@ async def _auto_scan_swing_impl():
 async def auto_zone_scan():
     """Каждые 20 мин: сканирует зоны Discount/Premium с OB/FVG"""
     try:
-        await _run_market_scan_exclusive("auto_zone_scan", _auto_zone_scan_impl, 210)
+        return await _run_market_scan_exclusive("auto_zone_scan", _auto_zone_scan_impl, 210)
     except asyncio.TimeoutError:
         logging.warning("[auto_zone_scan] таймаут 210с — пропускаем цикл")
         raise
@@ -2527,7 +2531,7 @@ async def _auto_zone_scan_impl():
 async def auto_wyckoff_scan():
     """Hourly quarter-batch; one full Wyckoff universe is covered every 4h."""
     try:
-        await _run_market_scan_exclusive("auto_wyckoff_scan", _auto_wyckoff_scan_impl, 300)
+        return await _run_market_scan_exclusive("auto_wyckoff_scan", _auto_wyckoff_scan_impl, 300)
     except asyncio.TimeoutError:
         logging.warning("[auto_wyckoff_scan] таймаут 300с — пропускаем цикл")
         raise
@@ -2670,9 +2674,12 @@ async def auto_fast_deal_scan():
     _session = fast_session(_now_dt)
     if not _session:
         logging.debug(f"[auto_fast_deal_scan] вне Kill Zone ({_hour:02d}:{_minute:02d} UTC)")
-        return
+        scan_logger = logging.getLogger("apex.scans")
+        scan_logger.setLevel(logging.INFO)
+        scan_logger.info("[APEX Scan] strategy=FAST status=SKIPPED reason=OUTSIDE_SESSION")
+        return False
     try:
-        await _run_market_scan_exclusive(
+        return await _run_market_scan_exclusive(
             "auto_fast_deal_scan",
             lambda: _auto_fast_deal_scan_impl(_hour, _minute, _session),
             90,
