@@ -62,6 +62,7 @@ async def _edit_message_markup(message: types.Message, *args, **kwargs):
 
 
 from aiohttp import web
+from apex.compatibility.market_constants import live_fast_pairs
 
 # Bounded compatibility adapters while implementations are physically migrated.
 from apex.compatibility.market_transport import (
@@ -767,6 +768,13 @@ def _v3_log_release_health():
         "release_sha": _V3_CONFIG.runtime.release_sha,
         "ready": bool(snapshot.get("ready")),
         "status": snapshot.get("status") or snapshot.get("runtime_status"),
+        "reason_codes": list(snapshot.get("reason_codes") or [])[:16],
+        "unhealthy_components": {
+            name: component.get("state")
+            for name, component in (snapshot.get("components") or {}).items()
+            if isinstance(component, dict)
+            and component.get("state") not in {"READY", "HEALTHY", "FRESH"}
+        },
         "telegram_only": _V3_CONFIG.integrations.telegram_only,
         "lease_backend": _V3_CONFIG.integrations.runtime_lease_backend,
         "auto_trading_enabled": _V3_CONFIG.execution.enabled,
@@ -2678,6 +2686,13 @@ async def auto_fast_deal_scan():
 
 async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     logging.info(f"[auto_fast_deal_scan] ЗАПУЩЕН ({_session}, {_hour:02d}:{_minute:02d} UTC)")
+    gate_prices = await asyncio.to_thread(get_live_prices)
+    eligible_pairs = live_fast_pairs(gate_prices)
+    if len(eligible_pairs) != len(FAST_PAIRS):
+        logging.info(
+            "[FAST] Gate live contracts: %s/%s reviewed pairs",
+            len(eligible_pairs), len(FAST_PAIRS),
+        )
 
     # Загружаем BTC свечи один раз для всех пар
     _shared_btc_4h = await asyncio.to_thread(get_candles, "BTCUSDT", "4h", 30)
@@ -2692,7 +2707,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
 
     found = []
     batch = await asyncio.to_thread(
-        _take_strategy_round_batch, "FAST", FAST_PAIRS, len(FAST_PAIRS), DB_PATH
+        _take_strategy_round_batch, "FAST", eligible_pairs, len(eligible_pairs), DB_PATH
     )
     pairs = batch["pairs"]
     await _control_scan_round(batch["round_id"])

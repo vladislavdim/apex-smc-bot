@@ -1,5 +1,7 @@
 """Shared immutable market UI and strategy constants."""
 
+from collections.abc import Mapping
+
 TF_CATEGORIES = {
     "scalp": ["1m", "5m", "15m"],
     "swing": ["1h", "4h"],
@@ -15,9 +17,19 @@ TF_LABELS = {
 FAST_PAIRS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ADAUSDT", "DOTUSDT",
-    "MATICUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT",
+    "POLUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT",
     "SUIUSDT", "INJUSDT", "FETUSDT", "WIFUSDT", "PEPEUSDT",
 ]
+
+
+def live_fast_pairs(gate_prices: Mapping[str, object]) -> list[str]:
+    """Scan reviewed FAST symbols only while Gate quotes their live contract."""
+    if not gate_prices:
+        raise RuntimeError("Gate live FAST universe unavailable")
+    pairs = [symbol for symbol in FAST_PAIRS if symbol in gate_prices]
+    if not pairs:
+        raise RuntimeError("No reviewed FAST contract is live on Gate")
+    return pairs
 
 COINGECKO_IDS = {
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
@@ -51,7 +63,7 @@ SYMBOL_ALIASES = {
     "arbitrum": "ARBUSDT", "sui": "SUIUSDT", "суи": "SUIUSDT",
     "dot": "DOTUSDT", "полкадот": "DOTUSDT", "polkadot": "DOTUSDT",
     "ada": "ADAUSDT", "кардано": "ADAUSDT", "cardano": "ADAUSDT",
-    "matic": "MATICUSDT", "матик": "MATICUSDT", "polygon": "MATICUSDT",
+    "matic": "POLUSDT", "матик": "POLUSDT", "polygon": "POLUSDT",
     "ltc": "LTCUSDT", "лайткоин": "LTCUSDT", "litecoin": "LTCUSDT",
     "atom": "ATOMUSDT", "космос": "ATOMUSDT", "cosmos": "ATOMUSDT",
     "near": "NEARUSDT", "ниар": "NEARUSDT", "pepe": "PEPEUSDT",
@@ -75,4 +87,5 @@ SYMBOL_ALIASES = {
 
 __all__ = [
     "COINGECKO_IDS", "FAST_PAIRS", "SYMBOL_ALIASES", "TF_CATEGORIES", "TF_LABELS",
+    "live_fast_pairs",
 ]
