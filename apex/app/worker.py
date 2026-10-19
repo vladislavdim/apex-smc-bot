@@ -3829,7 +3829,6 @@ async def _v3_memory_startup_checkpoint():
 
 
 async def _brain_rollout_settle():
-async def _brain_rollout_settle():
     """Let the old Render instance finish its SIGTERM snapshot before restore."""
     seconds = _V3_CONFIG.runtime.rollout_settle_seconds
     if seconds:
