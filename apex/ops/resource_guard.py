@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import gc
+import sys
+import threading
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,33 @@ class MemorySnapshot:
     state: str
     service_bytes: int = 0
     working_set_bytes: int = 0
+
+
+@dataclass
+class MemoryReliefPolicy:
+    """Retry relief during sustained pressure without collecting every tick."""
+
+    cooldown_seconds: float = 300.0
+    next_attempt_at: float = 0.0
+
+    def claim(self, snapshot: MemorySnapshot, now: float) -> bool:
+        if snapshot.state not in {"WATCH", "DEGRADED", "NEW_ENTRIES_OFF"}:
+            return False
+        if now < self.next_attempt_at:
+            return False
+        self.next_attempt_at = now + max(30.0, self.cooldown_seconds)
+        return True
+
+
+def memory_diagnostics() -> dict[str, int]:
+    """Cheap counters only: never copy the live heap or log object contents."""
+    gc_stats = gc.get_stats()
+    return {
+        "python_blocks": sys.getallocatedblocks(),
+        "threads": threading.active_count(),
+        "gc_collections": sum(item["collections"] for item in gc_stats),
+        "gc_collected": sum(item["collected"] for item in gc_stats),
+    }
 
 
 def _cgroup_memory() -> tuple[int, int]:
@@ -106,4 +135,4 @@ def release_unused_memory() -> bool:
         return False
 
 
-__all__ = ["MemorySnapshot", "memory_snapshot", "memory_snapshot_dict", "release_unused_memory"]
+__all__ = ["MemorySnapshot", "MemoryReliefPolicy", "memory_diagnostics", "memory_snapshot", "memory_snapshot_dict", "release_unused_memory"]
