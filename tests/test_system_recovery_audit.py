@@ -21,7 +21,7 @@ from apex.telemetry.incidents import (
     configure_incidents, mark_notifications_delivered, open_incident,
     pending_notifications, resolve_incident,
 )
-from apex.ui.telegram.incidents import format_notification, notification_batches
+from apex.ui.telegram.incidents import format_notification, notification_batches, notification_decision
 from core import historical_zones
 
 
@@ -190,6 +190,32 @@ class IndicatorInputAuditTests(unittest.TestCase):
 class IncidentNotificationAuditTests(unittest.TestCase):
     def tearDown(self):
         configure_incidents(None)
+
+    def test_short_reconciliation_blip_is_not_delivered_but_long_fault_is(self):
+        start = datetime(2026, 10, 19, 17, 12, tzinfo=timezone.utc)
+        alert = {"event_type": "OPENED", "started_at": start.isoformat(),
+                 "payload": {"code": "JOB_FAILED", "severity": "ERROR"}}
+        self.assertEqual(notification_decision(alert, start + timedelta(seconds=30)), "defer")
+        recovered = {**alert, "event_type": "RECOVERED",
+                     "resolved_at": (start + timedelta(seconds=30)).isoformat()}
+        self.assertEqual(notification_decision(recovered), "suppress")
+        self.assertEqual(notification_decision(alert, start + timedelta(seconds=121)), "send")
+        memory = {**alert, "payload": {"code": "MEMORY_PRESSURE", "severity": "ERROR"}}
+        self.assertEqual(notification_decision(memory, start + timedelta(seconds=1)), "send")
+        self.assertNotIn("limit_bytes=", format_notification({**memory,
+            "payload": {**memory["payload"], "details": {"limit_bytes": 536870912}}}))
+
+    def test_memory_severity_flap_is_queued_once_per_level(self):
+        conn = sqlite3.connect(":memory:")
+        migrate_state(conn)
+        open_incident(conn, "MEMORY_PRESSURE", "memory", "WARNING")
+        open_incident(conn, "MEMORY_PRESSURE", "memory", "ERROR")
+        open_incident(conn, "MEMORY_PRESSURE", "memory", "WARNING")
+        open_incident(conn, "MEMORY_PRESSURE", "memory", "ERROR")
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM incident_notifications WHERE event_type='SEVERITY_CHANGED' AND payload_json LIKE '%ERROR%'"
+        ).fetchone()[0], 1)
+        conn.close()
 
     def test_brief_episode_crossing_batch_limit_is_one_recovered_message(self):
         with tempfile.TemporaryDirectory() as folder:

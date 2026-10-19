@@ -246,6 +246,7 @@ from apex.ui.telegram.system import format_system_status as _format_system_statu
 from apex.ui.telegram.incidents import (
     format_incidents as _format_incidents,
     format_notification as _format_incident_notification,
+    notification_decision as _incident_notification_decision,
     notification_batches as _incident_notification_batches,
 )
 from apex.ui.telegram.router import (
@@ -1455,6 +1456,10 @@ async def _send_signal(sd):
         disclaimer = "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
         if setup_line not in sd["text"]:
             sd["text"] = sd["text"].replace(disclaimer, setup_line + disclaimer) if disclaimer in sd["text"] else sd["text"] + setup_line
+    if not _V3_CONFIG.execution.enabled and sd.get("text"):
+        note = "ℹ️ Автовход выключен. Это аналитический сигнал, позиции Binance нет."
+        if note not in sd["text"]:
+            sd["text"] += "\n\n" + note
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
         _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
@@ -1630,8 +1635,9 @@ async def _send_signal(sd):
         _execution_error = str(execution.get("error") or "").strip()
         if _execution_error:
             _execution_notice += f"\nПричина: <code>{html.escape(_execution_error[:500])}</code>"
-        for _admin_id in sorted({int(value) for value in (ADMIN_IDS or []) if value}):
-            await _send_with_retry(_admin_id, _execution_notice, parse_mode="HTML")
+        if _execution_status_text != "DISABLED":
+            for _admin_id in sorted({int(value) for value in (ADMIN_IDS or []) if value}):
+                await _send_with_retry(_admin_id, _execution_notice, parse_mode="HTML")
         try:
             await asyncio.to_thread(_V3_LIVE_BRIDGE.sync_execution, int(signal_id))
         except Exception as exc:
@@ -4235,6 +4241,12 @@ async def _v3_alerts_job():
         # ERROR/CRITICAL episodes remain visible, including brief recoveries.
         if severity not in {"ERROR", "CRITICAL"}:
             await asyncio.to_thread(_v3_mark_incidents_delivered, notification["notification_ids"])
+            continue
+        decision = _incident_notification_decision(notification)
+        if decision == "suppress":
+            await asyncio.to_thread(_v3_mark_incidents_delivered, notification["notification_ids"])
+            continue
+        if decision == "defer":
             continue
         text = _format_incident_notification(notification)
         delivered = False

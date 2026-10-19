@@ -67,7 +67,7 @@ class StateCallbackHandlers:
         if data == "menu_trades":
             await self._trade_menu(callback)
             return True
-        if data in {"menu_active_trades", "menu_take_closed", "menu_stop_closed"}:
+        if data in {"menu_active_trades", "menu_closed_trades", "menu_take_closed", "menu_stop_closed", "menu_trade_signals"}:
             await self._trade_rows(callback, data)
             return True
         if data == "menu_watchlist":
@@ -178,14 +178,20 @@ class StateCallbackHandlers:
             callback.message, "📊 <b>Сделки APEX</b>\n\nВыберите состояние сделки:",
             parse_mode="HTML", reply_markup=self.dependencies.markup(inline_keyboard=[
                 [self.dependencies.button(text="📍 Активные", callback_data="menu_active_trades")],
+                [self.dependencies.button(text="📁 Все закрытые", callback_data="menu_closed_trades")],
                 [self.dependencies.button(text="✅ Закрыты по тейку", callback_data="menu_take_closed")],
                 [self.dependencies.button(text="🛑 Закрыты по стопу", callback_data="menu_stop_closed")],
+                [self.dependencies.button(text="📨 Сигналы без позиции", callback_data="menu_trade_signals")],
                 [self.dependencies.button(text="🔙 Меню", callback_data="menu_back")],
             ]),
         )
 
     async def _trade_rows(self, callback: Any, data: str) -> None:
-        category = {"menu_active_trades": "active", "menu_take_closed": "take", "menu_stop_closed": "stop"}[data]
+        category = {
+            "menu_active_trades": "active", "menu_closed_trades": "closed",
+            "menu_take_closed": "take", "menu_stop_closed": "stop",
+            "menu_trade_signals": "signals",
+        }[data]
         try:
             rows = await asyncio.to_thread(self.dependencies.fetch_trade_rows, category, 12)
             text = self.dependencies.format_trade_view(category, rows)
@@ -196,8 +202,10 @@ class StateCallbackHandlers:
             callback.message, text, parse_mode="HTML",
             reply_markup=self.dependencies.markup(inline_keyboard=[
                 [self.dependencies.button(text="📍 Активные", callback_data="menu_active_trades"),
-                 self.dependencies.button(text="✅ Тейки", callback_data="menu_take_closed"),
-                 self.dependencies.button(text="🛑 Стопы", callback_data="menu_stop_closed")],
+                 self.dependencies.button(text="📁 Закрытые", callback_data="menu_closed_trades")],
+                [self.dependencies.button(text="✅ Тейки", callback_data="menu_take_closed"),
+                 self.dependencies.button(text="🛑 Стопы", callback_data="menu_stop_closed"),
+                 self.dependencies.button(text="📨 Сигналы", callback_data="menu_trade_signals")],
                 [self.dependencies.button(text="🔄 Обновить", callback_data=data),
                  self.dependencies.button(text="🔙 Сделки", callback_data="menu_trades")],
             ]),

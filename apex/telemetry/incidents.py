@@ -22,10 +22,10 @@ def _queue_notification(
     event_type: str,
     payload: Mapping[str, Any],
 ) -> None:
-    event_key = (
-        f"{incident_id}:{event_type}:{str(payload.get('severity') or '')}:"
-        f"{int(payload.get('occurrence') or 1)}"
-    )
+    # A pressure episode can alternate WARNING/ERROR on every watchdog tick.
+    # Persist each escalation level once per incident while retaining counts.
+    occurrence = 1 if event_type == "SEVERITY_CHANGED" else int(payload.get("occurrence") or 1)
+    event_key = f"{incident_id}:{event_type}:{str(payload.get('severity') or '')}:{occurrence}"
     conn.execute(
         """INSERT OR IGNORE INTO incident_notifications(
                event_key,incident_id,event_type,payload_json
