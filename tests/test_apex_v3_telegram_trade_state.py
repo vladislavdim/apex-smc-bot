@@ -21,6 +21,7 @@ class TelegramTradeStateTests(unittest.TestCase):
                 (3, "CLOSED", "sl", "live", True),
                 (4, "ACTIVE", "pending", "paper", True),
                 (5, "ACTIVE", "pending", "live", False),
+                (6, "CLOSED", "manual", "live", True),
             ):
                 entity = derived_id("signal", "test", signal_id)
                 conn.execute(
@@ -31,9 +32,11 @@ class TelegramTradeStateTests(unittest.TestCase):
                      "{}", "hash"),
                 )
                 conn.execute(
-                    """INSERT INTO signal_lifecycle(signal_entity_id,signal_id,status,result)
-                       VALUES(?,?,?,?)""",
-                    (entity, signal_id, "active" if status == "ACTIVE" else "closed", result),
+                    """INSERT INTO signal_lifecycle(signal_entity_id,signal_id,status,result,
+                         symbol,direction,signal_type,timeframe,entry,sl,tp1)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (entity, signal_id, "active" if status == "ACTIVE" else "closed", result,
+                     f"PAIR{signal_id}USDT", "BULLISH", "MTF", "1h", 100, 95, 110),
                 )
                 conn.execute(
                     """INSERT INTO manager_positions(signal_entity_id,signal_id,symbol,strategy,
@@ -44,6 +47,26 @@ class TelegramTradeStateTests(unittest.TestCase):
                      100, 95, 110, 2, "{}", "hash", status,
                      result if result != "pending" else None),
                 )
+            conn.execute(
+                "UPDATE manager_positions SET last_price=105,current_r=1.0 WHERE signal_id=1"
+            )
+            conn.execute(
+                "UPDATE manager_positions SET realized_r=1.7 WHERE signal_id=6"
+            )
+            # The analytical signal monitor may lag a confirmed Binance position.
+            conn.execute(
+                "UPDATE signal_lifecycle SET status='waiting_entry' WHERE signal_id=1"
+            )
+            conn.execute(
+                "UPDATE signal_lifecycle SET status='active',result='pending' WHERE signal_id=2"
+            )
+            entity = derived_id("signal", "test", 7)
+            conn.execute(
+                """INSERT INTO signal_lifecycle(signal_entity_id,signal_id,status,result,
+                    symbol,direction,signal_type,timeframe,entry,sl,tp1)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (entity, 7, "closed", "tp1", "SIGNAL7USDT", "BEARISH", "ZONE", "4h", 100, 105, 90),
+            )
         self.factory = lambda: sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
 
     def tearDown(self):
@@ -53,7 +76,17 @@ class TelegramTradeStateTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in fetch_live_trades("active", 12, self.factory)], [1])
         self.assertEqual([r["id"] for r in fetch_live_trades("take", 12, self.factory)], [2])
         self.assertEqual([r["id"] for r in fetch_live_trades("stop", 12, self.factory)], [3])
-        self.assertIn("PAIR1USDT", format_trade_view("active", fetch_live_trades("active", 12, self.factory)))
+        self.assertEqual([r["id"] for r in fetch_live_trades("closed", 12, self.factory)], [6, 3, 2])
+        self.assertEqual([r["id"] for r in fetch_live_trades("signals", 12, self.factory)], [7, 5, 4])
+        active = format_trade_view("active", fetch_live_trades("active", 12, self.factory))
+        self.assertIn("PAIR1USDT", active)
+        self.assertIn("текущий R <b>+1.00R</b>", active)
+        self.assertIn("Цена проверки", active)
+        self.assertIn("итог <b>+1.70R</b>", format_trade_view("closed", fetch_live_trades("closed", 12, self.factory)))
+        signals = format_trade_view("signals", fetch_live_trades("signals", 12, self.factory))
+        self.assertIn("SIGNAL7USDT", signals)
+        self.assertIn("аналитически закрыт: TP1", signals)
+        self.assertIn("не означает исполненную сделку", signals)
 
     def test_state_failure_does_not_fall_back_to_legacy(self):
         with self.assertRaises(sqlite3.OperationalError):
