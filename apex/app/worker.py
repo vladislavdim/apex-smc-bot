@@ -3802,12 +3802,28 @@ async def _v3_recover_deferred_state_checkpoint(
 
 async def _v3_memory_startup_checkpoint():
     result = await backup_memory_db_to_github("startup_verified")
+    if result.get("status") == "stale_remote":
+        # The retiring worker may publish its final advisory Memory snapshot
+        # after our initial restore. Only the lease owner can replace its local
+        # copy with that newer verified snapshot; never CAS over an unknown head.
+        if await _v3_refresh_runtime_lease(acquire=True):
+            restored = await restore_memory_db_from_github()
+            if restored.get("ready"):
+                with _closing(_v3_connect_memory(_V3_CONFIG)) as memory:
+                    _v3_migrate_memory(memory)
+                result = await backup_memory_db_to_github("startup_handoff_verified")
+                logging.info("[MemoryPersistence] handoff checkpoint status=%s", result.get("status"))
     if _MEMORY_PERSISTENCE.configured and result.get("status") not in {
         "saved", "unchanged",
     }:
         _V3_RUNTIME.mark_component(
             "memory_backup", _V3_COMPONENT_STATE.DEGRADED,
             f"startup backup {result.get('status') or 'failed'}", required=False,
+        )
+    else:
+        _V3_RUNTIME.mark_component(
+            "memory_backup", _V3_COMPONENT_STATE.READY,
+            f"startup backup {result.get('status')}", required=False,
         )
     return result
 
