@@ -4375,6 +4375,9 @@ async def _initialize_production_runtime(transport: str):
     if _backup_ready:
         _v3_recover_incident("JOB_FAILED", "backup")
         _v3_recover_incident("JOB_TIMEOUT", "backup")
+    # Startup checkpoints can outlast the lease TTL. Reconfirm ownership before
+    # Binance reconciliation, while the periodic watchdog is not running yet.
+    await _v3_refresh_runtime_lease(acquire=True)
     await _v3_startup_reconcile_and_market_check()
     if transport == "polling":
         threading.Thread(target=run_server, daemon=True).start()
