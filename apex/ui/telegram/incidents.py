@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -32,11 +32,35 @@ def notification_batches(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, An
     return batches
 
 
+def notification_decision(notification: Mapping[str, Any], now: datetime | None = None) -> str:
+    """Defer short job faults, discard recovered blips, keep durable alarms."""
+    payload = notification.get("payload") or {}
+    code = str(payload.get("code") or "")
+    event = str(notification.get("event_type") or "")
+    if code not in {"JOB_FAILED", "JOB_TIMEOUT"}:
+        return "send"
+    started = notification.get("started_at")
+    try:
+        onset = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        if onset.tzinfo is None:
+            onset = onset.replace(tzinfo=timezone.utc)
+        end = notification.get("resolved_at")
+        current = datetime.fromisoformat(str(end).replace("Z", "+00:00")) if end else (now or datetime.now(timezone.utc))
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        duration = (current - onset).total_seconds()
+    except (TypeError, ValueError):
+        return "send"
+    if duration >= 120:
+        return "send"
+    return "suppress" if event in {"RESOLVED", "RECOVERED"} else "defer"
+
+
 def format_notification(notification: Mapping[str, Any]) -> str:
     payload = notification.get("payload") or {}
     event = str(notification.get("event_type") or "INCIDENT")
     recovered = event in {"RESOLVED", "RECOVERED"}
-    title = "Сбой уже устранён" if event == "RECOVERED" else event
+    title = "Сбой уже устранён" if recovered else "Требуется внимание"
     lines = [
         f"{'✅' if recovered else '🚨'} APEX INCIDENT · {title}",
         f"{payload.get('severity', 'UNKNOWN')} · {payload.get('component', 'system')}",
@@ -55,7 +79,9 @@ def format_notification(notification: Mapping[str, Any]) -> str:
             except (TypeError, ValueError):
                 pass
     details = payload.get("details")
-    if isinstance(details, dict) and details:
+    if str(payload.get("code") or "") == "MEMORY_PRESSURE":
+        lines.append("Память worker превысила безопасный порог; новые входы могут быть приостановлены.")
+    elif isinstance(details, dict) and details:
         lines.append(", ".join(f"{key}={value}" for key, value in sorted(details.items()))[:500])
     return "\n".join(lines)
 
@@ -79,4 +105,4 @@ def format_incidents(rows: Iterable[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["format_incidents", "format_notification", "notification_batches"]
+__all__ = ["format_incidents", "format_notification", "notification_batches", "notification_decision"]
