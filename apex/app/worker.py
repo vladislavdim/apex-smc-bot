@@ -315,6 +315,8 @@ from apex.strategies.zone import ZoneStrategy as _V3_ZONE_STRATEGY
 from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT, normalize_gate_candles as _v3_normalize_gate_candles
 from apex.market.provider import GateSnapshotProvider as _V3_GATE_SNAPSHOT_PROVIDER
 from apex.ops.resource_guard import (
+    MemoryReliefPolicy as _V3MemoryReliefPolicy,
+    memory_diagnostics as _v3_memory_diagnostics,
     memory_snapshot as _v3_memory_snapshot,
     release_unused_memory as _v3_release_unused_memory,
 )
@@ -412,7 +414,7 @@ _audit_store_ready = False
 _brain_backup_async_lock = None
 _state_backup_async_lock = None
 _memory_backup_async_lock = None
-_v3_memory_relief_active = False
+_V3_MEMORY_RELIEF = _V3MemoryReliefPolicy()
 
 
 def _v3_confirmed_accounting(signal_id: int):
@@ -3935,47 +3937,61 @@ async def _v3_probe_gate_freshness(*, force=False):
         )
 
 
+def _v3_sample_memory():
+    return _v3_memory_snapshot(
+        watch_ratio=_V3_CONFIG.operational.memory_watch_ratio,
+        degraded_ratio=_V3_CONFIG.operational.memory_degraded_ratio,
+        stop_ratio=_V3_CONFIG.operational.memory_stop_ratio,
+        limit_bytes=_V3_CONFIG.operational.memory_limit_bytes,
+    )
+
+
+async def _v3_update_memory_health():
+    snapshot = await asyncio.to_thread(_v3_sample_memory)
+    if _V3_MEMORY_RELIEF.claim(snapshot, time.monotonic()):
+        before = snapshot
+        diagnostics_before = _v3_memory_diagnostics()
+        cleared = clear_market_runtime_caches()
+        _get_v3_strategy_snapshot_provider().client.clear_cache()
+        trimmed = await asyncio.to_thread(_v3_release_unused_memory)
+        snapshot = await asyncio.to_thread(_v3_sample_memory)
+        logging.warning(
+            "[ResourceGuard] relief caches=%s malloc_trim=%s "
+            "rss_before=%s rss_after=%s working_set_before=%s working_set_after=%s "
+            "state_before=%s state_after=%s counters_before=%s counters_after=%s",
+            cleared, trimmed, before.rss_bytes, snapshot.rss_bytes,
+            before.working_set_bytes, snapshot.working_set_bytes,
+            before.state, snapshot.state, diagnostics_before, _v3_memory_diagnostics(),
+        )
+
+    detail = (
+        f"rss={snapshot.rss_bytes} service={snapshot.service_bytes} working_set={snapshot.working_set_bytes} limit={snapshot.limit_bytes} "
+        f"ratio={snapshot.ratio:.3f} state={snapshot.state}"
+    )
+    blocked = snapshot.state in {"DEGRADED", "NEW_ENTRIES_OFF"}
+    _V3_RUNTIME.mark_component(
+        "memory", _V3_COMPONENT_STATE.DEGRADED if blocked else _V3_COMPONENT_STATE.READY,
+        detail, required=False,
+    )
+    if blocked:
+        _V3_RUNTIME.inhibit_entries(f"RESOURCE_MEMORY_{snapshot.state}")
+    for state in ("DEGRADED", "NEW_ENTRIES_OFF"):
+        if snapshot.state != state:
+            _V3_RUNTIME.clear_inhibit(f"RESOURCE_MEMORY_{state}")
+    if snapshot.state in {"WATCH", "DEGRADED", "NEW_ENTRIES_OFF"}:
+        _v3_report_incident(
+            "MEMORY_PRESSURE", "memory", "ERROR" if snapshot.state == "NEW_ENTRIES_OFF" else "WARNING",
+            {"rss_bytes": snapshot.rss_bytes, "working_set_bytes": snapshot.working_set_bytes,
+             "limit_bytes": snapshot.limit_bytes, "ratio": snapshot.ratio},
+        )
+    else:
+        _v3_recover_incident("MEMORY_PRESSURE", "memory")
+
+
 async def _v3_runtime_watchdog():
     """Resource pressure may stop entries, never Manager/reconciliation."""
-    global _v3_memory_relief_active
     try:
-        snapshot = await asyncio.to_thread(
-            _v3_memory_snapshot,
-            watch_ratio=_V3_CONFIG.operational.memory_watch_ratio,
-            degraded_ratio=_V3_CONFIG.operational.memory_degraded_ratio,
-            stop_ratio=_V3_CONFIG.operational.memory_stop_ratio,
-            limit_bytes=_V3_CONFIG.operational.memory_limit_bytes,
-        )
-        detail = (
-            f"rss={snapshot.rss_bytes} service={snapshot.service_bytes} working_set={snapshot.working_set_bytes} limit={snapshot.limit_bytes} "
-            f"ratio={snapshot.ratio:.3f} state={snapshot.state}"
-        )
-        if snapshot.state in {"WATCH", "DEGRADED", "NEW_ENTRIES_OFF"}:
-            if not _v3_memory_relief_active:
-                cleared = clear_market_runtime_caches()
-                _get_v3_strategy_snapshot_provider().client.clear_cache()
-                trimmed = _v3_release_unused_memory()
-                _v3_memory_relief_active = True
-                logging.warning(
-                    "[ResourceGuard] optional caches released=%s malloc_trim=%s",
-                    cleared, trimmed,
-                )
-            _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.READY if snapshot.state == "WATCH" else _V3_COMPONENT_STATE.DEGRADED, detail, required=False)
-            if snapshot.state != "WATCH":
-                _V3_RUNTIME.inhibit_entries(f"RESOURCE_MEMORY_{snapshot.state}")
-            else:
-                _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_DEGRADED")
-                _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_NEW_ENTRIES_OFF")
-            _v3_report_incident(
-                "MEMORY_PRESSURE", "memory", "ERROR" if snapshot.state == "NEW_ENTRIES_OFF" else "WARNING",
-                {"rss_bytes": snapshot.rss_bytes, "limit_bytes": snapshot.limit_bytes, "ratio": snapshot.ratio},
-            )
-        else:
-            _v3_memory_relief_active = False
-            _V3_RUNTIME.mark_component("memory", _V3_COMPONENT_STATE.READY, detail, required=False)
-            _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_DEGRADED")
-            _V3_RUNTIME.clear_inhibit("RESOURCE_MEMORY_NEW_ENTRIES_OFF")
-            _v3_recover_incident("MEMORY_PRESSURE", "memory")
+        await _v3_update_memory_health()
         cpu = _V3_CPU_MONITOR.sample()
         _V3_RUNTIME.mark_component(
             "cpu",
