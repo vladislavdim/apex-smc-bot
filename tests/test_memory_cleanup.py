@@ -7,6 +7,72 @@ from apex.ops.resource_guard import memory_snapshot
 from scripts.render_client import RenderReleaseClient, ReleaseError
 
 
+def test_memory_relief_retries_during_sustained_pressure_and_bounds_flapping():
+    from apex.ops.resource_guard import MemoryReliefPolicy, MemorySnapshot
+    high = MemorySnapshot(450, 512, 450 / 512, "NEW_ENTRIES_OFF")
+    normal = MemorySnapshot(250, 512, 250 / 512, "NORMAL")
+    policy = MemoryReliefPolicy()
+    assert policy.claim(high, 0)
+    assert not policy.claim(high, 15)
+    assert policy.claim(high, 300)  # Pressure never returned to NORMAL.
+    assert not policy.claim(normal, 400)
+    assert not policy.claim(high, 450)  # A brief recovery must not defeat cooldown.
+    assert policy.claim(high, 600)
+
+
+def test_memory_health_uses_measured_result_and_collects_off_event_loop():
+    import ast, asyncio, logging
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from apex.domain.enums import ComponentState
+    from apex.ops.resource_guard import MemoryReliefPolicy, MemorySnapshot
+
+    node = next(n for n in ast.parse(Path('apex/app/worker.py').read_text()).body
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == '_v3_update_memory_health')
+    high = MemorySnapshot(470, 512, 470 / 512, 'NEW_ENTRIES_OFF', 490, 470)
+    normal = MemorySnapshot(300, 512, 300 / 512, 'NORMAL', 320, 300)
+    degraded = MemorySnapshot(410, 512, 410 / 512, 'DEGRADED', 430, 410)
+    main_thread = threading.get_ident()
+    def collect():
+        assert threading.get_ident() != main_thread
+        return True
+    runtime = Mock()
+    samples = Mock(side_effect=[high, normal])
+    namespace = {
+        'asyncio': asyncio, 'time': SimpleNamespace(monotonic=lambda: 1000),
+        'logging': logging, '_V3_MEMORY_RELIEF': MemoryReliefPolicy(),
+        '_v3_sample_memory': samples, '_v3_memory_diagnostics': lambda: {},
+        'clear_market_runtime_caches': Mock(return_value={'candles': 5}),
+        '_get_v3_strategy_snapshot_provider': lambda: SimpleNamespace(client=Mock()),
+        '_v3_release_unused_memory': collect, '_V3_RUNTIME': runtime,
+        '_V3_COMPONENT_STATE': ComponentState,
+        '_v3_report_incident': Mock(), '_v3_recover_incident': Mock(),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'worker-memory', 'exec'), namespace)
+    asyncio.run(namespace['_v3_update_memory_health']())
+    assert runtime.mark_component.call_args.args[1] == ComponentState.READY
+    runtime.inhibit_entries.assert_not_called()
+    namespace['_v3_recover_incident'].assert_called_once_with('MEMORY_PRESSURE', 'memory')
+
+    # A successful malloc_trim is not proof that pressure is gone.
+    runtime.reset_mock()
+    namespace['_V3_MEMORY_RELIEF'] = MemoryReliefPolicy()
+    samples.side_effect = [high, degraded]
+    asyncio.run(namespace['_v3_update_memory_health']())
+    runtime.inhibit_entries.assert_called_once_with('RESOURCE_MEMORY_DEGRADED')
+    runtime.clear_inhibit.assert_called_once_with('RESOURCE_MEMORY_NEW_ENTRIES_OFF')
+    assert runtime.mark_component.call_args.args[1] == ComponentState.DEGRADED
+
+    # The next watchdog tick still inhibits entries but does not collect again.
+    samples.side_effect = [high]
+    namespace['clear_market_runtime_caches'].reset_mock()
+    runtime.reset_mock()
+    asyncio.run(namespace['_v3_update_memory_health']())
+    namespace['clear_market_runtime_caches'].assert_not_called()
+    runtime.inhibit_entries.assert_called_once_with('RESOURCE_MEMORY_NEW_ENTRIES_OFF')
+
+
 def test_historical_candle_keys_cannot_grow_cache_or_lock_registry():
     clock=[100]
     calls=[]
