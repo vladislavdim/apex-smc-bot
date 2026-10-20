@@ -1501,6 +1501,33 @@ async def _send_signal(sd):
         )
         return False
     _sent_signal_cache[cache_key] = now_ts
+    # The State DB is restored from its remote checkpoint after a container
+    # replacement. Persist the claim before the first irreversible Telegram
+    # send, or a crash after acceptance can replay the same candidate.
+    try:
+        checkpoint = await backup_state_db_to_github("signal_delivery_claim")
+        if checkpoint.get("status") not in {"saved", "unchanged"}:
+            raise RuntimeError(f"delivery_claim_checkpoint_{checkpoint.get('status')}")
+    except asyncio.CancelledError:
+        # A concurrent checkpoint may have reached the remote. Keep the claim
+        # for safe reconciliation; no Telegram call has begun yet.
+        raise
+    except Exception as exc:
+        logging.error("[_send_signal] delivery claim checkpoint unavailable: %s", exc)
+        try:
+            await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
+            await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
+            if _sent_signal_cache.get(cache_key) == now_ts:
+                _sent_signal_cache.pop(cache_key, None)
+        except Exception:
+            logging.exception("[_send_signal] unable to release unsent delivery claim")
+        _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
+        _v3_report_incident(
+            "STATE_BACKUP_DEFERRED", "backup", "CRITICAL",
+            {"error_type": type(exc).__name__},
+        )
+        _record_strategy_decision(sd, "WAIT", "delivery", "durable claim unavailable", db_path=DB_PATH)
+        return False
     delivered = False
     try:
         sent_destinations = set()
