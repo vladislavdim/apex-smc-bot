@@ -29,7 +29,7 @@ def mtf(direction="BULLISH"):
             "causal_matrix_ready": True,
             "timeframe_alignment": {"1h": direction, "4h": direction, "1d": direction},
             "ob": {"found": True}, "fvg": {"found": True},
-            "structure_event": {"type": "BOS", "direction": direction},
+            "structure_event": {"type": "BOS", "direction": direction, "closed": True},
             "bos_choch": True, "volume_confirmed": True, "btc_confirmed": True,
         },
     }
@@ -65,6 +65,13 @@ class SetupEvidenceTests(unittest.TestCase):
         self.assertEqual(candidate, before)
         self.assertEqual(result["dimensions"]["conflict_risk"], "FATAL")
 
+    def test_nonfinite_geometry_is_invalid(self):
+        for key, value in (("entry", float("nan")), ("sl", float("inf")), ("tp1", float("inf")), ("rr", float("nan"))):
+            with self.subTest(key=key):
+                candidate = mtf()
+                candidate[key] = value
+                self.assertEqual(assess_candidate(candidate)["state"], "INVALID")
+
     def test_missing_trigger_is_developing_not_rescued_by_weak_facts(self):
         candidate = mtf()
         candidate["technical_evidence"].pop("structure_event")
@@ -74,6 +81,18 @@ class SetupEvidenceTests(unittest.TestCase):
         result = assess_candidate(candidate, context)
         self.assertEqual(result["state"], "DEVELOPING")
         self.assertIn("fresh 15m BOS/CHoCH trigger", result["missing"])
+
+    def test_opposing_or_unclosed_structure_cannot_confirm_trigger(self):
+        for event in (
+            {"type": "BOS", "direction": "BEARISH", "closed": True},
+            {"type": "CHoCH", "direction": "BULLISH", "closed": False},
+            {"type": "BOS", "direction": "BULLISH"},
+            True,
+        ):
+            with self.subTest(event=event):
+                candidate = mtf()
+                candidate["technical_evidence"]["structure_event"] = event
+                self.assertEqual(assess_candidate(candidate)["state"], "DEVELOPING")
 
     def test_correlated_participation_is_one_domain(self):
         context = empty_context("BTCUSDT")
@@ -88,8 +107,17 @@ class SetupEvidenceTests(unittest.TestCase):
         context = empty_context("BTCUSDT")
         context["large_orders"]["bias"] = "bullish"
         context["open_interest"]["change_1h_pct"] = 2.5
+        context["open_interest"]["bias"] = "bullish"
         result = assess_candidate(mtf(), context)
         self.assertEqual(result["state"], "EXCEPTIONAL")
+
+    def test_rising_open_interest_without_direction_cannot_promote_setup(self):
+        context = empty_context("BTCUSDT")
+        context["large_orders"]["bias"] = "bullish"
+        context["open_interest"]["change_1h_pct"] = 2.5
+        result = assess_candidate(mtf(), context)
+        self.assertEqual(result["state"], "STRONG")
+        self.assertNotIn("derivatives", result["domains"]["participation_derivatives"]["independent_domains"])
 
     def test_falling_open_interest_alone_does_not_confirm_direction(self):
         context = empty_context("BTCUSDT")
@@ -112,9 +140,9 @@ class SetupEvidenceTests(unittest.TestCase):
         base = {"symbol": "XUSDT", "direction": "BULLISH", "entry": 100, "sl": 95,
                 "tp1": 110, "rr": 2, "technical_evidence": {"causal_matrix_ready": True}}
         cases = [
-            ("SWING", {"htf_dir": "BULLISH", "ob": True, "structure_event": True, "structure_event_1h": True}),
-            ("ZONE", {"zone": "Discount", "zone_type": "OB", "structure_event": True}),
-            ("FAST", {"zone": "Discount OB", "ob": True, "structure_event": True}),
+            ("SWING", {"htf_dir": "BULLISH", "ob": True, "structure_event": {"type": "BOS", "direction": "BULLISH", "closed": True}, "structure_event_1h": {"type": "CHoCH", "direction": "BULLISH", "closed": True}}),
+            ("ZONE", {"zone": "Discount", "zone_type": "OB", "structure_event": {"type": "BOS", "direction": "BULLISH", "closed": True}}),
+            ("FAST", {"zone": "Discount OB", "ob": True, "structure_event": {"type": "BOS", "direction": "BULLISH", "closed": True}}),
             ("WYCKOFF", {"phases": "SC → AR → ST → Spring → SOS", "spring": True, "sos": True}),
         ]
         for strategy, evidence in cases:
