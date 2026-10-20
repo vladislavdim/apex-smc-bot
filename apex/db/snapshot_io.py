@@ -82,6 +82,21 @@ def _file_and_anon_bytes():
     return 0, 0
 
 
+def _relieve_stage_cache(current, limit_bytes: int, paths: tuple[str, ...]) -> bool:
+    """Evict disposable snapshot pages before the cgroup approaches its limit.
+
+    A file-cache hint is safe during read-only checks; dirty pages may remain
+    resident until the writer flushes them at the stage boundary.
+    """
+    if not paths or not limit_bytes or current['service'] < limit_bytes * 0.8:
+        return False
+    if current['file'] < 32 * 1024 * 1024:
+        return False
+    for path in paths:
+        discard_file_cache(path)
+    return True
+
+
 @contextmanager
 def snapshot_stage(name: str, *paths: str):
     """Measure the whole container, including transient Git subprocess peaks."""
@@ -89,6 +104,7 @@ def snapshot_stage(name: str, *paths: str):
     started = time.monotonic()
     peak = {'rss': 0, 'service': 0, 'working_set': 0, 'anon': 0, 'file': 0}
     stopped = threading.Event()
+    last_relief = 0.0
     def sample():
         value = memory_snapshot()
         anon, file_bytes = _file_and_anon_bytes()
@@ -96,7 +112,7 @@ def snapshot_stage(name: str, *paths: str):
                        working_set=value.working_set_bytes, anon=anon, file=file_bytes)
         for key, amount in current.items():
             peak[key] = max(peak[key], amount)
-        return current
+        return current, value.limit_bytes
     def record(phase, current):
         logger = logging.getLogger('apex.backup.resources')
         logger.setLevel(logging.INFO)
@@ -105,9 +121,13 @@ def snapshot_stage(name: str, *paths: str):
             'anon=%s file=%s elapsed=%.2f', name, phase, current['rss'], current['service'],
             current['working_set'], current['anon'], current['file'], time.monotonic() - started)
     def monitor():
+        nonlocal last_relief
         while not stopped.wait(0.5):
-            sample()
-    record('start', sample())
+            current, limit = sample()
+            now = time.monotonic()
+            if now - last_relief >= 2 and _relieve_stage_cache(current, limit, paths):
+                last_relief = now
+    record('start', sample()[0])
     observer = threading.Thread(target=monitor, daemon=True, name='backup-resource-sampler')
     observer.start()
     try:
@@ -119,4 +139,4 @@ def snapshot_stage(name: str, *paths: str):
         record('peak', peak)
         for path in paths:
             discard_file_cache(path, sync=True)
-        record('end', sample())
+        record('end', sample()[0])
