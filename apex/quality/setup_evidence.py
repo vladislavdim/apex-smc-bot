@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.domain.models import SetupEvidence
@@ -48,6 +49,18 @@ def _truth(value: Any) -> bool:
     return str(value or "").strip().lower() not in {"", "none", "false", "0", "unknown", "n/a", "—"}
 
 
+def _confirmed_structure(value: Any, direction: str) -> bool:
+    """Only a closed, directional BOS/CHoCH can confirm a trigger."""
+    if not isinstance(value, dict):
+        return False
+    return (
+        value.get("found", True) is not False
+        and str(value.get("type") or "").upper() in {"BOS", "CHOCH"}
+        and _agrees(value.get("direction"), direction)
+        and value.get("closed") is True
+    )
+
+
 def _agrees(value: Any, direction: str) -> bool:
     raw = str(value or "").upper()
     if direction == "BULLISH":
@@ -65,8 +78,8 @@ def _geometry(candidate: dict[str, Any], direction: str) -> tuple[bool, str]:
         rr = float(candidate["rr"])
     except (KeyError, TypeError, ValueError):
         return False, "missing or non-numeric Entry/SL/TP/RR"
-    if min(entry, sl, tp, rr) <= 0:
-        return False, "Entry/SL/TP/RR must be positive"
+    if not all(math.isfinite(value) and value > 0 for value in (entry, sl, tp, rr)):
+        return False, "Entry/SL/TP/RR must be finite and positive"
     correct = sl < entry < tp if direction == "BULLISH" else tp < entry < sl if direction == "BEARISH" else False
     if not correct:
         return False, "trade geometry contradicts direction"
@@ -87,7 +100,9 @@ def _external_domain(context: dict[str, Any] | None, direction: str) -> dict[str
         oi_usable = str(oi.get("status") or "").lower() not in {"stale", "error", "unavailable", "not_configured"}
         if oi_usable and oi_change is not None and float(oi_change) >= 1.0:
             observations.append(f"OI 1h {float(oi_change):+.2f}%")
-            independent.add("derivatives")
+            # Rising OI alone shows participation, not which side owns it.
+            if _agrees(oi.get("bias"), direction):
+                independent.add("derivatives")
     except (TypeError, ValueError):
         pass
 
@@ -148,7 +163,7 @@ def _technical_backbone(strategy: str, evidence: dict[str, Any], direction: str)
         alignment = evidence.get("timeframe_alignment") if isinstance(evidence.get("timeframe_alignment"), dict) else {}
         aligned = _agrees(alignment.get("1h"), direction) and _agrees(alignment.get("4h"), direction)
         location = _truth(evidence.get("ob")) or _truth(evidence.get("fvg"))
-        structure = _truth(evidence.get("structure_event")) or bool(evidence.get("bos_choch"))
+        structure = _confirmed_structure(evidence.get("structure_event"), direction)
         if aligned: core.append("1h and 4h structure agree with direction")
         else:
             missing.append("1h+4h directional alignment")
@@ -162,8 +177,8 @@ def _technical_backbone(strategy: str, evidence: dict[str, Any], direction: str)
     elif strategy == "SWING":
         htf = evidence.get("htf_dir")
         location = _truth(evidence.get("ob")) or _truth(evidence.get("fvg")) or _truth(evidence.get("confirms"))
-        structure_4h = _truth(evidence.get("structure_event"))
-        structure_1h = _truth(evidence.get("structure_event_1h"))
+        structure_4h = _confirmed_structure(evidence.get("structure_event"), direction)
+        structure_1h = _confirmed_structure(evidence.get("structure_event_1h"), direction)
         if _agrees(htf, direction) or str(htf or "").upper() in {"MIXED", "NEUTRAL", ""}:
             core.append("HTF location does not invalidate swing direction")
         else:
@@ -183,7 +198,7 @@ def _technical_backbone(strategy: str, evidence: dict[str, Any], direction: str)
         expected = "discount" if direction == "BULLISH" else "premium"
         zone_ok = expected in str(evidence.get("zone") or "").lower()
         location = _truth(evidence.get("zone_type"))
-        structure = _truth(evidence.get("structure_event"))
+        structure = _confirmed_structure(evidence.get("structure_event"), direction)
         if zone_ok and location: core.append(f"price is in {expected} at a qualified zone")
         else:
             missing.append(f"qualified {expected} location")
@@ -192,7 +207,7 @@ def _technical_backbone(strategy: str, evidence: dict[str, Any], direction: str)
         else: missing.append("fresh closed 1h BOS/CHoCH trigger")
     elif strategy == "FAST":
         location = _truth(evidence.get("zone")) and (_truth(evidence.get("ob")) or _truth(evidence.get("fvg")))
-        structure = _truth(evidence.get("structure_event"))
+        structure = _confirmed_structure(evidence.get("structure_event"), direction)
         if location: core.append("15m OB/FVG retest location and session setup are present")
         else:
             missing.append("15m OB/FVG retest location")
