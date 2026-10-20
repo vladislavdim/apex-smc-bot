@@ -370,6 +370,7 @@ Return JSON only, with no markdown or commentary:
             signal_id=int(candidate.get("signal_id")) if candidate.get("signal_id") is not None else None,
             strategy=strategy, symbol=str(view.get("symbol") or ""), context_hash=context_hash,
             prediction_target="ORIGINAL_TP_BEFORE_ORIGINAL_SL", context_version="entry-quality-v2",
+            evidence_scope="ANALYTICAL_CANDIDATE",
             payload={"setup_state": setup_assessment.get("state"), "degraded": review.get("degraded")},
             db_path=DB_PATH,
         )

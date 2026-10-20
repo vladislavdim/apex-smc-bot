@@ -81,6 +81,26 @@ class GithubFencingTests(unittest.TestCase):
     def test_rejected_write_never_grants_local_ownership(self):
         self.store.reject_write=True
         self.assertFalse(self.client().acquire().granted)
+    def test_failed_renewal_retains_only_committed_lease_until_safety_deadline(self):
+        owner=self.client()
+        self.assertTrue(owner.acquire().granted)
+        old_expiry=self.store.value['expires_at']
+        self.store.reject_write=True
+        state=owner.renew()
+        self.assertTrue(state.granted)
+        self.assertEqual(state.reason,'RENEWAL_DEFERRED')
+        self.assertEqual(self.store.value['expires_at'],old_expiry)
+        self.assertEqual(datetime.fromisoformat(state.expires_at),
+                         datetime.fromisoformat(old_expiry)-timedelta(seconds=40))
+        self.store.now+=timedelta(seconds=141)
+        self.assertFalse(owner.renew().granted)
+    def test_failed_renewal_cannot_keep_lease_after_other_owner_takes_over(self):
+        owner=self.client('one'); other=self.client('two')
+        self.assertTrue(owner.acquire().granted)
+        self.store.now+=timedelta(seconds=181)
+        self.assertTrue(other.acquire().granted)
+        self.store.reject_write=True
+        self.assertFalse(owner.renew().granted)
     def test_corrupt_or_clock_skewed_state_blocks_mutation(self):
         a=self.client(); a.acquire()
         self.store.value['generation']=True
