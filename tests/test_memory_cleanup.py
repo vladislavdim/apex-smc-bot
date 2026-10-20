@@ -198,13 +198,19 @@ def test_shutdown_with_active_scan_name_drains_jobs_before_final_backup():
     node = next(n for n in ast.parse(Path('apex/app/worker.py').read_text()).body
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == '_shutdown_production_runtime')
     order = []
+    checkpoint_gate = asyncio.Event()
     async def drain():
         order.append('drain')
+        checkpoint_gate.set()
+    async def checkpoint():
+        await checkpoint_gate.wait()
+        order.append('checkpoint')
     async def finish(*args):
         order.append('backup')
     namespace = {'asyncio': asyncio, 'logging': logging, '_V3_RUNTIME': Mock(),
         '_production_scheduler': Mock(), '_auto_trade_reconcile_task': None,
-        '_trade_manager_task': None, '_active_market_scan': 'MTF_1H',
+        '_trade_manager_task': None, '_signal_checkpoint_task': None,
+        '_active_market_scan': 'MTF_1H',
         '_v3_get_lease_client': lambda: SimpleNamespace(configured=False),
         '_V3_CONFIG': SimpleNamespace(database=SimpleNamespace(state_db_path='state.db'),
                                     runtime=SimpleNamespace(instance_id='test')),
@@ -212,7 +218,10 @@ def test_shutdown_with_active_scan_name_drains_jobs_before_final_backup():
         '_v3_release_runtime_lease': AsyncMock(), '_v3_record_shutdown': Mock(),
         '_v3_maintenance_and_backup': AsyncMock(), '_MARKET_INTELLIGENCE_OK': False}
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'worker-shutdown', 'exec'), namespace)
+    async def exercise():
+        namespace['_signal_checkpoint_task'] = asyncio.create_task(checkpoint())
+        await namespace['_shutdown_production_runtime']('deploy')
     with patch('apex.app.scheduler.drain_production_jobs', side_effect=drain):
-        asyncio.run(namespace['_shutdown_production_runtime']('deploy'))
-    assert order == ['drain', 'backup']
+        asyncio.run(exercise())
+    assert order == ['drain', 'checkpoint', 'backup']
     namespace['_production_scheduler'].shutdown.assert_called_once_with(wait=True)
