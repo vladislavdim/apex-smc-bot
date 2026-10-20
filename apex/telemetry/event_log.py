@@ -36,6 +36,10 @@ _MAX_PAYLOAD_CHARS = 20000
 _EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=128)
 _LOCAL_AUDIT_MAX_ROWS = 1000
 _LOCAL_AUDIT_DAYS = 3
+_OVERFLOW_WRITE_TIMEOUT = 0.1
+_DROPPED_EVENTS = 0
+_LAST_DROP_WARNING = float("-inf")
+_DROP_LOCK = threading.Lock()
 
 
 def _prune_local_audit() -> None:
@@ -158,8 +162,8 @@ def _runtime_scan_context() -> dict[str, Any]:
         return {"run_id": None, "scanner": None}
 
 
-def _connect() -> sqlite3.Connection:
-    conn = _connect_compatibility_db(DB_PATH, timeout=10, check_same_thread=False)
+def _connect(*, timeout: float = 10) -> sqlite3.Connection:
+    conn = _connect_compatibility_db(DB_PATH, timeout=timeout, check_same_thread=False)
     try:
         if DB_PATH == _CONFIG.database.state_db_path:
             _migrate_state(conn)
@@ -195,9 +199,9 @@ def _payload_text(payload: dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-def _persist_event(event: dict[str, Any]) -> None:
+def _persist_event(event: dict[str, Any], *, timeout: float = 10) -> bool:
     try:
-        with closing(_connect()) as conn:
+        with closing(_connect(timeout=timeout)) as conn:
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
             payload_json = _payload_text(payload)
             conn.execute("""INSERT OR REPLACE INTO setup_audit_events
@@ -213,8 +217,21 @@ def _persist_event(event: dict[str, Any]) -> None:
                  event["occurred_at"], payload_json, event["event_key"], payload_json,
                  event["event_key"], event["occurred_at"], event["event_key"], event["event_key"], event["event_key"]))
             conn.commit()
+        return True
     except Exception as exc:
         logging.debug("[SetupAudit] local persistence skipped: %s", exc)
+        return False
+
+
+def _report_dropped_event(reason: str) -> None:
+    """Expose bounded audit loss without flooding Telegram or the worker log."""
+    global _DROPPED_EVENTS, _LAST_DROP_WARNING
+    with _DROP_LOCK:
+        _DROPPED_EVENTS += 1
+        now = time.monotonic()
+        if now - _LAST_DROP_WARNING >= 60:
+            logging.warning("[SetupAudit] diagnostic events dropped=%s reason=%s", _DROPPED_EVENTS, reason)
+            _LAST_DROP_WARNING = now
 
 
 def _post_events(events: list[dict[str, Any]]) -> bool:
@@ -376,8 +393,14 @@ def emit_event(kind: str, strategy: str, symbol: str, payload: dict[str, Any], *
     try:
         event["payload"] = json.loads(_payload_text(payload_data))
         _ensure_worker(); _EVENT_QUEUE.put_nowait(event)
+    except queue.Full:
+        # Preserve the event locally if the diagnostic worker is behind.
+        # The bounded SQLite wait keeps optional telemetry off the scan's
+        # critical path; the retry worker can upload this row later.
+        if not _persist_event(event, timeout=_OVERFLOW_WRITE_TIMEOUT):
+            _report_dropped_event("queue_full_local_write_failed")
     except Exception:
-        pass
+        _report_dropped_event("enqueue_failed")
     return key
 
 
