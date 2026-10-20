@@ -415,6 +415,8 @@ _audit_store_ready = False
 _brain_backup_async_lock = None
 _state_backup_async_lock = None
 _memory_backup_async_lock = None
+_signal_checkpoint_task = None
+_signal_checkpoint_revision = 0
 _V3_MEMORY_RELIEF = _V3MemoryReliefPolicy()
 
 
@@ -1652,10 +1654,10 @@ async def _send_signal(sd):
             _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
             "DELIVERY", "DELIVERED", "TELEGRAM", {"signal_id": signal_id}, DB_PATH,
         )
-    # Delivered signals and their cooldown are critical operational state.
-    # Persist them immediately so a Render restart cannot restore a snapshot
-    # from before Telegram delivery and emit the same setup again.
-    await backup_db_to_github(f"signal_{_strategy.lower()}")
+    # State owns delivery claims and the canonical signal lifecycle. Start a
+    # durable checkpoint without charging its GitHub upload to the scanner's
+    # deadline. The large compatibility Brain snapshot runs on its own job.
+    _schedule_delivered_signal_checkpoint(f"signal_{_strategy.lower()}")
     if lifecycle_ready:
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
     return True
@@ -3641,6 +3643,34 @@ async def backup_state_db_to_github(reason="scheduled"):
         return result
 
 
+def _schedule_delivered_signal_checkpoint(reason: str) -> None:
+    """Coalesce bursts, but include signals arriving during an earlier snapshot."""
+    global _signal_checkpoint_revision, _signal_checkpoint_task
+    _signal_checkpoint_revision += 1
+    if _signal_checkpoint_task is None or _signal_checkpoint_task.done():
+        _signal_checkpoint_task = asyncio.create_task(_checkpoint_delivered_signals(reason))
+
+
+async def _checkpoint_delivered_signals(reason: str) -> None:
+    while True:
+        revision = _signal_checkpoint_revision
+        try:
+            result = await backup_state_db_to_github(reason)
+            status = str(result.get("status") or "")
+            if status not in {"saved", "unchanged"}:
+                raise RuntimeError(f"state_checkpoint_{status or 'failed'}")
+        except Exception as exc:
+            logging.error("[SignalLifecycle] delivered signal checkpoint failed: %s", exc)
+            _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
+            _v3_report_incident(
+                "STATE_BACKUP_DEFERRED", "backup", "CRITICAL",
+                {"error_type": type(exc).__name__},
+            )
+            return
+        if revision == _signal_checkpoint_revision:
+            return
+
+
 async def restore_memory_db_from_github():
     """Restore optional Live Memory without ever replacing unknown remote state."""
     result = await asyncio.to_thread(_MEMORY_PERSISTENCE.restore)
@@ -4485,6 +4515,10 @@ async def _shutdown_production_runtime(reason: str) -> None:
             await asyncio.gather(*pending, return_exceptions=True)
         from apex.app.scheduler import drain_production_jobs
         await drain_production_jobs()
+        # A scan can finish before its State checkpoint; preserve that final
+        # receipt before the shutdown backup and lease release.
+        if _signal_checkpoint_task is not None and not _signal_checkpoint_task.done():
+            await _signal_checkpoint_task
         if _production_scheduler is not None:
             try:
                 _production_scheduler.shutdown(wait=True)
