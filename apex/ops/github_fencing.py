@@ -130,6 +130,14 @@ class GithubInstanceLeaseClient(InstanceLeaseClient):
             if not committed:
                 observed, _, _ = self._read()
                 if observed != proposed:
+                    # A failed or ambiguous renewal does not revoke an
+                    # already committed lease owned by this process. Keep
+                    # only the observed, unexpired generation; never assume
+                    # that the proposed extension reached GitHub.
+                    if (action == "renew" and observed.get("instance_id") == self.owner_id
+                            and observed.get("generation") == generation
+                            and datetime.fromisoformat(observed["expires_at"]) > self.clock()):
+                        return self._remember(observed, granted=True, reason="RENEWAL_DEFERRED")
                     return self._remember(observed, granted=False,
                                           reason="LEASE_HELD" if action == "acquire" else "FENCING_TOKEN_MISMATCH")
             return self._remember(proposed, granted=action != "release",

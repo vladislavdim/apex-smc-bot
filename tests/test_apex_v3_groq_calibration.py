@@ -50,6 +50,19 @@ class GroqLiveCalibrationTests(unittest.TestCase):
         self.assertFalse(record_outcome("legacy", outcome_label=True, db_path=self.db))
         self.assertEqual(calibration_summary(self.db)["calls"], 0)
 
+    def test_analytical_entry_review_does_not_claim_confirmed_live_evidence(self):
+        import tempfile
+        self.temp = tempfile.NamedTemporaryFile(suffix=".db")
+        self.db = self.temp.name
+        self.addCleanup(self.temp.close)
+        self.assertTrue(record_prediction(
+            "entry-groq:candidate", "APPROVE", .9,
+            prediction_target="ORIGINAL_TP_BEFORE_ORIGINAL_SL",
+            evidence_scope="ANALYTICAL_CANDIDATE", db_path=self.db,
+        ))
+        self.assertFalse(record_outcome("entry-groq:candidate", outcome_label=True, db_path=self.db))
+        self.assertEqual(calibration_summary(self.db)["calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

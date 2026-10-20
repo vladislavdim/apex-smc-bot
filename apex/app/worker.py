@@ -2372,7 +2372,7 @@ async def _auto_scan_swing_impl():
                 "tp2": _sw_tp2_val, "tp3": _sw_tp2_val,
                 "rr": r.get("rr"),
                 "grade": "SWING", "text": text,
-                "confluence_score": int(r["rr"] * 20),
+                "confluence_score": 0,
                 "regime": "SWING",
                 "scan_type": "swing",
                 "technical_evidence": {key: r.get(key) for key in (
@@ -2432,7 +2432,7 @@ def _zone_candidate_from_setup(r):
         f"💰 Вход: <code>{smart_price_fmt(r['entry'])}</code>\n"
         f"🛑 Стоп: <code>{smart_price_fmt(r['sl'])}</code>\n\n"
         f"📈 Логика: {r['logic']}\n\n"
-        f"⭐ Quality: {r['q_score']}/8 | RR: {r['rr']}\n"
+        f"⭐ Quality: {r['q_score']}/6 | RR: {r['rr']}\n"
         f"⏱ Горизонт: ~{r.get('est_hours', 12)}ч\n\n"
         "💡 Это аналитика, не совет. Торгуй осознанно"
     )
@@ -2442,7 +2442,7 @@ def _zone_candidate_from_setup(r):
         "timeframe": "4h", "entry": r["entry"],
         "sl": r["sl"], "tp1": r["tp"], "tp2": tp2, "tp3": tp2,
         "rr": r.get("rr"), "grade": "ZONE", "text": text,
-        "confluence_score": int(r["rr"] * 20), "regime": "ZONE", "scan_type": "zone",
+        "confluence_score": int(r["q_score"]), "regime": "ZONE", "scan_type": "zone",
         "technical_evidence": {key: r.get(key) for key in (
             "logic", "zone", "zone_type", "q_score", "quality_components",
             "htf_dir", "funding_warning", "structure_event"
@@ -2840,7 +2840,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
                 "entry": r["entry"], "sl": r["sl"], "tp1": _f_tp1,
                 "tp2": _f_tp2, "tp3": _f_tp2, "rr": r.get("rr"),
                 "grade": "FAST", "scan_type": "fast",
-                "confluence_score": int(r["rr"] * 20), "regime": "FAST",
+                "confluence_score": 0, "regime": "FAST",
                 "technical_evidence": {key: r.get(key) for key in (
                     "logic", "zone", "direction_1d", "funding_warning", "ob", "fvg",
                     "structure_event", "entry_drift_pct"

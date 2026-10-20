@@ -2205,7 +2205,7 @@ def detect_zone_setup(symbol: str, timeframe: str = "4h", passive_watch: bool = 
         except Exception:
             pass
 
-        # ── 7. Quality score (минимум 3 из 8) ──
+        # ── 7. Quality score (minimum 3 of 6 optional confirmations) ──
         q_score = 0
         # Decision passport only: these named components mirror the existing
         # score exactly and do not add, remove, or reorder any trading gate.

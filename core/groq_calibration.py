@@ -65,6 +65,7 @@ def record_prediction(
     strategy: str = "", symbol: str = "", model: str | None = None,
     prompt_version: str | None = None, context_hash: str | None = None,
     prediction_target: str = "UNSPECIFIED", context_version: str = "v1",
+    evidence_scope: str = "CONFIRMED_LIVE_ONLY",
     payload: Mapping[str, Any] | None = None, db_path: str = DB_PATH,
 ) -> bool:
     """Persist a prediction once; malformed confidence is stored as NULL."""
@@ -80,10 +81,11 @@ def record_prediction(
         """INSERT OR IGNORE INTO apex_v2_groq_calibration
            (action_id,signal_id,strategy,symbol,action,confidence,model,prompt_version,context_hash,
             prediction_target,context_version,payload_json,shadow_only,evidence_scope)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,'CONFIRMED_LIVE_ONLY')""",
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
         (str(action_id), signal_id, str(strategy).upper(), str(symbol).upper(), str(action).upper(), score,
          model, prompt_version, context_hash, str(prediction_target or "UNSPECIFIED").upper(),
-         str(context_version or "v1"), json.dumps(payload or {}, ensure_ascii=False, default=str)),
+         str(context_version or "v1"), json.dumps(payload or {}, ensure_ascii=False, default=str),
+         str(evidence_scope or "LEGACY_UNKNOWN").upper()),
     ).rowcount
     conn.commit()
     conn.close()
