@@ -154,7 +154,8 @@ def test_optional_diagnostic_queue_has_bounded_detached_payloads():
     from apex.telemetry import event_log
     events=queue.Queue(maxsize=128)
     payload={'score':7,'context':[{'value':'x'*1000} for _ in range(200)]}
-    with patch.object(event_log,'_EVENT_QUEUE',events),patch.object(event_log,'_ensure_worker'):
+    with patch.object(event_log,'_EVENT_QUEUE',events),patch.object(event_log,'_ensure_worker'), \
+            patch.object(event_log,'_persist_event',return_value=True) as overflow_write:
         for number in range(200):
             event_log.emit_event('strategy_attempt','FAST','BTCUSDT',payload,event_key=str(number))
     payload['score']=99
@@ -162,6 +163,40 @@ def test_optional_diagnostic_queue_has_bounded_detached_payloads():
     saved=events.get_nowait()['payload']
     assert saved['score']==7 and saved.get('payload_truncated') is True
     assert 'context' not in saved
+    assert overflow_write.call_count==72
+
+
+def test_diagnostic_queue_overflow_persists_locally_without_waiting_for_worker():
+    import queue, sqlite3, tempfile
+    from pathlib import Path
+    from apex.telemetry import event_log
+    with tempfile.TemporaryDirectory() as directory:
+        path=str(Path(directory)/'audit.db')
+        events=queue.Queue(maxsize=1)
+        with patch.object(event_log,'DB_PATH',path),patch.object(event_log,'_EVENT_QUEUE',events), \
+                patch.object(event_log,'_ensure_worker'):
+            event_log.emit_event('strategy_attempt','FAST','BTCUSDT',{'score':1},event_key='first')
+            event_log.emit_event('strategy_attempt','FAST','BTCUSDT',{'score':2},event_key='overflow')
+        with sqlite3.connect(path) as conn:
+            saved=conn.execute("SELECT payload_json FROM setup_audit_events WHERE event_key='overflow'").fetchone()
+        assert saved is not None and '"score":2' in saved[0]
+        assert events.qsize()==1
+
+
+def test_diagnostic_queue_reports_failed_overflow_without_spam():
+    import queue
+    from apex.telemetry import event_log
+    events=queue.Queue(maxsize=1)
+    events.put({'event_key':'first'})
+    with patch.object(event_log,'_EVENT_QUEUE',events), patch.object(event_log,'_ensure_worker'), \
+            patch.object(event_log,'_persist_event',return_value=False), \
+            patch.object(event_log,'_LAST_DROP_WARNING',float('-inf')), \
+            patch.object(event_log,'_DROPPED_EVENTS',0), \
+            patch.object(event_log.logging,'warning') as warning:
+        event_log.emit_event('strategy_attempt','FAST','BTCUSDT',{},event_key='second')
+        event_log.emit_event('strategy_attempt','FAST','BTCUSDT',{},event_key='third')
+        assert warning.call_count==1
+        assert event_log._DROPPED_EVENTS==2
 
 
 def test_technical_audit_starts_locally_without_restore_or_archiving():
