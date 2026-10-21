@@ -67,6 +67,7 @@ class StateSignalMonitorTests(unittest.TestCase):
         monitor = self.monitor(100, {"low": 94, "high": 111})
         first = monitor.check()
         self.assertEqual(first[0]["result"], "sl")
+        self.assertIsNone(first[0]["original_tp1_before_sl"])
         self.assertEqual(first[0]["exit_price"], 95)
         self.assertEqual(monitor.check(), [])
         self.assertEqual([event[0][0] for event in self.events], ["CLOSE"])
@@ -81,8 +82,16 @@ class StateSignalMonitorTests(unittest.TestCase):
     def test_fast_stop_wins_even_when_tp2_touched(self):
         self.seed(strategy="FAST")
         monitor = self.monitor(100, {"low": 94, "high": 121})
-        self.assertEqual(monitor.check()[0]["result"], "sl")
+        outcome = monitor.check()[0]
+        self.assertEqual(outcome["result"], "sl")
+        self.assertIsNone(outcome["original_tp1_before_sl"])
         self.assertEqual(monitor.check(), [])
+
+    def test_unambiguous_original_stop_labels_analytical_review_only(self):
+        self.seed()
+        outcome = self.monitor(96, {"low": 94, "high": 104}).check()[0]
+        self.assertEqual(outcome["result"], "sl")
+        self.assertIs(outcome["original_tp1_before_sl"], False)
 
     def test_waiting_target_does_not_become_a_trade(self):
         self.seed(status="waiting_entry")
@@ -93,7 +102,9 @@ class StateSignalMonitorTests(unittest.TestCase):
     def test_tp1_trailing_then_tp2_matches_legacy_sequence(self):
         self.seed()
         first = self.monitor(110, {"low": 105, "high": 111})
-        self.assertEqual(first.check()[0]["result"], "tp1_hit")
+        outcome = first.check()[0]
+        self.assertEqual(outcome["result"], "tp1_hit")
+        self.assertTrue(outcome["original_tp1_before_sl"])
         self.assertEqual(self.repository.get(1)["trailing_sl"], 104.0)
         second = self.monitor(120, {"low": 110, "high": 121})
         self.assertEqual(second.check()[0]["result"], "tp2")

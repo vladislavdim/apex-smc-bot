@@ -1276,6 +1276,14 @@ def _persist_delivered_signal(sd: dict):
     if signal_id:
         sd["_signal_persisted"] = True
         sd["_signal_id"] = signal_id
+        if sd.get("_groq_calibration_action_id"):
+            try:
+                from core.groq_calibration import bind_analytical_prediction
+                bind_analytical_prediction(
+                    sd["_groq_calibration_action_id"], int(signal_id), db_path=DB_PATH,
+                )
+            except Exception as exc:
+                logging.warning("[GroqCalibration] signal binding deferred: %s", exc)
         try:
             sd["_v3_candidate_id"] = _V3_LIVE_BRIDGE.register_signal(
                 int(signal_id),
@@ -1760,6 +1768,16 @@ async def auto_scan_job():
     if closed:
         await asyncio.to_thread(_rebuild_strategy_risk_states, DB_PATH)
     for c in closed:
+        if c.get("original_tp1_before_sl") is not None:
+            try:
+                from core.groq_calibration import resolve_analytical_signal
+                await asyncio.to_thread(
+                    resolve_analytical_signal, int(c["signal_id"]),
+                    tp_before_original_sl=c["original_tp1_before_sl"],
+                    reason=str(c["result"]), db_path=DB_PATH,
+                )
+            except Exception as exc:
+                logging.warning("[GroqCalibration] analytical outcome deferred: %s", exc)
         if c["result"] == "tp1_hit":
             # Trade Manager will fold TP1 into the existing compact card on
             # its next Gate-backed pass. Avoid a separate Telegram message.
