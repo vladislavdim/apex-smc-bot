@@ -64,9 +64,7 @@ def format_system_status(snapshot: Mapping[str, Any]) -> str:
         item = components.get(name)
         item = item if isinstance(item, Mapping) else {}
         state = str(item.get("state") or "UNKNOWN").upper()
-        if state == "UNKNOWN" and name in {"groq", "risk_engine"}:
-            state = "ON_DEMAND"
-        elif state == "UNKNOWN" and name.startswith("scanner_"):
+        if state == "UNKNOWN" and name.startswith("scanner_"):
             state = "WAITING_FIRST_RUN"
         lines.append(f"{_icon(state)} {html.escape(_LABELS.get(name, name))}: <b>{html.escape(state)}</b>")
 

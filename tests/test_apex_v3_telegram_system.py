@@ -31,8 +31,8 @@ class TelegramSystemTests(unittest.TestCase):
             "status": "READY", "health": "HEALTHY", "ready": True,
             "release_sha": "b" * 40,
             "components": {
-                "groq": {"state": "UNKNOWN"},
-                "risk_engine": {"state": "UNKNOWN"},
+                "groq": {"state": "ON_DEMAND"},
+                "risk_engine": {"state": "ON_DEMAND"},
                 "scanner_wyckoff": {"state": "UNKNOWN"},
             },
         })
@@ -40,6 +40,10 @@ class TelegramSystemTests(unittest.TestCase):
         self.assertIn("Risk engine: <b>ON_DEMAND</b>", text)
         self.assertIn("Scanner WYCKOFF: <b>WAITING_FIRST_RUN</b>", text)
         self.assertIn("это не ошибка подключения", text)
+
+    def test_unmeasured_component_is_not_disguised_as_on_demand(self):
+        text = format_system_status({"components": {"groq": {"state": "UNKNOWN"}}})
+        self.assertIn("Groq: <b>UNKNOWN</b>", text)
 
 
 if __name__ == "__main__":

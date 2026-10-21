@@ -97,6 +97,37 @@ assert send.await_count == 1
 """)
 
 
+def test_candidate_updates_groq_without_claiming_execution_risk_verified():
+    _worker_case("""
+import asyncio
+from unittest.mock import AsyncMock, Mock, patch
+from apex.app import worker
+
+async def verify():
+    runtime = Mock()
+    review = {"decision": "WAIT", "confidence": 0.0, "degraded": True,
+              "context": {}, "reasons": ["GROQ_UNAVAILABLE"]}
+    candidate = {"symbol": "BTCUSDT", "direction": "BULLISH", "grade": "MTF",
+                 "entry": 100, "sl": 95, "tp1": 110}
+    with patch.object(worker, "_V3_RUNTIME", runtime), \\
+         patch.object(worker, "_strategy_risk_state", return_value={"mode": "NORMAL", "groq_min_confidence": 0.65}), \\
+         patch.object(worker, "get_live_prices", return_value={}), \\
+         patch.object(worker, "_validate_signal_candidate", return_value={"valid": True}), \\
+         patch.object(worker, "_has_pending_signal_for_symbol", return_value=False), \\
+         patch.object(worker, "_assess_setup_candidate", return_value={"blocking": False}), \\
+         patch.object(worker, "_persist_setup_assessment"), \\
+         patch.object(worker, "_record_strategy_decision"), \\
+         patch.object(worker, "_review_signal_candidate", new=AsyncMock(return_value=review)), \\
+         patch.object(worker, "_SIGNAL_QUALITY_GATE_OK", True):
+        assert await worker._send_signal(candidate) is False
+    observed = {call.args[0]: call.args[1] for call in runtime.mark_component.call_args_list}
+    assert "risk_engine" not in observed
+    assert observed["groq"] == worker._V3_COMPONENT_STATE.DEGRADED
+
+asyncio.run(verify())
+""")
+
+
 def test_gate_probe_requires_recent_closed_candle_and_recovers():
     _worker_case("""
 import asyncio

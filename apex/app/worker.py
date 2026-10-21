@@ -1397,6 +1397,8 @@ async def _send_signal(sd):
         logging.info("[SetupEvidence] %s %s → %s: %s", sd.get("symbol"), _strategy, setup_state, reason)
         return False
     if not _SIGNAL_QUALITY_GATE_OK:
+        _V3_RUNTIME.mark_component("groq", _V3_COMPONENT_STATE.UNAVAILABLE,
+                                   "quality gate import unavailable", required=False)
         reason = "quality gate unavailable; final Groq confirmation required"
         logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
         _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
@@ -1407,7 +1409,19 @@ async def _send_signal(sd):
             )
         return False
     if not sd.get("_external_quality_reviewed"):
-        review = await _review_signal_candidate(sd, ask_groq, get_candles)
+        try:
+            review = await _review_signal_candidate(sd, ask_groq, get_candles)
+        except Exception as exc:
+            _V3_RUNTIME.mark_component("groq", _V3_COMPONENT_STATE.DEGRADED,
+                                       type(exc).__name__, required=False)
+            raise
+        _V3_RUNTIME.mark_component(
+            "groq",
+            _V3_COMPONENT_STATE.DEGRADED if review.get("degraded") else _V3_COMPONENT_STATE.READY,
+            "review unavailable" if review.get("degraded") else
+            f"review completed decision={str(review.get('decision') or 'WAIT').upper()}",
+            required=False,
+        )
         sd["_external_quality_reviewed"] = True
         sd["_external_quality_review"] = review
         if isinstance(review.get("setup_assessment"), dict):
@@ -1451,6 +1465,8 @@ async def _send_signal(sd):
     else:
         existing_review = sd.get("_external_quality_review")
         if not isinstance(existing_review, dict):
+            _V3_RUNTIME.mark_component("groq", _V3_COMPONENT_STATE.DEGRADED,
+                                       "cached review missing", required=False)
             reason = "quality review missing; final Groq confirmation required"
             logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
             _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
@@ -2141,6 +2157,7 @@ def _get_v3_strategy_activation():
             requested=settings.snapshot_activation_requested,
             corpus_directory=settings.parity_corpus_path,
             verdict_path=settings.parity_verdict_path,
+            registry=_get_v3_live_strategy_registry(),
         )
         logging.info(
             "[APEX V3] strategy snapshot activation active=%s reason=%s",
@@ -4469,6 +4486,14 @@ async def _initialize_production_runtime(transport: str):
     _manager_registration = await _v3_refresh_manager_state_mirror()
     logging.info("[APEX V3] Manager registration mirror: %s", _manager_registration)
     _rebuild_strategy_risk_states(DB_PATH)
+    _V3_RUNTIME.mark_component("risk_engine", _V3_COMPONENT_STATE.ON_DEMAND,
+                               "execution risk admission pending", required=False)
+    _V3_RUNTIME.mark_component(
+        "groq",
+        _V3_COMPONENT_STATE.ON_DEMAND if _SIGNAL_QUALITY_GATE_OK else _V3_COMPONENT_STATE.UNAVAILABLE,
+        "quality gate loaded; candidate review pending" if _SIGNAL_QUALITY_GATE_OK
+        else "quality gate import unavailable", required=False,
+    )
     start_db_writer()
     _checkpoint = await _brain_startup_checkpoint()
     _state_checkpoint = await _v3_state_startup_checkpoint()
