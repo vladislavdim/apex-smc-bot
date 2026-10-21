@@ -17,6 +17,7 @@ class RuntimeStatus(str, Enum):
 
 class ComponentState(str, Enum):
     UNKNOWN = "UNKNOWN"
+    ON_DEMAND = "ON_DEMAND"
     STARTING = "STARTING"
     READY = "READY"
     FRESH = "FRESH"

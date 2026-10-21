@@ -37,9 +37,24 @@ class StrategyActivationSwitch:
         requested: bool,
         corpus_directory: str | Path,
         verdict_path: str | Path,
+        registry: StrategyRegistry | None = None,
     ) -> "StrategyActivationSwitch":
         if not requested:
             return cls(False, False, "SNAPSHOT_ACTIVATION_NOT_REQUESTED")
+        if registry is None or not registry.complete():
+            return cls(True, False, "SNAPSHOT_IMPLEMENTATION_UNVERIFIED")
+        for strategy, adapter in registry.registered_adapters().items():
+            if hasattr(adapter, "snapshot_detectors"):
+                detectors = getattr(adapter, "snapshot_detectors")
+            elif hasattr(adapter, "snapshot_detector"):
+                detectors = (getattr(adapter, "snapshot_detector"),)
+            else:
+                detectors = (getattr(adapter, "evaluate_snapshot", None),)
+            if not detectors or any(
+                detector is None or getattr(detector, "_apex_legacy_snapshot_bridge", False)
+                for detector in detectors
+            ):
+                return cls(True, False, f"SNAPSHOT_IMPLEMENTATION_LEGACY_BRIDGE:{strategy.value}")
         try:
             cases = load_corpus_directory(corpus_directory)
             verdict = load_activation_verdict(verdict_path, cases)

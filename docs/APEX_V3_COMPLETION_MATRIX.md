@@ -20,6 +20,9 @@ an independent V3 detector implementation. Snapshot activation is off in the
 current production configuration. Entry Groq review diagnostics are labelled
 from unambiguous analytical TP1/SL candle order and remain separate from
 confirmed Binance trade outcomes; review confidence is not a TP probability.
+The activation switch rejects a registered legacy snapshot bridge even with a
+valid parity verdict. A separate implementation and stronger evidence are
+required before enabling snapshot activation in production.
 
 | IDs | Workstream | Status | Release evidence |
 |---|---|---|---|

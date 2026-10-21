@@ -62,6 +62,7 @@ def snapshot_symbol_detector(detector: Callable[..., Any]) -> Callable[..., Any]
         with use_market_snapshot(snapshot):
             return detector(snapshot.symbol, **kwargs)
 
+    evaluate._apex_legacy_snapshot_bridge = True
     return evaluate
 
 
