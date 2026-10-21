@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import sqlite3
+from uuid import uuid4
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from typing import Any, Callable
 from apex.config.settings import ApexConfig
@@ -176,8 +177,8 @@ async def review_signal_candidate(
 ) -> dict[str, Any]:
     """Enrich a completed candidate and let Groq approve, wait, or reject it.
 
-    Failures are deliberately fail-open so an unavailable external provider or
-    Groq key never silently replaces the existing APEX strategy decision.
+    Missing optional context remains UNKNOWN. An unavailable Groq review
+    returns WAIT and the production entry boundary blocks delivery.
     """
     view = _candidate_view(candidate)
     context_result, news_result = await asyncio.gather(
@@ -364,9 +365,12 @@ Return JSON only, with no markdown or commentary:
         context_hash = hashlib.sha256(
             json.dumps({"context": context, "news": news}, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
         ).hexdigest()
+        # Identical geometry can recur in a later scan. Each actual review
+        # needs its own outcome row even when the candidate view is identical.
+        action_id = f"entry-groq:{candidate_hash}:{uuid4().hex}"
         await asyncio.to_thread(
             record_prediction,
-            f"entry-groq:{candidate_hash}", review.get("decision") or "WAIT", review.get("confidence"),
+            action_id, review.get("decision") or "WAIT", review.get("confidence"),
             signal_id=int(candidate.get("signal_id")) if candidate.get("signal_id") is not None else None,
             strategy=strategy, symbol=str(view.get("symbol") or ""), context_hash=context_hash,
             prediction_target="ORIGINAL_TP_BEFORE_ORIGINAL_SL", context_version="entry-quality-v2",
@@ -374,6 +378,7 @@ Return JSON only, with no markdown or commentary:
             payload={"setup_state": setup_assessment.get("state"), "degraded": review.get("degraded")},
             db_path=DB_PATH,
         )
+        candidate["_groq_calibration_action_id"] = action_id
     except Exception:
         # Calibration is optional telemetry and cannot affect the quality gate.
         pass

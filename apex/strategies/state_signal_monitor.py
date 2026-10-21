@@ -110,6 +110,7 @@ class StateSignalMonitor:
                     break
                 low = min(float(candle["low"]), current) if bar_close is None else float(candle["low"])
                 high = max(float(candle["high"]), current) if bar_close is None else float(candle["high"])
+                original_hits = barrier_hits(direction, sl, tp1, tp2, low, high)
                 tp1_hit = bool(row["tp1_hit"])
                 trailing_sl = row["trailing_sl"]
                 active_sl = float(trailing_sl) if trailing_sl else sl
@@ -151,6 +152,7 @@ class StateSignalMonitor:
                             cursor = bar_close
                             closed.append({"signal_id": signal_id, "symbol": symbol,
                                            "result": "tp1_hit", "hours": round(hours, 1),
+                                           "original_tp1_before_sl": True,
                                            "grade": row["grade"], "is_win": False,
                                            "trailing_sl": new_trail, "tp2": tp2,
                                            "entry": entry, "direction": direction})
@@ -169,6 +171,13 @@ class StateSignalMonitor:
                                         hours=hours)
                     closed.append({"signal_id": signal_id, "symbol": symbol,
                                    "result": result, "hours": round(hours, 1),
+                                   "original_tp1_before_sl": (
+                                       True if tp1_hit or (result in {"tp1", "tp2", "tp3"}
+                                           and not original_hits["sl"])
+                                       else None if original_hits["tp1"] and original_hits["sl"]
+                                       else False if result == "sl" and not original_hits["tp1"]
+                                       else None
+                                   ),
                                    "grade": row["grade"], "is_win": result in {"tp1", "tp2", "tp3"},
                                    "direction": direction, "entry": entry, "sl": sl,
                                    "tp1": tp1, "tp2": tp2, "tp3": tp3,

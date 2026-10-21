@@ -13,6 +13,14 @@ production acceptance. The controlled release requires `RELEASE_READY` or `DONE`
 - One controlled Telegram worker deployment after green CI. The web dashboard was retired on 2026-10-14.
 - `PRODUCTION_STABLE` only after 48–72 hours of acceptance monitoring.
 
+The five snapshot adapters still call the legacy strategy detectors through the
+compatibility bridge. The pinned corpus proves parity of the symbol and frozen
+snapshot entry interfaces for five cases, not independent strategy quality or
+an independent V3 detector implementation. Snapshot activation is off in the
+current production configuration. Entry Groq review diagnostics are labelled
+from unambiguous analytical TP1/SL candle order and remain separate from
+confirmed Binance trade outcomes; review confidence is not a TP probability.
+
 | IDs | Workstream | Status | Release evidence |
 |---|---|---|---|
 | 1–3 | RuntimeSupervisor, readiness and health endpoints | DONE | One supervisor exposes liveness, entry readiness and independent HEALTHY/DEGRADED/FAILED state in webhook and polling modes; it inventories worker/event-loop, five scanners, DBs, Gate, Binance, Risk, Manager, Groq, Telegram, backup, telemetry and fencing |

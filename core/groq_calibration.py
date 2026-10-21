@@ -147,6 +147,81 @@ def resolve_signal(
     return int(changed)
 
 
+def bind_analytical_prediction(action_id: str, signal_id: int, *, db_path: str = DB_PATH) -> bool:
+    """Link a delivered candidate to its State signal without relabelling live evidence."""
+    ensure_groq_calibration_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        changed = conn.execute(
+            """UPDATE apex_v2_groq_calibration SET signal_id=?
+               WHERE action_id=? AND signal_id IS NULL
+                 AND evidence_scope='ANALYTICAL_CANDIDATE'
+                 AND prediction_target='ORIGINAL_TP_BEFORE_ORIGINAL_SL'""",
+            (int(signal_id), str(action_id)),
+        ).rowcount
+        conn.commit()
+        return changed == 1
+    finally:
+        conn.close()
+
+
+def resolve_analytical_signal(
+    signal_id: int, *, tp_before_original_sl: bool | None,
+    reason: str, db_path: str = DB_PATH,
+) -> int:
+    """Label only an unambiguous original TP1/SL order in the analytical monitor.
+
+    This remains separate from Binance fills and never contributes to the
+    confirmed-live calibration or learning store.
+    """
+    if tp_before_original_sl is None:
+        return 0
+    ensure_groq_calibration_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        changed = conn.execute(
+            """UPDATE apex_v2_groq_calibration
+                  SET outcome_label=?,outcome_reason=?,resolved_at=CURRENT_TIMESTAMP
+                WHERE signal_id=? AND outcome_label IS NULL AND action='APPROVE'
+                  AND evidence_scope='ANALYTICAL_CANDIDATE'
+                  AND prediction_target='ORIGINAL_TP_BEFORE_ORIGINAL_SL'""",
+            (float(bool(tp_before_original_sl)), str(reason)[:120], int(signal_id)),
+        ).rowcount
+        conn.commit()
+        return int(changed)
+    finally:
+        conn.close()
+
+
+def analytical_calibration_summary(db_path: str = DB_PATH) -> dict[str, Any]:
+    """Report separately on delivered analytical approvals with known barrier order."""
+    ensure_groq_calibration_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT strategy,action,signal_id,confidence,outcome_label
+                 FROM apex_v2_groq_calibration
+                WHERE evidence_scope='ANALYTICAL_CANDIDATE'
+                  AND prediction_target='ORIGINAL_TP_BEFORE_ORIGINAL_SL'
+                  AND shadow_only=0"""
+        ).fetchall()
+    finally:
+        conn.close()
+    approved = [row for row in rows if row[1] == "APPROVE" and row[2] is not None]
+    labelled = [(float(row[3]), float(row[4])) for row in approved
+                if row[3] is not None and row[4] is not None]
+    return {
+        "scope": "ANALYTICAL_CANDIDATE",
+        "target": "ORIGINAL_TP_BEFORE_ORIGINAL_SL",
+        "calls": len(rows), "delivered_approvals": len(approved),
+        "resolved": len(labelled),
+        "mean_review_confidence": round(mean(p for p, _ in labelled), 6) if labelled else None,
+        "observed_tp_before_sl_rate": round(mean(y for _, y in labelled), 6) if labelled else None,
+        "interpretation": "Groq confidence is review certainty, not a predicted TP-before-SL probability",
+        "selection": "Only delivered APPROVE candidates can receive observed outcomes; WAIT/REJECT remain unlabelled",
+    }
+
+
 def _bucket(confidence: float | None) -> str:
     if confidence is None:
         return "unknown"
@@ -205,4 +280,4 @@ def calibration_summary(db_path: str = DB_PATH, limit: int = 2000) -> dict[str, 
     }
 
 
-__all__ = ["calibration_summary", "ensure_groq_calibration_schema", "record_outcome", "record_prediction", "resolve_signal"]
+__all__ = ["analytical_calibration_summary", "bind_analytical_prediction", "calibration_summary", "ensure_groq_calibration_schema", "record_outcome", "record_prediction", "resolve_analytical_signal", "resolve_signal"]
