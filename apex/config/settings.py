@@ -97,6 +97,8 @@ class RiskSettings:
     max_same_side_risk_pct: float
     max_daily_loss_pct: float
     max_open_positions: int
+    max_cluster_risk_pct: float = 3.0
+    cluster_correlation_threshold: float = 0.75
 
 
 @dataclass(frozen=True)
@@ -304,6 +306,8 @@ class ApexConfig:
                 max_same_side_risk_pct=_float(source, "APEX_MAX_SAME_SIDE_RISK_PCT", 2.0),
                 max_daily_loss_pct=_float(source, "AUTO_TRADING_MAX_DAILY_LOSS_PCT", 2.0),
                 max_open_positions=_int(source, "AUTO_TRADING_MAX_OPEN_POSITIONS", 3),
+                max_cluster_risk_pct=_float(source, "APEX_MAX_CLUSTER_RISK_PCT", _float(source,"APEX_MAX_TOTAL_RISK_PCT",3.0)),
+                cluster_correlation_threshold=_float(source,"APEX_CLUSTER_CORRELATION_THRESHOLD",0.75),
             ),
             database=DatabaseSettings(
                 compatibility_db_path=legacy,

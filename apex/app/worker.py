@@ -307,7 +307,7 @@ from apex.strategies.activation import (
     StrategyActivationSwitch as _V3_STRATEGY_ACTIVATION_SWITCH,
 )
 from apex.strategies.fast import FastStrategy as _V3_FAST_STRATEGY
-from apex.strategies.legacy_bridge import snapshot_symbol_detector as _v3_snapshot_symbol_detector
+from apex.strategies import native as _v3_native_strategies
 from apex.strategies.mtf import MtfStrategy as _V3_MTF_STRATEGY
 from apex.strategies.registry import StrategyRegistry as _V3_STRATEGY_REGISTRY_CLASS
 from apex.strategies.swing import SwingStrategy as _V3_SWING_STRATEGY
@@ -365,6 +365,7 @@ if _TRADE_EXECUTION_OK:
     _configure_execution_state(
         lambda: _v3_connect_state(_V3_CONFIG),
         durable_checkpoint=lambda reason: _STATE_PERSISTENCE.backup(reason),
+        cluster_candles=lambda symbol: _v3_cluster_candles(symbol),
     )
 _configure_execution_ledger_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_message_state(lambda: _v3_connect_state(_V3_CONFIG))
@@ -769,6 +770,12 @@ _v3_last_release_health = None
 _v3_last_release_log_at = 0.0
 
 
+def _v3_cluster_candles(symbol):
+    from apex.market.gate_client import normalize_gate_candles
+    response = _get_v3_strategy_snapshot_provider().client.candles(symbol,"1h",limit=170)
+    return normalize_gate_candles(response.payload)
+
+
 def _v3_log_release_health():
     global _v3_last_release_health, _v3_last_release_log_at
     snapshot = _V3_RUNTIME.public_snapshot()
@@ -781,18 +788,23 @@ def _v3_log_release_health():
             name: component.get("state")
             for name, component in (snapshot.get("components") or {}).items()
             if isinstance(component, dict)
-            and component.get("state") not in {"READY", "HEALTHY", "FRESH"}
+            and component.get("state") not in {"READY", "HEALTHY", "FRESH", "ON_DEMAND"}
         },
         "telegram_only": _V3_CONFIG.integrations.telegram_only,
         "lease_backend": _V3_CONFIG.integrations.runtime_lease_backend,
         "auto_trading_enabled": _V3_CONFIG.execution.enabled,
+        "instance_id": _V3_CONFIG.runtime.instance_id,
+        "deploy_id": _V3_CONFIG.runtime.deploy_id,
+        "fencing_generation": snapshot.get("fencing_generation"),
+        "strategy_snapshot_active": _get_v3_strategy_activation().active,
+        "strategy_proof_sha256": _get_v3_strategy_activation().verdict_sha256,
     }
     now = time.monotonic()
     if value != _v3_last_release_health or now - _v3_last_release_log_at >= 300:
         logger = logging.getLogger("apex.release")
         logger.setLevel(logging.INFO)
         memory = _v3_memory_snapshot(limit_bytes=_V3_CONFIG.operational.memory_limit_bytes)
-        logger.info("[APEX Release Ready] %s", json.dumps({**value, "memory": {
+        logger.info("[APEX Release Ready] %s", json.dumps({**value, "observed_at": datetime.now(timezone.utc).isoformat(), "memory": {
             "rss_bytes": memory.rss_bytes, "service_bytes": memory.service_bytes,
             "working_set_bytes": memory.working_set_bytes, "limit_bytes": memory.limit_bytes,
         }}, sort_keys=True))
@@ -1649,6 +1661,8 @@ async def _send_signal(sd):
         destination = f"{chat_id}:{kwargs.get('message_thread_id', 0)}"
         await asyncio.to_thread(outbox.receipt, delivery_id, destination, "SENDING")
         try:
+            if _V3_RUNTIME.active and not _V3_RUNTIME.owns_exchange_management:
+                raise _SignalDeliveryUncertain("delivery_instance_ownership_expired")
             if time.time() - float(quote["observed_at"]) > 15 or time.time() - float(sd["_delivery_created_at"]) > 180:
                 raise _SignalDeliveryUncertain("delivery_quote_expired_before_send")
             result = await _send_signal_message(chat_id, text, **kwargs)
@@ -2246,28 +2260,28 @@ def _get_v3_live_strategy_registry():
         _v3_live_strategy_registry = _V3_STRATEGY_REGISTRY_CLASS({
             _V3_STRATEGY.FAST: _V3_FAST_STRATEGY(
                 detect_fast_deal,
-                _v3_snapshot_symbol_detector(detect_fast_deal),
+                _v3_native_strategies.detect_fast_deal,
             ),
             _V3_STRATEGY.MTF: _V3_MTF_STRATEGY(
                 full_scan_raw,
-                _v3_snapshot_symbol_detector(full_scan_raw),
+                _v3_native_strategies.full_scan_raw,
             ),
             _V3_STRATEGY.SWING: _V3_SWING_STRATEGY(
                 detect_swing_setup,
-                _v3_snapshot_symbol_detector(detect_swing_setup),
+                _v3_native_strategies.detect_swing_setup,
             ),
             _V3_STRATEGY.ZONE: _V3_ZONE_STRATEGY(
                 detect_zone_setup,
-                _v3_snapshot_symbol_detector(detect_zone_setup),
+                _v3_native_strategies.detect_zone_setup,
             ),
             _V3_STRATEGY.WYCKOFF: _V3_WYCKOFF_STRATEGY((
                 detect_wyckoff_spring,
                 detect_wyckoff_distribution,
                 detect_wyckoff_reaccumulation,
             ), (
-                _v3_snapshot_symbol_detector(detect_wyckoff_spring),
-                _v3_snapshot_symbol_detector(detect_wyckoff_distribution),
-                _v3_snapshot_symbol_detector(detect_wyckoff_reaccumulation),
+                _v3_native_strategies.detect_wyckoff_spring,
+                _v3_native_strategies.detect_wyckoff_distribution,
+                _v3_native_strategies.detect_wyckoff_reaccumulation,
             )),
         })
     return _v3_live_strategy_registry
@@ -2282,6 +2296,7 @@ def _get_v3_strategy_activation():
             corpus_directory=settings.parity_corpus_path,
             verdict_path=settings.parity_verdict_path,
             registry=_get_v3_live_strategy_registry(),
+            production=True,
         )
         logging.info(
             "[APEX V3] strategy snapshot activation active=%s reason=%s",
@@ -2297,7 +2312,8 @@ def _get_v3_strategy_snapshot_provider():
             _V3_GATE_MARKET_CLIENT(
                 base_url=_V3_CONFIG.integrations.gate_api_base,
                 timeout=_V3_CONFIG.operational.gate_timeout_seconds,
-            )
+            ),
+            ownership_reader=_has_pending_signal_for_symbol,
         )
     return _v3_strategy_snapshot_provider
 
@@ -3151,13 +3167,18 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
     try:
         # Проверяем есть ли уже открытый сигнал по этому символу в БД
         try:
-            with _v3_connect_compatibility(DB_PATH) as _chk:
-                _row = _chk.execute(
-                    "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result=\'pending\' LIMIT 1",
-                    (symbol, timeframe)
-                ).fetchone()
-                if _audit_test('MTF_FULL_SCAN_RAW_G4558', (_row), '_row', '_row', 4558):
-                    return _audit_fail('MTF_FULL_SCAN_RAW_R4559', '_row', locals(), '_row', 4559)  # уже есть открытая сделка по этой паре+ТФ — не дублируем
+            from apex.market.snapshot_scope import active_snapshot
+            _snapshot = active_snapshot()
+            if _snapshot is not None:
+                _row = _snapshot.market_context.get("pending_signal", False)
+            else:
+                with _v3_connect_compatibility(DB_PATH) as _chk:
+                    _row = _chk.execute(
+                        "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND result='pending' LIMIT 1",
+                        (symbol, timeframe)
+                    ).fetchone()
+            if _audit_test('MTF_FULL_SCAN_RAW_G4558', (_row), '_row', '_row', 4558):
+                return _audit_fail('MTF_FULL_SCAN_RAW_R4559', '_row', locals(), '_row', 4559)  # уже есть открытая сделка по этой паре+ТФ — не дублируем
         except Exception as _e:
             pass
 
@@ -3610,7 +3631,7 @@ def full_scan_raw(symbol, timeframe="1h", auto=False, passive_watch=False):
 
         # Активная сессия (London/NY)
         import datetime as _dt_m
-        _h_m = _dt_m.datetime.utcnow().hour
+        _h_m = __import__("apex.market.snapshot_scope", fromlist=["decision_time"]).decision_time().hour
         if 8 <= _h_m <= 17:
             _mtf_score += 1
             _mtf_score_session = True
@@ -4398,11 +4419,15 @@ async def _v3_refresh_runtime_lease(*, acquire: bool = False) -> bool:
 async def _v3_release_runtime_lease() -> None:
     client = _V3_LEASE_CLIENT
     if client is None:
-        return
+        return False
     try:
-        await asyncio.wait_for(asyncio.to_thread(client.release), timeout=5)
+        result = await asyncio.wait_for(asyncio.to_thread(client.release), timeout=5)
+        if result.reason != "RELEASED":
+            raise RuntimeError("runtime_lease_release_not_confirmed")
+        return True
     except Exception as exc:
         logging.warning("[APEX V3] runtime lease release failed safely: %s", exc)
+        raise
     finally:
         _V3_RUNTIME.clear_instance_lease()
 
@@ -4687,53 +4712,43 @@ async def _initialize_production_runtime(transport: str):
 
 
 async def _shutdown_production_runtime(reason: str) -> None:
-    _V3_RUNTIME.inhibit_entries("GRACEFUL_SHUTDOWN")
+    _V3_RUNTIME.stop()
     if _production_scheduler is not None:
         try:
             _production_scheduler.pause()
         except Exception:
             logging.warning("[Shutdown] scheduler pause unavailable")
-    # A cancelled to_thread still runs. Drain mutation owners before releasing
-    # the lease or taking the final snapshots; Render may enforce its own grace.
-    # _active_market_scan is a display name, not an asyncio Task. Market
-    # callbacks are awaited by drain_production_jobs below.
-    pending = [task for task in (_auto_trade_reconcile_task, _trade_manager_task)
-               if task is not None and not task.done()]
-    async def keep_lease():
-        client = _v3_get_lease_client()
-        while client.configured and client.state.granted:
-            await asyncio.sleep(max(5, client.ttl_seconds / 3))
-            try:
-                await asyncio.to_thread(client.renew)
-            except Exception:
-                break
-    renewal = asyncio.create_task(keep_lease())
-    try:
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def drain():
         from apex.app.scheduler import drain_production_jobs
+        pending = [task for task in (_auto_trade_reconcile_task, _trade_manager_task,
+                                    _signal_checkpoint_task)
+                   if task is not None and not task.done()]
         await drain_production_jobs()
-        # A scan can finish before its State checkpoint; preserve that final
-        # receipt before the shutdown backup and lease release.
-        if _signal_checkpoint_task is not None and not _signal_checkpoint_task.done():
-            await _signal_checkpoint_task
+        if pending:
+            await asyncio.gather(*(asyncio.shield(task) for task in pending),return_exceptions=True)
         if _production_scheduler is not None:
-            try:
-                _production_scheduler.shutdown(wait=True)
-            except Exception:
-                logging.warning("[Shutdown] scheduler stop unavailable")
-        await shutdown_production(ShutdownDependencies(
-            runtime=_V3_RUNTIME,
-            state_db_path=_V3_CONFIG.database.state_db_path,
-            instance_id=_V3_CONFIG.runtime.instance_id,
-            release_lease=_v3_release_runtime_lease,
-            record_shutdown=_v3_record_shutdown,
-            backup=_v3_maintenance_and_backup,
-            stop_market=_stop_market_intelligence if _MARKET_INTELLIGENCE_OK else None,
-        ), reason)
-    finally:
-        renewal.cancel()
-        await asyncio.gather(renewal, return_exceptions=True)
+            _production_scheduler.shutdown(wait=False)
+
+    def hard_exit():
+        # A running executor thread cannot be cancelled safely. Durable intents
+        # permit recovery; keeping the shared lease prevents overlapping owners.
+        import os
+        os._exit(0)
+
+    return await shutdown_production(ShutdownDependencies(
+        runtime=_V3_RUNTIME,
+        state_db_path=_V3_CONFIG.database.state_db_path,
+        instance_id=_V3_CONFIG.runtime.instance_id,
+        release_lease=_v3_release_runtime_lease,
+        record_shutdown=_v3_record_shutdown,
+        backup=functools.partial(_v3_maintenance_and_backup, store="state"),
+        stop_market=_stop_market_intelligence if _MARKET_INTELLIGENCE_OK else None,
+        drain=drain,
+        timeout_seconds=25,
+        drain_seconds=5,
+        hard_exit=hard_exit if getattr(_V3_CONFIG.runtime,"render",False) else None,
+    ), reason)
 
 
 def _v3_token_snapshot():

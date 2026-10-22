@@ -13,16 +13,18 @@ production acceptance. The controlled release requires `RELEASE_READY` or `DONE`
 - One controlled Telegram worker deployment after green CI. The web dashboard was retired on 2026-10-14.
 - `PRODUCTION_STABLE` only after 48–72 hours of acceptance monitoring.
 
-The five snapshot adapters still call the legacy strategy detectors through the
-compatibility bridge. The pinned corpus proves parity of the symbol and frozen
-snapshot entry interfaces for five cases, not independent strategy quality or
-an independent V3 detector implementation. Snapshot activation is off in the
-current production configuration. Entry Groq review diagnostics are labelled
-from unambiguous analytical TP1/SL candle order and remain separate from
-confirmed Binance trade outcomes; review confidence is not a TP probability.
-The activation switch rejects a registered legacy snapshot bridge even with a
-valid parity verdict. A separate implementation and stronger evidence are
-required before enabling snapshot activation in production.
+The five production snapshot adapters now calculate independently in
+`apex/strategies/native.py`; no native detector calls a compatibility detector,
+live API or database. The previous detectors remain offline parity oracles.
+A schema-v2 proof pins calculation sources and 33 immutable real Gate cases
+across four symbols and eleven decision timestamps, including actual MTF
+LONG/SHORT and SWING LONG candidates. FAST, ZONE and Wyckoff cases are filtered;
+there is no claim of positive market examples for every subtype. An AST
+regression additionally proves unchanged arithmetic, comparisons and gate order
+for all eleven migrated calculation bodies. Production must request the
+snapshot path and present valid expanded proof; invalid or stale inputs block
+instead of falling back. Groq review confidence remains separate from confirmed
+Binance outcomes and is never treated as TP probability.
 
 | IDs | Workstream | Status | Release evidence |
 |---|---|---|---|
@@ -44,7 +46,7 @@ required before enabling snapshot activation in production.
 | 95–104 | Integrity, evidence, factor grouping and strict Groq | DONE | Production entry review accepts only the exact versioned APPROVE/WAIT/REJECT schema, rejects injected geometry or legacy/extra fields, retries malformed output once, fails safely to WAIT, applies deterministic evidence and confidence constraints afterward, and persists machine-readable reason codes plus the bounded summary. The old `/improve`, patch callback and helper entry points are now physically denied and the runtime contains no direct GitHub write request; AI/error analysis is advisory and any code change requires a reviewed PR |
 | 105–109 | Live-only learning, confidence, similarity and advisory edge | DONE | Production candidates, exchange-protected positions and fill/fee/funding-accounted Binance outcomes are handed off automatically and restart-safely; simulated closes and UNKNOWN funding are rejected. Groq calibration now writes explicit `CONFIRMED_LIVE_ONLY` provenance with `shadow_only=0`; pre-V3/unknown rows are excluded and cannot be resolved as live evidence. Legacy adaptive skips, score changes, risk multipliers and learned Groq rules are disabled; statistics/similarity remain structurally ADVISORY |
 | 110 | Unified risk/execution/Manager pipeline | DONE | Manager eligibility, confirmed-stop handover, confirmed-fill/fee/funding accounting, non-boosting risk and immutable plan are wired into live reconciliation. Manager registration requires State lifecycle `active` plus a positive-quantity live execution with confirmed or pending protection; analytics-only candidates never become managed positions. MARKET reductions require Binance RESULT, final FILLED and executedQty before State advances. Ambiguous OHLC barriers force HOLD until Binance fills establish ordering, while reconciliation preserves protective orders whenever a position exists or the position snapshot is unavailable. State atomically owns reviews, confirmed Manager transitions, execution plans, exchange mutations and idempotent action claims; `SUBMITTING` intent precedes entry and deterministic client-order IDs recover ambiguous restarts. Physical closure and final accounting are separate: complete exit fills stop Manager immediately, but net R remains NULL until commissions and exact-window funding resolve. Live correlation and learning resolve through State IDs and immutable Live Memory geometry. Post-exchange State failures use the fsync recovery journal; normal registration, execution, reconciliation, status and Manager paths neither create nor update compatibility execution/Manager tables. Legacy data is read only by bounded importers and cannot overwrite newer State progress. |
-| 111 | UI, incidents, releases, tests and production acceptance | RELEASE_READY | Production UI is Telegram-only; General Statistics reads canonical local stores with UTC/strategy filters. The web service, HTML, unused web projections and Dashboard telemetry are retired. Persistent incidents deduplicate runtime failures, queue durable Telegram notifications only for OPENED/SEVERITY_CHANGED/RESOLVED transitions and publish a bounded active-incident snapshot even under strategy/symbol filters. Telegram Manager list/detail read the parity-checked State projection without opening `brain.db`. Delivered signal creation and analytical monitoring commit to State first; a restart-safe projection feeds bounded compatibility readers, and missing historical identities fail closed. State owns execution and confirmed Binance positions. Restart/retry suites cover signal delivery, pair claims, lifecycle monitoring, execution, Manager registration, protection and recovery. CI and controlled release both run a portable production-authority audit, the full suites and the pinned five-strategy corpus replay. Code cutover is ready for one exact-SHA controlled release; `DONE` remains reserved for 48–72h production acceptance. |
+| 111 | UI, incidents, releases, tests and production acceptance | RELEASE_READY | Production UI is Telegram-only; General Statistics reads canonical local stores with UTC/strategy filters. The web service, HTML, unused web projections and Dashboard telemetry are retired. Persistent incidents deduplicate runtime failures, queue durable Telegram notifications only for OPENED/SEVERITY_CHANGED/RESOLVED transitions and publish a bounded active-incident snapshot even under strategy/symbol filters. Telegram Manager list/detail read the parity-checked State projection without opening `brain.db`. Delivered signal creation and analytical monitoring commit to State first; a restart-safe projection feeds bounded compatibility readers, and missing historical identities fail closed. State owns execution and confirmed Binance positions. Restart/retry suites cover signal delivery, pair claims, lifecycle monitoring, execution, Manager registration, protection and recovery. CI and controlled release both run a portable production-authority audit, the full suites and the source-bound, expanded real-market corpus replay. The final package includes conservative observed cluster exposure, a bounded 25-second shutdown with a persistent mutation fence, real-SIGTERM regression and timestamped release observations. Code cutover is ready for one exact-SHA controlled release after the final suite; `DONE` remains reserved for 48–72h production acceptance. |
 
 ## Non-negotiable final checks
 

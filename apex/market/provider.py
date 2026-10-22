@@ -22,10 +22,12 @@ class GateSnapshotProvider:
     def __init__(
         self, client: GateMarketClient, *, candle_limit: int = 500,
         universe_context: UniverseContext | None = None,
+        ownership_reader=None,
     ) -> None:
         self.client = client
         self.candle_limit = min(2000, max(100, int(candle_limit)))
         self.universe_context = universe_context
+        self.ownership_reader = ownership_reader
 
     def build(
         self,
@@ -81,7 +83,34 @@ class GateSnapshotProvider:
                 "market_cap": market_cap_omission(),
             }
         )
-        return build_snapshot(
+        # Freeze BTC's directional context with the candidate; native detectors
+        # must never read a different symbol from a live/global cache.
+        references = {}
+        reference_wait = []
+        if symbol.upper() != "BTCUSDT":
+            for timeframe in ("1h", "4h"):
+                try:
+                    response = self.client.candles("BTCUSDT", timeframe, limit=150)
+                    references[timeframe] = confirmed_candles(
+                        normalize_gate_candles(response.payload), timeframe, as_of=boundary,
+                    )
+                except Exception:
+                    references[timeframe] = []
+        if symbol.upper() != "BTCUSDT":
+            from .freshness import assess_candles
+            for timeframe, rows in references.items():
+                if assess_candles(timeframe, rows, as_of=boundary).status != "FRESH":
+                    reference_wait.append("BTC_REFERENCE_UNAVAILABLE:" + timeframe)
+        market_context = dict(market_context)
+        ownership = self.ownership_reader(symbol) if self.ownership_reader is not None else False
+        market_context["pending_signal"] = ownership
+        market_context["reference_candles"] = {"BTCUSDT": references} if references else {}
+        book = live.microstructure.get("visible_orderbook", {})
+        microstructure = dict(live.microstructure)
+        if book.get("available"):
+            bids, asks = book["bid_depth_usd"], book["ask_depth_usd"]
+            microstructure["strategy_orderbook"] = {"bids": bids, "asks": asks, "bias": "BUY" if bids > asks else "SELL"}
+        build = build_snapshot(
             symbol=symbol,
             as_of=boundary,
             raw_candles=candles,
@@ -90,9 +119,15 @@ class GateSnapshotProvider:
             regime=classify_regime(context_rows),
             volume=volume,
             derivatives_context=live.derivatives,
-            microstructure_context=live.microstructure,
+            microstructure_context=microstructure,
             market_context=market_context,
         )
+        if ownership is None:
+            reference_wait.append("PAIR_OWNERSHIP_UNAVAILABLE")
+        if reference_wait:
+            from dataclasses import replace
+            return replace(build, wait_reason_codes=build.wait_reason_codes + tuple(reference_wait))
+        return build
 
 
 __all__ = ["GateSnapshotProvider"]

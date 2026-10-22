@@ -40,6 +40,10 @@ def validate_config(config: ApexConfig, *, raise_on_error: bool = False) -> Vali
         errors.append("EXECUTION_RETRIES_INVALID")
     if not 0 <= config.execution.min_groq_confidence <= 1:
         errors.append("EXECUTION_GROQ_CONFIDENCE_INVALID")
+    if not 0 < config.risk.max_cluster_risk_pct <= config.risk.max_total_risk_pct:
+        errors.append("cluster risk limit must be positive and <= total risk limit")
+    if not 0 < config.risk.cluster_correlation_threshold <= 1:
+        errors.append("cluster correlation threshold must be in (0,1]")
     if config.risk.max_total_risk_pct < config.risk.risk_pct:
         errors.append("PORTFOLIO_RISK_BELOW_TRADE_RISK")
     if not 0 < config.risk.max_same_side_risk_pct <= config.risk.max_total_risk_pct:

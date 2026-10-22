@@ -17,7 +17,8 @@ def _within(local_dt: datetime, start: time, end: time) -> bool:
 
 def fast_session(now_utc: datetime | None = None) -> str | None:
     """Return the active liquid session while respecting DST transitions."""
-    current = now_utc or datetime.now(timezone.utc)
+    from apex.market.snapshot_scope import decision_time
+    current = now_utc or decision_time()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     current = current.astimezone(timezone.utc)

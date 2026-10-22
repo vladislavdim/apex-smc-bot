@@ -38,6 +38,7 @@ class StrategyActivationSwitch:
         corpus_directory: str | Path,
         verdict_path: str | Path,
         registry: StrategyRegistry | None = None,
+        production: bool = True,
     ) -> "StrategyActivationSwitch":
         if not requested:
             return cls(False, False, "SNAPSHOT_ACTIVATION_NOT_REQUESTED")
@@ -57,7 +58,7 @@ class StrategyActivationSwitch:
                 return cls(True, False, f"SNAPSHOT_IMPLEMENTATION_LEGACY_BRIDGE:{strategy.value}")
         try:
             cases = load_corpus_directory(corpus_directory)
-            verdict = load_activation_verdict(verdict_path, cases)
+            verdict = load_activation_verdict(verdict_path, cases, require_coverage=production)
         except (OSError, TypeError, ValueError) as exc:
             return cls(True, False, f"SNAPSHOT_PROOF_INVALID:{exc}")
         return cls(True, True, "SNAPSHOT_PROOF_READY", str(verdict["verdict_sha256"]))
@@ -71,6 +72,8 @@ class StrategyActivationSwitch:
         **kwargs: Any,
     ) -> tuple[StrategyTrace, ...]:
         if not self.active:
+            if self.requested:
+                raise SnapshotEvaluationBlocked("snapshot_activation_blocked:" + self.reason)
             return registry.evaluate(strategy, symbol, **kwargs)
         build = provider.build(strategy, symbol)
         if build.wait_reason_codes:

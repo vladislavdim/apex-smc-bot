@@ -118,6 +118,9 @@ class MarketSnapshot:
             raise ValueError("snapshot_id must be canonical")
         if self.as_of.tzinfo is None:
             raise ValueError("snapshot as_of must be timezone-aware")
+        from .immutable import freeze
+        for name in ("candles", "structure", "levels", "volume", "derivatives_context", "microstructure_context", "market_context"):
+            object.__setattr__(self, name, freeze(getattr(self, name)))
 
 
 @dataclass(frozen=True)

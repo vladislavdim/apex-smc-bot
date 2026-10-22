@@ -15,6 +15,9 @@ def _request_get(url: str, **kwargs):
 
 
 def get_fear_greed() -> dict | None:
+    from .snapshot_scope import active_snapshot
+    if active_snapshot() is not None:
+        return None
     global _fear_greed_cache, _fear_greed_cache_time
     if time.time() - _fear_greed_cache_time < 3600 and _fear_greed_cache:
         return _fear_greed_cache
@@ -39,6 +42,11 @@ def _gate_contract(symbol: str) -> str:
 
 
 def get_funding_rate(symbol: str) -> float | None:
+    from .snapshot_scope import active_snapshot
+    snapshot = active_snapshot()
+    if snapshot is not None:
+        from apex.strategies.native import SnapshotContext
+        return SnapshotContext(snapshot).get_funding_rate(symbol)
     try:
         response = _request_get(
             f"https://fx-api.gateio.ws/api/v4/futures/usdt/contracts/{_gate_contract(symbol)}",

@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from .indicators import average_true_range, ema_value
 from .runtime_cache import get_confirmed_candles
+from .snapshot_scope import snapshot_scope_active
 
 
 class LegacyDerivedContext:
@@ -19,7 +20,8 @@ class LegacyDerivedContext:
 
     def get_higher_tf_context(self, symbol: str) -> dict:
         if (
-            time.time() - self._higher_timeframe_cache_time.get(symbol, 0) < 7200
+            not snapshot_scope_active()
+            and time.time() - self._higher_timeframe_cache_time.get(symbol, 0) < 7200
             and symbol in self._higher_timeframe_cache
         ):
             return self._higher_timeframe_cache[symbol]
@@ -57,7 +59,8 @@ class LegacyDerivedContext:
     def get_market_regime(self, symbol: str) -> dict:
         now = time.time()
         if (
-            symbol in self._regime_cache
+            not snapshot_scope_active()
+            and symbol in self._regime_cache
             and now - self._regime_cache_time.get(symbol, 0) < 1800
         ):
             return self._regime_cache[symbol]

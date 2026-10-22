@@ -228,7 +228,7 @@ def test_technical_audit_starts_locally_without_restore_or_archiving():
 
 
 def test_shutdown_with_active_scan_name_drains_jobs_before_final_backup():
-    import ast, asyncio, logging
+    import ast, asyncio, logging, functools
     from pathlib import Path
     from types import SimpleNamespace
     from unittest.mock import Mock, AsyncMock
@@ -242,9 +242,10 @@ def test_shutdown_with_active_scan_name_drains_jobs_before_final_backup():
     async def checkpoint():
         await checkpoint_gate.wait()
         order.append('checkpoint')
-    async def finish(*args):
+    async def finish(deps,reason):
+        await deps['drain']()
         order.append('backup')
-    namespace = {'asyncio': asyncio, 'logging': logging, '_V3_RUNTIME': Mock(),
+    namespace = {'asyncio': asyncio, 'logging': logging, 'functools': functools, '_V3_RUNTIME': Mock(),
         '_production_scheduler': Mock(), '_auto_trade_reconcile_task': None,
         '_trade_manager_task': None, '_signal_checkpoint_task': None,
         '_active_market_scan': 'MTF_1H',
@@ -261,4 +262,4 @@ def test_shutdown_with_active_scan_name_drains_jobs_before_final_backup():
     with patch('apex.app.scheduler.drain_production_jobs', side_effect=drain):
         asyncio.run(exercise())
     assert order == ['drain', 'checkpoint', 'backup']
-    namespace['_production_scheduler'].shutdown.assert_called_once_with(wait=True)
+    namespace['_production_scheduler'].shutdown.assert_called_once_with(wait=False)
