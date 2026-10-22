@@ -306,10 +306,10 @@ class ApexV3RuntimeTests(unittest.TestCase):
         self.assertNotIn("sig_data = full_scan_raw(symbol, timeframe, auto=True)", bot_source)
         self.assertNotIn('return full_scan_raw(symbol, "1h")', bot_source)
         self.assertIn("register_raw_scan_handler(_canonical_mtf_scan_handler)", bot_source)
-        self.assertIn("_v3_snapshot_symbol_detector(detect_fast_deal)", bot_source)
-        self.assertIn("_v3_snapshot_symbol_detector(full_scan_raw)", bot_source)
-        self.assertIn("_v3_snapshot_symbol_detector(detect_swing_setup)", bot_source)
-        self.assertIn("_v3_snapshot_symbol_detector(detect_zone_setup)", bot_source)
+        self.assertIn("_v3_native_strategies.detect_fast_deal", bot_source)
+        self.assertIn("_v3_native_strategies.full_scan_raw", bot_source)
+        self.assertIn("_v3_native_strategies.detect_swing_setup", bot_source)
+        self.assertIn("_v3_native_strategies.detect_zone_setup", bot_source)
         self.assertIn('_v3_strategy_candidate, "MTF", symbol', bot_source)
 
     def test_swing_and_zone_schedulers_use_the_single_v3_registry(self):
@@ -325,9 +325,9 @@ class ApexV3RuntimeTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
             bot_source = source.read()
-        self.assertIn("_v3_snapshot_symbol_detector(detect_wyckoff_spring)", bot_source)
-        self.assertIn("_v3_snapshot_symbol_detector(detect_wyckoff_distribution)", bot_source)
-        self.assertIn("_v3_snapshot_symbol_detector(detect_wyckoff_reaccumulation)", bot_source)
+        self.assertIn("_v3_native_strategies.detect_wyckoff_spring", bot_source)
+        self.assertIn("_v3_native_strategies.detect_wyckoff_distribution", bot_source)
+        self.assertIn("_v3_native_strategies.detect_wyckoff_reaccumulation", bot_source)
         self.assertNotIn("asyncio.to_thread(detect_wyckoff_spring, symbol)", bot_source)
         self.assertNotIn("asyncio.to_thread(detect_wyckoff_distribution, symbol)", bot_source)
         self.assertNotIn("asyncio.to_thread(detect_wyckoff_reaccumulation, symbol)", bot_source)

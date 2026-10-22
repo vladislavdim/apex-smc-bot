@@ -1629,7 +1629,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
         _swing_4h_displacement_ok = False
         try:
             from datetime import datetime as _dt_vol
-            _vol_hour = _dt_vol.utcnow().hour
+            _vol_hour = __import__("apex.market.snapshot_scope", fromlist=["decision_time"]).decision_time().hour
             _vol_mult = 1.3 if 8 <= _vol_hour <= 21 else 1.2
             sweep_candle = trigger_candle or candles[-1]
             avg_vol = sum(c["volume"] for c in candles[-20:-1]) / 19 if len(candles) >= 20 else 0
@@ -1851,7 +1851,7 @@ def detect_swing_setup(symbol: str, timeframe: str = "4h") -> dict | None:
 
         # ── Dead hours penalty для SWING (22:00-06:00 UTC) ──
         from datetime import datetime as _dt_sw
-        _sw_hour = _dt_sw.utcnow().hour
+        _sw_hour = __import__("apex.market.snapshot_scope", fromlist=["decision_time"]).decision_time().hour
         _is_dead_hours = 22 <= _sw_hour or _sw_hour <= 5
         _rr_min = 1.8 if _is_dead_hours else 1.5
         if _audit_test('SWING_DETECT_SWING_SETUP_G7583', (rr_check < _rr_min), 'Dead hours penalty для SWING (22:00-06:00 UTC)', 'rr_check < _rr_min', 7583):

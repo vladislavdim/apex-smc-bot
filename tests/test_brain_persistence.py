@@ -621,10 +621,16 @@ class BrainPersistenceTests(unittest.TestCase):
         with open(os.path.join(root, "apex/app/worker.py"), encoding="utf-8") as source:
             bot_source = source.read()
         self.assertIn('state_backup=functools.partial(_v3_maintenance_and_backup, "safety_30m", store="state")', bot_source)
-        self.assertIn('backup=_v3_maintenance_and_backup', bot_source)
+        self.assertIn('backup=functools.partial(_v3_maintenance_and_backup, store="state")', bot_source)
         with open(os.path.join(root, "apex/app/shutdown.py"), encoding="utf-8") as source:
             shutdown_source = source.read()
-        self.assertEqual(shutdown_source.count('deps.backup("render_sigterm")'), 1)
+        import ast
+        final_backups = [node for node in ast.walk(ast.parse(shutdown_source))
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == "bounded" and len(node.args) >= 3
+                         and isinstance(node.args[0], ast.Constant) and node.args[0].value == "state"
+                         and isinstance(node.args[2], ast.Constant) and node.args[2].value == "render_sigterm"]
+        self.assertEqual(len(final_backups), 1)
         with open(os.path.join(root, "apex/app/bootstrap.py"), encoding="utf-8") as source:
             bootstrap_source = source.read()
         self.assertIn('shutdown=_shutdown_production_runtime', bot_source)

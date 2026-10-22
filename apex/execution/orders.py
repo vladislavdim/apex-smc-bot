@@ -57,16 +57,18 @@ _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
 _account_cache_lock = threading.Lock()
 _ACCOUNT_STATE_FACTORY = None
 _DURABLE_CHECKPOINT = None
+_CLUSTER_CANDLES = None
 _MANAGER_CONFIRM_CALLBACK = None
 _MANAGER_TRANSITION_VALIDATOR = None
 _MANAGER_RECONCILIATION_CALLBACK = None
 
 
-def configure_execution_state(connection_factory=None, *, durable_checkpoint=None) -> None:
+def configure_execution_state(connection_factory=None, *, durable_checkpoint=None, cluster_candles=None) -> None:
     """Bind non-signal execution state to apex_state.db in production."""
-    global _ACCOUNT_STATE_FACTORY, _DURABLE_CHECKPOINT
+    global _ACCOUNT_STATE_FACTORY, _DURABLE_CHECKPOINT, _CLUSTER_CANDLES
     _ACCOUNT_STATE_FACTORY = connection_factory
     _DURABLE_CHECKPOINT = durable_checkpoint
+    _CLUSTER_CANDLES = cluster_candles
 
 
 def _checkpoint_intent(reason):
@@ -249,6 +251,8 @@ class ExecutionConfig:
     max_risk_pct: float = 1.0
     max_total_risk_pct: float = 3.0
     max_same_side_risk_pct: float = 2.0
+    max_cluster_risk_pct: float = 3.0
+    cluster_correlation_threshold: float = 0.75
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ExecutionConfig":
@@ -277,6 +281,8 @@ class ExecutionConfig:
             max_risk_pct=max(0.05, min(5.0, config.risk.max_risk_pct)),
             max_total_risk_pct=max(0.1, min(20.0, config.risk.max_total_risk_pct)),
             max_same_side_risk_pct=max(0.1, min(20.0, config.risk.max_same_side_risk_pct)),
+            max_cluster_risk_pct=config.risk.max_cluster_risk_pct,
+            cluster_correlation_threshold=config.risk.cluster_correlation_threshold,
         )
 
     @property
@@ -1333,6 +1339,15 @@ def _v3_risk_admission(
     same_side_pct = (
         float(exposure["same_side_risk_usdt"]) / equity * 100.0 if equity > 0 else 0.0
     )
+    from apex.risk.clusters import assess_cluster_exposure
+    assessment = assess_cluster_exposure(str(candidate.get("symbol") or ""),
+        repository.risk_by_symbol(_LIVE_RECONCILE_STATUSES) if repository else {},
+        as_of=time.time(),candles=_CLUSTER_CANDLES,threshold=config.cluster_correlation_threshold)
+    cluster_pct = assessment.risk_quote/equity*100 if equity > 0 else 0
+    if isinstance(candidate,dict):
+        candidate['_v3_cluster_risk'] = {**assessment.evidence,
+            'symbols':list(assessment.symbols),'risk_pct':cluster_pct,
+            'limit_pct':config.max_cluster_risk_pct}
     decision = decide_risk(
         domain_candidate,
         base_risk_pct=float(config.risk_pct),
@@ -1343,16 +1358,14 @@ def _v3_risk_admission(
             equity_quote=equity,
             portfolio_risk_pct=portfolio_pct,
             same_side_risk_pct=same_side_pct,
-            # Cluster authority is not inferred from symbols. Until a canonical
-            # cluster map is present, this gate stays neutral rather than guessed.
-            cluster_risk_pct=0.0,
+            cluster_risk_pct=cluster_pct,
         ),
         limits=RiskLimits(
             max_risk_pct=float(config.max_risk_pct),
             max_leverage=5.0,
             max_portfolio_risk_pct=float(config.max_total_risk_pct),
             max_same_side_risk_pct=float(config.max_same_side_risk_pct),
-            max_cluster_risk_pct=float(config.max_total_risk_pct),
+            max_cluster_risk_pct=float(config.max_cluster_risk_pct),
         ),
     )
     return decision, domain_candidate

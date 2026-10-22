@@ -206,46 +206,49 @@ def load_corpus_directory(path: str | Path) -> tuple[FrozenParityCase, ...]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ValueError("corpus_manifest_missing") from exc
-    required = {"schema_version", "source", "symbol", "as_of", "cases"}
-    if not isinstance(manifest, dict) or set(manifest) != required:
+    if not isinstance(manifest, dict):
         raise ValueError("invalid_corpus_manifest_schema")
-    if manifest["schema_version"] != 1 or manifest["source"] != REAL_MARKET_SOURCE:
+    version = manifest.get("schema_version")
+    required = {"schema_version", "source", "symbol", "as_of", "cases"} if version == 1 else {"schema_version", "source", "cases"}
+    if set(manifest) != required:
+        raise ValueError("invalid_corpus_manifest_schema")
+    if version not in (1, 2) or manifest["source"] != REAL_MARKET_SOURCE:
         raise ValueError("invalid_corpus_manifest_identity")
     rows = manifest["cases"]
-    if not isinstance(rows, list) or len(rows) != len(Strategy):
+    if not isinstance(rows, list) or len(rows) < len(Strategy) or (version == 1 and len(rows) != len(Strategy)):
         raise ValueError("corpus_strategy_coverage_incomplete")
     expected_files = {"corpus.json"}
-    loaded: dict[Strategy, FrozenParityCase] = {}
+    loaded = []
+    covered = set()
+    ids = set()
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {
-            "strategy", "file", "case_id", "sha256",
-        }:
+        if not isinstance(row, dict) or set(row) != {"strategy", "file", "case_id", "sha256"}:
             raise ValueError("invalid_corpus_case_manifest")
         strategy = Strategy(str(row["strategy"]))
         filename = str(row["file"])
-        if Path(filename).name != filename or not filename.endswith(".json"):
+        if Path(filename).name != filename or not filename.endswith(".json") or filename in expected_files:
             raise ValueError("invalid_corpus_case_path")
-        if strategy in loaded:
+        if version == 1 and strategy in covered:
             raise ValueError(f"duplicate_corpus_strategy:{strategy.value}")
         case = load_frozen_case(root / filename)
-        if (
-            case.strategy != strategy
-            or case.case_id != str(row["case_id"])
-            or case.sha256 != str(row["sha256"])
-        ):
+        if case.case_id in ids:
+            raise ValueError("duplicate_corpus_case")
+        if case.strategy != strategy or case.case_id != str(row["case_id"]) or case.sha256 != str(row["sha256"]):
             raise ValueError(f"corpus_manifest_case_mismatch:{strategy.value}")
-        if case.snapshot.symbol != str(manifest["symbol"]):
-            raise ValueError(f"corpus_symbol_mismatch:{strategy.value}")
-        if case.snapshot.as_of.isoformat() != str(manifest["as_of"]):
-            raise ValueError(f"corpus_as_of_mismatch:{strategy.value}")
+        if version == 1:
+            if case.snapshot.symbol != str(manifest["symbol"]):
+                raise ValueError(f"corpus_symbol_mismatch:{strategy.value}")
+            if case.snapshot.as_of.isoformat() != str(manifest["as_of"]):
+                raise ValueError(f"corpus_as_of_mismatch:{strategy.value}")
         expected_files.add(filename)
-        loaded[strategy] = case
-    if set(loaded) != set(Strategy):
+        ids.add(case.case_id)
+        covered.add(strategy)
+        loaded.append(case)
+    if covered != set(Strategy):
         raise ValueError("corpus_strategy_coverage_incomplete")
-    actual_files = {item.name for item in root.glob("*.json")}
-    if actual_files != expected_files:
+    if {item.name for item in root.glob("*.json")} != expected_files:
         raise ValueError("corpus_file_set_mismatch")
-    return tuple(loaded[strategy] for strategy in Strategy)
+    return tuple(sorted(loaded, key=lambda case: (list(Strategy).index(case.strategy), case.case_id)))
 
 
 def evaluate_activation_corpus(

@@ -97,6 +97,16 @@ class RuntimeSupervisor:
             self._components.clear()
             self._component_faults.clear()
 
+    def stop(self) -> None:
+        """Fence a retired production instance without entering test bypass."""
+        with self._lock:
+            self._active = True
+            self._status = RuntimeStatus.NEW_ENTRIES_OFF
+            self._reason_codes.add("GRACEFUL_SHUTDOWN")
+            self._lease_generation = None
+            self._lease_expires_at = None
+            self._lease_deadline = None
+
     @property
     def active(self) -> bool:
         with self._lock:

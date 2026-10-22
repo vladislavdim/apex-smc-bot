@@ -35,9 +35,8 @@ def snapshot_candle_override(
     snapshot = _ACTIVE_SNAPSHOT.get()
     if snapshot is None:
         return None
-    if str(symbol).upper() != snapshot.symbol.upper():
-        return []
-    rows = snapshot.candles.get(str(timeframe))
+    data = snapshot.candles if str(symbol).upper() == snapshot.symbol.upper() else snapshot.market_context.get("reference_candles", {}).get(str(symbol).upper(), {})
+    rows = data.get(str(timeframe))
     if not rows:
         return []
     requested = max(1, int(limit or 1))
@@ -52,3 +51,13 @@ def snapshot_scope_active() -> bool:
 __all__ = [
     "snapshot_candle_override", "snapshot_scope_active", "use_market_snapshot",
 ]
+
+
+def active_snapshot() -> MarketSnapshot | None:
+    return _ACTIVE_SNAPSHOT.get()
+
+
+def decision_time():
+    from datetime import datetime, timezone
+    snapshot = active_snapshot()
+    return snapshot.as_of if snapshot is not None else datetime.now(timezone.utc)

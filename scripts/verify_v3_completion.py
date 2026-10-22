@@ -78,7 +78,7 @@ def verify_corpus(path: Path) -> tuple[str, ...]:
 def verify_verdict(corpus_path: Path, verdict_path: Path) -> str:
     try:
         cases = load_corpus_directory(corpus_path)
-        verdict = load_activation_verdict(verdict_path, cases)
+        verdict = load_activation_verdict(verdict_path, cases, require_coverage=True)
     except (OSError, TypeError, ValueError) as exc:
         raise CompletionError(f"strategy_parity_verdict_invalid:{exc}") from exc
     return str(verdict["verdict_sha256"])

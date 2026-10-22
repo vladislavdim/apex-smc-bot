@@ -234,31 +234,34 @@ class ExecutionRepository:
 
     def risk_exposure(self, direction: str, active_statuses: tuple[str, ...]) -> dict[str, float]:
         """Return canonical live risk already committed in State."""
-        normalized = tuple(sorted({str(value).upper() for value in active_statuses if value}))
-        if not normalized:
-            return {"portfolio_risk_usdt": 0.0, "same_side_risk_usdt": 0.0}
-        side = str(direction or "").upper()
-        conn = self._conn_factory()
-        try:
-            row = conn.execute(
-                """SELECT
-                       COALESCE(SUM(COALESCE(risk_usdt,0)),0),
-                       COALESCE(SUM(CASE WHEN
-                         CASE WHEN direction IN ('LONG','BUY','BULLISH') THEN 'BULLISH'
-                              WHEN direction IN ('SHORT','SELL','BEARISH') THEN 'BEARISH'
-                              ELSE direction END = ?
-                         THEN COALESCE(risk_usdt,0) ELSE 0 END),0)
-                     FROM executions
-                    WHERE mode='live' AND status IN (%s)"""
-                % ",".join("?" for _ in normalized),
-                ('BULLISH' if side in {'LONG','BUY','BULLISH'} else 'BEARISH' if side in {'SHORT','SELL','BEARISH'} else side, *normalized),
-            ).fetchone()
-            return {
-                "portfolio_risk_usdt": float(row[0] or 0.0),
-                "same_side_risk_usdt": float(row[1] or 0.0),
-            }
-        finally:
-            conn.close()
+        rows = self.requiring_reconciliation(active_statuses)
+        side = 'BULLISH' if direction.upper() in {'LONG','BUY','BULLISH'} else 'BEARISH'
+        amounts = [(self._row_risk(row), 'BULLISH' if str(row['direction']).upper() in {'LONG','BUY','BULLISH'} else 'BEARISH') for row in rows]
+        return {'portfolio_risk_usdt':sum(value for value,_ in amounts),
+                'same_side_risk_usdt':sum(value for value,row_side in amounts if row_side==side)}
+
+    @staticmethod
+    def _row_risk(row):
+        from math import isfinite
+        risk = row.get('risk_usdt')
+        if risk is None:
+            try:
+                risk = abs(float(row['quantity'])*(float(row['entry'])-float(row['sl'])))
+            except (ValueError,TypeError,KeyError) as exc:
+                raise ExecutionStateError('position_risk_unknown') from exc
+        risk = float(risk)
+        if not isfinite(risk) or risk < 0:
+            raise ExecutionStateError('invalid_position_risk')
+        return risk
+
+    def risk_by_symbol(self, statuses: tuple[str,...]) -> dict[str,float]:
+        rows = self.requiring_reconciliation(statuses)
+        exposure = {}
+        for row in rows:
+            risk = self._row_risk(row)
+            symbol = str(row['symbol']).upper()
+            exposure[symbol] = exposure.get(symbol,0)+risk
+        return exposure
 
     def update_exchange_state(self, signal_id: int, **changes: Any) -> bool:
         allowed = {

@@ -50,13 +50,14 @@ class StrategyActivationTests(unittest.TestCase):
         snapshot = supervisor.snapshot()
         self.assertIn("strategy_activation", snapshot["components"])
 
-    def test_requested_without_valid_proof_stays_legacy(self):
+    def test_requested_without_valid_proof_blocks_without_legacy_fallback(self):
         switch = StrategyActivationSwitch.from_proof(
             requested=True, corpus_directory="missing", verdict_path="missing",
-            registry=registry(),
+            registry=registry(), production=False,
         )
         provider = Mock()
-        switch.evaluate(registry(), provider, Strategy.FAST, "BTCUSDT")
+        with self.assertRaises(SnapshotEvaluationBlocked):
+            switch.evaluate(registry(), provider, Strategy.FAST, "BTCUSDT")
         self.assertFalse(switch.active)
         self.assertIn("SNAPSHOT_PROOF_INVALID", switch.reason)
         provider.build.assert_not_called()
@@ -66,7 +67,7 @@ class StrategyActivationTests(unittest.TestCase):
             corpus, verdict = self.proof(Path(directory))
             switch = StrategyActivationSwitch.from_proof(
                 requested=True, corpus_directory=corpus, verdict_path=verdict,
-                registry=registry(),
+                registry=registry(), production=False,
             )
         provider = Mock()
         provider.build.return_value = snapshot_build()
@@ -83,7 +84,7 @@ class StrategyActivationTests(unittest.TestCase):
             corpus, verdict = self.proof(Path(directory))
             switch = StrategyActivationSwitch.from_proof(
                 requested=True, corpus_directory=corpus, verdict_path=verdict,
-                registry=registry(),
+                registry=registry(), production=False,
             )
         provider = Mock()
         provider.build.return_value = snapshot_build(wait=("GATE_STALE_15M",))
@@ -95,6 +96,16 @@ class StrategyActivationTests(unittest.TestCase):
                 live_registry, provider, Strategy.FAST, "BTCUSDT",
             )
         legacy.assert_not_called()
+
+    def test_production_rejects_filtered_only_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus, verdict = self.proof(Path(directory))
+            switch = StrategyActivationSwitch.from_proof(
+                requested=True, corpus_directory=corpus, verdict_path=verdict,
+                registry=registry(), production=True,
+            )
+        self.assertFalse(switch.active)
+        self.assertIn("candidate_coverage_incomplete", switch.reason)
 
     def test_legacy_detector_behind_snapshot_adapter_cannot_activate(self):
         with tempfile.TemporaryDirectory() as directory:

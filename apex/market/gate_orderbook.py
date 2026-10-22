@@ -10,12 +10,22 @@ def _request_get(url: str, **kwargs):
 
 def get_orderbook(symbol: str) -> dict | None:
     """Return notional bid/ask totals for the registered Gate contract."""
+    from .snapshot_scope import active_snapshot
+    snapshot = active_snapshot()
+    if snapshot is not None:
+        return snapshot.microstructure_context.get("strategy_orderbook")
     try:
         from external_sources.pair_registry import get_pair
 
         pair = get_pair(symbol)
         contract = str(pair.get("gate_symbol") or symbol.replace("USDT", "_USDT"))
-        multiplier = float(pair.get("gate_multiplier") or 1)
+        raw_multiplier = pair.get("gate_multiplier")
+        if raw_multiplier is None:
+            return None
+        multiplier = float(raw_multiplier)
+        import math
+        if not math.isfinite(multiplier) or multiplier <= 0:
+            return None
         response = _request_get(
             "https://api.gateio.ws/api/v4/futures/usdt/order_book",
             params={"contract": contract, "limit": 20}, timeout=8,

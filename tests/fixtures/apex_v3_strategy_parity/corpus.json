@@ -1,38 +1,204 @@
 {
-  "as_of": "2026-09-21T12:49:59.092171+00:00",
+  "schema_version": 2,
+  "source": "GATE_REAL_MARKET",
   "cases": [
     {
-      "case_id": "gate-fast-btcusdt-1789994999",
-      "file": "fast.json",
-      "sha256": "0a8131debfca829a43d073f7df9820392fc2ceab8b8d7342965da464df0607e3",
-      "strategy": "FAST"
-    },
-    {
-      "case_id": "gate-mtf-btcusdt-1789994999",
-      "file": "mtf.json",
-      "sha256": "27949f7f1351447ed00c60cb98ffbbefad2b0f874204dc3c4c262f01aa09cce6",
-      "strategy": "MTF"
-    },
-    {
-      "case_id": "gate-swing-btcusdt-1789994999",
+      "strategy": "SWING",
       "file": "swing.json",
-      "sha256": "43107ebbb932b93106352413d15dc251614b2dfc3a60013b748bb4b470f4298a",
-      "strategy": "SWING"
+      "case_id": "gate-swing-btcusdt-1789994999",
+      "sha256": "43107ebbb932b93106352413d15dc251614b2dfc3a60013b748bb4b470f4298a"
     },
     {
-      "case_id": "gate-zone-btcusdt-1789994999",
-      "file": "zone.json",
-      "sha256": "ac4f51aa3c2891fefee10d78c5bb295359ff600ee0a95b4a7a1ec30b6b3f1544",
-      "strategy": "ZONE"
-    },
-    {
-      "case_id": "gate-wyckoff-btcusdt-1789994999",
+      "strategy": "WYCKOFF",
       "file": "wyckoff.json",
-      "sha256": "0b7f750eafbeec032edc4b00d67e4264a40a344403dbcafd82863111b7c36751",
-      "strategy": "WYCKOFF"
+      "case_id": "gate-wyckoff-btcusdt-1789994999",
+      "sha256": "0b7f750eafbeec032edc4b00d67e4264a40a344403dbcafd82863111b7c36751"
+    },
+    {
+      "strategy": "ZONE",
+      "file": "zone.json",
+      "case_id": "gate-zone-btcusdt-1789994999",
+      "sha256": "ac4f51aa3c2891fefee10d78c5bb295359ff600ee0a95b4a7a1ec30b6b3f1544"
+    },
+    {
+      "strategy": "FAST",
+      "file": "fast.json",
+      "case_id": "gate-fast-btcusdt-1789994999",
+      "sha256": "0a8131debfca829a43d073f7df9820392fc2ceab8b8d7342965da464df0607e3"
+    },
+    {
+      "strategy": "MTF",
+      "file": "mtf.json",
+      "case_id": "gate-mtf-btcusdt-1789994999",
+      "sha256": "27949f7f1351447ed00c60cb98ffbbefad2b0f874204dc3c4c262f01aa09cce6"
+    },
+    {
+      "strategy": "FAST",
+      "file": "gate-fast-btcusdt-1791622800.json",
+      "case_id": "gate-fast-btcusdt-1791622800",
+      "sha256": "7b30a1e142a0cddd2287d7c93f02a2e96d209dbb685107937e989b4c153f67d0"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-btcusdt-1791622800.json",
+      "case_id": "gate-mtf-btcusdt-1791622800",
+      "sha256": "1f819aa19ac971b18662c046a4b846fea86d88ef875edc032325b3e9ea363e1e"
+    },
+    {
+      "strategy": "SWING",
+      "file": "gate-swing-btcusdt-1791622800.json",
+      "case_id": "gate-swing-btcusdt-1791622800",
+      "sha256": "6d36e38a53be3088bbd9da7ce51a68405ffbb858e2b12f4a5c78bfd1cc8525b6"
+    },
+    {
+      "strategy": "ZONE",
+      "file": "gate-zone-btcusdt-1791622800.json",
+      "case_id": "gate-zone-btcusdt-1791622800",
+      "sha256": "9e6c22a4aa284d687053d19901d5ea59fffebd821dd8b09fbcdad00ce856bc9b"
+    },
+    {
+      "strategy": "WYCKOFF",
+      "file": "gate-wyckoff-btcusdt-1791622800.json",
+      "case_id": "gate-wyckoff-btcusdt-1791622800",
+      "sha256": "da701a99f1eac12f317e12a5edeb978cb833f4f931cbd2eaf9613857af3da524"
+    },
+    {
+      "strategy": "FAST",
+      "file": "gate-fast-btcusdt-1792506600.json",
+      "case_id": "gate-fast-btcusdt-1792506600",
+      "sha256": "8d397e79d3d5eebe529ae19717af5665927cb491146318cd80fefa57fa6bceaf"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-btcusdt-1792506600.json",
+      "case_id": "gate-mtf-btcusdt-1792506600",
+      "sha256": "5d889577d30cbcfc486cbc58732959cea828d073a39da67f79a7d31af43cd3a1"
+    },
+    {
+      "strategy": "SWING",
+      "file": "gate-swing-btcusdt-1792506600.json",
+      "case_id": "gate-swing-btcusdt-1792506600",
+      "sha256": "ca72318c3598a4e1f6c0e1e8c581b72dfa0c8ef1bfa369f816e4867f2b084fee"
+    },
+    {
+      "strategy": "ZONE",
+      "file": "gate-zone-btcusdt-1792506600.json",
+      "case_id": "gate-zone-btcusdt-1792506600",
+      "sha256": "63865d5ab255f494b42e93881a4902ddf5039161e88ada510f991c384404a375"
+    },
+    {
+      "strategy": "WYCKOFF",
+      "file": "gate-wyckoff-btcusdt-1792506600.json",
+      "case_id": "gate-wyckoff-btcusdt-1792506600",
+      "sha256": "0f9a391f41ec2734d70c80d4387c4cacb7de572bbd968310dae30886eabfd251"
+    },
+    {
+      "strategy": "FAST",
+      "file": "gate-fast-adausdt-1791622800.json",
+      "case_id": "gate-fast-adausdt-1791622800",
+      "sha256": "74d598ea40f03f68d774742b4305be439f43d1cd3be3ebc0ca20c960420d6a2c"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-adausdt-1791622800.json",
+      "case_id": "gate-mtf-adausdt-1791622800",
+      "sha256": "9fd6535e5299b332e057caca65ae094685257e7df43e49850c8a8a820187041d"
+    },
+    {
+      "strategy": "SWING",
+      "file": "gate-swing-adausdt-1791622800.json",
+      "case_id": "gate-swing-adausdt-1791622800",
+      "sha256": "af15502a2048b7b9193fcb456a85af837c8769db7407112020e8f43db638fa21"
+    },
+    {
+      "strategy": "ZONE",
+      "file": "gate-zone-adausdt-1791622800.json",
+      "case_id": "gate-zone-adausdt-1791622800",
+      "sha256": "f1a6a1fa03360be62f468b416499dbab79b1163c77d3589522926a3916b22faa"
+    },
+    {
+      "strategy": "WYCKOFF",
+      "file": "gate-wyckoff-adausdt-1791622800.json",
+      "case_id": "gate-wyckoff-adausdt-1791622800",
+      "sha256": "be7e7d6295e1a912da02fb0267be3fe0ea759a028248dfa6b8901c6b934feaff"
+    },
+    {
+      "strategy": "FAST",
+      "file": "gate-fast-adausdt-1792506600.json",
+      "case_id": "gate-fast-adausdt-1792506600",
+      "sha256": "3a2bf0ec276684e754bb74baf56fae92a587816c24a136c509ca9f5ef92678e9"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-adausdt-1792506600.json",
+      "case_id": "gate-mtf-adausdt-1792506600",
+      "sha256": "fe06d25e30e2f123a86d8e8619fe0bdb99ac13992ff688688e05fc39cccdace3"
+    },
+    {
+      "strategy": "SWING",
+      "file": "gate-swing-adausdt-1792506600.json",
+      "case_id": "gate-swing-adausdt-1792506600",
+      "sha256": "5a4920876953cbc0b4e1730afeee5b7ee4333dcfab54e17ff9f3b7c267faaf32"
+    },
+    {
+      "strategy": "ZONE",
+      "file": "gate-zone-adausdt-1792506600.json",
+      "case_id": "gate-zone-adausdt-1792506600",
+      "sha256": "739f5b4d96966dd1da7bf8b1ba0ca821b8faba2171033072080d3f7b16ecc862"
+    },
+    {
+      "strategy": "WYCKOFF",
+      "file": "gate-wyckoff-adausdt-1792506600.json",
+      "case_id": "gate-wyckoff-adausdt-1792506600",
+      "sha256": "13ca700f20fd6c899debb9adb8e48a0fa17ce3ffd10d0eecf4adbae1a18af6a6"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-btcusdt-1790984700.json",
+      "case_id": "gate-mtf-btcusdt-1790984700",
+      "sha256": "04fddcac39d1d00dc064b470d06920b0ed8f57e749bb3f1ed25d01868247abcb"
+    },
+    {
+      "strategy": "SWING",
+      "file": "gate-swing-adausdt-1792147500.json",
+      "case_id": "gate-swing-adausdt-1792147500",
+      "sha256": "e22a1947975ceb48dc066a138dd6dbbf89a9bfa1f5663da66b50167c00049cc2"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-btcusdt-1788718500.json",
+      "case_id": "gate-mtf-btcusdt-1788718500",
+      "sha256": "999b9d8920f45796510255d503347af35bc16ea50e86d14c63bc0a1132cddd61"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-ethusdt-1790409600.json",
+      "case_id": "gate-mtf-ethusdt-1790409600",
+      "sha256": "65d815da6c0ff1bb30e6635e13b9e47edf488445b86e56df08236daf6d4bdb7d"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-ethusdt-1790412300.json",
+      "case_id": "gate-mtf-ethusdt-1790412300",
+      "sha256": "673d66cbf5198bd4853c271bfefaa725404d53d705c27ca6395eff86d98968ae"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-ethusdt-1790437500.json",
+      "case_id": "gate-mtf-ethusdt-1790437500",
+      "sha256": "86e49e0dc9306333aba85406edc9dfd8b557e8083efbb51217161bd262a5206a"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-ethusdt-1788803100.json",
+      "case_id": "gate-mtf-ethusdt-1788803100",
+      "sha256": "d06c2a1e80cca0817368036fc536004a6018c92228e1981ba9e96767bfaab3be"
+    },
+    {
+      "strategy": "MTF",
+      "file": "gate-mtf-dogeusdt-1790943300.json",
+      "case_id": "gate-mtf-dogeusdt-1790943300",
+      "sha256": "37f7d05c799c3df2b5e0afd9f4afc8d0deb5170158b49773c7d43088b334de93"
     }
-  ],
-  "schema_version": 1,
-  "source": "GATE_REAL_MARKET",
-  "symbol": "BTCUSDT"
+  ]
 }
