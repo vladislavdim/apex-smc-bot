@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
 SOURCE = "live_market_tape"
 _DB_PATH = ApexConfig.from_env().database.compatibility_db_path
 
-@dataclass
+@dataclass(slots=True)
 class TapeEvent:
     timestamp: float
     value_usd: float
@@ -75,8 +75,15 @@ def _add(target, provider, symbol, timestamp, usd, side):
     if usd <= 0:
         return
     events = target[(provider, symbol)]
-    if events and int(events[-1].timestamp) == int(timestamp) and events[-1].side == side:
-        events[-1].value_usd += usd
+    # Retain only the consumed window, even for pairs never queried by a scan.
+    _prune(events, timestamp, window=60 if target is _trades else 300)
+    # One aggregate per second and side also bounds alternating high-volume
+    # trades; adjacent-only coalescing leaves thousands of redundant records.
+    bucket = int(timestamp)
+    aggregate = next((row for row in reversed(events)
+                      if int(row.timestamp) == bucket and row.side == side), None)
+    if aggregate is not None:
+        aggregate.value_usd += usd
     else:
         events.append(TapeEvent(timestamp, usd, side))
     _latest[(provider, symbol)] = {**_latest.get((provider, symbol), {}), "updated_at": timestamp}
@@ -178,7 +185,7 @@ def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
     now = now or time.time(); sources = {}
     for provider in ("gate", "binance", "bybit"):
         trades, liqs = _trades[(provider, symbol)], _liquidations[(provider, symbol)]
-        _prune(trades, now); _prune(liqs, now)
+        _prune(trades, now, window=60); _prune(liqs, now, window=300)
         recent_trades = [row for row in trades if now - row.timestamp <= 60]
         recent_liq = [row for row in liqs if now - row.timestamp <= 300]
         latest = dict(_latest.get((provider, symbol), {})); updated = number(latest.get("updated_at"))

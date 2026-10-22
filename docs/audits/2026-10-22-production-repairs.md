@@ -8,7 +8,7 @@ by the recovery inventory.
 
 | Finding | Change and validation boundary |
 | --- | --- |
-| F01 memory pressure | Limit each SQLite connection to a 512 KiB page cache, disable mmap, close WS storage connections, cap depth history, defer optional snapshots under pressure and release allocator arenas after backups. Memory admission thresholds remain unchanged. Sustained production stability requires observation after deployment. |
+| F01 memory pressure | Prune tape events on ingestion to their 60/300-second consumption windows, aggregate per second/side, use slotted tape records, limit each SQLite connection to a 512 KiB page cache, disable mmap, close WS storage connections, cap depth history, defer optional snapshots under pressure and release allocator arenas after backups. Memory admission thresholds remain unchanged. Sustained production stability requires observation after deployment. |
 | F02 stale signal | Mandatory uncached Gate quote after review and durable checkpoint; quote age <=15 seconds, candidate lifetime <=180 seconds; check again before sending. Unavailable or invalid quote yields WAIT. |
 | F03 stale legacy candles | Actual legacy router validates timestamps, ordered contiguous bars, OHLC geometry and last closed-bar age on cache, shared and venue paths. Explicit historical snapshot scope stays deterministic. |
 | F04 cancelled protection | Query and verify the real stop's status, venue symbol, side, STOP_MARKET type, close-all/reduce-only coverage and trigger grid. Repair only confirmed missing/cancelled stops with deterministic IDs, without recreating TPs. Unknown responses quarantine admission. |
@@ -29,7 +29,7 @@ scheduled checkpoints rather than extending final shutdown with large uploads.
 
 ## Verification
 
-The local full run passed 1,045 pytest tests and 833 unittest tests. Added
+The local full run passed 1,047 pytest tests and 833 unittest tests. Added
 regressions cover restored outboxes, evidence-based resolution, all three candle
 sources, stop cancellation/unknown responses, empty-State remote exposure, an
 orphan alongside a known position, missing multiplier/liquidation data, depth

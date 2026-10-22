@@ -404,3 +404,39 @@ def test_critical_checkpoint_waits_for_shared_slot_instead_of_dropping():
         if thread.is_alive():
             thread.join(2)
     assert result and result[0]["status"] == "saved"
+
+
+def test_unqueried_tape_pair_retains_only_consumed_window():
+    from external_sources import live_tape as tape
+
+    trades = defaultdict(lambda: deque(maxlen=1500))
+    liqs = defaultdict(lambda: deque(maxlen=1200))
+    with (
+        patch.object(tape, "_trades", trades),
+        patch.object(tape, "_liquidations", liqs),
+        patch.object(tape, "_latest", {}),
+    ):
+        for timestamp in range(3600):
+            tape._trade("gate", "NEVER_SCANNED", timestamp, 100, "buy")
+            tape._liquidation("bybit", "NEVER_SCANNED", timestamp, 100, "long")
+        assert len(trades[("gate", "NEVER_SCANNED")]) <= 61
+        assert len(liqs[("bybit", "NEVER_SCANNED")]) <= 301
+        assert not hasattr(trades[("gate", "NEVER_SCANNED")][0], "__dict__")
+
+
+def test_busy_tape_aggregates_alternating_sides_without_losing_notional():
+    from external_sources import live_tape as tape
+
+    trades = defaultdict(lambda: deque(maxlen=1500))
+    with patch.object(tape, "_trades", trades), patch.object(tape, "_latest", {}):
+        for index in range(5000):
+            tape._trade(
+                "gate",
+                "BUSY",
+                1000 + index / 10000,
+                100,
+                "buy" if index % 2 else "sell",
+            )
+        events = trades[("gate", "BUSY")]
+        assert len(events) == 2
+        assert sum(event.value_usd for event in events) == 500000
