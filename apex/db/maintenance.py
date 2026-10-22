@@ -59,6 +59,7 @@ def maintain_state(
         "DELETE FROM incident_notifications WHERE delivered_at IS NOT NULL AND delivered_at<?",
         (telemetry_cutoff,),
     ).rowcount
+    conn.execute("DELETE FROM signal_delivery_outbox WHERE status IN ('DELIVERED','ABORTED') AND updated_at<?", (telemetry_cutoff,))
     delivery_claims = conn.execute(
         "DELETE FROM delivery_claims WHERE delivered_at>=0 AND updated_at<?",
         (telemetry_cutoff,),

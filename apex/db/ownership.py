@@ -11,6 +11,8 @@ PERSISTENCE_METADATA_TABLES = frozenset({"brain_persistence_meta"})
 
 STATE_TABLES = frozenset({
     "delivery_claims",
+    "signal_delivery_outbox",
+    "delivery_resolutions",
     "execution_account_cache",
     "execution_actions",
     "execution_fills",

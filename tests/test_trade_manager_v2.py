@@ -159,6 +159,13 @@ def test_cutover_reconciliation_uses_one_position_snapshot_and_keeps_protection(
 
     class SnapshotClient:
         def __init__(self): self.calls = []
+        def symbol_rules(self, symbol):
+            from tests.test_trade_execution import RULES
+            return RULES
+        def query_algo_order(self, **kwargs):
+            self.calls.append("query_stop")
+            return {"algoStatus":"NEW","symbol":"AAVEUSDT","side":"SELL",
+                    "orderType":"STOP_MARKET","closePosition":True,"triggerPrice":"95"}
         def open_positions(self):
             self.calls.append("open_positions")
             return [{"symbol": "AAVEUSDT", "positionAmt": "1"}]
@@ -171,7 +178,7 @@ def test_cutover_reconciliation_uses_one_position_snapshot_and_keeps_protection(
     finally:
         configure_manager_confirmation(None, transition_validator=None, reconciliation_callback=None)
     assert outcomes == [{"status": "PROTECTED", "signal_id": 1}]
-    assert client.calls == ["open_positions"]
+    assert client.calls == ["open_positions", "query_stop"]
     assert load_state(1, db)["manager_state"] == "PROTECTED"
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT stop_order_id FROM trade_executions WHERE signal_id=1").fetchone()[0] == "existing-stop"

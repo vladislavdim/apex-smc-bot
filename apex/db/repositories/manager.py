@@ -164,6 +164,16 @@ class ManagerRepository:
         finally:
             conn.close()
 
+    def observe_price(self, signal_id: int, price: float, current_r: float, best: float) -> None:
+        conn = self._conn_factory()
+        try:
+            conn.execute("""UPDATE manager_positions SET last_price=?,current_r=?,best_price=?,
+                price_observed_at=CURRENT_TIMESTAMP WHERE signal_id=? AND status='ACTIVE'""",
+                (price,current_r,best,int(signal_id)))
+            conn.commit()
+        finally:
+            conn.close()
+
     def update_thesis(self, signal_id: int, thesis: Mapping[str, Any]) -> bool:
         conn = self._conn_factory()
         try:

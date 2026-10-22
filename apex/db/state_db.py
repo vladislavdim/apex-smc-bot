@@ -781,6 +781,21 @@ def _migration_025(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE signal_lifecycle ADD COLUMN monitor_bar_close REAL")
 
 
+def _migration_026(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE signal_delivery_outbox (
+        delivery_id TEXT PRIMARY KEY, cache_key TEXT NOT NULL, pair_key TEXT NOT NULL,
+        claimed_at REAL NOT NULL, candidate_json TEXT NOT NULL, destinations_json TEXT NOT NULL,
+        receipts_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'PENDING',
+        resolution_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    conn.execute("CREATE INDEX idx_delivery_outbox_status ON signal_delivery_outbox(status,created_at)")
+    conn.execute("ALTER TABLE manager_positions ADD COLUMN price_observed_at TEXT")
+    conn.execute("""CREATE TABLE delivery_resolutions (
+        id INTEGER PRIMARY KEY, cache_key TEXT NOT NULL, claimed_at REAL NOT NULL,
+        actor TEXT NOT NULL, evidence TEXT NOT NULL, action TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -807,6 +822,7 @@ STATE_MIGRATIONS = (
     Migration(23, "signal_monitor_state_ownership", _migration_023),
     Migration(24, "signal_lifecycle_state_creation", _migration_024),
     Migration(25, "signal_monitor_cursor", _migration_025),
+    Migration(26, "durable_delivery_outbox", _migration_026),
 )
 
 

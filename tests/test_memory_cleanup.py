@@ -139,7 +139,9 @@ def test_web_runtime_is_removed_and_telegram_is_independent():
 
 def test_candle_router_evicts_old_pairs_without_truncating_strategy_history():
     from apex.market.candle_router import GateCandleRouter
-    rows=[{'open_time':i,'close':i} for i in range(10)]
+    import time
+    boundary = int(time.time()//3600)*3600
+    rows=[{'open_time':boundary-(10-i)*3600,'open':100,'high':101,'low':99,'close':100} for i in range(10)]
     router=GateCandleRouter(cache={},get_shared=lambda *_:[],update_shared=lambda *_:None,
         fetch_gate=lambda *_:{'candles':rows},gate_available=lambda:True,
         record_health=lambda *_,**__:None,last_closed_at=lambda _:0)

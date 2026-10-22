@@ -10,7 +10,10 @@ from apex.market.snapshot_scope import use_market_snapshot
 
 
 def _candles(count):
-    return [{"close": float(index)} for index in range(count)]
+    import time
+    boundary = int(time.time() // 3600) * 3600
+    return [{"timestamp":boundary-(count-index)*3600,"open":100,"high":101,
+             "low":99,"close":100,"volume":1} for index in range(count)]
 
 
 class GateCandleRouterTests(unittest.TestCase):

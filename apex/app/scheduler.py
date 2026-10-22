@@ -53,6 +53,7 @@ class SchedulerCallbacks:
 
 
 _RUNNING_JOBS: set[asyncio.Task] = set()
+_JOB_OWNERS: dict[str, asyncio.Task] = {}
 
 
 def _job_finished(task: asyncio.Task) -> None:
@@ -101,16 +102,43 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
 
     @functools.wraps(callback)
     async def run() -> Any:
+        previous = _JOB_OWNERS.get(job_id)
+        if previous is not None and not previous.done():
+            logging.warning("[APEX V3] job=%s status=SKIPPED_STILL_RUNNING", job_id)
+            return False
         component = JOB_COMPONENT.get(job_id)
         component_required = bool(definition and definition.critical)
         reason_code = f"JOB_FAILED:{job_id}"
         recorder = recorder_for(job_id)
         if recorder is not None:
             recorder.__enter__()
+        late = {"value": False}
+        def completed(task):
+            _job_finished(task)
+            if _JOB_OWNERS.get(job_id) is task:
+                _JOB_OWNERS.pop(job_id, None)
+            if not late["value"]:
+                return
+            error = None if task.cancelled() else task.exception()
+            success = not task.cancelled() and error is None and task.result() is not False
+            if success:
+                if component:
+                    runtime_supervisor.mark_component(component, ComponentState.READY, required=component_required)
+                    recover_incident("JOB_TIMEOUT", component)
+                    recover_incident("JOB_FAILED", component)
+                runtime_supervisor.clear_inhibit(reason_code)
+            elif error is not None and component:
+                runtime_supervisor.mark_component(component, ComponentState.DEGRADED, type(error).__name__, required=component_required)
+                report_incident("JOB_FAILED", component, "ERROR", {"job_id": job_id, "late": True, "error_type": type(error).__name__})
+            if recorder is not None:
+                recorder.finish_late("LATE_OK" if success else "LATE_ERROR" if error else "LATE_SKIPPED",
+                                     error_code=type(error).__name__ if error else "")
+            logging.info("[APEX V3] job=%s status=%s", job_id, "LATE_OK" if success else "LATE_FAILED")
         try:
             work = asyncio.create_task(_measured_invoke(job_id, callback))
             _RUNNING_JOBS.add(work)
-            work.add_done_callback(_job_finished)
+            _JOB_OWNERS[job_id] = work
+            work.add_done_callback(completed)
             result = await asyncio.wait_for(asyncio.shield(work), timeout=timeout)
             if result is False:
                 # A lock/admission skip did not verify the previously failing job.
@@ -132,6 +160,7 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
                 recorder.finish("OK", items_processed=int(processed or 0))
             return result
         except asyncio.TimeoutError:
+            late["value"] = True
             logging.error("[APEX V3] job=%s status=FAILED_TIMEOUT timeout=%ss", job_id, timeout)
             if component:
                 runtime_supervisor.mark_component(component, ComponentState.DEGRADED, "FAILED_TIMEOUT", required=component_required)
@@ -151,6 +180,7 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
                 recorder.finish("FAILED_TIMEOUT", error_code="TIMEOUT")
             raise
         except asyncio.CancelledError:
+            late["value"] = True
             if recorder is not None:
                 recorder.finish("CANCELLED", error_code="CANCELLED")
             raise

@@ -61,9 +61,17 @@ def persist_gate_microstructure(symbol: str, features: dict[str, Any], db_path: 
     payload = json.dumps(features or {}, ensure_ascii=False, sort_keys=True, default=str)
     update_id = str((features or {}).get('update_id') or int(time.time()))
     key = hashlib.sha256(f"{str(symbol).upper()}:{update_id}".encode()).hexdigest()
-    with connect_compatibility(path, timeout=2) as conn:
+    from contextlib import closing
+    with closing(connect_compatibility(path, timeout=2)) as conn, conn:
         conn.execute('''CREATE TABLE IF NOT EXISTS gate_microstructure_live_context (
             event_key TEXT PRIMARY KEY, symbol TEXT NOT NULL, update_id TEXT,
             payload_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
         conn.execute('''INSERT OR IGNORE INTO gate_microstructure_live_context(event_key,symbol,update_id,payload_json)
                         VALUES(?,?,?,?)''', (key, str(symbol).upper(), update_id, payload))
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gate_microstructure_created ON gate_microstructure_live_context(created_at)")
+        # A hard global cap also bounds storage if timestamps are malformed or
+        # more symbols are configured later. Keep only a day of diagnostics.
+        conn.execute("DELETE FROM gate_microstructure_live_context WHERE created_at < datetime('now','-1 day')")
+        conn.execute("""DELETE FROM gate_microstructure_live_context WHERE rowid IN
+            (SELECT rowid FROM gate_microstructure_live_context ORDER BY rowid DESC LIMIT -1 OFFSET 10000)""")

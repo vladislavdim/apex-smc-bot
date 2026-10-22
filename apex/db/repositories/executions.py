@@ -348,6 +348,18 @@ class ExecutionRepository:
         finally:
             conn.close()
 
+    def uncertain_stop_actions(self) -> list[dict[str, Any]]:
+        conn = self._conn_factory()
+        try:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute("""SELECT a.*,e.symbol,e.direction
+                FROM execution_actions a JOIN executions e ON e.signal_id=a.signal_id
+                WHERE a.action IN ('PROTECT','MOVE_STOP_TO_BREAKEVEN')
+                AND a.status IN ('PROCESSING','SUBMITTING','SUBMISSION_UNCONFIRMED')
+                ORDER BY a.updated_at,a.action_key LIMIT 5""").fetchall()]
+        finally:
+            conn.close()
+
     def uncertain_market_actions(self) -> list[dict[str, Any]]:
         conn = self._conn_factory()
         try:
@@ -356,7 +368,7 @@ class ExecutionRepository:
                 FROM execution_actions a JOIN executions e ON e.signal_id=a.signal_id
                 WHERE a.action IN ('PARTIAL_EXIT','CLOSE')
                 AND a.status IN ('SUBMITTING','SUBMISSION_UNCONFIRMED')
-                AND LENGTH(a.action_key)=32 ORDER BY a.updated_at,a.action_key LIMIT 1""").fetchall()]
+                AND (LENGTH(a.action_key)=32 OR a.action_key LIKE 'emergency:%') ORDER BY a.updated_at,a.action_key LIMIT 5""").fetchall()]
         finally:
             conn.close()
 

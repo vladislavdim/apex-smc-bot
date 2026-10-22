@@ -21,7 +21,7 @@ def state_factory(tmp_path):
     ExecutionRepository(factory).register({'signal_id':1,'mode':'live','symbol':'BTCUSDT',
         'direction':'BULLISH','status':'ENTRY_PENDING','entry':100,'sl':95,
         'tp1':110,'tp2':115,'quantity':1,'entry_order_id':'entry-1'})
-    orders.configure_execution_state(factory)
+    orders.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
     configure_execution_ledger_state(factory)
     yield factory
     orders.configure_execution_state(None)

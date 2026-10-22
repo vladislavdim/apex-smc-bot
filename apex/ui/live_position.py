@@ -55,26 +55,6 @@ class LivePositionService:
             volume_tag = "🔥 высокий" if volume_ratio > 1.5 else "📉 низкий" if volume_ratio < 0.6 else "➡️ средний"
             distance_resistance = ((nearest_res - price_now) / price_now * 100) if nearest_res else None
             distance_support = ((price_now - nearest_sup) / price_now * 100) if nearest_sup else None
-            if trend == "BULLISH":
-                if in_bull_ob or in_bull_fvg:
-                    action, reason, risk = "✅ ВХОДИТЬ ЛОНГ", "В зоне Bull OB/FVG — идеальная точка", "низкий"
-                elif nearest_sup and distance_support and distance_support < 1.0:
-                    action, reason, risk = "✅ ЛОНГ у поддержки", "Тренд ↑, цена у поддержки", "низкий"
-                elif nearest_res and distance_resistance and distance_resistance < 0.5:
-                    action, reason, risk = "⚠️ ЖДАТЬ пробоя", "У сопротивления — жди пробой", "высокий"
-                else:
-                    action, reason, risk = "⏳ ЖДАТЬ", "Тренд бычий, нет точки входа", "средний"
-            elif trend == "BEARISH":
-                if in_bear_ob or in_bear_fvg:
-                    action, reason, risk = "🔴 ВХОДИТЬ ШОРТ", "В зоне Bear OB/FVG — точка на продажу", "низкий"
-                elif nearest_res and distance_resistance and distance_resistance < 1.0:
-                    action, reason, risk = "🔴 ШОРТ у сопр.", "Тренд ↓, цена у сопротивления", "низкий"
-                elif nearest_sup and distance_support and distance_support < 0.5:
-                    action, reason, risk = "⚠️ ЖДАТЬ пробоя", "У поддержки — жди пробой", "высокий"
-                else:
-                    action, reason, risk = "⏳ ЖДАТЬ", "Тренд медвежий, нет точки", "средний"
-            else:
-                action, reason, risk = "😴 НЕТ СИГНАЛА", "Боковик или смена тренда", "высокий"
 
             def fmt(price):
                 if price is None:
@@ -102,16 +82,8 @@ class LivePositionService:
                 lines.append(f"🔵 Bull FVG: <code>{fmt(fvg_bull['bottom'])}–{fmt(fvg_bull['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bull_fvg else ""))
             if fvg_bear:
                 lines.append(f"🟠 Bear FVG: <code>{fmt(fvg_bear['bottom'])}–{fmt(fvg_bear['top'])}</code>" + (" ← ТЫ ЗДЕСЬ" if in_bear_fvg else ""))
-            stop_hint = ""
-            if "ЛОНГ" in action and nearest_sup:
-                stop = nearest_sup * 0.997
-                target = price_now + (price_now - stop) * 2
-                stop_hint = f"\n🛡 SL: <code>{fmt(stop)}</code>  |  🎯 TP: <code>{fmt(target)}</code>  (RR 1:2)"
-            elif "ШОРТ" in action and nearest_res:
-                stop = nearest_res * 1.003
-                target = price_now - (stop - price_now) * 2
-                stop_hint = f"\n🛡 SL: <code>{fmt(stop)}</code>  |  🎯 TP: <code>{fmt(target)}</code>  (RR 1:2)"
-            lines += [f"\n{'━' * 26}", f"🎯 <b>{action}</b>", f"<i>{reason}</i>", f"⚠️ Риск: {risk}{stop_hint}"]
+            lines += ["\nНаблюдение за структурой и зонами.",
+                      "Это не торговый сигнал. Для входа требуется проверенный сигнал APEX."]
             return "\n".join(lines)
         except Exception as error:
             logging.error("live_position_analysis %s: %s", symbol, error)
