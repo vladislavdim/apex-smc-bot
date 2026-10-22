@@ -31,6 +31,7 @@ class TapeEvent:
     timestamp: float
     value_usd: float
     side: str
+    count: int = 1
 
 _trades: dict[tuple[str, str], deque[TapeEvent]] = defaultdict(lambda: deque(maxlen=1500))
 _liquidations: dict[tuple[str, str], deque[TapeEvent]] = defaultdict(lambda: deque(maxlen=1200))
@@ -84,6 +85,7 @@ def _add(target, provider, symbol, timestamp, usd, side):
                       if int(row.timestamp) == bucket and row.side == side), None)
     if aggregate is not None:
         aggregate.value_usd += usd
+        aggregate.count += 1
     else:
         events.append(TapeEvent(timestamp, usd, side))
     _latest[(provider, symbol)] = {**_latest.get((provider, symbol), {}), "updated_at": timestamp}
@@ -192,7 +194,7 @@ def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
         if recent_trades or recent_liq or (updated and now - updated <= 120):
             sources[provider] = {"buy_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "buy"), 2) if recent_trades else None,
                 "sell_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "sell"), 2) if recent_trades else None,
-                "trade_count_60s": len(recent_trades),
+                "trade_count_60s": sum(row.count for row in recent_trades),
                 "long_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "long"), 2) if recent_liq else None,
                 "short_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "short"), 2) if recent_liq else None,
                 "age_seconds": int(max(0, now - (updated or max([r.timestamp for r in recent_trades + recent_liq] or [now])))),

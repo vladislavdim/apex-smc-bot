@@ -440,3 +440,4 @@ def test_busy_tape_aggregates_alternating_sides_without_losing_notional():
         events = trades[("gate", "BUSY")]
         assert len(events) == 2
         assert sum(event.value_usd for event in events) == 500000
+        assert sum(event.count for event in events) == 5000
