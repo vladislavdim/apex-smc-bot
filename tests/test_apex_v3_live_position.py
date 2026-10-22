@@ -25,13 +25,14 @@ class LivePositionServiceTests(unittest.TestCase):
             {"1h": "1 ЧАС"},
         )
 
-    def test_bullish_zone_preserves_read_only_long_advice(self):
+    def test_bullish_zone_is_observational_without_trade_advice(self):
         result = self.service(_candles()).analyze("BTCUSDT", "1h")
         self.assertIn("BTCUSDT", result)
         self.assertIn("1 ЧАС", result)
-        self.assertIn("✅ ВХОДИТЬ ЛОНГ", result)
+        self.assertNotIn("ВХОДИТЬ", result)
         self.assertIn("Bull OB", result)
-        self.assertIn("RR 1:2", result)
+        self.assertNotIn("RR 1:2", result)
+        self.assertIn("Это не торговый сигнал", result)
 
     def test_insufficient_candles_returns_no_analysis(self):
         self.assertIsNone(self.service(_candles(29)).analyze("BTCUSDT", "1h"))

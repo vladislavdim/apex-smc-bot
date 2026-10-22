@@ -57,6 +57,9 @@ def rejected_detector(strategy: str, *, subtype: str = ""):
 
 class StrategyParityTests(unittest.TestCase):
     def setUp(self):
+        # Trace parity uses historical synthetic bars; live venue freshness is
+        # tested independently at the router boundary.
+        patch.object(GateCandleRouter, "_usable", return_value=True).start()
         patch("apex.telemetry.event_log.emit_event", return_value="event").start()
 
     def tearDown(self):

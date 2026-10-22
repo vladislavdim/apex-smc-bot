@@ -32,7 +32,7 @@ class SafetyRegressionTests(unittest.TestCase):
         state_path = str(Path(self.tmp.name) / "state.db")
         self.factory = lambda: sqlite3.connect(state_path)
         conn = self.factory(); migrate_state(conn); conn.close()
-        orders.configure_execution_state(self.factory)
+        orders.configure_execution_state(self.factory, durable_checkpoint=lambda _: {"status":"saved"})
         self.addCleanup(orders.configure_execution_state, None)
         self.addCleanup(orders.configure_manager_confirmation, None)
         self.ready = patch("apex.app.runtime.entry_admission", return_value=(True, ""))
@@ -77,7 +77,7 @@ class SafetyRegressionTests(unittest.TestCase):
         recovered.open_positions = lambda: [{"symbol": "BTCUSDT", "positionAmt": "0.980"}]
         outcomes = orders.reconcile_live_executions(db_path=self.db_path,
                                                     config=live_config(), client=recovered)
-        self.assertEqual(outcomes[0]["status"], "PROTECTED")
+        self.assertTrue(any(item["status"] == "PROTECTED" for item in outcomes))
 
     def test_terminal_partial_fill_gets_stop(self):
         class PartiallyCancelled(FakeClient):

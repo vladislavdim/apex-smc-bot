@@ -75,6 +75,9 @@ class FakeClient:
         self.calls.append("all_positions")
         return []
 
+    def open_owned_orders(self):
+        return []
+
     def usdt_balance_details(self):
         self.calls.append("balance_details")
         return {"wallet_balance": self.balance, "available_balance": self.balance}
@@ -144,7 +147,9 @@ class FakeClient:
 
     def query_algo_order(self, algo_id="", client_algo_id=""):
         self.calls.append(("query_algo", algo_id or client_algo_id))
-        return {"algoId": algo_id or "algo-1", "algoStatus": "NEW"}
+        return {"algoId": algo_id or "algo-1", "algoStatus": "NEW",
+                "symbol":"BTCUSDT", "side":"SELL", "orderType":"STOP_MARKET",
+                "closePosition":True, "triggerPrice":"95"}
 
     def cancel_algo_order(self, algo_id):
         self.calls.append(("cancel_algo", algo_id))
@@ -226,7 +231,7 @@ class TradeExecutionTests(unittest.TestCase):
         conn = factory()
         migrate_state(conn)
         conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         trade_execution._store_balance_attempt(
             self.db_path,
             attempted_at=123.0,
@@ -248,7 +253,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         ExecutionRepository(factory).register({
             "signal_id": 502, "mode": "live", "symbol": "ETHUSDT",
             "direction": "LONG", "status": "PROTECTED", "entry": 100,
@@ -271,7 +276,7 @@ class TradeExecutionTests(unittest.TestCase):
         conn = factory()
         migrate_state(conn)
         conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
 
         trade_execution._store_execution(
             self.db_path, 501, live_config(), CANDIDATE, "ENTRY_PENDING",
@@ -321,7 +326,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
 
         class InspectingClient(FakeClient):
             def place_limit_entry(client_self, plan, client_id):
@@ -351,7 +356,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         candidate_id = derived_id("candidate", "test", 511)
         execution_id = derived_id("execution", candidate_id)
         repository = ExecutionRepository(factory)
@@ -383,7 +388,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         repository = ExecutionRepository(factory)
         repository.register({
             "signal_id": 509, "mode": "live", "symbol": "BTCUSDT",
@@ -428,7 +433,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         result = trade_execution._store_execution(
             legacy_path, 511, live_config(), CANDIDATE, "BLOCKED_KILL_SWITCH",
             error="test fence",
@@ -447,7 +452,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         trade_execution._store_execution(
             legacy_path, 512, live_config(), CANDIDATE, "ENTRY_PENDING",
             {
@@ -470,7 +475,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         ExecutionRepository(factory).register({
             "signal_id": 77, "mode": "live", "symbol": "BTCUSDT",
             "direction": "LONG", "status": "PROTECTED", "entry": 100,
@@ -512,7 +517,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         ExecutionRepository(factory).register({
             "signal_id": 79, "mode": "live", "symbol": "BTCUSDT",
             "direction": "LONG", "status": "PROTECTED", "entry": 100,
@@ -547,7 +552,7 @@ class TradeExecutionTests(unittest.TestCase):
         conn = factory()
         migrate_state(conn)
         conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
 
         conn = sqlite3.connect(self.db_path)
         conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
@@ -589,7 +594,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         trade_execution._store_execution(
             self.db_path, 905, live_config(), CANDIDATE, "ENTRY_PENDING",
             {
@@ -631,7 +636,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         ExecutionRepository(factory).register({
             "signal_id": 990, "mode": "live", "symbol": "BTCUSDT",
             "direction": "LONG", "status": "ENTRY_PENDING", "entry": 100,
@@ -651,7 +656,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         ExecutionRepository(factory).register({
             "signal_id": 906, "mode": "live", "symbol": "BTCUSDT",
             "direction": "BULLISH", "status": "PROTECTED",
@@ -682,7 +687,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         repository = ExecutionRepository(factory)
         repository.register({
             "signal_id": 907, "mode": "live", "symbol": "BTCUSDT",
@@ -720,7 +725,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         conn = sqlite3.connect(self.db_path)
         conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, result TEXT)")
         conn.execute("INSERT INTO signals (id,result) VALUES (902,'sl')")
@@ -751,7 +756,7 @@ class TradeExecutionTests(unittest.TestCase):
             return sqlite3.connect(state_path)
 
         conn = factory(); migrate_state(conn); conn.close()
-        trade_execution.configure_execution_state(factory)
+        trade_execution.configure_execution_state(factory, durable_checkpoint=lambda _: {"status":"saved"})
         repository = ManagerRepository(factory)
         repository.register({
             "signal_id": 903, "symbol": "BTCUSDT", "strategy": "ZONE",
@@ -889,18 +894,18 @@ class TradeExecutionTests(unittest.TestCase):
             trade_execution._reconcile_process_lock.release()
         self.assertEqual(result, [])
 
-    def test_idle_reconciliation_never_constructs_binance_client(self):
+    def test_idle_reconciliation_checks_remote_ownership(self):
         with patch.object(
             trade_execution,
             "BinanceFuturesClient",
-            side_effect=AssertionError("idle reconciliation touched Binance"),
+            return_value=FakeClient(),
         ) as client_class:
             result = reconcile_live_executions(
                 db_path=self.db_path,
                 config=live_config(),
             )
         self.assertEqual(result, [])
-        client_class.assert_not_called()
+        client_class.assert_called_once()
 
     def test_telegram_status_defers_binance_account_probe(self):
         with patch.object(
@@ -989,6 +994,11 @@ class TradeExecutionTests(unittest.TestCase):
                 VALUES(501,'live','BTCUSDT','BULLISH','PROTECTED')""")
         from unittest.mock import Mock
         client = Mock()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE trade_executions SET stop_order_id='existing-stop',sl=95,quantity=1 WHERE signal_id=501")
+        client.symbol_rules.return_value = RULES
+        client.query_algo_order.return_value = {"algoStatus":"NEW","symbol":"BTCUSDT","side":"SELL",
+                                                "orderType":"STOP_MARKET","closePosition":True,"triggerPrice":"95"}
         client.open_positions.return_value = [{'symbol': 'BTCUSDT', 'positionAmt': '1'}]
         outcomes = reconcile_live_executions(db_path=self.db_path, config=live_config(), client=client)
         status = execution_status(self.db_path, config=live_config())

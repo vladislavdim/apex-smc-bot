@@ -35,6 +35,8 @@ _META_TABLE = "brain_persistence_meta"
 # constructor so temporary files cannot retain untracked WAL sidecars.
 _SQLITE_CONNECT = sqlite3.dbapi2.connect
 _BACKUP_RESOURCE_LOCK = threading.Lock()
+_BACKUP_PRIORITY_LOCK = threading.Lock()
+_CRITICAL_BACKUP_WAITERS = 0
 # Keep fast compression for small stores; large migration snapshots need a
 # denser representation before Base64 expansion in GitHub's JSON request.
 _DENSE_COMPRESSION_THRESHOLD = 32 * 1024 * 1024
@@ -630,15 +632,33 @@ class BrainPersistence:
     def backup(self, reason: str = "scheduled") -> dict[str, Any]:
         # A cancelled asyncio.to_thread keeps running. Never accumulate blocked
         # snapshot threads or run several compression/upload jobs simultaneously.
-        if not _BACKUP_RESOURCE_LOCK.acquire(blocking=False):
-            return {"status": "busy", "saved": False}
+        global _CRITICAL_BACKUP_WAITERS
+        critical = reason.startswith(("signal_delivery", "execution_intent", "manager_intent", "delivery_resolution"))
+        with _BACKUP_PRIORITY_LOCK:
+            if critical:
+                _CRITICAL_BACKUP_WAITERS += 1
+            elif _CRITICAL_BACKUP_WAITERS:
+                return {"status":"busy", "saved":False}
+        try:
+            acquired = _BACKUP_RESOURCE_LOCK.acquire(timeout=120 if critical else 0)
+        finally:
+            if critical:
+                with _BACKUP_PRIORITY_LOCK:
+                    _CRITICAL_BACKUP_WAITERS -= 1
+        if not acquired:
+            return {"status":"busy", "saved":False}
         started = time.monotonic()
         try:
+            from apex.ops.resource_guard import memory_snapshot
+            if self.remote_name != "apex_state.db" and memory_snapshot().state in {"DEGRADED","NEW_ENTRIES_OFF"}:
+                return {"status":"resource_deferred", "saved":False}
             result = self._backup_locked(reason)
             result["duration_seconds"] = round(time.monotonic() - started, 3)
             return result
         finally:
             _BACKUP_RESOURCE_LOCK.release()
+            from apex.ops.resource_guard import release_unused_memory
+            release_unused_memory()
 
     def _backup_locked(self, reason: str = "scheduled") -> dict[str, Any]:
         """Upload one consistent snapshot if data changed and this instance is current."""

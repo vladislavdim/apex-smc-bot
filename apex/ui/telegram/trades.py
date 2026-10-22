@@ -53,7 +53,7 @@ def fetch_live_trades(
                       m.confirmed_protect_level AS trailing_sl,
                       m.status AS manager_status,
                       m.close_result, m.created_at, m.updated_at, m.closed_at,
-                      m.last_price, m.current_r, m.last_reviewed_candle,
+                      m.last_price, m.current_r, m.last_reviewed_candle, m.price_observed_at,
                       m.exit_price, m.realized_r,
                       l.status AS lifecycle_status, l.result AS lifecycle_result,
                       e.status AS execution_status
@@ -160,7 +160,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
             execution = row.get("execution_status")
             execution_text = f"\n   Автоисполнение: <code>{html.escape(str(execution))}</code>" if execution else ""
             price = row.get("last_price")
-            checked = row.get("updated_at")
+            checked = row.get("price_observed_at") or row.get("updated_at")
             progress = (
                 f"\n   Цена проверки <code>{_fmt_price(price)}</code> · текущий R "
                 f"<b>{float(row['current_r']):+.2f}R</b> · обновлено {html.escape(str(checked or '')[:16].replace('T', ' '))} UTC"

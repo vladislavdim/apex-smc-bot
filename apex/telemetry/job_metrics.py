@@ -76,6 +76,11 @@ class JobRunRecorder:
             logging.warning("[JobMetrics] finish persist failed safely: %s", type(exc).__name__)
         self._finished = True
 
+    def finish_late(self, status: str, *, error_code: str = "") -> None:
+        """Replace the timeout observation with the actual task completion."""
+        self._finished = False
+        self.finish(status, error_code=error_code)
+
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: Any) -> bool:
         del traceback
         self.finish(

@@ -18,6 +18,10 @@ class DeliveryClaimRepository:
         conn = self._conn_factory()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            unresolved = conn.execute("SELECT 1 FROM signal_delivery_outbox WHERE (cache_key=? OR pair_key=?) AND status IN ('PENDING','UNKNOWN') LIMIT 1", (cache_key,cache_key)).fetchone()
+            if unresolved:
+                conn.rollback()
+                return False
             row = conn.execute(
                 "SELECT claimed_at,delivered_at FROM delivery_claims WHERE cache_key=?",
                 (cache_key,),

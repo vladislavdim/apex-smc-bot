@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory() as directory:
             return {'saved':True}
         with patch.object(worker,'_v3_maintenance_and_backup',store_backup):
             result = await original('render_sigterm',store='all')
-        assert stores == ['state','memory','brain']
+        assert stores == ['state']
         assert result['state']['status'] == 'backup_failed'
-        assert result['brain']['saved'] is True
+        assert 'brain' not in result  # optional large stores use scheduled checkpoints
     asyncio.run(verify())

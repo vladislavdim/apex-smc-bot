@@ -6,6 +6,8 @@ import asyncio
 import logging
 import time
 import threading
+import math
+from .candles import candle_open_time
 from collections.abc import Callable
 
 from .snapshot_scope import snapshot_candle_override
@@ -57,6 +59,34 @@ class GateCandleRouter:
             self.cache[key] = (candles, time.time())
             self._prune_cache()
 
+    @staticmethod
+    def _usable(rows, interval):
+        seconds = {"1m":60,"3m":180,"5m":300,"15m":900,"30m":1800,
+                   "1h":3600,"2h":7200,"4h":14400,"8h":28800,
+                   "1d":86400,"1w":604800,"1M":2592000}.get(interval)
+        if not seconds or len(rows) < 3:
+            return False
+        now = time.time()
+        previous = None
+        last_closed = None
+        try:
+            for row in rows:
+                opened = candle_open_time(row)
+                values = [float(row[key]) for key in ("open","high","low","close")]
+                o,h,l,c = values
+                if (opened is None or not all(math.isfinite(x) and x > 0 for x in values)
+                        or l > min(o,c) or h < max(o,c) or l > h
+                        or opened > now + 5):
+                    return False
+                if previous is not None and abs(opened - previous - seconds) > 1:
+                    return False
+                if opened + seconds <= now and row.get("is_closed") is not False:
+                    last_closed = opened + seconds
+                previous = opened
+        except (TypeError, ValueError, KeyError):
+            return False
+        return last_closed is not None and 0 <= now - last_closed <= seconds + 90
+
     def get_candles(self, symbol: str, interval: str = "1h", limit: int = 200) -> list:
         requested_limit = max(1, int(limit or 1))
         snapshot_rows = snapshot_candle_override(
@@ -71,7 +101,7 @@ class GateCandleRouter:
             item = self.cache.get(cache_key)
         if item is not None:
             cached, timestamp = item
-            if time.time() - timestamp < self._cache_ttl(interval) and len(cached) >= requested_limit:
+            if time.time() - timestamp < self._cache_ttl(interval) and len(cached) >= requested_limit and self._usable(cached, interval):
                 self._record_health(
                     symbol, interval, True, source="Gate cache",
                     candle_count=len(cached), cached=True,
@@ -80,7 +110,7 @@ class GateCandleRouter:
                 return cached[-requested_limit:]
 
         shared = self._get_shared(symbol, interval)
-        if shared and len(shared) >= requested_limit:
+        if shared and len(shared) >= requested_limit and self._usable(shared, interval):
             self._store_cache(cache_key, shared)
             self._record_health(
                 symbol, interval, True, source="Gate shared cache",
@@ -93,7 +123,7 @@ class GateCandleRouter:
             try:
                 result = self._fetch_gate(symbol, interval, requested_limit)
                 candles = result.get("candles", []) if isinstance(result, dict) else []
-                if candles and len(candles) >= 3:
+                if candles and self._usable(candles, interval):
                     self._store_cache(cache_key, candles)
                     self._update_shared(symbol, interval, candles)
                     self._record_health(
@@ -102,6 +132,8 @@ class GateCandleRouter:
                         last_closed_candle_at=self._last_closed_at(candles),
                     )
                     return candles[-requested_limit:]
+                if candles:
+                    errors.append("SMC adapter: invalid, gapped or stale candles")
                 if isinstance(result, dict) and result.get("error"):
                     errors.append(f"SMC adapter: {result['error']}")
             except Exception as exc:

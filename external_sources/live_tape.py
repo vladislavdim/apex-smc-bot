@@ -7,6 +7,8 @@ import json
 import logging
 import sqlite3
 import time
+import threading
+from functools import wraps
 from typing import Any
 from apex.config.settings import ApexConfig
 from apex.db.connection import connect_compatibility
@@ -42,6 +44,15 @@ _gate_books: dict[str, OrderBookReducer] = {}
 _gate_depth_last_persist: dict[str, float] = {}
 
 
+_TAPE_LOCK = threading.RLock()
+
+def _serialized(callback):
+    @wraps(callback)
+    def run(*args, **kwargs):
+        with _TAPE_LOCK:
+            return callback(*args, **kwargs)
+    return run
+
 class GateDepthResync(RuntimeError):
     """Force a reconnect/resubscribe so futures.obu sends a new full snapshot."""
 
@@ -76,6 +87,7 @@ def _trade(provider, symbol, timestamp, usd, side):
 def _liquidation(provider, symbol, timestamp, usd, side):
     if side in {"long", "short"}: _add(_liquidations, provider, symbol, timestamp, usd, side)
 
+@_serialized
 def ingest_gate(message: dict[str, Any]) -> None:
     if message.get("event") != "update": return
     channel, result = message.get("channel"), message.get("result")
@@ -87,21 +99,26 @@ def ingest_gate(message: dict[str, Any]) -> None:
             raw_symbol = raw_symbol.replace("ob.", "").rsplit(".", 1)[0]
         symbol = _apex_from_provider("gate", raw_symbol)
         if not symbol: continue
-        multiplier = number(get_pair(symbol).get("gate_multiplier")) or 1.0
+        multiplier = number(get_pair(symbol).get("gate_multiplier"))
+        normalized = multiplier is not None and multiplier > 0
+        _latest[("gate", symbol)] = {**_latest.get(("gate", symbol), {}), "normalization_available": normalized}
         timestamp = (number(row.get("create_time_ms")) or now * 1000) / 1000
         if channel == "futures.trades" and not row.get("is_internal"):
             size, price = number(row.get("size")), number(row.get("price"))
-            if size is not None and price is not None:
+            if normalized and size is not None and price is not None:
                 _trade("gate", symbol, timestamp, abs(size) * multiplier * price, "buy" if size > 0 else "sell")
         elif channel == "futures.book_ticker":
             _latest[("gate", symbol)] = {**_latest.get(("gate", symbol), {}), "bid": number(row.get("b")), "ask": number(row.get("a")), "updated_at": now}
         elif channel == "futures.tickers":
             mark, units = number(row.get("mark_price")), number(row.get("total_size"))
             _latest[("gate", symbol)] = {**_latest.get(("gate", symbol), {}), "funding": number(row.get("funding_rate")),
-                "oi": abs(units) * multiplier * mark if units is not None and mark is not None else None, "updated_at": now}
+                "oi": abs(units) * multiplier * mark if normalized and units is not None and mark is not None else None, "updated_at": now}
         elif channel == "futures.obu":
+            if not normalized:
+                _gate_books.pop(symbol, None)
+                continue
             reducer = _gate_books.get(symbol)
-            if reducer is None:
+            if reducer is None or reducer.contract_multiplier != multiplier:
                 reducer = OrderBookReducer(symbol, depth=50, contract_multiplier=multiplier)
                 _gate_books[symbol] = reducer
             applied = reducer.apply_message(row)
@@ -115,6 +132,7 @@ def ingest_gate(message: dict[str, Any]) -> None:
                 except Exception:
                     pass
 
+@_serialized
 def ingest_binance(message: dict[str, Any]) -> None:
     row = message.get("data", message)
     if not isinstance(row, dict): return
@@ -134,6 +152,7 @@ def ingest_binance(message: dict[str, Any]) -> None:
     elif event == "bookTicker":
         _latest[("binance", symbol)] = {**_latest.get(("binance", symbol), {}), "bid": number(row.get("b")), "ask": number(row.get("a")), "updated_at": timestamp}
 
+@_serialized
 def ingest_bybit(message: dict[str, Any]) -> None:
     topic = str(message.get("topic", "")); symbol = _apex_from_provider("bybit", topic.rsplit(".", 1)[-1])
     if not symbol: return
@@ -154,6 +173,7 @@ def ingest_bybit(message: dict[str, Any]) -> None:
                 "oi": units * mark if units is not None and mark is not None else None,
                 "bid": number(row.get("bid1Price")), "ask": number(row.get("ask1Price")), "updated_at": now}
 
+@_serialized
 def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
     now = now or time.time(); sources = {}
     for provider in ("gate", "binance", "bybit"):
@@ -163,23 +183,24 @@ def snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
         recent_liq = [row for row in liqs if now - row.timestamp <= 300]
         latest = dict(_latest.get((provider, symbol), {})); updated = number(latest.get("updated_at"))
         if recent_trades or recent_liq or (updated and now - updated <= 120):
-            sources[provider] = {"buy_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "buy"), 2),
-                "sell_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "sell"), 2),
+            sources[provider] = {"buy_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "buy"), 2) if recent_trades else None,
+                "sell_usd_60s": round(sum(r.value_usd for r in recent_trades if r.side == "sell"), 2) if recent_trades else None,
                 "trade_count_60s": len(recent_trades),
-                "long_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "long"), 2),
-                "short_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "short"), 2),
+                "long_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "long"), 2) if recent_liq else None,
+                "short_liq_usd_300s": round(sum(r.value_usd for r in recent_liq if r.side == "short"), 2) if recent_liq else None,
                 "age_seconds": int(max(0, now - (updated or max([r.timestamp for r in recent_trades + recent_liq] or [now])))),
                 **{key: latest.get(key) for key in ("bid", "ask", "oi", "funding")}}
-    buy, sell = sum(v["buy_usd_60s"] for v in sources.values()), sum(v["sell_usd_60s"] for v in sources.values())
+    buy, sell = sum(v["buy_usd_60s"] or 0 for v in sources.values()), sum(v["sell_usd_60s"] or 0 for v in sources.values())
     trade_count = sum(int(v.get("trade_count_60s") or 0) for v in sources.values())
-    return {"symbol": symbol, "sources": sources, "buy_usd_60s": round(buy, 2), "sell_usd_60s": round(sell, 2),
+    return {"symbol": symbol, "sources": sources, "buy_usd_60s": round(buy, 2) if trade_count else None, "sell_usd_60s": round(sell, 2) if trade_count else None,
         "cvd_real_delta_usd_60s": round(buy - sell, 2) if trade_count else None,
         "trade_count_60s": trade_count or None,
-        "long_liq_usd_300s": round(sum(v["long_liq_usd_300s"] for v in sources.values()), 2),
-        "short_liq_usd_300s": round(sum(v["short_liq_usd_300s"] for v in sources.values()), 2),
+        "long_liq_usd_300s": round(sum(v["long_liq_usd_300s"] or 0 for v in sources.values()), 2) if any(v["long_liq_usd_300s"] is not None for v in sources.values()) else None,
+        "short_liq_usd_300s": round(sum(v["short_liq_usd_300s"] or 0 for v in sources.values()), 2) if any(v["short_liq_usd_300s"] is not None for v in sources.values()) else None,
         "bias": "bullish" if buy > sell * 1.25 else "bearish" if sell > buy * 1.25 else "neutral" if buy + sell else "unknown",
         "age_seconds": max((v["age_seconds"] for v in sources.values()), default=None)}
 
+@_serialized
 def order_book_snapshot(symbol: str, now: float | None = None) -> dict[str, Any]:
     """Return the sequence-verified Gate book and a bounded heatmap ladder."""
     reducer = _gate_books.get(symbol.upper())
@@ -208,8 +229,8 @@ def _persist_snapshot(data: dict[str, Any], db_path: str = _DB_PATH) -> None:
     except Exception as exc: logging.debug("[LiveTape] snapshot persistence skipped: %s", exc)
 
 async def collect(symbol: str) -> dict:
-    data = snapshot(symbol)
-    data["orderbook"] = order_book_snapshot(symbol)
+    data = await asyncio.to_thread(snapshot, symbol)
+    data["orderbook"] = await asyncio.to_thread(order_book_snapshot, symbol)
     if not data["sources"] and data["orderbook"].get("freshness_status") != "FRESH":
         return {"source": SOURCE, "status": "warming_up", "symbol": symbol}
     if time.time() - _last_persist.get(symbol, 0) >= 60:
@@ -265,7 +286,7 @@ async def _consume(provider: str, url: str, subscriptions: list[dict[str, Any]],
                     async for message in ws:
                         if _stop_event and _stop_event.is_set(): break
                         if message.type == aiohttp.WSMsgType.TEXT:
-                            try: parser(json.loads(message.data))
+                            try: await asyncio.to_thread(parser, json.loads(message.data))
                             except GateDepthResync:
                                 raise
                             except Exception as exc: logging.debug("[LiveTape] parse: %s", exc)

@@ -56,15 +56,27 @@ _symbol_rules_lock = threading.Lock()
 _shared_symbol_rules_cache: dict[str, tuple[float, "SymbolRules"]] = {}
 _account_cache_lock = threading.Lock()
 _ACCOUNT_STATE_FACTORY = None
+_DURABLE_CHECKPOINT = None
 _MANAGER_CONFIRM_CALLBACK = None
 _MANAGER_TRANSITION_VALIDATOR = None
 _MANAGER_RECONCILIATION_CALLBACK = None
 
 
-def configure_execution_state(connection_factory=None) -> None:
+def configure_execution_state(connection_factory=None, *, durable_checkpoint=None) -> None:
     """Bind non-signal execution state to apex_state.db in production."""
-    global _ACCOUNT_STATE_FACTORY
+    global _ACCOUNT_STATE_FACTORY, _DURABLE_CHECKPOINT
     _ACCOUNT_STATE_FACTORY = connection_factory
+    _DURABLE_CHECKPOINT = durable_checkpoint
+
+
+def _checkpoint_intent(reason):
+    if _ACCOUNT_STATE_FACTORY is None:
+        return  # isolated compatibility/test mode; production always binds State
+    if _DURABLE_CHECKPOINT is None:
+        raise RuntimeError("durable_execution_checkpoint_unconfigured")
+    receipt = _DURABLE_CHECKPOINT(reason)
+    if not isinstance(receipt, Mapping) or receipt.get("status") not in {"saved", "unchanged"}:
+        raise RuntimeError("durable_execution_checkpoint_unavailable")
 
 
 def configure_manager_confirmation(callback=None, *, transition_validator=None, reconciliation_callback=None) -> None:
@@ -670,6 +682,13 @@ class BinanceFuturesClient:
             raise RuntimeError("position snapshot malformed")
         return any(abs(_decimal(row["positionAmt"])) > 0 for row in rows)
 
+    def open_owned_orders(self):
+        regular = self._request("GET", "/fapi/v1/openOrders", signed=True)
+        algo = self._request("GET", "/fapi/v1/openAlgoOrders", {"algoType":"CONDITIONAL"}, signed=True)
+        if not isinstance(regular,list) or not isinstance(algo,list):
+            raise RuntimeError("open_order_snapshot_malformed")
+        return [row for row in regular + algo if str(row.get("clientOrderId") or row.get("clientAlgoId") or "").lower().startswith(("apex_", "apex-"))]
+
     def has_open_orders(self, symbol: str) -> bool:
         regular = self._request("GET", "/fapi/v1/openOrders", {"symbol": symbol}, signed=True)
         algo = self._request(
@@ -859,7 +878,10 @@ def _claim_manager_action(
     repository = _execution_state_repository()
     if repository is not None:
         try:
-            return repository.claim_action(action_key, signal_id, action, requested_level)
+            claimed = repository.claim_action(action_key, signal_id, action, requested_level)
+            if claimed:
+                _checkpoint_intent("manager_intent:" + str(action_key))
+            return claimed
         except Exception as exc:
             # Idempotency is a capital-safety invariant. Never execute an
             # exchange mutation when canonical State cannot own its claim.
@@ -1067,6 +1089,7 @@ def execute_manager_review(
             if quantity < rules.min_qty:
                 raise RuntimeError("partial quantity below exchange minimum")
         _finish_manager_action(db_path, action_key, "SUBMITTING")
+        _checkpoint_intent("manager_intent:" + action_key)
         market_submitted = True
         order = client.emergency_close(
             symbol, direction, _plain_decimal(quantity), f"apex_mx_{signal_id}_{action_key[:8]}",
@@ -1597,9 +1620,6 @@ def _execute_approved_candidate(
         if not plan.get("ok"):
             return _store_execution(db_path, signal_id, config, candidate, plan.get("status", "SKIPPED"), plan)
 
-        # Isolated margin bounds a symbol failure to its allocated margin.
-        client.set_isolated_margin(symbol)
-        client.set_leverage(symbol, config.leverage)
         intent = _store_execution(
             db_path, signal_id, config, candidate, "SUBMITTING", plan,
         )
@@ -1608,7 +1628,27 @@ def _execute_approved_candidate(
                 db_path, signal_id, config, candidate, "BLOCKED_STATE_PERSISTENCE", plan,
                 error="canonical execution intent was not persisted",
             )
+        try:
+            _checkpoint_intent("execution_intent:" + str(intent["execution_id"]))
+        except Exception as checkpoint_error:
+            return _store_execution(db_path, signal_id, config, candidate,
+                                    "BLOCKED_STATE_PERSISTENCE", plan,
+                                    error=str(checkpoint_error))
+        # No exchange mutation precedes the durable deterministic intent.
+        client.set_isolated_margin(symbol)
+        client.set_leverage(symbol, config.leverage)
         client_order_id = client_order_ids(str(intent["execution_id"]))["entry"]
+        # Durable checkpoint latency must not consume the executable quote.
+        quote = (quote_provider or _fresh_gate_quote)(symbol)
+        quote_time = float(quote.get("observed_at") or 0)
+        quote_price = float(quote.get("price") or 0)
+        quote_age = time.time() - quote_time
+        if (quote.get("source") != "gate" or not math.isfinite(quote_price)
+                or quote_price <= 0 or not 0 <= quote_age <= 15
+                or not validate_candidate(candidate, quote_price).get("valid")):
+            return _store_execution(db_path, signal_id, config, candidate,
+                                    "SKIPPED_STALE_GATE_DATA", plan,
+                                    error="fresh Gate quote required after durable intent")
         # Account/risk calls can outlive the runtime lease or quote freshness.
         admitted, reason = entry_admission()
         if not admitted or time.time() - quote_time > 15:
@@ -1723,6 +1763,8 @@ def _owned_emergency_close(row, client, db_path, quantity):
     action_key = f'emergency:{signal_id}'
     client_id = f'apex_x_{signal_id}'
     if _claim_manager_action(db_path, action_key, signal_id, 'CLOSE', None):
+        _finish_manager_action(db_path, action_key, 'SUBMITTING')
+        _checkpoint_intent('manager_intent:' + action_key)
         response = client.emergency_close(str(row['symbol']), str(row['direction']),
                                           _plain_decimal(quantity), client_id)
     else:
@@ -2017,7 +2059,8 @@ def _recover_manager_market_action(db_path, client):
     for action in actions:
         signal_id, key = int(action['signal_id']), str(action['action_key'])
         try:
-            response = client.query_order_by_client_id(str(action['symbol']), f'apex_mx_{signal_id}_{key[:8]}')
+            recovery_id = f'apex_x_{signal_id}' if key.startswith('emergency:') else f'apex_mx_{signal_id}_{key[:8]}'
+            response = client.query_order_by_client_id(str(action['symbol']), recovery_id)
             order_id = _required_remote_order_id(response, 'recovered Manager close')
             _register_market_exit(db_path, signal_id, str(action['symbol']), str(action['direction']),
                                   order_id, str(action['action']))
@@ -2044,6 +2087,83 @@ def _recover_manager_market_action(db_path, client):
     return outcomes
 
 
+def _recover_manager_stop_action(db_path, client):
+    repository = _execution_state_repository()
+    if repository is None:
+        return []
+    outcomes = []
+    for action in repository.uncertain_stop_actions():
+        signal_id, key = int(action['signal_id']), str(action['action_key'])
+        try:
+            stop = client.query_algo_order(client_algo_id=f'apex_mp_{signal_id}_{key[:8]}')
+            if str(stop.get('algoStatus') or '').upper() not in {'NEW','PENDING'}:
+                raise RuntimeError('replacement_stop_outcome_unresolved')
+            row = dict(repository.get(signal_id))
+            new_id = _required_remote_order_id(stop, 'recovered protective stop')
+            if (str(stop.get('symbol') or '').upper() != str(row['symbol']).upper()
+                    or stop.get('side') != ('SELL' if row['direction']=='BULLISH' else 'BUY')
+                    or str(stop.get('closePosition')).lower() != 'true'):
+                raise RuntimeError('replacement_stop_geometry_unverified')
+            level = float(stop.get('triggerPrice') or 0)
+            if not math.isfinite(level) or level <= 0:
+                raise RuntimeError('replacement_stop_price_invalid')
+            previous = row.get('previous_stop_order_id') or row.get('stop_order_id')
+            _update_execution(db_path, signal_id, 'STOP_REPLACEMENT_PENDING',
+                              stop_order_id=new_id, pending_stop_order_id=new_id,
+                              previous_stop_order_id=previous, active_stop_price=level)
+            row = dict(repository.get(signal_id))
+            outcomes.append(_reconcile_stop_replacement(row, client, db_path))
+        except Exception as exc:
+            logging.warning('[AutoTrading] stop action recovery deferred: %s', type(exc).__name__)
+            outcomes.append({'signal_id':signal_id,'status':'RECONCILE_ERROR'})
+    return outcomes
+
+
+def _verify_protective_stop(row, client, db_path):
+    """Check the actual reduce-only stop, repairing only confirmed absence."""
+    values = dict(row)
+    stop_id = str(values.get("stop_order_id") or "")
+    order = {}
+    missing = not stop_id
+    if stop_id:
+        try:
+            order = client.query_algo_order(algo_id=stop_id)
+        except BinanceAPIError as exc:
+            if exc.code not in {-2011, -2013}: raise
+            missing = True
+    status = str(order.get("algoStatus") or order.get("status") or "").upper()
+    if status in {"CANCELED","CANCELLED","EXPIRED","REJECTED"}:
+        missing = True
+    expected_side = "SELL" if row["direction"] == "BULLISH" else "BUY"
+    if not missing:
+        close_all = str(order.get("closePosition")).lower() == "true"
+        reduce_only = str(order.get("reduceOnly")).lower() == "true"
+        quantity_ok = close_all or (reduce_only and _decimal(order.get("quantity") or 0) >= _decimal(row["quantity"]))
+        rules = client.symbol_rules(str(row["symbol"]))
+        expected = _nearest_step(values.get("active_stop_price") or row["sl"], rules.tick_size)
+        trigger = _decimal(order.get("triggerPrice") or order.get("stopPrice") or 0)
+        valid = (status in {"NEW","PENDING","TRIGGERING"}
+                 and str(order.get("symbol") or "").upper() == str(row["symbol"]).upper()
+                 and order.get("side") == expected_side
+                 and str(order.get("orderType") or order.get("type") or "").upper() == "STOP_MARKET"
+                 and quantity_ok and trigger > 0
+                 and abs(trigger-expected) <= max(abs(expected)*Decimal("0.0001"), Decimal("0.00000001")))
+        if not valid:
+            raise RuntimeError("protective_stop_unverified_or_invalid")
+        return
+    # A deterministic replacement ID recovers its acknowledgement; never reuse
+    # a cancelled order's client ID and never duplicate existing TP orders.
+    replacement_id = f"apex_rs_{row['signal_id']}_{hashlib.sha256(stop_id.encode()).hexdigest()[:8]}"
+    _checkpoint_intent("manager_intent:repair_stop:" + replacement_id)
+    rules = client.symbol_rules(str(row["symbol"]))
+    level = _nearest_step(values.get("active_stop_price") or row["sl"], rules.tick_size)
+    response = client.place_close_all_trigger(str(row["symbol"]), expected_side,
+                    "STOP_MARKET", _plain_decimal(level), replacement_id)
+    new_id = _required_remote_order_id(response, "repaired protective stop")
+    _update_execution(db_path, int(row["signal_id"]), str(row["status"]),
+                      stop_order_id=new_id, active_stop_price=float(level))
+
+
 def _reconcile_live_executions_unlocked(
     *, db_path: str = DB_PATH, config: ExecutionConfig | None = None,
     client: BinanceFuturesClient | None = None,
@@ -2054,14 +2174,26 @@ def _reconcile_live_executions_unlocked(
         return []
     rows = _live_reconcile_rows(db_path)
     repository = _execution_state_repository()
-    if not rows and (repository is None or not repository.uncertain_market_actions()):
-        return []
     client = client or BinanceFuturesClient(config)
+    if not rows and (repository is None or not (repository.uncertain_market_actions() or repository.uncertain_stop_actions())):
+        try:
+            owned = client.open_owned_orders()
+            positions = client.open_positions()
+            if owned or positions:
+                return [{"status":"RECONCILE_ERROR", "signal_id":0,
+                         "reason":"REMOTE_EXPOSURE_WITHOUT_LOCAL_OWNER",
+                         "owned_orders":len(owned), "unowned_positions":len(positions)}]
+            return []
+        except Exception as exc:
+            return [{"status":"RECONCILE_ERROR", "signal_id":0,
+                     "reason":"REMOTE_OWNERSHIP_SNAPSHOT_UNAVAILABLE", "error_type":type(exc).__name__}]
     outcomes = _recover_manager_market_action(db_path, client)
+    outcomes.extend(_recover_manager_stop_action(db_path, client))
+    if any(item.get("status") in {"MANAGER_ACTION_RECOVERED", "STOP_REPLACEMENT_RECOVERED"} for item in outcomes):
+        rows = _live_reconcile_rows(db_path)
     protected_cutover_ids = _reconciliation_required_signal_ids(db_path)
-    # One bounded, batched position snapshot confirms every already-protected
-    # cutover row. Existing protective orders are deliberately not queried,
-    # cancelled or recreated here.
+    # One batched snapshot confirms open positions; each actual protective
+    # stop is verified below before the row is considered protected.
     open_position_symbols: set[str] = set()
     position_snapshot_available = True
     if any(
@@ -2122,6 +2254,7 @@ def _reconcile_live_executions_unlocked(
                     })
                     continue
                 if str(row["symbol"]).upper() in open_position_symbols:
+                    _verify_protective_stop(row, client, db_path)
                     if not signal_pending:
                         outcomes.append({"status": "AWAITING_BINANCE_CLOSE", "signal_id": row["signal_id"]})
                         continue
@@ -2436,3 +2569,35 @@ def execution_status(
                 logging.warning("[AutoTrading] explicit account diagnostic unavailable: %s", exc)
                 summary["account"] = {"available": False, "error": str(exc)[:300]}
     return summary
+
+
+def verify_remote_ownership(db_path: str, client) -> None:
+    """Startup inventory: quarantine unknown exposure without adopting it."""
+    rows = [dict(row) for row in _live_reconcile_rows(db_path)]
+    known_ids = set()
+    known_clients = set()
+    symbols = {str(row['symbol']).upper() for row in rows}
+    for row in rows:
+        signal_id = int(row['signal_id'])
+        for key in ('entry_order_id','stop_order_id','tp1_order_id','tp2_order_id',
+                    'previous_stop_order_id','pending_stop_order_id'):
+            if row.get(key): known_ids.add(str(row[key]))
+        execution_id = str(row.get('execution_id') or '')
+        if is_id(execution_id,'execution'):
+            known_clients.update(client_order_ids(execution_id).values())
+        known_clients.update(f'apex_{kind}_{signal_id}' for kind in ('e','s','t1','t2','x'))
+        known_clients.add(f"apex_rs_{signal_id}_{hashlib.sha256(str(row.get('stop_order_id') or '').encode()).hexdigest()[:8]}")
+    if _ACCOUNT_STATE_FACTORY is not None:
+        with closing(_ACCOUNT_STATE_FACTORY()) as conn:
+            for action in conn.execute('SELECT signal_id,action_key,exchange_order_id FROM execution_actions'):
+                signal_id,key,remote_id=action
+                if remote_id: known_ids.add(str(remote_id))
+                known_clients.update((f'apex_mx_{signal_id}_{str(key)[:8]}',f'apex_mp_{signal_id}_{str(key)[:8]}'))
+    for order in client.open_owned_orders():
+        remote_id = str(order.get('algoId') or order.get('orderId') or '')
+        client_id = str(order.get('clientAlgoId') or order.get('clientOrderId') or '')
+        if remote_id not in known_ids and client_id not in known_clients:
+            raise RuntimeError('REMOTE_APEX_ORDER_WITHOUT_STATE_OWNER')
+    for position in client.open_positions():
+        if abs(_decimal(position.get('positionAmt') or 0)) > 0 and str(position.get('symbol') or '').upper() not in symbols:
+            raise RuntimeError('REMOTE_POSITION_WITHOUT_STATE_OWNER')

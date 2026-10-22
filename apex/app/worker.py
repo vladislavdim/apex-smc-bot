@@ -362,7 +362,10 @@ _V3_LIFECYCLE_CUTOVER = _V3_CUTOVER_SPEC(
     parity_counts=("signals",),
 )
 if _TRADE_EXECUTION_OK:
-    _configure_execution_state(lambda: _v3_connect_state(_V3_CONFIG))
+    _configure_execution_state(
+        lambda: _v3_connect_state(_V3_CONFIG),
+        durable_checkpoint=lambda reason: _STATE_PERSISTENCE.backup(reason),
+    )
 _configure_execution_ledger_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_message_state(lambda: _v3_connect_state(_V3_CONFIG))
 _configure_manager_state(lambda: _v3_connect_state(_V3_CONFIG))
@@ -945,6 +948,60 @@ _v3_command_handlers = _V3TelegramCommandHandlers(
     )
 )
 
+async def cmd_delivery(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    import json
+    from apex.db.repositories.delivery_outbox import DeliveryOutbox
+    repository = DeliveryOutbox(_V3_CONFIG.database.state_db_path)
+    args = (message.text or "").split(maxsplit=3)
+    mutated = False
+    try:
+        if len(args) < 2 or args[1] == "list":
+            rows = await asyncio.to_thread(repository.pending)
+            text = "Незавершённые отправки:\n" + "\n".join(
+                f"{row['delivery_id']} {json.loads(row['candidate_json']).get('symbol')} {row['status']}" for row in rows)
+            text += "\n/delivery confirm ID доказательство\n/delivery release ID доказательство\n/delivery claims"
+        elif args[1] == "show" and len(args) >= 3:
+            row = await asyncio.to_thread(repository.get, args[2])
+            if not row: raise ValueError('delivery_not_found')
+            text = json.dumps(row, ensure_ascii=False, indent=2)
+        elif args[1] == "claims":
+            rows = await asyncio.to_thread(repository.uncertain_claims)
+            text = "Неопределённые claims:\n" + "\n".join(f"{r['cache_key']} {r['claimed_at']}" for r in rows)
+            text += "\n/delivery release-claim KEY TIMESTAMP доказательство"
+        elif args[1] == "release-claim":
+            pieces = (message.text or "").split(maxsplit=4)
+            if len(pieces) != 5: raise ValueError('KEY TIMESTAMP evidence required')
+            await asyncio.to_thread(repository.release_legacy_claim, pieces[2], float(pieces[3]), message.from_user.id, pieces[4])
+            mutated = True
+            receipt = await backup_state_db_to_github("delivery_resolution")
+            if receipt.get("status") not in {"saved","unchanged"}: raise RuntimeError('resolution_checkpoint_failed')
+            text = "Claim освобождён, доказательство сохранено."
+        elif len(args) == 4 and args[1] in {"confirm","release"}:
+            row = await asyncio.to_thread(repository.get, args[2])
+            if not row or row['status'] not in {"PENDING","UNKNOWN"}: raise ValueError('unresolved_delivery_not_found')
+            if args[1] == "confirm":
+                mutated = True
+                candidate = json.loads(row['candidate_json'])
+                if not await asyncio.to_thread(_persist_delivered_signal, candidate):
+                    raise RuntimeError('signal_persistence_failed')
+            await asyncio.to_thread(repository.resolve, args[2], args[1], message.from_user.id, args[3])
+            mutated = True
+            receipt = await backup_state_db_to_github("delivery_resolution")
+            if receipt.get("status") not in {"saved","unchanged"}: raise RuntimeError('resolution_checkpoint_failed')
+            text = "Решение и доказательство сохранены. Автоматического повторения отправки или входа нет."
+        else:
+            text = "/delivery list | claims | confirm ID доказательство | release ID доказательство"
+    except Exception as exc:
+        if mutated:
+            _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
+        text = f"Решение требует проверки: {type(exc).__name__}: {exc}"
+    await message.answer(text[:4000], parse_mode=None)
+
+
+dp.message.register(cmd_delivery, Command("delivery"))
+
 _v3_register_telegram_handlers(
     dp,
     _V3TelegramHandlers(
@@ -1157,8 +1214,7 @@ class _SignalDeliveryUncertain(RuntimeError):
 async def _send_signal_message(chat_id, text, parse_mode="HTML", **kwargs):
     """Send a claimed signal once; unknown outcomes must retain its claim."""
     try:
-        await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
-        return True
+        return await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
     except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter) as exc:
         # These Bot API responses explicitly reject the request, so the
         # current attempt cannot have produced a duplicate.
@@ -1334,6 +1390,7 @@ from apex.db.repositories.deliveries import (
 async def _send_signal(sd):
     """Отправляет сигнал всем админам и в каналы"""
     logging.info(f"[_send_signal] Вызван: {sd.get('symbol')} {sd.get('direction')} {sd.get('grade')} {sd.get('timeframe')}")
+    sd.setdefault("_delivery_created_at", time.time())
     _run_id = sd.get("_scan_run_id") or _active_scan_run_id
     _strategy = _signal_type_from_candidate(sd)
     if _run_id:
@@ -1345,7 +1402,7 @@ async def _send_signal(sd):
     sd["_strategy_risk_state"] = risk_state
     if risk_state.get("mode") == "PAUSED":
         reason = f"{_strategy} LIVE paused after {risk_state.get('consecutive_losses', 0)} consecutive SL"
-        _record_strategy_decision(sd, "WAIT", "strategy_risk", reason, db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "strategy_risk", reason, db_path=DB_PATH)
         if _run_id:
             await asyncio.to_thread(
                 _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -1354,10 +1411,10 @@ async def _send_signal(sd):
         return False
     if not _SIGNAL_INTEGRITY_OK:
         logging.error("[SignalIntegrity] validator unavailable — candidate blocked")
-        _record_strategy_decision(sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "REJECT", "integrity", "validator unavailable", db_path=DB_PATH)
         return False
     try:
-        _integrity_prices = get_live_prices()
+        _integrity_prices = await asyncio.to_thread(get_live_prices)
         _integrity_current = _integrity_prices.get(sd.get("symbol", ""), {}).get("price")
     except Exception:
         _integrity_current = None
@@ -1367,18 +1424,18 @@ async def _send_signal(sd):
             "[SignalIntegrity] %s %s blocked: %s",
             sd.get("symbol"), sd.get("direction"), integrity.get("errors"),
         )
-        _record_strategy_decision(sd, "REJECT", "integrity", "; ".join(integrity.get("errors", [])), db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "REJECT", "integrity", "; ".join(integrity.get("errors", [])), db_path=DB_PATH)
         return False
     if integrity.get("warnings"):
         logging.warning("[SignalIntegrity] %s warnings: %s", sd.get("symbol"), integrity["warnings"])
     if not sd.get("_signal_id"):
-        pending_thesis = _has_pending_signal_for_symbol(sd.get("symbol", ""))
+        pending_thesis = await asyncio.to_thread(_has_pending_signal_for_symbol, sd.get("symbol", ""))
         if pending_thesis is None:
-            _record_strategy_decision(sd, "WAIT", "arbiter", "pair ownership unavailable", db_path=DB_PATH)
+            await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "arbiter", "pair ownership unavailable", db_path=DB_PATH)
             return False
         if pending_thesis:
             logging.info("[SignalArbiter] %s blocked: pending thesis owns the pair", sd.get("symbol"))
-            _record_strategy_decision(sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
+            await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "arbiter", "existing pending thesis owns pair", db_path=DB_PATH)
             return False
     setup_assessment = _assess_setup_candidate(sd)
     sd["setup_assessment"] = setup_assessment
@@ -1387,7 +1444,7 @@ async def _send_signal(sd):
         setup_state = str(setup_assessment.get("state") or "DEVELOPING")
         decision = "REJECT" if setup_state == "INVALID" else "WAIT"
         reason = str(setup_assessment.get("thesis") or f"setup evidence {setup_state}")
-        _record_strategy_decision(sd, decision, "setup_evidence", reason, evidence=setup_assessment, db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, decision, "setup_evidence", reason, evidence=setup_assessment, db_path=DB_PATH)
         await asyncio.to_thread(_persist_setup_assessment, sd, setup_assessment, "FINAL", DB_PATH)
         if _run_id:
             await asyncio.to_thread(
@@ -1401,7 +1458,7 @@ async def _send_signal(sd):
                                    "quality gate import unavailable", required=False)
         reason = "quality gate unavailable; final Groq confirmation required"
         logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
-        _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
         if _run_id:
             await asyncio.to_thread(
                 _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -1448,7 +1505,7 @@ async def _send_signal(sd):
                     "GROQ", f"GROQ_{decision}", "QUALITY_GATE",
                     {"confidence": review.get("confidence"), "reasons": review.get("reasons", [])}, DB_PATH,
                 )
-            _record_strategy_decision(
+            await asyncio.to_thread(_record_strategy_decision,
                 sd, decision, "groq_quality_gate", "; ".join(review.get("reasons", [])),
                 evidence={
                     "sources": review.get("context", {}).get("data_quality", {}),
@@ -1469,12 +1526,12 @@ async def _send_signal(sd):
                                        "cached review missing", required=False)
             reason = "quality review missing; final Groq confirmation required"
             logging.error("[SignalQualityGate] %s blocked: %s", sd.get("symbol"), reason)
-            _record_strategy_decision(sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
+            await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
             return False
         existing_decision = str(existing_review.get("decision") or "WAIT").upper()
         if existing_decision != "APPROVE":
             reason = "; ".join(existing_review.get("reasons", [])) or f"existing quality review={existing_decision}"
-            _record_strategy_decision(sd, existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
+            await asyncio.to_thread(_record_strategy_decision, sd, existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
             return False
     setup_state = str((sd.get("setup_assessment") or {}).get("state") or "")
     if setup_state in {"VALID", "STRONG", "EXCEPTIONAL"} and sd.get("text"):
@@ -1488,7 +1545,7 @@ async def _send_signal(sd):
             sd["text"] += "\n\n" + note
     if not ADMIN_IDS:
         logging.error("[_send_signal] ADMIN_IDS пуст — сигнал не будет отправлен!")
-        _record_strategy_decision(sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "ERROR", "delivery", "ADMIN_IDS empty", db_path=DB_PATH)
         return False
     now_ts = time.time()
     cache_key = _signal_delivery_key(sd, _strategy)
@@ -1502,7 +1559,7 @@ async def _send_signal(sd):
         _V3_RUNTIME.clear_inhibit("STATE_DB_DELIVERY_UNAVAILABLE")
         _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
         if not pair_claimed:
-            _record_strategy_decision(sd, "WAIT", "arbiter", "pair delivery in progress", db_path=DB_PATH)
+            await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "arbiter", "pair delivery in progress", db_path=DB_PATH)
             return False
         claimed = await asyncio.to_thread(
             _claim_signal_delivery, delivery_db_path, cache_key, now_ts,
@@ -1514,7 +1571,7 @@ async def _send_signal(sd):
         _v3_recover_incident("DELIVERY_STATE_UNAVAILABLE", "state_db")
         if not claimed:
             logging.info(f"[_send_signal] cooldown: {sd.get('symbol')} — повтор через {_SIGNAL_COOLDOWN_HOURS}ч, пропускаем")
-            _record_strategy_decision(sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
+            await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "cooldown", "duplicate signal cooldown", db_path=DB_PATH)
             return False
     except Exception as _cde:
         logging.error("[_send_signal] State DB delivery claim failed closed: %s", _cde)
@@ -1524,10 +1581,27 @@ async def _send_signal(sd):
             {"error_type": type(_cde).__name__},
         )
         return False
+    from apex.db.repositories.delivery_outbox import DeliveryOutbox
+    outbox = DeliveryOutbox(delivery_db_path)
+    scan_type = str(sd.get("scan_type", "")).lower()
+    destinations = [{"chat_id": int(admin), "thread_id": 0, "text": sd["text"]} for admin in ADMIN_IDS]
+    if scan_type == "fast":
+        destinations.append({"chat_id": int(SIGNAL_CHANNEL_SWING), "thread_id": int(FAST_DEAL_THREAD_ID), "text": sd["text"]})
+    else:
+        destinations.append({"chat_id": int(SIGNAL_CHANNEL_MAIN), "thread_id": 0, "text": _format_channel_signal(sd)})
+    if scan_type == "swing":
+        destinations.append({"chat_id": int(SIGNAL_CHANNEL_SWING), "thread_id": int(SWING_THREAD_ID), "text": _format_channel_signal(sd)})
+    try:
+        delivery_id = await asyncio.to_thread(outbox.prepare, sd, cache_key, pair_key, now_ts, destinations)
+    except Exception:
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
+        raise
     _sent_signal_cache[cache_key] = now_ts
     # The State DB is restored from its remote checkpoint after a container
     # replacement. Persist the claim before the first irreversible Telegram
     # send, or a crash after acceptance can replay the same candidate.
+    checkpoint = None
     try:
         checkpoint = await backup_state_db_to_github("signal_delivery_claim")
         if checkpoint.get("status") not in {"saved", "unchanged"}:
@@ -1538,6 +1612,7 @@ async def _send_signal(sd):
         raise
     except Exception as exc:
         logging.error("[_send_signal] delivery claim checkpoint unavailable: %s", exc)
+        await asyncio.to_thread(outbox.finish, delivery_id, "ABORTED")
         try:
             await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
             await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
@@ -1545,13 +1620,51 @@ async def _send_signal(sd):
                 _sent_signal_cache.pop(cache_key, None)
         except Exception:
             logging.exception("[_send_signal] unable to release unsent delivery claim")
-        _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
+        if str(checkpoint.get("status") if isinstance(checkpoint, dict) else "") != "busy":
+            _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
         _v3_report_incident(
-            "STATE_BACKUP_DEFERRED", "backup", "CRITICAL",
+            "DELIVERY_CHECKPOINT_DEFERRED", "backup", "WARNING",
             {"error_type": type(exc).__name__},
         )
-        _record_strategy_decision(sd, "WAIT", "delivery", "durable claim unavailable", db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "delivery", "durable claim unavailable", db_path=DB_PATH)
         return False
+    from apex.market.gate_tickers import get_execution_quote
+    try:
+        quote = await asyncio.to_thread(get_execution_quote, sd.get("symbol", ""))
+        age = time.time() - float(quote.get("observed_at") or 0)
+        if (quote.get("source") != "gate" or not 0 <= age <= 15
+                or time.time() - float(sd["_delivery_created_at"]) > 180
+                or not float(quote.get("price") or 0) > 0
+                or not _validate_signal_candidate(sd, quote["price"]).get("valid")):
+            raise ValueError("candidate or Gate quote expired")
+    except Exception as exc:
+        await asyncio.to_thread(outbox.finish, delivery_id, "ABORTED")
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
+        await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
+        _sent_signal_cache.pop(cache_key, None)
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "delivery", str(exc), db_path=DB_PATH)
+        return False
+
+    async def send_durable(chat_id, text, **kwargs):
+        destination = f"{chat_id}:{kwargs.get('message_thread_id', 0)}"
+        await asyncio.to_thread(outbox.receipt, delivery_id, destination, "SENDING")
+        try:
+            if time.time() - float(quote["observed_at"]) > 15 or time.time() - float(sd["_delivery_created_at"]) > 180:
+                raise _SignalDeliveryUncertain("delivery_quote_expired_before_send")
+            result = await _send_signal_message(chat_id, text, **kwargs)
+            await asyncio.to_thread(outbox.receipt, delivery_id, destination,
+                                    "SENT" if result else "REJECTED", getattr(result, "message_id", None))
+            return bool(result)
+        except asyncio.CancelledError:
+            await asyncio.shield(asyncio.to_thread(outbox.finish, delivery_id, "UNKNOWN"))
+            raise
+        except Exception as exc:
+            try:
+                await asyncio.to_thread(outbox.finish, delivery_id, "UNKNOWN")
+            except Exception:
+                logging.exception("[DeliveryOutbox] receipt unavailable after possible acceptance")
+            raise _SignalDeliveryUncertain(type(exc).__name__) from exc
+
     delivered = False
     try:
         sent_destinations = set()
@@ -1560,7 +1673,7 @@ async def _send_signal(sd):
             if destination in sent_destinations:
                 continue
             sent_destinations.add(destination)
-            ok = await _send_signal_message(admin_id, sd["text"], parse_mode="HTML")
+            ok = await send_durable(admin_id, sd["text"], parse_mode="HTML")
             if ok:
                 delivered = True
                 logging.info(f"[_send_signal] Отправлено admin {admin_id}: {sd.get('symbol')}")
@@ -1570,7 +1683,7 @@ async def _send_signal(sd):
             fast_ok = False
             if destination not in sent_destinations:
                 sent_destinations.add(destination)
-                fast_ok = await _send_signal_message(
+                fast_ok = await send_durable(
                     SIGNAL_CHANNEL_SWING, sd["text"], parse_mode="HTML",
                     message_thread_id=FAST_DEAL_THREAD_ID,
                 )
@@ -1583,7 +1696,7 @@ async def _send_signal(sd):
             main_ok = False
             if destination not in sent_destinations:
                 sent_destinations.add(destination)
-                main_ok = await _send_signal_message(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
+                main_ok = await send_durable(SIGNAL_CHANNEL_MAIN, channel_text, parse_mode="HTML")
             delivered = delivered or main_ok
             if main_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_MAIN ({SIGNAL_CHANNEL_MAIN}): {sd.get('symbol')}")
@@ -1593,7 +1706,7 @@ async def _send_signal(sd):
             swing_ok = False
             if destination not in sent_destinations:
                 sent_destinations.add(destination)
-                swing_ok = await _send_signal_message(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
+                swing_ok = await send_durable(SIGNAL_CHANNEL_SWING, channel_text, parse_mode="HTML", message_thread_id=SWING_THREAD_ID)
             delivered = delivered or swing_ok
             if swing_ok:
                 logging.info(f"[_send_signal] Отправлено в SIGNAL_CHANNEL_SWING swing thread: {sd.get('symbol')}")
@@ -1615,17 +1728,18 @@ async def _send_signal(sd):
             "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
             {"cache_key": cache_key, "error_type": str(ce)},
         )
-        _record_strategy_decision(sd, "WAIT", "delivery", "Telegram outcome unknown", db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "delivery", "Telegram outcome unknown", db_path=DB_PATH)
         return False
     except Exception as ce:
         logging.error(f"[_send_signal] ОШИБКА отправки в канал: {ce}")
     if not delivered:
+        await asyncio.to_thread(outbox.finish, delivery_id, "ABORTED")
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
         if _sent_signal_cache.get(cache_key) == now_ts:
             _sent_signal_cache.pop(cache_key, None)
         logging.error(f"[_send_signal] Сигнал {sd.get('symbol')} не доставлен — cooldown не установлен")
-        _record_strategy_decision(sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "ERROR", "delivery", "Telegram delivery failed", db_path=DB_PATH)
         return False
     try:
         confirmed = await asyncio.to_thread(
@@ -1643,9 +1757,19 @@ async def _send_signal(sd):
             "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
             {"cache_key": cache_key, "error_type": type(exc).__name__},
         )
-        _record_strategy_decision(sd, "WAIT", "delivery", "delivery confirmation requires reconciliation", db_path=DB_PATH)
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "delivery", "delivery confirmation requires reconciliation", db_path=DB_PATH)
         return False
     signal_id = await asyncio.to_thread(_persist_delivered_signal, sd)
+    if signal_id:
+        try:
+            await asyncio.to_thread(outbox.finish, delivery_id, "DELIVERED")
+            receipt = await backup_state_db_to_github("signal_delivery_receipt")
+            if receipt.get("status") not in {"saved", "unchanged"}:
+                raise RuntimeError("delivered_signal_checkpoint_unavailable")
+        except Exception as exc:
+            _V3_RUNTIME.inhibit_entries("STATE_BACKUP_DEFERRED")
+            _v3_report_incident("STATE_BACKUP_DEFERRED", "backup", "CRITICAL", {"error_type": type(exc).__name__})
+            return False
     lifecycle_ready = False
     if signal_id:
         try: await asyncio.to_thread(_bind_setup_assessment_to_signal, sd, signal_id, DB_PATH)
@@ -1699,7 +1823,7 @@ async def _send_signal(sd):
             await _v3_refresh_execution_state_mirror()
         except Exception as exc:
             logging.error("[APEX V3] execution State mirror requires reconcile: %s", exc)
-    _record_strategy_decision(sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
+    await asyncio.to_thread(_record_strategy_decision, sd, "ACCEPT", "delivered", "signal delivered", evidence={"signal_id": signal_id}, db_path=DB_PATH)
     if _run_id:
         await asyncio.to_thread(
             _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -3782,7 +3906,8 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
     """Back up independently scheduled stores; shutdown can still request all."""
     if store == "all":
         results = {}
-        for name in ("state", "memory", "brain"):
+        stores = ("state",) if reason == "render_sigterm" else ("state", "memory", "brain")
+        for name in stores:
             try:
                 results[name] = await _v3_maintenance_and_backup(reason, store=name)
             except Exception as exc:
@@ -3823,7 +3948,7 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
     logging.info("[Backup] store=%s status=%s duration=%s size=%s upload=%s archived=%s",
                  store, status, result.get("duration_seconds"), result.get("size"),
                  result.get("upload_size"), result.get("archived_state_events", 0))
-    if status == "busy":
+    if status in {"busy", "resource_deferred"}:
         return False
     if status not in {"saved", "unchanged", "not_configured"}:
         raise RuntimeError(f"{store}_backup_{status or 'failed'}")
@@ -3982,6 +4107,9 @@ async def _v3_startup_reconcile_and_market_check():
             }})
             if unresolved:
                 raise RuntimeError("startup reconciliation unresolved:" + ",".join(unresolved))
+            if _execution_client is not None:
+                from apex.execution.orders import verify_remote_ownership
+                await asyncio.to_thread(verify_remote_ownership, DB_PATH, _execution_client)
             await asyncio.to_thread(_v3_sync_live_learning)
             _V3_RUNTIME.mark_component(
                 "binance_reconciliation", _V3_COMPONENT_STATE.READY, _account_detail

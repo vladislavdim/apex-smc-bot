@@ -14,6 +14,7 @@ import html
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 import math
 from apex.db.connection import connect_compatibility as _connect_compatibility_db
 from apex.db.repositories.manager_messages import ManagerMessageRepository
@@ -1655,6 +1656,18 @@ def manager_cycle(
             price = float(raw_price)
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(price) or price <= 0:
+            continue
+        current_r = r_multiple(state["direction"], float(state["initial_entry"]), float(state["initial_sl"]), price)
+        best = float(state.get("best_price") or price)
+        best = max(best, price) if state["direction"] == "BULLISH" else min(best, price)
+        if _MANAGER_STATE_FACTORY is not None:
+            _manager_state_repository().observe_price(int(state["signal_id"]), price, current_r, best)
+        else:
+            with closing(_connect(db_path)) as price_conn:
+                price_conn.execute("UPDATE trade_manager_state SET last_price=?,current_r=?,best_price=? WHERE signal_id=?",
+                                   (price,current_r,best,int(state["signal_id"])))
+                price_conn.commit()
         try:
             candles = get_candles(symbol, state["management_tf"], 120) or []
             candle_error = ""
