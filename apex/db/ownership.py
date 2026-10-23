@@ -13,6 +13,7 @@ STATE_TABLES = frozenset({
     "delivery_claims",
     "signal_delivery_outbox",
     "delivery_resolutions",
+    "scan_candidate_queue",
     "execution_account_cache",
     "execution_actions",
     "execution_fills",

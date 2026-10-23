@@ -249,7 +249,7 @@ class ApexV3InfrastructureTests(unittest.TestCase):
     def test_state_and_memory_migrations_are_idempotent(self):
         state = sqlite3.connect(":memory:")
         memory = sqlite3.connect(":memory:")
-        self.assertEqual(migrate_state(state), tuple(range(1, 27)))
+        self.assertEqual(migrate_state(state), tuple(range(1, 28)))
         self.assertEqual(migrate_state(state), ())
         self.assertEqual(migrate_memory(memory), (1, 2, 3, 4))
         self.assertEqual(migrate_memory(memory), ())

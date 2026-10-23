@@ -115,6 +115,11 @@ async def _run_polling(deps: ProductionDependencies) -> None:
             deps.telegram_bot,
             allowed_updates=deps.dispatcher.resolve_used_update_types(),
         )
+    except Exception:
+        # Shutdown may hard-exit after a bounded checkpoint deadline. Preserve
+        # the initiating traceback before that path can suppress the exception.
+        logging.exception("[APEX Bootstrap] polling initialization/runtime failed")
+        raise
     finally:
         await deps.shutdown("polling_shutdown")
 
