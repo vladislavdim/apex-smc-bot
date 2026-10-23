@@ -208,6 +208,20 @@ def _ensure_binance_circuit_closed() -> None:
         raise RuntimeError(f"Binance circuit open; retry in {int(remaining) + 1}s")
 
 
+def recover_binance_rate_limit() -> bool:
+    """Maintenance only: never run incident database writes in the order path."""
+    with _binance_metrics_lock:
+        metrics = dict(_binance_request_metrics)
+    success_at = metrics.get('last_success_epoch') or 0
+    if (not 200 <= (metrics.get('last_status') or 0) < 300
+            or success_at < (metrics.get('last_request_epoch') or 0)
+            or not 0 <= time.time() - success_at <= 600
+            or _binance_circuit_remaining()):
+        return False
+    from apex.telemetry.incidents import recover_incident
+    return recover_incident('BINANCE_RATE_LIMIT', 'binance')
+
+
 def _env_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -535,15 +549,10 @@ class BinanceFuturesClient:
                         continue
                     raise error
                 result = response.json()
-                # A restored incident can outlive the process-local breaker.
-                # Only a confirmed healthy response, with no newer open ban,
-                # is evidence of recovery.
-                if not _binance_circuit_remaining():
-                    try:
-                        from apex.telemetry.incidents import recover_incident
-                        recover_incident("BINANCE_RATE_LIMIT", "binance")
-                    except Exception:
-                        logging.warning("[AutoTrading] Binance recovery telemetry deferred")
+                # Record evidence in memory only. Incident DB maintenance must
+                # not delay entry/protective-order responses on a locked DB.
+                with _binance_metrics_lock:
+                    _binance_request_metrics['last_success_epoch'] = time.time()
                 return result
             except BinanceAPIError:
                 raise

@@ -156,7 +156,8 @@ def test_partial_scan_returns_actual_persisted_status(tmp_path):
         assert conn.execute('SELECT status,pairs_attempted FROM scan_runs').fetchone() == ('PARTIAL', 0)
 
 
-def test_successful_binance_response_recovers_restored_rate_limit_incident():
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+def test_successful_binance_response_recovers_restored_rate_limit_incident(method):
     from unittest.mock import patch
     from apex.execution import orders
     from tests.test_trade_execution import live_config
@@ -167,8 +168,29 @@ def test_successful_binance_response_recovers_restored_rate_limit_incident():
     with patch.object(orders, '_binance_blocked_until', 0), \
             patch('apex.telemetry.incidents.recover_incident') as recovered:
         client = orders.BinanceFuturesClient(live_config(), session=session)
-        assert client._request('GET', '/fapi/v1/time', signed=False) == {'serverTime': 1}
+        assert client._request(method, '/fapi/v1/time', signed=False) == {'serverTime': 1}
+        recovered.assert_not_called()
+        orders.recover_binance_rate_limit()
         recovered.assert_called_once_with('BINANCE_RATE_LIMIT', 'binance')
+
+
+@pytest.mark.parametrize('case', ['blocked', 'stale', 'failed', 'unparsed'])
+def test_binance_recovery_requires_recent_parsed_success_and_closed_circuit(case):
+    from unittest.mock import patch
+    from apex.execution import orders
+    now = time.time()
+    metrics = dict(last_status=200, last_success_epoch=now, last_request_epoch=now - 1)
+    if case == 'stale':
+        metrics.update(last_success_epoch=now - 700, last_request_epoch=now - 701)
+    elif case == 'failed':
+        metrics['last_status'] = 429
+    elif case == 'unparsed':
+        metrics['last_success_epoch'] = now - 2
+    with patch.object(orders, '_binance_request_metrics', metrics), \
+            patch.object(orders, '_binance_blocked_until', now + 60 if case == 'blocked' else 0), \
+            patch('apex.telemetry.incidents.recover_incident') as recovered:
+        assert orders.recover_binance_rate_limit() is False
+        recovered.assert_not_called()
 
 
 def test_release_input_is_not_interpolated_into_shell_source():

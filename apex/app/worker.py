@@ -4557,6 +4557,11 @@ async def _start_market_intelligence_background():
 
 async def _v3_alerts_job():
     """Send durable incident transitions once, alongside legacy price alerts."""
+    try:
+        from apex.execution.orders import recover_binance_rate_limit
+        await asyncio.to_thread(recover_binance_rate_limit)
+    except Exception as exc:
+        logging.warning("[Alerts] Binance recovery telemetry deferred: %s", type(exc).__name__)
     alert_error = None
     try:
         await check_alerts()

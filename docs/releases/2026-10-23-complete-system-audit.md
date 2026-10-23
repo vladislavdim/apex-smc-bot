@@ -11,7 +11,7 @@ This batch includes the previously merged coverage database correction (PR210) a
 5. **Candidate identity collided across strategies.** Queue keys now include strategy. Pre-existing keys migrate transactionally, retaining payload and original creation time without extending TTL. Retiring one strategy cannot remove another's work.
 6. **Malformed candle boundary.** Explicit close times must agree with the candle timeframe; historical epoch zero stays historical; future closes cannot be FRESH. Strict parsing rejects malformed prices before silent row removal can hide corrupt recent data. The provider uses strict Gate normalization for both candidate and BTC reference candles.
 7. **Incomplete scan reported as full in logs.** The worker now logs the actual persisted scan status, including PARTIAL. The MTF price-validation loop checks its remaining budget before starting additional calls.
-8. **Old Binance rate-limit incident never recovered.** A confirmed successful response resolves the restored incident only when the current circuit is no longer blocked. Telemetry failure does not change execution behavior.
+8. **Old Binance rate-limit incident never recovered.** A confirmed successful response records recovery evidence in memory. The separate noncritical alerts job resolves the restored incident only when that evidence is recent and the current circuit is no longer blocked. Incident DB writes never delay an exchange/order response; telemetry failure does not change execution behavior.
 9. **Optional context with unknown age was usable.** Unknown, negative and nonfinite ages are excluded from Groq context. Nonfinite external numeric values and booleans normalize to UNKNOWN rather than NaN/infinity or false precision.
 10. **News absence labelled LOW risk.** Missing calendar/headline observations are UNKNOWN. They do not create an automatic technical strategy veto.
 11. **Unbounded public payloads and XML declarations.** Gate and external JSON readers cap responses at 4 MiB; news at 1 MiB. RSS/calendar parsing rejects DTD/entity declarations before ElementTree. Excess/invalid optional data becomes unavailable through the existing provider error boundary.
@@ -20,7 +20,7 @@ This batch includes the previously merged coverage database correction (PR210) a
 
 ## Verification and evidence
 
-- Full suites passed: **1117 pytest, 841 unittest**, zero failures. Additional behavioral and fault-injection regressions cover the above boundaries. Coverage was measured separately; passing tests do not mean every line or branch was exercised.
+- Full suites passed: **1122 pytest, 841 unittest**, zero failures. Additional behavioral and fault-injection regressions cover the above boundaries. Coverage was measured separately; passing tests do not mean every line or branch was exercised.
 - Strict undefined-name lint, full compilation, production-authority and release-readiness checks, dependency vulnerability audit.
 - Rebuilt 33-case frozen real-market parity proof using the actual production strategy registry, with live requests forbidden. This protects existing strategy behavior; it is not an independent profitability backtest.
 - Latest inspected Brain backup: 2026-10-23 18:24 UTC; State: 18:34 UTC. Both pass SQLite quick_check and foreign_key_check.
