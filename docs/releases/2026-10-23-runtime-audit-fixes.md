@@ -31,3 +31,7 @@ Regression checks cover native-thread drain ownership, queued-candidate restart 
 The bounded-store test fixture previously had close prices above its declared high. Its OHLC range is corrected so it continues testing the store bound with valid candles. The old insufficient-history liquidity test is corrected to require UNKNOWN.
 
 Production release must use one final merged SHA, after CI and duplicate-deploy checks. Execution remains unarmed/Telegram-only. Post-deploy verification must show actual scheduled work and report any partial coverage or unhealthy components. This change does not claim 48–72 hours of production acceptance, a successful real-money order drill, or positive golden coverage for every Wyckoff subtype.
+
+## Post-launch correction
+
+The first deployment exposed an integration error in the new release-health coverage field: it queried Audit DB instead of the compatibility/control database used by scanner_metrics. This made scanner_coverage empty and caused operational acceptance to remain incomplete; it did not alter candidate decisions or execution. The connection now uses DB_PATH, matching scanner control. A regression executes the real release-health function against two distinct SQLite databases and failed before this correction. This correction requires a separately recorded deploy; it must not be represented as part of the first deploy.

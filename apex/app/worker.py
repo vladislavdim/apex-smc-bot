@@ -805,7 +805,7 @@ def _v3_log_release_health():
         logger.setLevel(logging.INFO)
         from apex.telemetry.scan_acceptance import completed_rounds
         try:
-            with _closing(_audit_connect(_AUDIT_DB_PATH, read_only=True)) as coverage_conn:
+            with _closing(_audit_connect(DB_PATH, read_only=True)) as coverage_conn:
                 coverage = completed_rounds(coverage_conn)
         except Exception:
             coverage = {}
