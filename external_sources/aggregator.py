@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 from . import (btc_mempool, coinmetrics, crypto_monitor, defillama,
@@ -55,8 +56,9 @@ def _bias(buy: float | None, sell: float | None) -> str:
 def _age(result: dict[str, Any]) -> int | None:
     value = result.get("age_seconds")
     try:
-        return max(0, int(value)) if value is not None else None
-    except (TypeError, ValueError):
+        number = float(value)
+        return int(number) if math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -66,7 +68,7 @@ def _usable(result: dict[str, Any]) -> bool:
         return False
     age = _age(result)
     maximum = _MAX_USABLE_AGE.get(str(result.get("source")), 120)
-    return age is None or age <= maximum
+    return age is not None and age <= maximum
 
 
 def _status(context: dict[str, Any], result: dict[str, Any]) -> None:
@@ -75,7 +77,8 @@ def _status(context: dict[str, Any], result: dict[str, Any]) -> None:
     age = _age(result)
     usable = _usable(result)
     reported = state if usable else (
-        f"stale_excluded:{age}s" if state == "stale_fallback" else state
+        ("age_unknown" if age is None else f"stale_excluded:{age}s")
+        if state in {"fresh", "cached", "stale_fallback"} else state
     )
     context["data_quality"]["source_status"][source] = reported
     context["data_quality"]["source_ages"][source] = age

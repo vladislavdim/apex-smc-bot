@@ -16,6 +16,7 @@ from .source_registry import authorize
 
 
 GATE_API_BASE = "https://api.gateio.ws/api/v4"
+MAX_GATE_JSON_BYTES = 4 * 1024 * 1024
 GATE_INTERVALS = {"1w": "7d", "1M": "30d"}
 
 
@@ -31,7 +32,10 @@ def _stdlib_get(url: str, params: Mapping[str, Any], timeout: float) -> Any:
     request = Request(f"{url}?{query}" if query else url, headers={"Accept": "application/json"})
     try:
         with urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed Gate base URL
-            return json.loads(response.read().decode("utf-8"))
+            raw = response.read(MAX_GATE_JSON_BYTES + 1)
+            if len(raw) > MAX_GATE_JSON_BYTES:
+                raise GateTransportError('gate_payload_too_large')
+            return json.loads(raw.decode("utf-8"))
     except Exception as exc:
         raise GateTransportError(f"gate_request_failed:{type(exc).__name__}") from exc
 
@@ -45,9 +49,11 @@ def gate_contract(symbol: str) -> str:
     return normalized
 
 
-def normalize_gate_candles(payload: Any) -> list[dict[str, float]]:
+def normalize_gate_candles(payload: Any, *, strict: bool = False) -> list[dict[str, float]]:
     """Normalize Gate's ``[t,v,c,h,l,o,...]`` and mapping response shapes."""
     if not isinstance(payload, Iterable) or isinstance(payload, (str, bytes, Mapping)):
+        if strict:
+            raise ValueError("invalid_candle_payload")
         return []
     output: list[dict[str, float]] = []
     for row in payload:
@@ -68,13 +74,19 @@ def normalize_gate_candles(payload: Any) -> list[dict[str, float]]:
                     "low": float(row[4]), "open": float(row[5]),
                 }
             else:
+                if strict:
+                    raise ValueError("invalid_candle_row")
                 continue
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            if strict:
+                raise ValueError("invalid_candle_row") from None
             continue
         if all(isfinite(value) for value in values.values()):
             if isinstance(row, Mapping) and "is_closed" in row:
                 values["is_closed"] = row["is_closed"]
             output.append(values)
+        elif strict:
+            raise ValueError("invalid_candle_row")
     return sorted(output, key=lambda row: row["open_time"])
 
 

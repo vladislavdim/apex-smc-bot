@@ -23,12 +23,25 @@ RSS_SOURCES = (
     ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
     ("https://decrypt.co/feed", "Decrypt"),
 )
+MAX_NEWS_BYTES = 1024 * 1024
+
+
+def _parse_xml(raw: str) -> ET.Element:
+    if len(raw.encode('utf-8')) > MAX_NEWS_BYTES:
+        raise ValueError('news_payload_too_large')
+    declarations = raw.upper()
+    if '<!DOCTYPE' in declarations or '<!ENTITY' in declarations:
+        raise ValueError('news_xml_declarations_forbidden')
+    return ET.fromstring(raw)
 
 
 def _fetch_text_sync(url: str, timeout: float = 7.0) -> str:
     req = Request(url, headers={"User-Agent": "APEX-SMC-Bot/news-context"})
     with urlopen(req, timeout=timeout) as response:
-        return response.read().decode("utf-8", errors="replace")
+        payload = response.read(MAX_NEWS_BYTES + 1)
+        if len(payload) > MAX_NEWS_BYTES:
+            raise ValueError('news_payload_too_large')
+        return payload.decode("utf-8", errors="replace")
 
 
 async def fetch_text(url: str, retries: int = 2) -> str:
@@ -59,7 +72,7 @@ def _child_text(node: ET.Element, *names: str) -> str:
 
 
 def parse_calendar_xml(raw: str) -> list[dict[str, Any]]:
-    root = ET.fromstring(raw)
+    root = _parse_xml(raw)
     events: list[dict[str, Any]] = []
     for node in root.iter():
         if node.tag.rsplit("}", 1)[-1].lower() not in {"event", "item"}:
@@ -84,6 +97,8 @@ def parse_calendar_xml(raw: str) -> list[dict[str, Any]]:
 
 def parse_calendar_payload(raw: str) -> list[dict[str, Any]]:
     """Accept the Fair Economy JSON feed and the legacy ForexFactory XML feed."""
+    if len(raw.encode('utf-8')) > MAX_NEWS_BYTES:
+        raise ValueError('news_payload_too_large')
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -104,7 +119,7 @@ def parse_calendar_payload(raw: str) -> list[dict[str, Any]]:
 
 
 def parse_rss_xml(raw: str, source: str) -> list[dict[str, Any]]:
-    root = ET.fromstring(raw)
+    root = _parse_xml(raw)
     items: list[dict[str, Any]] = []
     for node in root.iter():
         if node.tag.rsplit("}", 1)[-1].lower() not in {"item", "entry"}:

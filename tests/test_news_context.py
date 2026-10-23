@@ -62,5 +62,5 @@ class NewsContextAsyncTests(unittest.IsolatedAsyncioTestCase):
              patch("news_context.aggregator.collect_official_actuals", new=AsyncMock(side_effect=TimeoutError())):
             context = await collect_news_context("BTCUSDT")
         self.assertTrue(context["news_data_unavailable"])
-        self.assertEqual(context["risk_level"], "LOW")
+        self.assertEqual(context["risk_level"], "UNKNOWN")
         self.assertEqual(len(context["data_quality"]["failed_sources"]), 3)

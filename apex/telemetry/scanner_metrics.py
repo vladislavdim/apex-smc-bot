@@ -309,7 +309,7 @@ def record_scan_event(
         return
 
 
-def finish_scan(run_id: int, status: str = "COMPLETED", error: str = "", db_path: str = DB_PATH) -> None:
+def finish_scan(run_id: int, status: str = "COMPLETED", error: str = "", db_path: str = DB_PATH) -> str | None:
     try:
         conn = _connect(db_path)
         requested = str(status).upper()
@@ -362,6 +362,7 @@ def finish_scan(run_id: int, status: str = "COMPLETED", error: str = "", db_path
         conn.execute("DELETE FROM scan_coverage_rounds WHERE started_at < datetime('now','-30 days')")
         conn.execute("DELETE FROM ltf_watchlist WHERE state IN ('RESOLVED','EXPIRED','INVALIDATED') AND resolved_at < datetime('now','-14 days')")
         conn.commit(); conn.close()
+        return requested
     except sqlite3.Error:
         return
 

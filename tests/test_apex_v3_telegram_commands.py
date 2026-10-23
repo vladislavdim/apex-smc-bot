@@ -70,6 +70,18 @@ class TelegramCommandHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.update_memory.assert_not_called()
         message.answer.assert_awaited_once_with("Риск должен быть от 0.1% до 10%")
 
+    async def test_deposit_rejects_nonfinite_zero_and_negative_values(self):
+        for value in ['nan', 'inf', '-5', '0']:
+            with self.subTest(value=value):
+                await self.handlers.risk(_message(text='/risk ' + value))
+        self.update_memory.assert_not_called()
+
+    async def test_start_escapes_telegram_name_without_changing_stored_name(self):
+        message = _message(name='A&B <Trader>')
+        await self.handlers.start(message)
+        self.update_memory.assert_called_once_with(7, name='A&B <Trader>')
+        self.assertIn('A&amp;B &lt;Trader&gt;', message.answer.await_args.args[0])
+
     async def test_stats_uses_injected_live_memory_view(self):
         message = _message(text="/stats")
 
@@ -122,6 +134,17 @@ class CompatibilityCommandHandlerTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()
         self.assertEqual(row, (7, "BTCUSDT", 70000.0, "above"))
         self.assertIn("Алерт установлен", message.answer.await_args.args[0])
+
+    async def test_invalid_alert_is_not_persisted(self):
+        for command in ['/alert BTCUSDT nan', '/alert BTCUSDT -1', '/alert UNKNOWNUSDT 1']:
+            await self.handlers.alert(_message(text=command))
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM alerts').fetchone()[0], 0)
+
+    async def test_invalid_journal_numbers_and_direction_are_not_persisted(self):
+        for command in ['/journal BTC LONG nan 100 win', '/journal BTC LONG -1 100 loss',
+                        '/journal BTC SIDEWAYS 100 101 win', '/journal BTC LONG 100 101 maybe']:
+            await self.handlers.journal(_message(text=command))
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM journal').fetchone()[0], 0)
 
     async def test_journal_calculates_short_pnl_without_trading_access(self):
         message = _message(text="/journal BTC SHORT 100 90 win test")

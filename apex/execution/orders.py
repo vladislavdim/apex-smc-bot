@@ -534,7 +534,17 @@ class BinanceFuturesClient:
                         time.sleep(max(0.25, retry_after))
                         continue
                     raise error
-                return response.json()
+                result = response.json()
+                # A restored incident can outlive the process-local breaker.
+                # Only a confirmed healthy response, with no newer open ban,
+                # is evidence of recovery.
+                if not _binance_circuit_remaining():
+                    try:
+                        from apex.telemetry.incidents import recover_incident
+                        recover_incident("BINANCE_RATE_LIMIT", "binance")
+                    except Exception:
+                        logging.warning("[AutoTrading] Binance recovery telemetry deferred")
+                return result
             except BinanceAPIError:
                 raise
             except (_RequestException, ValueError, KeyError) as exc:
@@ -1490,17 +1500,12 @@ def _execute_approved_candidate(
                 error="AUTO_TRADING_KILL_SWITCH is enabled",
             )
 
-        # Telegram delivery stays fail-open, but real money is fail-closed.
+        # Recheck the persisted approval immediately before exchange admission.
         review = candidate.get("_external_quality_review")
         min_groq = ApexConfig.from_env().execution.min_groq_confidence
-        groq_error = ""
-        if not candidate.get("_external_quality_reviewed") or not isinstance(review, dict): groq_error = "missing Groq quality review"
-        elif bool(review.get("degraded")): groq_error = "degraded Groq quality review"
-        elif str(review.get("decision", "")).upper() != "APPROVE": groq_error = f"Groq decision is {review.get('decision', 'missing')}"
-        else:
-            try: confidence = float(review.get("confidence", 0))
-            except (TypeError, ValueError): confidence = 0
-            if confidence < min_groq: groq_error = f"Groq confidence {confidence:.2f} below {min_groq:.2f}"
+        from apex.quality.groq_schema import approval_error
+        groq_error = (approval_error(review, min_groq) if candidate.get("_external_quality_reviewed")
+                      else "missing Groq quality review")
         if groq_error:
             return _store_execution(db_path, signal_id, config, candidate, "BLOCKED_GROQ_GUARD", error=groq_error)
 

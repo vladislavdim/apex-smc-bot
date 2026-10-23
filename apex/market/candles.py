@@ -30,7 +30,7 @@ def epoch_seconds(value: Any) -> float | None:
         return current.astimezone(timezone.utc).timestamp()
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not isfinite(number):
         return None
@@ -67,7 +67,7 @@ def confirmed_candles(
     to one row by open time. Unknown timestamps are rejected rather than
     guessed, preventing a mutable edge candle from entering a decision.
     """
-    boundary = epoch_seconds(as_of or datetime.now(timezone.utc))
+    boundary = epoch_seconds(datetime.now(timezone.utc) if as_of is None else as_of)
     if boundary is None:
         raise ValueError("invalid_as_of")
     normalized: dict[float, Mapping[str, Any]] = {}
@@ -76,7 +76,16 @@ def confirmed_candles(
             continue
         opened = candle_open_time(raw)
         closed = candle_close_time(raw, timeframe)
-        if opened is None or closed is None or closed > boundary:
+        if opened is None or closed is None:
+            if strict:
+                raise ValueError("invalid_candle_time")
+            continue
+        expected_close = opened + timeframe_seconds(timeframe)
+        if abs(closed - expected_close) > 1:
+            if strict:
+                raise ValueError("invalid_candle_time")
+            continue
+        if closed > boundary or expected_close > boundary:
             continue
         try:
             ohlcv = {
@@ -86,7 +95,9 @@ def confirmed_candles(
                 "close": float(raw["close"]),
                 "volume": float(raw.get("volume") or 0.0),
             }
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
+            if strict:
+                raise ValueError("invalid_candle_geometry") from None
             continue
         if (not all(isfinite(value) for value in ohlcv.values())
                 or min(ohlcv[k] for k in ("open", "high", "low", "close")) <= 0

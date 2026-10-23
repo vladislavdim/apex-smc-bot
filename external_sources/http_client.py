@@ -18,6 +18,9 @@ class ExternalHTTPError(RuntimeError):
     pass
 
 
+MAX_JSON_BYTES = 4 * 1024 * 1024
+
+
 class ExternalHTTPClient:
     def __init__(self, timeout_seconds: float = 4.0, retries: int = 1, concurrency: int = 6) -> None:
         self.timeout_seconds = timeout_seconds
@@ -39,7 +42,10 @@ class ExternalHTTPClient:
             request_headers.setdefault("Content-Type", "application/json")
         request = Request(url, data=body, headers=request_headers, method=method)
         with urlopen(request, timeout=self.timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+            raw = response.read(MAX_JSON_BYTES + 1)
+            if len(raw) > MAX_JSON_BYTES:
+                raise ExternalHTTPError('external_payload_too_large')
+            return json.loads(raw.decode("utf-8"))
 
     async def _request(self, url, params=None, headers=None, method="GET", payload=None):
         source, units = request_scope(url, params, payload)

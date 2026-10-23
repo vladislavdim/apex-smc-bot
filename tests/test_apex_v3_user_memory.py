@@ -70,6 +70,10 @@ class UserMemoryServiceTests(unittest.TestCase):
         self.assertEqual(get_user_memory(404)["risk"], 1.0)
         self.assertEqual(get_chat_history(404), [])
 
+    def test_first_risk_update_does_not_silently_restore_default(self):
+        update_user_memory(8, risk=0.25)
+        self.assertEqual(get_user_memory(8)['risk'], 0.25)
+
     def test_news_and_advisory_context_storage_is_bounded(self):
         save_news("market", "x" * 1200)
         self.assertEqual(len(get_recent_news().split(": ", 1)[1]), 1000)
