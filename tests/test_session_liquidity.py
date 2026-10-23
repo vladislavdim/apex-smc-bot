@@ -29,12 +29,12 @@ class SessionLiquidityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["ratio"], 0.5)
 
-    def test_insufficient_history_does_not_false_block(self):
+    def test_insufficient_history_is_unknown_and_not_approved(self):
         provider = SessionLiquidityProvider(lambda *_args, **_kwargs: _candles()[:10])
         result = provider.check("BTCUSDT", "1h")
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["ratio"], 1.0)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["ratio"])
 
 
 if __name__ == "__main__":

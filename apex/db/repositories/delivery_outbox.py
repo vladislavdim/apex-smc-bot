@@ -36,7 +36,7 @@ class DeliveryOutbox:
             "setup_assessment",
             "_delivery_created_at",
             "_v3_candidate_id",
-            "_scan_run_id",
+            "_scan_run_id", "_v3_strategy_trace", "snapshot_id", "snapshot_as_of", "technical_evidence",
         }
         snapshot = {key: value for key, value in candidate.items() if key in fields}
         review = candidate.get("_external_quality_review")
@@ -46,7 +46,7 @@ class DeliveryOutbox:
             )
             snapshot["_external_quality_review"] = {
                 key: review.get(key)
-                for key in ("decision", "confidence", "degraded", "reasons")
+                for key in ("decision", "confidence", "degraded", "reasons", "reason_codes", "short_summary")
             }
         payload = json.dumps(snapshot, sort_keys=True, default=str)
         if len(payload.encode()) > 131072:

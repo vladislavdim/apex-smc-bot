@@ -269,7 +269,7 @@ class ApexV3MarketTests(unittest.TestCase):
         store = UniverseContextStore(max_bars=20)
         rows = [
             {
-                "timestamp": index * 900, "open": 100, "high": 101,
+                "timestamp": index * 900, "open": 100, "high": 101 + index,
                 "low": 99, "close": 100 + index, "volume": 10,
             }
             for index in range(60)

@@ -46,6 +46,9 @@ def open_incident(
         "SELECT incident_id,count,severity FROM incidents WHERE code=? AND component=? AND resolved_at IS NULL",
         (str(code), str(component)),
     ).fetchone()
+    if row and code == "JOB_TIMEOUT" and str(component).startswith("scanner_"):
+        if int(row[1]) >= 2 or str(row[2]) in {"ERROR", "CRITICAL"}:
+            level = IncidentSeverity.ERROR
     now = _now()
     payload = json.dumps(dict(details or {}), sort_keys=True, default=str)
     if row:

@@ -71,6 +71,7 @@ class StrategyActivationSwitch:
         symbol: str,
         **kwargs: Any,
     ) -> tuple[StrategyTrace, ...]:
+        require_liquidity = kwargs.pop("require_session_liquidity", False)
         if not self.active:
             if self.requested:
                 raise SnapshotEvaluationBlocked("snapshot_activation_blocked:" + self.reason)
@@ -84,7 +85,24 @@ class StrategyActivationSwitch:
             not rows for rows in build.snapshot.candles.values()
         ):
             raise SnapshotEvaluationBlocked("snapshot_market_data_incomplete")
-        return registry.evaluate_snapshot(strategy, build.snapshot, **kwargs)
+        if require_liquidity:
+            from apex.market.session_liquidity import SessionLiquidityProvider
+            from apex.strategies.specifications import specification_for
+            key = strategy.value if isinstance(strategy, Strategy) else str(strategy).upper()
+            timeframe = "1h" if key == "FAST" else "1d" if key == "WYCKOFF" else specification_for(strategy).working_timeframe
+            liquidity = SessionLiquidityProvider(
+                lambda *_: [dict(row) for row in build.snapshot.candles.get(timeframe, ())]
+            ).check(symbol, timeframe)
+            if liquidity["ratio"] is None:
+                raise SnapshotEvaluationBlocked("snapshot_liquidity_unknown")
+            if not liquidity["ok"]:
+                return ()
+        from dataclasses import replace
+        return tuple(replace(trace, raw_result={**trace.raw_result,
+                     "snapshot_id": build.snapshot.snapshot_id,
+                     "snapshot_as_of": build.snapshot.as_of.isoformat()})
+                     if trace.raw_result is not None else trace
+                     for trace in registry.evaluate_snapshot(strategy, build.snapshot, **kwargs))
 
 
 __all__ = [

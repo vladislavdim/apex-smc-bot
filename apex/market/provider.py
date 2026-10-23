@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+import logging
+import time
 from apex.domain.enums import Strategy
 from apex.strategies.specifications import specification_for
 
@@ -16,6 +19,32 @@ from .structure import analyze_market_structure
 from .volume import volume_features, vwap
 from .volume_profile import volume_profile
 from .universe import UniverseContext, market_cap_omission
+
+
+class _CollectedClient:
+    """Bounded parallel I/O; all facts are collected before the decision clock."""
+    def __init__(self, client, requests):
+        self.values = {}
+        def fetch(request):
+            method, args, kwargs = request
+            try:
+                return getattr(client, method)(*args, **kwargs)
+            except Exception as exc:
+                return exc
+        # One symbol is evaluated at a time. Four connections bound both
+        # venue load and memory, and every submitted operation is joined.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="gate-snapshot") as pool:
+            for request, value in zip(requests, pool.map(fetch, requests)):
+                method, args, kwargs = request
+                self.values[(method, args, tuple(sorted(kwargs.items())))] = value
+
+    def __getattr__(self, method):
+        def read(*args, **kwargs):
+            value = self.values[(method, args, tuple(sorted(kwargs.items())))]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return read
 
 
 class GateSnapshotProvider:
@@ -43,24 +72,34 @@ class GateSnapshotProvider:
             boundary = boundary.replace(tzinfo=timezone.utc)
         boundary = boundary.astimezone(timezone.utc)
         required = tuple(dict.fromkeys((specification.working_timeframe, *specification.context_timeframes)))
+        started = time.monotonic()
+        requests = [("candles", (symbol, tf), {"limit": self.candle_limit}) for tf in required]
+        if symbol.upper() != "BTCUSDT":
+            requests += [("candles", ("BTCUSDT", tf), {"limit": 150}) for tf in ("1h", "4h")]
+        requests += [(method, (symbol,), {}) for method in (
+            "contract_stats", "funding_history", "contract_multiplier", "public_trades", "order_book")]
+        client = _CollectedClient(self.client, requests)
+        if as_of is None:
+            # The observation time is after collection, never before it.
+            boundary = datetime.now(timezone.utc)
         candles = {}
         for timeframe in required:
             try:
-                response = self.client.candles(symbol, timeframe, limit=self.candle_limit)
+                response = client.candles(symbol, timeframe, limit=self.candle_limit)
                 # Every downstream engine consumes exactly the same confirmed
                 # point-in-time rows.  Filtering only inside build_snapshot is
                 # too late because structure/regime/volume are derived below.
                 candles[timeframe] = confirmed_candles(
                     normalize_gate_candles(response.payload),
                     timeframe,
-                    as_of=boundary,
+                    as_of=min(boundary.timestamp(), response.received_at), strict=True,
                 )
             except Exception:
                 candles[timeframe] = []
 
         # Context is optional and cannot change StrategyResult. Late-arriving
         # observations are excluded by PointInTimeContext.
-        live = fetch_live_context(self.client, symbol, as_of=int(boundary.timestamp()))
+        live = fetch_live_context(client, symbol, as_of=int(boundary.timestamp()))
         working_rows = candles.get(specification.working_timeframe, [])
         context_rows = next((candles[tf] for tf in reversed(required) if candles.get(tf)), working_rows)
         volume = volume_features(working_rows)
@@ -90,9 +129,9 @@ class GateSnapshotProvider:
         if symbol.upper() != "BTCUSDT":
             for timeframe in ("1h", "4h"):
                 try:
-                    response = self.client.candles("BTCUSDT", timeframe, limit=150)
+                    response = client.candles("BTCUSDT", timeframe, limit=150)
                     references[timeframe] = confirmed_candles(
-                        normalize_gate_candles(response.payload), timeframe, as_of=boundary,
+                        normalize_gate_candles(response.payload), timeframe, as_of=min(boundary.timestamp(), response.received_at), strict=True,
                     )
                 except Exception:
                     references[timeframe] = []
@@ -122,6 +161,10 @@ class GateSnapshotProvider:
             microstructure_context=microstructure,
             market_context=market_context,
         )
+        logger = logging.getLogger("apex.scans")
+        logger.setLevel(logging.INFO)
+        logger.info("[APEX Snapshot] strategy=%s symbol=%s duration=%.3fs requests=%s wait=%s",
+                    key.value, symbol, time.monotonic()-started, len(requests), build.wait_reason_codes)
         if ownership is None:
             reference_wait.append("PAIR_OWNERSHIP_UNAVAILABLE")
         if reference_wait:

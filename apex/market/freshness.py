@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from .candles import candle_close_time, epoch_seconds
+from .candles import candle_close_time, candle_open_time, epoch_seconds, timeframe_seconds
 
 
 FRESHNESS_SLA_SECONDS = {
@@ -40,6 +40,11 @@ def assess_candles(
     closed = candle_close_time(candles[-1], timeframe)
     if closed is None:
         return FreshnessResult(timeframe, "UNAVAILABLE", None, None, "GATE_CLOSE_TIME_UNKNOWN")
+    step = timeframe_seconds(timeframe)
+    opens = [candle_open_time(row) for row in candles]
+    if any(left is None or right is None or abs(right-left-step) > 1
+           for left, right in zip(opens, opens[1:])):
+        return FreshnessResult(timeframe, "UNAVAILABLE", None, closed, "GATE_HISTORY_GAP")
     age = max(0.0, now - closed)
     sla = FRESHNESS_SLA_SECONDS.get(timeframe)
     if sla is None:

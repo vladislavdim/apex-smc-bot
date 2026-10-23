@@ -13,6 +13,8 @@ def rows(hours=48):
             observed_at=(start + timedelta(minutes=5 * i)).isoformat(),
             ready=True,
             reason_codes=[],
+            scanner_coverage={s:(start + timedelta(minutes=5*i)).isoformat()
+                              for s in ("FAST","MTF","ZONE","SWING","WYCKOFF")},
             auto_trading_enabled=False,
             strategy_snapshot_active=True,
             strategy_proof_sha256="b" * 64,
