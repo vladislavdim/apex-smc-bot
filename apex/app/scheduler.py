@@ -14,6 +14,7 @@ from apex.telemetry.incidents import recover_incident, report_incident
 from apex.telemetry.job_metrics import recorder_for
 
 from .job_registry import JOB_BY_ID
+from .scan_budget import ScanDeadlineExceeded
 from .runtime import runtime_supervisor
 
 
@@ -159,15 +160,17 @@ def _guarded(job_id: str, callback: Callable[..., Any]) -> Callable[[], Any]:
                     processed = 0
                 recorder.finish("OK", items_processed=int(processed or 0))
             return result
-        except asyncio.TimeoutError:
-            late["value"] = True
-            logging.error("[APEX V3] job=%s status=FAILED_TIMEOUT timeout=%ss", job_id, timeout)
+        except asyncio.TimeoutError as exc:
+            actual_timeout = exc.timeout_seconds if isinstance(exc, ScanDeadlineExceeded) else timeout
+            late["value"] = not work.done()
+            logging.error("[APEX V3] job=%s status=FAILED_TIMEOUT timeout=%ss", job_id, actual_timeout)
             if component:
                 runtime_supervisor.mark_component(component, ComponentState.DEGRADED, "FAILED_TIMEOUT", required=component_required)
                 report_incident(
                     "JOB_TIMEOUT", component,
                     "ERROR" if definition and definition.critical else "WARNING",
-                    {"job_id": job_id, "timeout_seconds": timeout},
+                    {"job_id": job_id, "timeout_seconds": actual_timeout,
+                     "deadline_source": "scan" if isinstance(exc, ScanDeadlineExceeded) else "scheduler"},
                 )
             # Only jobs that protect trading safety may inhibit new entries.
             # Maintenance/telemetry jobs can degrade and alert, but must never

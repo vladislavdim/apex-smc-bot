@@ -693,7 +693,7 @@ def ask_groq(prompt, max_tokens=800):
     global _last_ai_call, _groq_key_index
 
     # Сокращаем промпт если больше 6000 символов
-    if len(prompt) > 6000:
+    if len(prompt) > 6000 and not prompt.startswith("You are the final quality reviewer") and not prompt.startswith("Repair the") :
         prompt = prompt[:5000] + "\n[промпт сокращён для экономии токенов]"
 
     models = configured_groq_models()

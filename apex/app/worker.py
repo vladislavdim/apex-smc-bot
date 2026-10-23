@@ -803,8 +803,14 @@ def _v3_log_release_health():
     if value != _v3_last_release_health or now - _v3_last_release_log_at >= 300:
         logger = logging.getLogger("apex.release")
         logger.setLevel(logging.INFO)
+        from apex.telemetry.scan_acceptance import completed_rounds
+        try:
+            with _closing(_audit_connect(_AUDIT_DB_PATH, read_only=True)) as coverage_conn:
+                coverage = completed_rounds(coverage_conn)
+        except Exception:
+            coverage = {}
         memory = _v3_memory_snapshot(limit_bytes=_V3_CONFIG.operational.memory_limit_bytes)
-        logger.info("[APEX Release Ready] %s", json.dumps({**value, "observed_at": datetime.now(timezone.utc).isoformat(), "memory": {
+        logger.info("[APEX Release Ready] %s", json.dumps({**value, "scanner_coverage": coverage, "observed_at": datetime.now(timezone.utc).isoformat(), "memory": {
             "rss_bytes": memory.rss_bytes, "service_bytes": memory.service_bytes,
             "working_set_bytes": memory.working_set_bytes, "limit_bytes": memory.limit_bytes,
         }}, sort_keys=True))
@@ -1510,7 +1516,7 @@ async def _send_signal(sd):
             review.get("context", {}).get("data_quality", {}).get("available_sources", []),
             review.get("reasons", []),
         )
-        if decision in ("WAIT", "REJECT"):
+        if decision != "APPROVE":
             if _run_id:
                 await asyncio.to_thread(
                     _record_scan_event, _run_id, _strategy, sd.get("symbol", ""),
@@ -1551,6 +1557,8 @@ async def _send_signal(sd):
         disclaimer = "\n\n💡 Это аналитика, не совет. Торгуй осознанно"
         if setup_line not in sd["text"]:
             sd["text"] = sd["text"].replace(disclaimer, setup_line + disclaimer) if disclaimer in sd["text"] else sd["text"] + setup_line
+    if sd.get("text") and "🧠 Groq: одобрено" not in sd["text"]:
+        sd["text"] += "\n🧠 Groq: одобрено"
     if not _V3_CONFIG.execution.enabled and sd.get("text"):
         note = "ℹ️ Автовход выключен. Это аналитический сигнал, позиции Binance нет."
         if note not in sd["text"]:
@@ -1731,7 +1739,7 @@ async def _send_signal(sd):
         logging.error("[_send_signal] delivery interrupted; claim retained for reconciliation: %s", cache_key)
         await asyncio.shield(_retain_uncertain_signal_claims(delivery_db_path, cache_key, pair_key, now_ts))
         _v3_report_incident(
-            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "ERROR",
             {"cache_key": cache_key, "error_type": "CancelledError"},
         )
         raise
@@ -1739,7 +1747,7 @@ async def _send_signal(sd):
         logging.error("[_send_signal] Telegram outcome unknown; claim retained: %s", cache_key)
         await _retain_uncertain_signal_claims(delivery_db_path, cache_key, pair_key, now_ts)
         _v3_report_incident(
-            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "ERROR",
             {"cache_key": cache_key, "error_type": str(ce)},
         )
         await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "delivery", "Telegram outcome unknown", db_path=DB_PATH)
@@ -1768,7 +1776,7 @@ async def _send_signal(sd):
         logging.error("[_send_signal] delivery confirmation requires reconcile: %s", exc)
         await _retain_uncertain_signal_claims(delivery_db_path, cache_key, pair_key, now_ts)
         _v3_report_incident(
-            "DELIVERY_CONFIRMATION_PENDING", "telegram", "HIGH",
+            "DELIVERY_CONFIRMATION_PENDING", "telegram", "ERROR",
             {"cache_key": cache_key, "error_type": type(exc).__name__},
         )
         await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "delivery", "delivery confirmation requires reconciliation", db_path=DB_PATH)
@@ -1952,6 +1960,9 @@ async def auto_scan_job():
 _auto_trade_reconcile_task = None
 _trade_manager_task = None
 _production_scheduler = None
+from apex.app.scan_budget import scan_deadline, scan_has_budget, ScanDeadlineExceeded, ScanBudget
+from apex.db.repositories.scan_candidates import ScanCandidates
+
 _market_scan_lock = asyncio.Lock()
 _active_market_scan = None
 _active_market_scan_started = 0.0
@@ -2022,8 +2033,22 @@ async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
         _active_scan_run_id = await asyncio.to_thread(
             _begin_scan_control, _scanner_strategy(name), name, 0, 0, DB_PATH
         )
+        budget = ScanBudget(timeout)
+        token = scan_deadline.set(budget)
+        work = asyncio.create_task(coroutine_factory())
         try:
-            await asyncio.wait_for(coroutine_factory(), timeout=timeout)
+            try:
+                await asyncio.wait_for(asyncio.shield(work), timeout=timeout)
+            except asyncio.TimeoutError:
+                budget.cancel()
+                # Cancellation cannot stop native to_thread work. Retain the
+                # scan lock and shutdown ownership until the actual task ends.
+                await asyncio.gather(asyncio.shield(work), return_exceptions=True)
+                raise ScanDeadlineExceeded(timeout)
+            except asyncio.CancelledError:
+                budget.cancel()
+                await asyncio.gather(asyncio.shield(work), return_exceptions=True)
+                raise
             await asyncio.to_thread(_finish_scan_control, _active_scan_run_id, "COMPLETED", "", DB_PATH)
             scan_logger.info("[APEX Scan] strategy=%s status=COMPLETED duration=%.1fs", _scanner_strategy(name), time.monotonic() - _active_market_scan_started)
             return True
@@ -2043,6 +2068,7 @@ async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
             )
             raise
         finally:
+            scan_deadline.reset(token)
             _active_market_scan = None
             _active_market_scan_started = 0.0
             _active_scan_run_id = None
@@ -2361,17 +2387,14 @@ def _v3_strategy_candidates(strategy, symbol, **kwargs):
         try:
             traces = activation.evaluate(
                 registry, _get_v3_strategy_snapshot_provider(),
-                strategy, symbol, **kwargs,
+                strategy, symbol, require_session_liquidity=True, **kwargs,
             )
         except _V3_SNAPSHOT_EVALUATION_BLOCKED as exc:
             reason = str(exc)[:300]
-            _V3_RUNTIME.mark_component(
-                "strategy_activation", _V3_COMPONENT_STATE.STALE,
-                reason, required=True,
-            )
-            _V3_RUNTIME.inhibit_entries("SNAPSHOT_STRATEGY_DATA_NOT_READY")
+            # A pair's missing history does not invalidate the global proof.
+            # Block only this evaluation; provider outages surface via scanner health.
             _v3_report_incident(
-                "SNAPSHOT_STRATEGY_DATA_NOT_READY", "strategy_activation", "HIGH",
+                "SNAPSHOT_STRATEGY_DATA_NOT_READY", f"market_data:{strategy}:{symbol}", "WARNING",
                 {"strategy": str(strategy), "symbol": str(symbol), "reason": reason},
             )
             raise
@@ -2382,7 +2405,7 @@ def _v3_strategy_candidates(strategy, symbol, **kwargs):
         )
         _V3_RUNTIME.clear_inhibit("SNAPSHOT_STRATEGY_DATA_NOT_READY")
         _v3_recover_incident(
-            "SNAPSHOT_STRATEGY_DATA_NOT_READY", "strategy_activation",
+            "SNAPSHOT_STRATEGY_DATA_NOT_READY", f"market_data:{strategy}:{symbol}",
         )
     else:
         traces = registry.evaluate(strategy, symbol, **kwargs)
@@ -2416,9 +2439,12 @@ async def _auto_scan_1h_impl():
     pairs = batch["pairs"]
     await _control_scan_round(batch["round_id"])
     await _control_scan_scope(pairs, batch["target"])
-    all_signals = []
+    all_signals = ScanCandidates(lambda: _v3_connect_state(_V3_CONFIG), "MTF")
 
     for symbol in pairs:
+        if not scan_has_budget(100):
+            logging.info("[APEX Scan] yielding remaining pairs to next coverage batch")
+            break
         await _control_scan_pair(symbol)
         try:
             # Определяем режим рынка
@@ -2426,7 +2452,8 @@ async def _auto_scan_1h_impl():
             enabled = regime.get("enabled", ["MTF"])
 
             # Session liquidity check
-            _liq = await asyncio.to_thread(check_session_liquidity, symbol, "1h")
+            _liq = ({"ok": True} if _get_v3_strategy_activation().active else
+                      await asyncio.to_thread(check_session_liquidity, symbol, "1h"))
             if not _liq["ok"]:
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
@@ -2475,8 +2502,11 @@ async def _auto_scan_1h_impl():
         reverse=True,
     )
     for sd in valid:
+        if not scan_has_budget(75):
+            break
         logging.info(f"[auto_scan_1h] → _send_signal: {sd.get('symbol')} {sd.get('direction')}")
         delivered = await _send_signal(sd)
+        all_signals.retire(sd)
         await asyncio.sleep(1)
         sent += int(bool(delivered))
     logging.info(f"[auto_scan_1h] Завершён, отправлено {sent}")
@@ -2505,12 +2535,16 @@ async def _auto_scan_swing_impl():
     )
     await _control_scan_round(batch["round_id"])
     await _control_scan_scope(pairs, batch["target"])
-    found = []
+    found = ScanCandidates(lambda: _v3_connect_state(_V3_CONFIG), "SWING")
     blocked = 0
     for symbol in pairs:
+        if not scan_has_budget(100):
+            logging.info("[APEX Scan] yielding remaining pairs to next coverage batch")
+            break
         await _control_scan_pair(symbol)
         try:
-            _liq_sw = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
+            _liq_sw = ({"ok": True} if _get_v3_strategy_activation().active else
+                      await asyncio.to_thread(check_session_liquidity, symbol, "4h"))
             if not _liq_sw["ok"]:
                 blocked += 1
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
@@ -2541,6 +2575,8 @@ async def _auto_scan_swing_impl():
     logging.info(f"[auto_scan_swing] Swing scan 4h: найдено {len(found)} сетапов")
 
     for r in found:
+        if not scan_has_budget(75):
+            break
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -2584,6 +2620,7 @@ async def _auto_scan_swing_impl():
                     "funding_warning", "ob", "fvg", "structure_event", "structure_event_1h"
                 ) if r.get(key) is not None},
             }
+            sd.update({key: r[key] for key in ("_v3_strategy_trace", "snapshot_id", "snapshot_as_of") if key in r})
             sd["technical_evidence"]["causal_matrix_ready"] = True
 
             # Проверка актуальности цены входа
@@ -2603,6 +2640,7 @@ async def _auto_scan_swing_impl():
             except Exception:
                 pass
             delivered = await _send_signal(sd)
+            found.retire(r)
             if delivered:
                 logging.info(f"[SwingScan] {symbol} {direction} RR={r['rr']} → отправлен")
             await asyncio.sleep(1)
@@ -2652,6 +2690,7 @@ def _zone_candidate_from_setup(r):
             "htf_dir", "funding_warning", "structure_event"
         ) if r.get(key) is not None},
     }
+    candidate.update({key: r[key] for key in ("_v3_strategy_trace", "snapshot_id", "snapshot_as_of") if key in r})
     candidate["technical_evidence"]["causal_matrix_ready"] = True
     return candidate
 
@@ -2667,11 +2706,15 @@ async def _auto_zone_scan_impl():
     )
     await _control_scan_round(batch["round_id"])
     await _control_scan_scope(pairs, batch["target"])
-    found = []
+    found = ScanCandidates(lambda: _v3_connect_state(_V3_CONFIG), "ZONE")
     for symbol in pairs:
+        if not scan_has_budget(100):
+            logging.info("[APEX Scan] yielding remaining pairs to next coverage batch")
+            break
         await _control_scan_pair(symbol)
         try:
-            _liq_z = await asyncio.to_thread(check_session_liquidity, symbol, "4h")
+            _liq_z = ({"ok": True} if _get_v3_strategy_activation().active else
+                      await asyncio.to_thread(check_session_liquidity, symbol, "4h"))
             if not _liq_z["ok"]:
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 continue
@@ -2705,6 +2748,8 @@ async def _auto_zone_scan_impl():
     found.sort(key=lambda x: x["rr"], reverse=True)
 
     for r in found:
+        if not scan_has_budget(75):
+            break
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -2726,6 +2771,7 @@ async def _auto_zone_scan_impl():
                 pass
 
             delivered = await _send_signal(sd)
+            found.retire(r)
             if delivered:
                 logging.info(f"[ZoneScan] {symbol} {direction} RR={r['rr']} zone={r['zone']} → отправлен")
             await asyncio.sleep(1)
@@ -2760,12 +2806,16 @@ async def _auto_wyckoff_scan_impl():
     pairs = batch["pairs"]
     await _control_scan_round(batch["round_id"])
     await _control_scan_scope(pairs, batch["target"])
-    found = []
+    found = ScanCandidates(lambda: _v3_connect_state(_V3_CONFIG), "WYCKOFF")
     for symbol in pairs:
+        if not scan_has_budget(100):
+            logging.info("[APEX Scan] yielding remaining pairs to next coverage batch")
+            break
         await _control_scan_pair(symbol)
         try:
             # Session liquidity check
-            _liq_w = await asyncio.to_thread(check_session_liquidity, symbol, "1d")
+            _liq_w = ({"ok": True} if _get_v3_strategy_activation().active else
+                      await asyncio.to_thread(check_session_liquidity, symbol, "1d"))
             if not _liq_w["ok"]:
                 await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                 logging.debug(f"[WYCKOFF] {symbol}: низкая ликвидность ({_liq_w['ratio']}x) — пропускаем")
@@ -2789,6 +2839,8 @@ async def _auto_wyckoff_scan_impl():
     logging.info(f"[auto_wyckoff_scan] Wyckoff scan: найдено {len(found)}")
 
     for r in found:
+        if not scan_has_budget(75):
+            break
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -2866,9 +2918,11 @@ async def _auto_wyckoff_scan_impl():
             }
             if "RE-ACCUMULATION" in str(r.get("phases") or "").upper():
                 sd["technical_evidence"]["reacc_trigger_validated"] = True
+            sd.update({key: r[key] for key in ("_v3_strategy_trace", "snapshot_id", "snapshot_as_of") if key in r})
             sd["technical_evidence"]["causal_matrix_ready"] = True
 
             delivered = await _send_signal(sd)
+            found.retire(r)
             if delivered:
                 logging.info(f"[WyckoffScan] {symbol} score={r['score']} RR={r['rr']} → отправлен")
             await asyncio.sleep(2)
@@ -2924,7 +2978,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     if _shared_btc_1h:
         update_global_candles("BTCUSDT", "1h", _shared_btc_1h)
 
-    found = []
+    found = ScanCandidates(lambda: _v3_connect_state(_V3_CONFIG), "FAST")
     batch = await asyncio.to_thread(
         _take_strategy_round_batch, "FAST", eligible_pairs, len(eligible_pairs), DB_PATH
     )
@@ -2939,9 +2993,12 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
 
     async def _scan_fast_pair(symbol):
         async with _fast_slots:
+            if not scan_has_budget(100):
+                return None
             await _control_scan_pair(symbol)
             try:
-                _liq_fast = await asyncio.to_thread(check_session_liquidity, symbol)
+                _liq_fast = ({"ok": True} if _get_v3_strategy_activation().active else
+                             await asyncio.to_thread(check_session_liquidity, symbol))
                 if not _liq_fast["ok"]:
                     await _control_scan_outcome(symbol, "FILTERED", "LOW_LIQUIDITY")
                     logging.debug(
@@ -2952,6 +3009,8 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
                 result = await asyncio.to_thread(_v3_strategy_candidate, "FAST", symbol)
                 if not result:
                     await _control_scan_outcome(symbol, "FILTERED", "NO_STRATEGY_SETUP")
+                if result:
+                    found.append(result)
                 return result
             except asyncio.CancelledError:
                 raise
@@ -2965,7 +3024,7 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     # Gate reads are bounded, not unrestrained. Strategy predicates, candle
     # closure rules and candidate ordering remain unchanged.
     _fast_results = await asyncio.gather(*(_scan_fast_pair(symbol) for symbol in pairs))
-    found.extend(result for result in _fast_results if result)
+    # Each result was persisted immediately inside its pair task.
 
     if not found:
         return
@@ -2974,6 +3033,8 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
     logging.info(f"Fast Deal scan: найдено {len(found)}")
 
     for r in found:
+        if not scan_has_budget(75):
+            break
         try:
             symbol    = r["symbol"]
             direction = r["direction"]
@@ -3050,9 +3111,11 @@ async def _auto_fast_deal_scan_impl(_hour, _minute, _session="UNKNOWN"):
                     "structure_event", "entry_drift_pct"
                 ) if r.get(key) is not None},
             }
+            _fast_sd.update({key: r[key] for key in ("_v3_strategy_trace", "snapshot_id", "snapshot_as_of") if key in r})
             _fast_sd["technical_evidence"]["causal_matrix_ready"] = True
             _fast_sd["text"] = text
             delivered = await _send_signal(_fast_sd)
+            found.retire(r)
             if delivered:
                 logging.info(f"[FastDeal] {symbol} {direction} RR={r['rr']} → отправлен")
             await asyncio.sleep(1)
@@ -4763,6 +4826,7 @@ def _v3_token_snapshot():
 
 
 def main():
+    logging.getLogger().setLevel(logging.INFO)
     _v3_run_production(_V3_PRODUCTION_DEPENDENCIES(
         config=_V3_CONFIG,
         runtime=_V3_RUNTIME,

@@ -59,6 +59,7 @@ def confirmed_candles(
     timeframe: str,
     *,
     as_of: datetime | float | int | None = None,
+    strict: bool = False,
 ) -> tuple[Mapping[str, Any], ...]:
     """Return sorted immutable bars whose close was known at ``as_of``.
 
@@ -87,7 +88,13 @@ def confirmed_candles(
             }
         except (KeyError, TypeError, ValueError):
             continue
-        if not all(isfinite(value) for value in ohlcv.values()):
+        if (not all(isfinite(value) for value in ohlcv.values())
+                or min(ohlcv[k] for k in ("open", "high", "low", "close")) <= 0
+                or ohlcv["volume"] < 0
+                or ohlcv["high"] < max(ohlcv["open"], ohlcv["close"], ohlcv["low"])
+                or ohlcv["low"] > min(ohlcv["open"], ohlcv["close"])):
+            if strict:
+                raise ValueError("invalid_candle_geometry")
             continue
         normalized[opened] = {
             **ohlcv,

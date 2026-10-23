@@ -107,6 +107,10 @@ def build_webhook_application(deps: ProductionDependencies) -> Any:
 async def _run_polling(deps: ProductionDependencies) -> None:
     try:
         await deps.initialize("polling")
+        from .telegram_retry import PollingRetryAfter
+        session = getattr(deps.telegram_bot, "session", None)
+        if session is not None:
+            session.middleware(PollingRetryAfter())
         await deps.dispatcher.start_polling(
             deps.telegram_bot,
             allowed_updates=deps.dispatcher.resolve_used_update_types(),

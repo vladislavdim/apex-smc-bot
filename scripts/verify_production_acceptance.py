@@ -56,6 +56,19 @@ def verify_acceptance(records, sha, *, hours=48, max_gap_seconds=900):
         times.append(timestamp.timestamp())
         if row.get("ready") is not True or row.get("reason_codes"):
             raise AcceptanceIncomplete("unhealthy_observation:" + row["observed_at"])
+        if row.get("unhealthy_components"):
+            raise AcceptanceIncomplete("degraded_components:" + row["observed_at"])
+        coverage = row.get("scanner_coverage") or {}
+        for strategy in ("FAST", "MTF", "ZONE", "SWING", "WYCKOFF"):
+            completed = coverage.get(strategy)
+            if not completed:
+                raise AcceptanceIncomplete("scanner_coverage_missing:" + strategy)
+            completed_at = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=timezone.utc)
+            age = timestamp.timestamp() - completed_at.timestamp()
+            if age < 0 or age > 24*3600:
+                raise AcceptanceIncomplete("scanner_coverage_stale:" + strategy)
         if row.get("auto_trading_enabled") is not False:
             raise AcceptanceIncomplete("unexpected_execution_mode")
         if row.get("strategy_snapshot_active") is not True or not row.get(

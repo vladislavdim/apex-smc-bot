@@ -38,7 +38,7 @@ def build_snapshot(
         as_of = as_of.replace(tzinfo=timezone.utc)
     as_of = as_of.astimezone(timezone.utc)
     normalized = {
-        timeframe: confirmed_candles(rows, timeframe, as_of=as_of)
+        timeframe: confirmed_candles(rows, timeframe, as_of=as_of, strict=True)
         for timeframe, rows in raw_candles.items()
     }
     freshness = {

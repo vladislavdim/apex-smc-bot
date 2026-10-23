@@ -243,6 +243,10 @@ confidence or be listed as a risk, but a conflicting weekly/monthly candle alone
 NOT sufficient to WAIT or REJECT an otherwise valid candidate.
 The deterministic SETUP EVIDENCE assessment is authoritative about causal completeness.
 You may downgrade its class, but you MUST NOT promote INVALID or DEVELOPING to APPROVE.
+VALID is eligibility for review, not an instruction to approve. Check the supplied observations
+for support and contradictions. Do not approve solely by repeating the class label.
+The short_summary must identify the decisive evidence or concrete conflict; confidence is
+review confidence, never a calibrated win probability.
 Correlated observations inside one domain are one body of evidence, not multiple votes.
 
 CANDIDATE:
@@ -286,12 +290,14 @@ Return JSON only:
             key: view.get(key) for key in (
                 "symbol", "strategy", "direction", "timeframe", "entry", "sl",
                 "tp1", "tp2", "tp3", "rr", "confluence_score", "regime",
+                "technical_evidence", "strategy_check_journal",
             )
         }
         compact_assessment = {
             key: setup_assessment.get(key) for key in (
                 "state", "class", "fatal_reasons", "missing", "warnings",
                 "trigger_ready", "geometry_ready", "causal_domains",
+                "domains", "dimensions", "evidence_roles", "conflicts", "thesis",
             ) if setup_assessment.get(key) is not None
         }
         compact_prompt = f"""You are the final quality reviewer for an already calculated crypto trade candidate.
@@ -304,6 +310,15 @@ CANDIDATE:
 SETUP EVIDENCE:
 {json.dumps(compact_assessment, ensure_ascii=False, default=str)}
 
+{external_block}
+
+{news_block}
+
+{zone_block}
+
+{htf_close_block}
+
+VALID is eligibility, not a reason by itself to approve. Identify decisive evidence or conflict.
 Return JSON only, with no markdown or commentary:
 {{
   \"decision\": \"APPROVE|WAIT|REJECT\",

@@ -54,7 +54,7 @@ def normalize_gate_candles(payload: Any) -> list[dict[str, float]]:
         try:
             if isinstance(row, Mapping):
                 values = {
-                    "open_time": float(row.get("t", row.get("time", row.get("timestamp")))),
+                    "open_time": float(row.get("t", row.get("open_time", row.get("time", row.get("timestamp"))))),
                     "open": float(row.get("o", row.get("open"))),
                     "high": float(row.get("h", row.get("high"))),
                     "low": float(row.get("l", row.get("low"))),
@@ -72,6 +72,8 @@ def normalize_gate_candles(payload: Any) -> list[dict[str, float]]:
         except (TypeError, ValueError):
             continue
         if all(isfinite(value) for value in values.values()):
+            if isinstance(row, Mapping) and "is_closed" in row:
+                values["is_closed"] = row["is_closed"]
             output.append(values)
     return sorted(output, key=lambda row: row["open_time"])
 
@@ -111,6 +113,7 @@ class GateMarketClient:
         self._max_cache_entries = max(1, int(max_cache_entries))
         self._cache = OrderedDict()
         self._lock_guard = threading.Lock()
+        self._request_slots = threading.BoundedSemaphore(4)
         # Fixed stripes retain same-key singleflight without retaining every
         # historical request key (candle windows include changing timestamps).
         self._key_locks = tuple(threading.Lock() for _ in range(64))
@@ -140,7 +143,8 @@ class GateMarketClient:
                 if cached is not None and now - cached.received_at <= self._ttl(endpoint):
                     self._cache.move_to_end(key)
                     return cached
-            payload = self._get_json(f"{self._base_url}{endpoint}", params, self._timeout)
+            with self._request_slots:
+                payload = self._get_json(f"{self._base_url}{endpoint}", params, self._timeout)
             response = GateResponse(endpoint, int(self._clock()), payload)
             with self._lock_guard:
                 if self._ttl(endpoint) > 0:

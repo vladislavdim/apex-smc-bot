@@ -7,6 +7,7 @@ from typing import Any, Callable
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
 from apex.market.candles import candle_close_time, candle_open_time
 from core.signal_lifecycle import barrier_hits, entry_touched
+from apex.telemetry.incidents import report_incident, recover_incident
 
 _EXPIRY = {"FAST": 4, "MTF": 72, "SWING": 96, "WYCKOFF": 504}
 _TRAIL = {"FAST": .3, "MTF": .4, "SWING": .5, "WYCKOFF": .5, "ZONE": .4}
@@ -53,6 +54,9 @@ class StateSignalMonitor:
             if status == "waiting_entry":
                 invalidated = current <= sl if direction == "BULLISH" else current >= sl
                 target_passed = current >= tp1 if direction == "BULLISH" else current <= tp1
+                if invalidated or target_passed:
+                    report_incident("SIGNAL_ENTRY_PATH_UNKNOWN", f"signal_monitor:{signal_id}", "WARNING",
+                                    {"signal_id": signal_id, "reason": "point_quote_cannot_prove_no_intrabar_fill"})
                 if invalidated or target_passed or hours > expiry:
                     reason = ("stop_reached_before_confirmed_entry" if invalidated else
                               "target_reached_without_entry" if target_passed else
@@ -95,13 +99,34 @@ class StateSignalMonitor:
             ordered.sort(key=lambda item: item[0])
             # If the requested history is truncated, never skip an unknown bar.
             if ordered and ordered[0][0] > since + 600:
-                from apex.telemetry.incidents import report_incident
                 report_incident("SIGNAL_HISTORY_GAP", "market_data", "WARNING",
                                 {"signal_id": signal_id, "cursor": since, "first_close": ordered[0][0]})
                 continue
             # Legacy tests/data without timestamps use the current interval only.
             if not ordered and candles and all(candle_open_time(c) is None for c in candles):
                 ordered = [(None, candles[-1])]
+            partial = [c for c in candles or [] if isinstance(c, dict)
+                       and c.get("is_closed") is not False
+                       and candle_open_time(c) is not None
+                       and candle_open_time(c) < activated_at
+                       and activated_at < candle_close_time(c, "5m") <= now_epoch]
+            if cursor is None and partial:
+                bar = partial[-1]
+                hits = barrier_hits(direction, sl, tp1, tp2, float(bar["low"]), float(bar["high"]))
+                if any(hits.values()):
+                    reason = "activation_bar_order_unknown"
+                    if self.repository.advance_monitor(signal_id, expected_status=status,
+                                                       transition="close", result="ambiguous", reason=reason):
+                        closed.append({"signal_id": signal_id, "symbol": symbol,
+                                       "result": "ambiguous", "hours": round(hours, 1),
+                                       "grade": row["grade"], "is_win": False,
+                                       "original_tp1_before_sl": None, "reason": reason})
+                    continue
+            if not ordered and elapsed > 600:
+                report_incident("SIGNAL_HISTORY_GAP", f"signal_monitor:{signal_id}", "ERROR",
+                                {"signal_id": signal_id, "cursor": since, "reason": "history_unavailable"})
+            elif ordered:
+                recover_incident("SIGNAL_HISTORY_GAP", f"signal_monitor:{signal_id}")
             if not ordered:
                 # A point quote cannot prove a barrier was missed during an outage.
                 continue
