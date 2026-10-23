@@ -1551,6 +1551,15 @@ async def _send_signal(sd):
             reason = "; ".join(existing_review.get("reasons", [])) or f"existing quality review={existing_decision}"
             await asyncio.to_thread(_record_strategy_decision, sd, existing_decision if existing_decision in {"WAIT", "REJECT"} else "WAIT", "groq_quality_gate", reason, db_path=DB_PATH)
             return False
+    from apex.quality.groq_schema import approval_error
+    quality_error = approval_error(
+        sd.get("_external_quality_review"),
+        max(_V3_CONFIG.integrations.groq_min_approval_confidence,
+            float(risk_state.get("groq_min_confidence", 0.65) or 0.65)),
+    )
+    if quality_error:
+        await asyncio.to_thread(_record_strategy_decision, sd, "WAIT", "groq_quality_gate", quality_error, db_path=DB_PATH)
+        return False
     setup_state = str((sd.get("setup_assessment") or {}).get("state") or "")
     if setup_state in {"VALID", "STRONG", "EXCEPTIONAL"} and sd.get("text"):
         setup_line = f"\n🧭 Класс сетапа: <b>{setup_state}</b>"
@@ -2049,8 +2058,8 @@ async def _run_market_scan_exclusive(name, coroutine_factory, timeout):
                 budget.cancel()
                 await asyncio.gather(asyncio.shield(work), return_exceptions=True)
                 raise
-            await asyncio.to_thread(_finish_scan_control, _active_scan_run_id, "COMPLETED", "", DB_PATH)
-            scan_logger.info("[APEX Scan] strategy=%s status=COMPLETED duration=%.1fs", _scanner_strategy(name), time.monotonic() - _active_market_scan_started)
+            scan_status = await asyncio.to_thread(_finish_scan_control, _active_scan_run_id, "COMPLETED", "", DB_PATH)
+            scan_logger.info("[APEX Scan] strategy=%s status=%s duration=%.1fs", _scanner_strategy(name), scan_status or "UNKNOWN", time.monotonic() - _active_market_scan_started)
             return True
         except asyncio.TimeoutError:
             await asyncio.to_thread(
@@ -2492,6 +2501,8 @@ async def _auto_scan_1h_impl():
     # Фильтрация и сортировка
     valid = []
     for signal in all_signals:
+        if not scan_has_budget(75):
+            break
         if await asyncio.to_thread(_is_entry_still_valid, signal, max_drift_pct=2.0):
             valid.append(signal)
 
@@ -2948,10 +2959,10 @@ async def auto_fast_deal_scan():
         return await _run_market_scan_exclusive(
             "auto_fast_deal_scan",
             lambda: _auto_fast_deal_scan_impl(_hour, _minute, _session),
-            90,
+            210,
         )
     except asyncio.TimeoutError:
-        logging.warning("[auto_fast_deal_scan] таймаут 90с — пропускаем цикл")
+        logging.warning("[auto_fast_deal_scan] таймаут 210с — пропускаем цикл")
         raise
     except Exception as e:
         logging.error(f"[auto_fast_deal_scan] ОШИБКА: {e}")

@@ -8,9 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import re
+from html import escape
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Collection
+
+
+def _positive_number(value: Any) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError("Нужно положительное конечное число")
+    return number
 
 
 @dataclass(frozen=True)
@@ -42,9 +52,9 @@ class TelegramCommandHandlers:
         self.dependencies.update_user_memory(user_id, name=name)
         memory = self.dependencies.get_user_memory(user_id)
         greeting = (
-            f"С возвращением, {name}! 👊"
+            f"С возвращением, {escape(name)}! 👊"
             if memory["messages"] > 1
-            else f"Привет, {name}!"
+            else f"Привет, {escape(name)}!"
         )
         await message.answer(
             f"⚡️ <b>APEX — AI трейдер по SMC</b>\n\n{greeting}\n\n"
@@ -75,7 +85,7 @@ class TelegramCommandHandlers:
         memory = self.dependencies.get_user_memory(message.from_user.id)
         if len(args) == 2:
             try:
-                deposit = float(args[1])
+                deposit = _positive_number(args[1])
                 self.dependencies.update_user_memory(
                     message.from_user.id, deposit=deposit
                 )
@@ -180,12 +190,17 @@ class CompatibilityCommandHandlers:
             return
         symbol = args[1].upper()
         try:
-            level = float(args[2])
-            prices = self.dependencies.get_live_prices()
+            level = _positive_number(args[2])
+            if not re.fullmatch(r"[A-Z0-9]{1,32}USDT", symbol):
+                raise ValueError("Укажи контракт USDT")
+            prices = await asyncio.to_thread(self.dependencies.get_live_prices)
             if not prices or not isinstance(prices, dict):
                 await message.answer("Ошибка получения цен")
                 return
-            current = prices.get(symbol, {}).get("price", 0)
+            quote = prices.get(symbol, {})
+            if quote.get("stale"):
+                raise ValueError("Нет актуальной цены")
+            current = _positive_number(quote.get("price"))
             direction = "above" if level > current else "below"
             for retry in range(3):
                 connection = None
@@ -260,13 +275,13 @@ class CompatibilityCommandHandlers:
                     f"{row[0]} {row[1]} вход:{row[2]} выход:{row[3]}"
                     for row in losses[:3]
                 )
-                analysis = self.dependencies.ask_groq(
+                analysis = await asyncio.to_thread(self.dependencies.ask_groq,
                     "Проанализируй проигрышные сделки трейдера и дай 2-3 "
                     f"конкретных совета:\n{loss_text}",
                     max_tokens=300,
                 )
                 if analysis:
-                    text += f"\n🧠 <b>Анализ ошибок:</b>\n{analysis}"
+                    text += f"\n🧠 <b>Анализ ошибок:</b>\n{escape(str(analysis))}"
             await message.answer(text, parse_mode="HTML")
             return
 
@@ -278,12 +293,18 @@ class CompatibilityCommandHandlers:
                 )
                 return
             symbol, direction = parts[0].upper(), parts[1].upper()
-            entry, exit_price = float(parts[2]), float(parts[3])
+            if not re.fullmatch(r"[A-Z0-9]{1,36}", symbol) or direction not in {'LONG', 'SHORT'}:
+                raise ValueError("invalid journal instrument or direction")
+            entry, exit_price = _positive_number(parts[2]), _positive_number(parts[3])
             result = parts[4].lower()
+            if result not in {'win', 'loss'}:
+                raise ValueError("invalid journal result")
             note = " ".join(parts[5:]) if len(parts) > 5 else ""
             pnl = (exit_price - entry) / entry * 100
             if direction == "SHORT":
                 pnl = -pnl
+            if not math.isfinite(pnl):
+                raise ValueError("invalid journal return")
             connection = self.dependencies.connect()
             try:
                 connection.execute(

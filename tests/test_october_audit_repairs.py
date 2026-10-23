@@ -308,7 +308,7 @@ async def verify():
             assert json.loads(row['candidate_json'])['sl']==95
             raise worker._SignalDeliveryUncertain('lost reply')
         quote = Mock(side_effect=TimeoutError()) if FINAL_PRICE is None else Mock(return_value={'source':'gate','price':FINAL_PRICE,'observed_at':time.time()})
-        with patch.object(worker,'_V3_CONFIG',SimpleNamespace(database=SimpleNamespace(state_db_path=path),execution=SimpleNamespace(enabled=False))), \\
+        with patch.object(worker,'_V3_CONFIG',SimpleNamespace(database=SimpleNamespace(state_db_path=path),execution=SimpleNamespace(enabled=False),integrations=SimpleNamespace(groq_min_approval_confidence=.65))), \\
              patch.object(worker,'_V3_RUNTIME',Mock()),patch.object(worker,'ADMIN_IDS',[123]), \\
              patch.object(worker,'_strategy_risk_state',return_value={'mode':'NORMAL'}), \\
              patch.object(worker,'get_live_prices',return_value={'BTCUSDT':{'price':100}}), \\

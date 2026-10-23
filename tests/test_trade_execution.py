@@ -1139,6 +1139,19 @@ class TradeExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED_GROQ_GUARD")
         self.assertEqual(client.calls, [])
 
+    def test_live_mode_rejects_nonfinite_or_out_of_range_groq_before_exchange(self):
+        for number, confidence in enumerate([float('nan'), float('inf'), 1.1, -1, None]):
+            with self.subTest(confidence=confidence):
+                candidate = {**CANDIDATE, '_external_quality_review': {
+                    'decision': 'APPROVE', 'confidence': confidence, 'degraded': False,
+                }}
+                client = FakeClient()
+                result = execute_approved_candidate(
+                    candidate, 80000 + number, db_path=self.db_path, config=live_config(), client=client,
+                )
+                self.assertEqual(result['status'], 'BLOCKED_GROQ_GUARD')
+                self.assertEqual(client.calls, [])
+
     def test_paper_mode_records_without_exchange(self):
         config = ExecutionConfig(enabled=True, mode="paper", paper_balance_usdt=1000)
         result = execute_approved_candidate(CANDIDATE, 2, db_path=self.db_path, config=config)

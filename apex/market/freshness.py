@@ -34,12 +34,14 @@ def assess_candles(
     *,
     as_of: datetime | float | int | None = None,
 ) -> FreshnessResult:
-    now = epoch_seconds(as_of or datetime.now(timezone.utc))
+    now = epoch_seconds(datetime.now(timezone.utc) if as_of is None else as_of)
     if not candles or now is None:
         return FreshnessResult(timeframe, "UNAVAILABLE", None, None, "GATE_DATA_UNAVAILABLE")
     closed = candle_close_time(candles[-1], timeframe)
     if closed is None:
         return FreshnessResult(timeframe, "UNAVAILABLE", None, None, "GATE_CLOSE_TIME_UNKNOWN")
+    if closed > now:
+        return FreshnessResult(timeframe, "UNAVAILABLE", None, closed, "GATE_FUTURE_CANDLE")
     step = timeframe_seconds(timeframe)
     opens = [candle_open_time(row) for row in candles]
     if any(left is None or right is None or abs(right-left-step) > 1

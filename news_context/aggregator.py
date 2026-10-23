@@ -108,6 +108,9 @@ def normalize_news_context(
     relevant = _relevant_headlines(headlines, symbol)
     if any(any(word in row["title"].lower() for word in ("hack", "exploit", "bankruptcy", "war")) for row in relevant):
         risk = "HIGH"
+    if not calendar and not headlines:
+        risk = "UNKNOWN"
+        phase = "UNKNOWN"
     return {
         "symbol": symbol.upper(),
         "timestamp": now.isoformat(),

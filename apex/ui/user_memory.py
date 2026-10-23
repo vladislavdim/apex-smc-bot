@@ -75,7 +75,7 @@ def update_user_memory(
                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
                     user_id, name, profile or "", preferences or "", coins or "",
-                    deposit or 0, 1.0, 0, now, now,
+                    deposit or 0, risk if risk is not None else 1.0, 0, now, now,
                 ),
             )
         conn.commit()

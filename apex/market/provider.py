@@ -90,7 +90,7 @@ class GateSnapshotProvider:
                 # point-in-time rows.  Filtering only inside build_snapshot is
                 # too late because structure/regime/volume are derived below.
                 candles[timeframe] = confirmed_candles(
-                    normalize_gate_candles(response.payload),
+                    normalize_gate_candles(response.payload, strict=True),
                     timeframe,
                     as_of=min(boundary.timestamp(), response.received_at), strict=True,
                 )
@@ -131,7 +131,7 @@ class GateSnapshotProvider:
                 try:
                     response = client.candles("BTCUSDT", timeframe, limit=150)
                     references[timeframe] = confirmed_candles(
-                        normalize_gate_candles(response.payload), timeframe, as_of=min(boundary.timestamp(), response.received_at), strict=True,
+                        normalize_gate_candles(response.payload, strict=True), timeframe, as_of=min(boundary.timestamp(), response.received_at), strict=True,
                     )
                 except Exception:
                     references[timeframe] = []

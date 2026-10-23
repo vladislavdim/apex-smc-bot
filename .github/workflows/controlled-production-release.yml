@@ -35,10 +35,13 @@ jobs:
       - name: Verify immutable main commit
         id: commit
         shell: bash
+        env:
+          REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
           set -euo pipefail
+          [[ "$REQUESTED_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           SHA="$(git rev-parse HEAD)"
-          test "$SHA" = "${{ inputs.release_sha }}"
+          test "$SHA" = "$REQUESTED_RELEASE_SHA"
           git fetch --filter=blob:none --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$SHA" origin/main
           echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from math import isfinite
 
 
 def number(value: Any) -> float | None:
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+        return result if not isinstance(value, bool) and isfinite(result) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
