@@ -796,6 +796,15 @@ def _migration_026(conn: sqlite3.Connection) -> None:
         created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
 
 
+def _migration_027(conn: sqlite3.Connection) -> None:
+    """Adopt the runtime-created queue without losing already persisted work."""
+    conn.execute('''CREATE TABLE IF NOT EXISTS scan_candidate_queue(
+        identity TEXT PRIMARY KEY,strategy TEXT NOT NULL,
+        payload TEXT NOT NULL,created REAL NOT NULL)''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_scan_candidates_strategy_created '
+                 'ON scan_candidate_queue(strategy,created)')
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -823,6 +832,7 @@ STATE_MIGRATIONS = (
     Migration(24, "signal_lifecycle_state_creation", _migration_024),
     Migration(25, "signal_monitor_cursor", _migration_025),
     Migration(26, "durable_delivery_outbox", _migration_026),
+    Migration(27, "durable_scanner_candidates", _migration_027),
 )
 
 

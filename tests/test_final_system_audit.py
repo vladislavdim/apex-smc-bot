@@ -267,3 +267,36 @@ def test_public_json_reader_rejects_oversized_response(venue):
             else:
                 ExternalHTTPClient()._fetch_sync('https://example.com/context', None, None)
     response.read.assert_called_once_with(limit + 1)
+
+
+def test_cold_restart_accepts_state_after_runtime_candidate_persistence(tmp_path):
+    from apex.db.state_db import STATE_MIGRATIONS, migrate_state
+    from apex.db.memory_db import migrate_memory
+    from apex.db.migrations import MigrationRunner
+    from apex.db.ownership import assert_schema_ownership
+    path = tmp_path / 'restored-state.db'
+    factory = lambda: sqlite3.connect(path)
+    with factory() as conn:
+        MigrationRunner(tuple(m for m in STATE_MIGRATIONS if m.version <= 26)).run(conn)
+    queue = ScanCandidates(factory, 'ZONE')
+    item = dict(symbol='ETHUSDT', direction='BULLISH', entry=100, sl=95, tp=110)
+    queue.append(item)
+    with factory() as conn:
+        before = conn.execute('SELECT identity,payload,created FROM scan_candidate_queue').fetchall()
+    # Same cold-start order as the actual worker: migrate, then ownership gate.
+    with factory() as state, sqlite3.connect(':memory:') as memory:
+        migrate_state(state)
+        migrate_memory(memory)
+        assert assert_schema_ownership(state, memory).ok
+        assert state.execute('SELECT identity,payload,created FROM scan_candidate_queue').fetchall() == before
+        assert migrate_state(state) == ()
+    assert list(ScanCandidates(factory, 'ZONE')) == [item]
+
+
+def test_bootstrap_logs_original_failure_before_shutdown_can_exit(caplog):
+    from apex.app.bootstrap import _run_polling
+    deps = NS(initialize=AsyncMock(side_effect=RuntimeError('original_boot_failure')),
+              shutdown=AsyncMock(side_effect=SystemExit(0)))
+    with pytest.raises(SystemExit):
+        asyncio.run(_run_polling(deps))
+    assert 'original_boot_failure' in caplog.text
