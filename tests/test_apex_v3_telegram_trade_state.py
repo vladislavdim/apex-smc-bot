@@ -1,4 +1,4 @@
-"""Telegram trade list must show only State-owned live positions."""
+"""Telegram history includes delivered analytical signals and verified positions."""
 import sqlite3
 import tempfile
 import unittest
@@ -72,11 +72,11 @@ class TelegramTradeStateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_only_confirmed_live_positions_appear(self):
-        self.assertEqual([r["id"] for r in fetch_live_trades("active", 12, self.factory)], [1])
-        self.assertEqual([r["id"] for r in fetch_live_trades("take", 12, self.factory)], [2])
+    def test_all_signals_appear_with_verified_position_authority(self):
+        self.assertEqual([r["id"] for r in fetch_live_trades("active", 12, self.factory)], [5, 4, 1])
+        self.assertEqual([r["id"] for r in fetch_live_trades("take", 12, self.factory)], [7, 2])
         self.assertEqual([r["id"] for r in fetch_live_trades("stop", 12, self.factory)], [3])
-        self.assertEqual([r["id"] for r in fetch_live_trades("closed", 12, self.factory)], [6, 3, 2])
+        self.assertEqual([r["id"] for r in fetch_live_trades("closed", 12, self.factory)], [7, 6, 3, 2])
         self.assertEqual([r["id"] for r in fetch_live_trades("signals", 12, self.factory)], [7, 5, 4])
         active = format_trade_view("active", fetch_live_trades("active", 12, self.factory))
         self.assertIn("PAIR1USDT", active)

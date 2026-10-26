@@ -805,6 +805,12 @@ def _migration_027(conn: sqlite3.Connection) -> None:
                  'ON scan_candidate_queue(strategy,created)')
 
 
+def _migration_028(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE signal_lifecycle ADD COLUMN delivery_id TEXT")
+    conn.execute("CREATE UNIQUE INDEX idx_signal_delivery_identity ON signal_lifecycle(delivery_id) WHERE delivery_id IS NOT NULL")
+    conn.execute("ALTER TABLE signal_delivery_outbox ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 0")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -833,6 +839,7 @@ STATE_MIGRATIONS = (
     Migration(25, "signal_monitor_cursor", _migration_025),
     Migration(26, "durable_delivery_outbox", _migration_026),
     Migration(27, "durable_scanner_candidates", _migration_027),
+    Migration(28, "canonical_delivery_signal_identity", _migration_028),
 )
 
 

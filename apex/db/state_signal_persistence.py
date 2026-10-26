@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from typing import Callable
 
 from apex.domain.ids import derived_id
@@ -25,7 +26,7 @@ class StateSignalPersistence:
         self, symbol: str, direction: str, signal_type: str, entry: float,
         tp1: float, tp2: float, tp3: float, sl: float, timeframe: str,
         estimated_hours: float, grade: str, *, confluence: float = 0,
-        regime: str = "UNKNOWN",
+        regime: str = "UNKNOWN", delivery_id: str | None = None,
     ) -> int | None:
         """Reserve a unique pair and ID; State commit precedes compatibility replay."""
         symbol = str(symbol or "").upper()
@@ -39,6 +40,33 @@ class StateSignalPersistence:
             legacy.execute("BEGIN IMMEDIATE")
             state = self.state_factory()
             state.execute("BEGIN IMMEDIATE")
+            if delivery_id is not None:
+                intent = state.execute(
+                    "SELECT candidate_json,identity_version,status FROM signal_delivery_outbox WHERE delivery_id=?",
+                    (delivery_id,),
+                ).fetchone()
+                if intent is None or intent[1] != 1 or intent[2] not in {"PENDING", "UNKNOWN", "DELIVERED"}:
+                    raise ValueError("delivery_identity_requires_reconciliation")
+                candidate = json.loads(intent[0])
+                source_tp1 = candidate.get("tp1", candidate.get("tp"))
+                source_tp2 = candidate.get("tp2", source_tp1)
+                source_tp3 = candidate.get("tp3", source_tp2)
+                expected = (str(candidate.get("symbol") or "").upper(), candidate.get("direction"),
+                            candidate.get("entry"), candidate.get("sl"), source_tp1, source_tp2,
+                            source_tp3, candidate.get("timeframe", "1h"))
+                actual = (symbol, direction, entry, sl, tp1, tp2, tp3, timeframe)
+                if expected != actual:
+                    raise ValueError("delivery_candidate_identity_conflict")
+                existing = state.execute(
+                    "SELECT signal_id,symbol,direction,entry,sl,tp1,tp2,tp3,timeframe,signal_type,grade,estimated_hours FROM signal_lifecycle WHERE delivery_id=?",
+                    (delivery_id,),
+                ).fetchone()
+                if existing is not None:
+                    if tuple(existing[1:]) != actual + (signal_type, grade, estimated_hours):
+                        raise ValueError("delivery_signal_identity_conflict")
+                    state.rollback()
+                    legacy.rollback()
+                    return int(existing[0])
             if legacy.execute(
                 "SELECT 1 FROM signals WHERE UPPER(symbol)=? AND result='pending' LIMIT 1",
                 (symbol,),
@@ -67,11 +95,11 @@ class StateSignalPersistence:
                 """INSERT INTO signal_lifecycle(
                     signal_entity_id,signal_id,status,result,symbol,direction,
                     signal_type,timeframe,entry,sl,tp1,tp2,tp3,estimated_hours,
-                    grade,confluence,regime,ownership,source
-                ) VALUES(?,?,'waiting_entry','pending',?,?,?,?,?,?,?,?,?,?,?,?,?,'state','state')""",
+                    grade,confluence,regime,delivery_id,ownership,source
+                ) VALUES(?,?,'waiting_entry','pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,'state','state')""",
                 (derived_id("signal", self.release_sha, signal_id), signal_id, symbol,
                  direction, signal_type, timeframe, entry, sl, tp1, tp2, tp3,
-                 estimated_hours, grade, confluence, regime),
+                 estimated_hours, grade, confluence, regime, delivery_id),
             )
             state.commit()
             # The State row remains durable if compatibility commit fails.

@@ -175,13 +175,13 @@ class StateCallbackHandlers:
 
     async def _trade_menu(self, callback: Any) -> None:
         await self.dependencies.edit_message(
-            callback.message, "📊 <b>Сделки APEX</b>\n\nВыберите состояние сделки:",
+            callback.message, "📊 <b>Сигналы и сделки APEX</b>\n\nЗдесь учитываются все присланные сигналы, включая сигналы без автовхода. Результаты Binance отмечены отдельно.\n\nВыберите состояние:",
             parse_mode="HTML", reply_markup=self.dependencies.markup(inline_keyboard=[
                 [self.dependencies.button(text="📍 Активные", callback_data="menu_active_trades")],
                 [self.dependencies.button(text="📁 Все закрытые", callback_data="menu_closed_trades")],
                 [self.dependencies.button(text="✅ Закрыты по тейку", callback_data="menu_take_closed")],
                 [self.dependencies.button(text="🛑 Закрыты по стопу", callback_data="menu_stop_closed")],
-                [self.dependencies.button(text="📨 Сигналы без позиции", callback_data="menu_trade_signals")],
+                [self.dependencies.button(text="📨 Аналитические сигналы", callback_data="menu_trade_signals")],
                 [self.dependencies.button(text="🔙 Меню", callback_data="menu_back")],
             ]),
         )

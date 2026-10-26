@@ -1463,11 +1463,20 @@ class SnapshotContext:
                         if fvg
                         else zone_level * 0.99
                     )
-                    for c in candles[-40:-3]:
-                        if (
-                            _zone_bot <= c["low"] <= _zone_top
-                            or _zone_bot <= c["high"] <= _zone_top
-                        ):
+                    _zone_origin = ob if zone_type == "OB" else fvg
+                    # An OB is observable at its origin close. A three-bar
+                    # FVG exists only when its right-hand candle has closed.
+                    _zone_birth_idx = int(_zone_origin["index"]) + (
+                        1 if zone_type == "FVG" else 0
+                    )
+                    # Preserve the existing forty-bar window and exclusion
+                    # of the latest three setup bars; exclude formation too.
+                    for _zone_test_idx in range(
+                        max(0, len(candles) - 40, _zone_birth_idx + 1),
+                        max(0, len(candles) - 3),
+                    ):
+                        c = candles[_zone_test_idx]
+                        if c["low"] <= _zone_top and c["high"] >= _zone_bot:
                             _test_count += 1
                     _audit_observe("zone_numeric", {"test_count": _test_count})
                     if _audit_test(

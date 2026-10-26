@@ -26,6 +26,7 @@ class DeliveryOutbox:
             "grade",
             "timeframe",
             "hours",
+            "estimated_hours",
             "confluence",
             "confluence_score",
             "score",
@@ -54,8 +55,8 @@ class DeliveryOutbox:
         with closing(connect_compatibility(self.path)) as conn, conn:
             conn.execute(
                 """INSERT INTO signal_delivery_outbox
-                (delivery_id,cache_key,pair_key,claimed_at,candidate_json,destinations_json)
-                VALUES(?,?,?,?,?,?)""",
+                (delivery_id,cache_key,pair_key,claimed_at,candidate_json,destinations_json,identity_version)
+                VALUES(?,?,?,?,?,?,1)""",
                 (
                     identity,
                     cache_key,

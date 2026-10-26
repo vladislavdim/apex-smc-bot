@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory() as directory:
         with patch.object(worker,'get_top_pairs',return_value=['BTCUSDT','ETHUSDT','SOLUSDT']), patch.object(worker,'_v3_strategy_candidate',detect), ThreadPoolExecutor(max_workers=3) as callers:
             results=list(callers.map(lambda _:worker.scan_all_for_deals(),range(3)))
         assert peak<=2 and all(len(result)==3 for result in results)
-        with patch.object(worker, 'get_all_market_pairs', return_value=['BTCUSDT','ETHUSDT']), patch.object(worker, 'full_scan_raw', return_value=None), patch.object(worker, 'detect_accumulation', return_value=None):
+        with patch.object(worker, 'get_all_market_pairs', return_value=['BTCUSDT','ETHUSDT']), patch.object(worker, '_v3_strategy_candidate', return_value=None), patch.object(worker, 'detect_accumulation', return_value=None):
             signals, accumulations, scope = await worker.deep_market_scan(limit=80,with_summary=True)
         assert scope == {'scope':2,'attempted':2,'checked':2,'failed':0}
         summary = worker.format_deep_scan_result([],[],{'scope':80,'attempted':2,'checked':1,'failed':1})
