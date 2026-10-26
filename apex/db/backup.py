@@ -505,6 +505,20 @@ class BrainPersistence:
                         f"no valid {self.remote_name} in recent backup history ({last_candidate_error})"
                     )
                 now = datetime.now(timezone.utc).isoformat()
+                if self.remote_name == "apex_state.db" and selected_ref != self.branch:
+                    # Historical State may omit accepted sends/orders and their
+                    # durable claims. Integrity alone cannot authorize trading
+                    # or overwriting the corrupt head from that older state.
+                    self._ready = False
+                    self._last_error = "critical State history requires reconciliation before startup"
+                    return {
+                        "status": "state_history_requires_reconciliation",
+                        "ready": False,
+                        "reason": "STATE_HISTORY_RECOVERY",
+                        "recovered_from": selected_ref,
+                        "generation": generation,
+                        "blob_sha": str(metadata["sha"]),
+                    }
                 self._ready = True
                 # CAS always targets the current branch blob.  When a previous
                 # valid commit was recovered, the next backup safely replaces

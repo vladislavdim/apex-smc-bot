@@ -159,6 +159,30 @@ def test_migrated_trading_arithmetic_and_ordered_gates_are_unchanged():
             ):
                 node.body[0] = ast.Pass()
         b.args.args.pop(0)
+        if name == "detect_zone_setup":
+            # Intentional reviewed bug fix: count overlaps only after zone birth.
+            # Lock its exact implementation, then compare every other statement
+            # against the frozen legacy detector as before.
+            old_loop = next(n for n in ast.walk(a) if isinstance(n, ast.For)
+                            and ast.unparse(n.iter) == "candles[-40:-3]")
+            expected = ast.parse("""
+_zone_origin = ob if zone_type == 'OB' else fvg
+_zone_birth_idx = int(_zone_origin['index']) + (1 if zone_type == 'FVG' else 0)
+for _zone_test_idx in range(max(0, len(candles) - 40, _zone_birth_idx + 1), max(0, len(candles) - 3)):
+    c = candles[_zone_test_idx]
+    if c['low'] <= _zone_top and c['high'] >= _zone_bot:
+        _test_count += 1
+""").body
+            section = next(n.body for n in ast.walk(b) if isinstance(n, ast.Try)
+                           and any(isinstance(x, ast.Assign) and
+                                   any(isinstance(t, ast.Name) and t.id == '_zone_origin' for t in x.targets)
+                                   for x in n.body))
+            start = next(i for i, n in enumerate(section) if isinstance(n, ast.Assign)
+                         and any(isinstance(t, ast.Name) and t.id == '_zone_origin' for t in n.targets))
+            assert [ast.dump(n, include_attributes=False) for n in section[start:start + 3]] == [
+                ast.dump(n, include_attributes=False) for n in expected
+            ]
+            section[start:start + 3] = [old_loop]
         if name == "full_scan_raw":
             # Same gate represented by one snapshot-owned lookup in native.
             a.body[1].body[:1] = b.body[1].body[:2]

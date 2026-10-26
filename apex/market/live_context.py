@@ -104,7 +104,7 @@ def fetch_live_context(client: GateMarketClient, symbol: str, *, as_of: int) -> 
         )
         # A REST snapshot is visible liquidity at one instant, never a historical stop map.
         microstructure["visible_orderbook"] = {
-            **book.features(now=float(book_response.received_at)),
+            **book.features(now=float(as_of)),
             "source": "gate_rest_orderbook",
             "received_at": book_response.received_at,
             "availability": "FORWARD_ONLY",

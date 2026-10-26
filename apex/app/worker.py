@@ -1002,6 +1002,7 @@ async def cmd_delivery(message):
             if args[1] == "confirm":
                 mutated = True
                 candidate = json.loads(row['candidate_json'])
+                candidate['_delivery_id'] = row['delivery_id']
                 if not await asyncio.to_thread(_persist_delivered_signal, candidate):
                     raise RuntimeError('signal_persistence_failed')
             await asyncio.to_thread(repository.resolve, args[2], args[1], message.from_user.id, args[3])
@@ -1071,10 +1072,15 @@ async def deep_market_scan(limit=80, *, with_summary=False):
             loop = asyncio.get_running_loop()
             # Таймаут 8 сек на монету — не зависаем
             sig = await asyncio.wait_for(
-                loop.run_in_executor(_manual_scan_executor, full_scan_raw, symbol, "1h"),
+                loop.run_in_executor(
+                    _manual_scan_executor,
+                    functools.partial(_v3_strategy_candidate, "MTF", symbol, timeframe="1h"),
+                ),
                 timeout=8.0
             )
-            if sig and sig.get("grade") in ("МЕГА ТОП", "ТОП СДЕЛКА", "ХОРОШАЯ",
+            if sig and not sig.get("_pending_ltf") and sig.get("grade") in (
+                                             "СДЕЛКА", "ПРЕМИУМ СИГНАЛ",
+                                             "МЕГА ТОП", "ТОП СДЕЛКА", "ХОРОШАЯ",
                                              "🔥🔥🔥 МЕГА ТОП", "🔥🔥 ТОП СДЕЛКА", "✅ ХОРОШАЯ"):
                 signals.append(sig)
             # Накопление — отдельный таймаут
@@ -1106,7 +1112,8 @@ async def deep_market_scan(limit=80, *, with_summary=False):
         await asyncio.sleep(0.5)  # Не перегружаем API
 
     # Сортируем по приоритету
-    grade_order = {"🔥🔥🔥 МЕГА ТОП": 0, "🔥🔥 ТОП СДЕЛКА": 1, "✅ ХОРОШАЯ": 2}
+    grade_order = {"ПРЕМИУМ СИГНАЛ": 0, "🔥🔥🔥 МЕГА ТОП": 0,
+                   "🔥🔥 ТОП СДЕЛКА": 1, "✅ ХОРОШАЯ": 2, "СДЕЛКА": 3}
     signals.sort(key=lambda x: grade_order.get(x.get("grade", ""), 3))
     accumulations.sort(key=lambda x: x["score"], reverse=True)
 
@@ -1134,7 +1141,8 @@ def format_deep_scan_result(signals, accumulations, total_scanned):
 
     # Сигналы SMC
     if signals:
-        parts.append(f"\n📡 <b>Найдено сигналов: {len(signals)}</b>\n")
+        parts.append(f"\n📡 <b>Технических кандидатов: {len(signals)}</b>\n"
+                     "🧠 Проверка Groq: не выполнялась\n")
         for s in signals[:5]:  # Топ-5
             sym = s.get("symbol", "")
             direction = s.get("direction", "")
@@ -1315,7 +1323,7 @@ def _signal_type_from_candidate(sd: dict) -> str:
 
 def _persist_delivered_signal(sd: dict):
     """Persist only a candidate that passed review and reached Telegram."""
-    if sd.get("_signal_persisted"):
+    if sd.get("_signal_persisted") and not sd.get("_delivery_id"):
         return sd.get("_signal_id")
     signal_type = _signal_type_from_candidate(sd)
     default_hours = {
@@ -1338,6 +1346,7 @@ def _persist_delivered_signal(sd: dict):
             sd.get("grade", signal_type),
             confluence=sd.get("confluence_score", sd.get("score", 0)) or 0,
             regime=sd.get("regime", signal_type) or signal_type,
+            delivery_id=sd.get("_delivery_id"),
         )
     except Exception as exc:
         logging.exception("[APEX V3] State signal persistence requires reconcile")
@@ -1622,6 +1631,7 @@ async def _send_signal(sd):
         destinations.append({"chat_id": int(SIGNAL_CHANNEL_SWING), "thread_id": int(SWING_THREAD_ID), "text": _format_channel_signal(sd)})
     try:
         delivery_id = await asyncio.to_thread(outbox.prepare, sd, cache_key, pair_key, now_ts, destinations)
+        sd["_delivery_id"] = delivery_id
     except Exception:
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, cache_key, now_ts)
         await asyncio.to_thread(_release_signal_delivery_claim, delivery_db_path, pair_key, now_ts)
@@ -2392,6 +2402,10 @@ def _v3_strategy_candidates(strategy, symbol, **kwargs):
     """Return all subtype results through the proof-gated evaluation path."""
     registry = _get_v3_live_strategy_registry()
     activation = _get_v3_strategy_activation()
+    if not activation.active and activation.requested:
+        raise _V3_SNAPSHOT_EVALUATION_BLOCKED(
+            "snapshot_activation_blocked:" + activation.reason
+        )
     if activation.active:
         try:
             traces = activation.evaluate(
@@ -3159,7 +3173,10 @@ async def _auto_ltf_watch_scan_impl():
         await _control_scan_pair(symbol)
         try:
             if strategy == "MTF":
-                result = await asyncio.to_thread(full_scan_raw, symbol, "1h", True, True)
+                result = await asyncio.to_thread(
+                    _v3_strategy_candidate, "MTF", symbol,
+                    timeframe="1h", auto=True, passive_watch=True,
+                )
             elif strategy == "ZONE":
                 result = await asyncio.to_thread(
                     _v3_strategy_candidate, "ZONE", symbol,
@@ -3891,19 +3908,18 @@ async def backup_db_to_github(reason="scheduled"):
 
 
 async def restore_state_db_from_github():
-    """Restore V3 critical state, bootstrapping only a proven-missing remote."""
+    """Restore critical State; absence does not prove a first installation."""
     result = await asyncio.to_thread(_STATE_PERSISTENCE.restore)
     if result.get("reason") == "REMOTE_MISSING":
-        # First V3 rollout only: create a valid local schema, then use a
-        # create-without-SHA request that cannot overwrite concurrent state.
-        conn = _v3_connect_state(_V3_CONFIG)
-        try:
-            _v3_migrate_state(conn)
-        finally:
-            conn.close()
-        result = await asyncio.to_thread(_STATE_PERSISTENCE.initialize, "v3_initial_state")
-        if result.get("status") in {"concurrent_initialize", "remote_exists"}:
-            result = await asyncio.to_thread(_STATE_PERSISTENCE.restore)
+        # A 404 is also possible after loss/deletion of an established State.
+        # Creating an empty replacement would discard durable claims/intents.
+        # Explicit initial provisioning/recovery must happen outside startup.
+        return {
+            **result,
+            "status": "state_initialization_requires_authorization",
+            "ready": False,
+            "reason": "STATE_REMOTE_MISSING",
+        }
     return result
 
 
