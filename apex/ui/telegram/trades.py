@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import math
 import sqlite3
 from typing import Any, Callable
 from datetime import datetime, timezone
@@ -78,7 +79,7 @@ def fetch_live_trades(
                           m.tp1_seen AS tp1_hit,m.confirmed_protect_level AS trailing_sl,
                           m.status AS manager_status,m.close_result,m.created_at,
                           m.updated_at,m.closed_at,m.last_price,m.current_r,
-                          m.last_reviewed_candle,m.price_observed_at,m.exit_price,m.realized_r,
+                          m.last_reviewed_candle,m.price_observed_at,m.exit_price,m.realized_pct,m.realized_r,
                           l.status AS lifecycle_status,l.result AS lifecycle_result,
                           e.status AS execution_status,{real_result} AS resolved_result
                      FROM manager_positions m
@@ -111,6 +112,52 @@ def _fmt_price(value: Any) -> str:
     if number >= 1:
         return f"{number:.4f}".rstrip("0").rstrip(".")
     return f"{number:.8f}".rstrip("0").rstrip(".")
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _analytical_return(row: dict[str, Any]) -> str:
+    """Nominal barrier distance; never imply a fill, trailing exit or account PnL."""
+    if str(row.get("lifecycle_status") or "").lower() != "closed":
+        return ""
+    outcome = str(row.get("result") or "").lower()
+    if outcome not in {"sl", "tp1", "tp2", "tp3"}:
+        return "\n   Расчёт результата: недостаточно данных"
+    entry, stop, target = (_finite_number(row.get(k)) for k in ("entry", "sl", outcome))
+    direction = str(row.get("direction") or "").upper()
+    sign = {"BULLISH": 1, "BEARISH": -1}.get(direction)
+    if sign is None or entry is None or stop is None or target is None:
+        return "\n   Расчёт результата: недостаточно данных"
+    if entry <= 0 or stop <= 0 or target <= 0 or sign * (entry - stop) <= 0:
+        return "\n   Расчёт результата: недостаточно данных"
+    if outcome != "sl" and sign * (target - entry) <= 0:
+        return "\n   Расчёт результата: недостаточно данных"
+    change = sign * (target - entry)
+    pct, r = change / entry * 100, change / abs(entry - stop)
+    if not math.isfinite(pct) or not math.isfinite(r):
+        return "\n   Расчёт результата: недостаточно данных"
+    return (
+        f"\n   Расчёт до уровня {outcome.upper()}: <b>{pct:+.2f}% · {r:+.2f}R</b>"
+    )
+
+
+def _manager_return(row: dict[str, Any]) -> str:
+    """Show only recorded Manager return; do not guess net account PnL."""
+    pct, r = (_finite_number(row.get(k)) for k in ("realized_pct", "realized_r"))
+    values = []
+    if pct is not None:
+        values.append(f"{pct:+.2f}%")
+    if r is not None:
+        values.append(f"{r:+.2f}R")
+    if not values:
+        return "\n   Результат Manager: нет подтверждённого расчёта"
+    return "\n   Результат Manager: <b>" + " · ".join(values) + "</b>"
 
 
 def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
@@ -175,6 +222,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
                 f"   {html.escape(state)} · {status}\n"
                 f"   Вход <code>{_fmt_price(row.get('entry'))}</code> · SL <code>{_fmt_price(row.get('sl'))}</code> "
                 f"· TP1 <code>{_fmt_price(row.get('tp1'))}</code> · {date_text}"
+                f"{_analytical_return(row)}"
             )
         elif category == "active":
             live_label = "Binance · " if row.get("_view_kind") == "live" else ""
@@ -202,18 +250,19 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
         else:
             live_label = "Binance · " if row.get("_view_kind") == "live" else ""
             result = html.escape(str(row.get("result") or "").upper())
-            realized = row.get("realized_r")
-            realized_text = f" · итог <b>{float(realized):+.2f}R</b>" if realized is not None else ""
             lines.append(
                 f"\n{direction_icon} <b>#{int(row['id'])} {symbol}</b> {direction} · {strategy}/{timeframe}\n"
-                f"   {live_label}Результат: <b>{result}</b>{realized_text} · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
+                f"   {live_label}Результат: <b>{result}</b> · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
                 f"   SL <code>{_fmt_price(row.get('sl'))}</code> · TP1 <code>{_fmt_price(row.get('tp1'))}</code> · {date_text}"
+                f"{_manager_return(row)}"
             )
         if len("\n".join(lines)) > 3600:
             lines.pop()
             break
     if analytical_shown:
-        lines.append("\n<i>Это история сигналов. Аналитический результат не означает исполненную сделку на Binance.</i>")
+        lines.append("\n<i>Это история сигналов. Аналитический результат не означает исполненную сделку на Binance. Расчёт до уровня — без плеча, комиссий, funding и проскальзывания; при трейлинге это не цена выхода и не итоговый PnL. Денежный PnL счёта не рассчитан.</i>")
+    elif category in {"closed", "take", "stop"}:
+        lines.append("\n<i>Результат Manager не подтверждает чистый PnL счёта с комиссиями, funding и частичными выходами.</i>")
     elif category == "active":
         lines.append("\n<i>R обновляется после проверки Manager; нажмите «Обновить» для новых данных.</i>")
     return "\n".join(lines)

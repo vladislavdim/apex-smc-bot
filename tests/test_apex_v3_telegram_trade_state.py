@@ -82,7 +82,7 @@ class TelegramTradeStateTests(unittest.TestCase):
         self.assertIn("PAIR1USDT", active)
         self.assertIn("текущий R <b>+1.00R</b>", active)
         self.assertIn("Цена проверки", active)
-        self.assertIn("итог <b>+1.70R</b>", format_trade_view("closed", fetch_live_trades("closed", 12, self.factory)))
+        self.assertIn("Результат Manager: <b>+1.70R</b>", format_trade_view("closed", fetch_live_trades("closed", 12, self.factory)))
         signals = format_trade_view("signals", fetch_live_trades("signals", 12, self.factory))
         self.assertIn("SIGNAL7USDT", signals)
         self.assertIn("аналитически закрыт: TP1", signals)
