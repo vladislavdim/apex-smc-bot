@@ -61,7 +61,7 @@ class StateCallbackHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(self.edit.await_args.args[1], "detail:7")
 
-    async def test_trade_tabs_keep_signals_separate_from_executed_positions(self):
+    async def test_trade_tabs_route_combined_history_and_signals_view(self):
         for callback, category in (("menu_active_trades", "active"),
                                    ("menu_closed_trades", "closed"),
                                    ("menu_trade_signals", "signals")):

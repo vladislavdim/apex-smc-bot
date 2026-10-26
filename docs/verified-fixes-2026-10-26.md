@@ -59,3 +59,21 @@ Compilation, Ruff F821/F822/F823, production-authority verification and V3
 release-ready verification passed. The 33-case activation verdict is ready and
 bound to implementation eacacccbaa0ae015c2fb752a19b8d31e55546f7057e919ca7da540c1ed0fcc00.
 Dependency audit and GitHub CI status are reported separately in the PR.
+
+## Follow-up: all delivered signals in trade history
+
+At the user's request, active/closed/take/stop tabs now include delivered
+analytical signals even when Binance auto-entry is disabled. Rows explicitly
+identify analytical results versus confirmed Binance position results. Waiting
+entry and cancelled/ambiguous outcomes are not turned into fabricated stop/take
+results. The dedicated analytical-signals tab remains available.
+
+Reads use one SQLite snapshot and apply each outcome filter before the result
+limit. A confirmed managed position appears once and its Manager outcome takes
+priority over a conflicting analytical result. A position reference without a
+Manager row no longer hides the delivered signal; its outcome remains labelled
+analytical. This changes display only, not lifecycle transitions or trade history.
+
+The change does not establish that a specific historical notification was saved,
+activated or closed correctly. That requires the relevant State rows. It also
+does not repair the separately observed FAST timeout or incomplete LTF recovery.

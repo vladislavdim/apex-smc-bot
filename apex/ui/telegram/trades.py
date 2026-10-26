@@ -5,77 +5,98 @@ from __future__ import annotations
 import html
 import sqlite3
 from typing import Any, Callable
+from datetime import datetime, timezone
+
+
+def _history_order(row: dict[str, Any]) -> tuple[float, int]:
+    value = row.get("closed_at") or row.get("updated_at") or row.get("created_at")
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        stamp = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    except (ValueError, TypeError, OverflowError):
+        stamp = 0.0
+    return stamp, int(row["id"])
 
 
 def fetch_live_trades(
     category: str, limit: int, connection_factory: Callable[[], sqlite3.Connection],
 ) -> list[dict[str, Any]]:
-    """Project verified positions and delivered analytical signals from State."""
+    """Read all delivered-signal history, preserving verified Binance authority."""
     category = str(category).lower()
-    # Manager is backed by the confirmed exchange position. The analytical
-    # lifecycle can lag its Binance reconciliation and must not hide a trade.
-    active = "m.status='ACTIVE'"
-    result = "COALESCE(NULLIF(l.result,'pending'),m.close_result,'')"
-    where = {
-        "active": active,
+    cap = max(1, min(int(limit), 30))
+    # Manager owns actual position outcomes; analytical lifecycle is separate.
+    real_result = "COALESCE(NULLIF(NULLIF(m.close_result,''),'pending'),NULLIF(l.result,'pending'),'')"
+    live_where = {
+        "active": "m.status='ACTIVE'",
         "closed": "m.status='CLOSED'",
-        "take": f"m.status='CLOSED' AND {result} IN ('tp1','tp2','tp3')",
-        "stop": f"m.status='CLOSED' AND {result}='sl'",
-    }.get(category)
-    if where is None and category != "signals":
+        "take": f"m.status='CLOSED' AND {real_result} IN ('tp1','tp2','tp3')",
+        "stop": f"m.status='CLOSED' AND {real_result}='sl'",
+    }
+    analytical_where = {
+        "active": "l.status IN ('waiting_entry','active')",
+        "closed": "l.status IN ('closed','cancelled')",
+        "take": "l.status='closed' AND l.result IN ('tp1','tp2','tp3')",
+        "stop": "l.status='closed' AND l.result='sl'",
+        "signals": "1=1",
+    }
+    if category not in analytical_where:
         raise ValueError(f"unsupported trade category: {category}")
     conn = connection_factory()
     try:
         conn.row_factory = sqlite3.Row
-        if category == "signals":
-            rows = conn.execute(
-                """SELECT l.signal_id AS id, l.symbol, l.direction,
-                          l.signal_type, l.grade, l.timeframe, l.entry, l.sl,
-                          l.tp1, l.tp2, l.tp3, l.status AS lifecycle_status,
-                          l.result, l.created_at, l.closed_at, l.last_checked_at,
-                          e.status AS execution_status
-                     FROM signal_lifecycle l
-                     LEFT JOIN executions e ON e.signal_entity_id=l.signal_entity_id
-                    WHERE l.symbol IS NOT NULL AND l.entry IS NOT NULL
-                      AND NOT (e.mode='live' AND e.position_id IS NOT NULL)
-                    ORDER BY l.signal_id DESC LIMIT ?""",
-                (max(1, min(int(limit), 30)),),
-            ).fetchall()
-            return [dict(item) for item in rows]
-        rows = conn.execute(
-            f"""SELECT m.signal_id AS id, m.symbol, m.direction,
-                      m.strategy AS signal_type, m.strategy AS grade,
-                      m.management_tf AS timeframe, m.initial_entry AS entry,
-                      m.initial_sl AS sl, m.initial_tp1 AS tp1,
-                      m.initial_tp2 AS tp2, m.initial_tp3 AS tp3,
-                      m.initial_rr,
-                      m.tp1_seen AS tp1_hit,
-                      m.confirmed_protect_level AS trailing_sl,
-                      m.status AS manager_status,
-                      m.close_result, m.created_at, m.updated_at, m.closed_at,
-                      m.last_price, m.current_r, m.last_reviewed_candle, m.price_observed_at,
-                      m.exit_price, m.realized_r,
-                      l.status AS lifecycle_status, l.result AS lifecycle_result,
-                      e.status AS execution_status
-                 FROM manager_positions m
-                 JOIN executions e ON e.signal_entity_id=m.signal_entity_id
-                 LEFT JOIN signal_lifecycle l ON l.signal_entity_id=m.signal_entity_id
-                WHERE e.mode='live' AND e.position_id IS NOT NULL
-                  AND ({where})
-                ORDER BY COALESCE(m.closed_at,m.updated_at) DESC,m.signal_id DESC
-                LIMIT ?""",
-            (max(1, min(int(limit), 30)),),
+        # Both sources must be read in the same SQLite snapshot.
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        analytical = conn.execute(
+            f"""SELECT l.signal_id AS id,l.symbol,l.direction,l.signal_type,l.grade,
+                      l.timeframe,l.entry,l.sl,l.tp1,l.tp2,l.tp3,
+                      l.status AS lifecycle_status,l.result,l.created_at,l.updated_at,
+                      l.closed_at,l.last_checked_at,l.cancel_reason,
+                      e.status AS execution_status,e.mode AS execution_mode,
+                      e.position_id AS execution_position_id
+                 FROM signal_lifecycle l
+                 LEFT JOIN executions e ON e.signal_entity_id=l.signal_entity_id
+                WHERE l.symbol IS NOT NULL AND l.entry IS NOT NULL
+                  AND ({analytical_where[category]})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM manager_positions m
+                      JOIN executions actual ON actual.signal_entity_id=m.signal_entity_id
+                       WHERE m.signal_entity_id=l.signal_entity_id
+                         AND actual.mode='live' AND actual.position_id IS NOT NULL
+                         AND m.status IN ('ACTIVE','CLOSED'))
+                ORDER BY COALESCE(l.closed_at,l.updated_at,l.created_at) DESC,l.signal_id DESC
+                LIMIT ?""", (cap,),
         ).fetchall()
-        selected: list[dict[str, Any]] = []
-        for item in rows:
-            row = dict(item)
-            result = str(row["lifecycle_result"] or "").lower()
-            if result == "pending":
-                result = str(row["close_result"] or "").lower()
-            row["result"] = "pending" if category == "active" else result
-            row["lifecycle_status"] = "active" if category == "active" else "closed"
-            selected.append(row)
-        return selected
+        selected = [dict(row, _view_kind="analytical") for row in analytical]
+        if category != "signals":
+            live = conn.execute(
+                f"""SELECT m.signal_id AS id,m.symbol,m.direction,
+                          m.strategy AS signal_type,m.strategy AS grade,
+                          m.management_tf AS timeframe,m.initial_entry AS entry,
+                          m.initial_sl AS sl,m.initial_tp1 AS tp1,
+                          m.initial_tp2 AS tp2,m.initial_tp3 AS tp3,m.initial_rr,
+                          m.tp1_seen AS tp1_hit,m.confirmed_protect_level AS trailing_sl,
+                          m.status AS manager_status,m.close_result,m.created_at,
+                          m.updated_at,m.closed_at,m.last_price,m.current_r,
+                          m.last_reviewed_candle,m.price_observed_at,m.exit_price,m.realized_r,
+                          l.status AS lifecycle_status,l.result AS lifecycle_result,
+                          e.status AS execution_status,{real_result} AS resolved_result
+                     FROM manager_positions m
+                     JOIN executions e ON e.signal_entity_id=m.signal_entity_id
+                     LEFT JOIN signal_lifecycle l ON l.signal_entity_id=m.signal_entity_id
+                    WHERE e.mode='live' AND e.position_id IS NOT NULL
+                      AND ({live_where[category]})
+                    ORDER BY COALESCE(m.closed_at,m.updated_at) DESC,m.signal_id DESC
+                    LIMIT ?""", (cap,),
+            ).fetchall()
+            for item in live:
+                row = dict(item)
+                row["result"] = "pending" if category == "active" else row.pop("resolved_result")
+                row["lifecycle_status"] = "active" if category == "active" else "closed"
+                row["_view_kind"] = "live"
+                selected.append(row)
+        selected.sort(key=_history_order, reverse=True)
+        return selected[:cap]
     finally:
         conn.close()
 
@@ -95,18 +116,18 @@ def _fmt_price(value: Any) -> str:
 def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
     category = str(category).lower()
     headers = {
-        "active": "📍 <b>Активные сделки</b>",
-        "closed": "📁 <b>Закрытые сделки</b>",
+        "active": "📍 <b>Активные сигналы и позиции</b>",
+        "closed": "📁 <b>Закрытые сигналы и сделки</b>",
         "take": "✅ <b>Закрытые по тейку</b>",
         "stop": "🛑 <b>Закрытые по стопу</b>",
-        "signals": "📨 <b>Сигналы без подтверждённой позиции</b>",
+        "signals": "📨 <b>Аналитические сигналы</b>",
     }
     empty = {
-        "active": "Сейчас нет открытых подтверждённых позиций.",
-        "closed": "Пока нет закрытых подтверждённых позиций.",
-        "take": "Пока нет сделок, закрытых по тейку.",
-        "stop": "Пока нет сделок, закрытых по стопу.",
-        "signals": "Сигналов без подтверждённой позиции пока нет.",
+        "active": "Сейчас нет активных сигналов или позиций.",
+        "closed": "Пока нет закрытых сигналов или сделок.",
+        "take": "Пока нет сделок или сигналов, закрытых по тейку.",
+        "stop": "Пока нет сделок или сигналов, закрытых по стопу.",
+        "signals": "Аналитических сигналов для отображения пока нет.",
     }
     if category not in headers:
         raise ValueError(f"unsupported trade category: {category}")
@@ -120,6 +141,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
         "cancelled": "отменена",
     }
     lines = [headers[category], f"\nПоказано: <b>{len(rows)}</b>"]
+    analytical_shown = False
     for row in rows:
         symbol = html.escape(str(row.get("symbol") or "?"))
         strategy = html.escape(str(row.get("grade") or row.get("signal_type") or "?"))
@@ -131,7 +153,8 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
         date_text = html.escape(str(date_value)[:16].replace("T", " "))
         status = state_labels.get(str(row.get("lifecycle_status")), str(row.get("lifecycle_status") or ""))
 
-        if category == "signals":
+        if category == "signals" or row.get("_view_kind") == "analytical":
+            analytical_shown = True
             lifecycle = str(row.get("lifecycle_status") or "").lower()
             state = state_labels.get(lifecycle, lifecycle or "—")
             outcome = str(row.get("result") or "pending").lower()
@@ -141,16 +164,20 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
                 state = "аналитически активен"
             execution = str(row.get("execution_status") or "").upper()
             status = (
-                "Автовход выключен" if execution == "DISABLED"
+                "Позиция Binance подтверждена; результат ниже аналитический"
+                if row.get("execution_mode") == "live" and row.get("execution_position_id")
+                else "Автовход выключен" if execution == "DISABLED"
                 else "Биржевой вход не подтверждён"
             )
             lines.append(
                 f"\n{direction_icon} <b>#{int(row['id'])} {symbol}</b> {direction} · {strategy}/{timeframe}\n"
+                "   📨 Аналитический сигнал\n"
                 f"   {html.escape(state)} · {status}\n"
                 f"   Вход <code>{_fmt_price(row.get('entry'))}</code> · SL <code>{_fmt_price(row.get('sl'))}</code> "
                 f"· TP1 <code>{_fmt_price(row.get('tp1'))}</code> · {date_text}"
             )
         elif category == "active":
+            live_label = "Binance · " if row.get("_view_kind") == "live" else ""
             current_sl = row.get("trailing_sl") or row.get("sl")
             tp2 = row.get("tp2")
             target_text = f"TP1 <code>{_fmt_price(row.get('tp1'))}</code>"
@@ -169,22 +196,23 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
             )
             lines.append(
                 f"\n{direction_icon} <b>#{int(row['id'])} {symbol}</b> {direction} · {strategy}/{timeframe}\n"
-                f"   {html.escape(status)} · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
+                f"   {live_label}{html.escape(status)} · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
                 f"   SL <code>{_fmt_price(current_sl)}</code> · {target_text}{plan_text}{progress}{execution_text}"
             )
         else:
+            live_label = "Binance · " if row.get("_view_kind") == "live" else ""
             result = html.escape(str(row.get("result") or "").upper())
             realized = row.get("realized_r")
             realized_text = f" · итог <b>{float(realized):+.2f}R</b>" if realized is not None else ""
             lines.append(
                 f"\n{direction_icon} <b>#{int(row['id'])} {symbol}</b> {direction} · {strategy}/{timeframe}\n"
-                f"   Результат: <b>{result}</b>{realized_text} · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
+                f"   {live_label}Результат: <b>{result}</b>{realized_text} · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
                 f"   SL <code>{_fmt_price(row.get('sl'))}</code> · TP1 <code>{_fmt_price(row.get('tp1'))}</code> · {date_text}"
             )
         if len("\n".join(lines)) > 3600:
             lines.pop()
             break
-    if category == "signals":
+    if analytical_shown:
         lines.append("\n<i>Это история сигналов. Аналитический результат не означает исполненную сделку на Binance.</i>")
     elif category == "active":
         lines.append("\n<i>R обновляется после проверки Manager; нажмите «Обновить» для новых данных.</i>")
