@@ -1,1 +1,1 @@
-{"expires_at": "2026-10-27T23:52:42+00:00", "generation": 54, "instance_id": "", "lease_key": "apex-production-worker", "nonce": "a5e858bb34b541b183e0936bf5ecc36c", "release_sha": "c641c9a0554e5b6d4c554a533ec7340909ef8b75"}
+{"expires_at": "2026-10-27T23:57:28+00:00", "generation": 55, "instance_id": "srv-da9f0d6gekts7381reo0-95d69cbff-n8cdg:31df0427a2854c51b8ebba4ff6537f57", "lease_key": "apex-production-worker", "nonce": "4e2370eacebb4d78a5598ce3639ea5af", "release_sha": "93395a7e6ab2807f56c8fc12c09b687112a645b3"}
