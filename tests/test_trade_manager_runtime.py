@@ -21,6 +21,7 @@ from apex.db.state_db import migrate_state
 from apex.db.manager_migration import import_legacy_manager
 from apex.db.repositories.signal_lifecycle import SignalLifecycleRepository
 from apex.db.repositories.executions import ExecutionRepository
+from apex.db.repositories.manager import ManagerRepository
 from core.trade_manager_telegram import (
     configure_manager_dashboard_state, fetch_manager_trade,
     fetch_manager_trades, format_final_trade_card,
@@ -435,14 +436,16 @@ def test_state_lifecycle_is_required_before_manager_registration(tmp_path):
         SignalLifecycleRepository(state_factory).import_row({
             "signal_id": 1, "status": "active", "result": "pending",
         })
-        assert register_pending_signals(db_path) == 0
+        assert register_pending_signals(db_path) == 1
+        assert ManagerRepository(state_factory).get(1)["tracking_mode"] == "ANALYTICAL"
         ExecutionRepository(state_factory).register({
             "signal_id": 1, "mode": "live", "symbol": "BTCUSDT",
             "direction": "BULLISH", "status": "PROTECTED",
             "entry": 100, "sl": 95, "tp1": 110, "tp2": 115,
             "quantity": 0.25, "entry_order_id": "entry-1", "stop_order_id": "stop-1",
         })
-        assert register_pending_signals(db_path) == 1
+        assert register_pending_signals(db_path) == 0
+        assert ManagerRepository(state_factory).get(1)["tracking_mode"] == "LIVE"
     finally:
         configure_manager_state(None)
 
@@ -468,8 +471,9 @@ def test_state_execution_rejection_is_not_registered_as_live_position(tmp_path):
     })
     configure_manager_state(state_factory)
     try:
-        assert register_pending_signals(db_path) == 0
-        assert load_state(1, db_path) is None
+        assert register_pending_signals(db_path) == 1
+        assert ManagerRepository(state_factory).get(1)["tracking_mode"] == "ANALYTICAL"
+        assert load_state(1, db_path)["tracking_mode"] == "ANALYTICAL"
     finally:
         configure_manager_state(None)
 
