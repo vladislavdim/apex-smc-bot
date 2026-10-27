@@ -2263,11 +2263,9 @@ async def _run_trade_manager_once():
                 )
             except Exception:
                 pass
-            if not update.get("notify"):
-                continue
-            await _upsert_manager_card(
-                int(update.get("signal_id") or 0), update.get("telegram", ""),
-            )
+            # Manager output is pull-only. Decisions remain durable in State and
+            # are rendered only in the "Активные" and "Менеджер" views.
+            # Never push or edit standalone Manager cards from the scheduler.
         if durable_events:
             logging.info(
                 "[TradeManager] %s durable event(s) committed; next scheduled/SIGTERM snapshot will persist them",

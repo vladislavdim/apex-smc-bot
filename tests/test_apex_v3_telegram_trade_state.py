@@ -51,6 +51,14 @@ class TelegramTradeStateTests(unittest.TestCase):
                 "UPDATE manager_positions SET last_price=105,current_r=1.0 WHERE signal_id=1"
             )
             conn.execute(
+                """UPDATE manager_positions
+                      SET tracking_mode='ANALYTICAL',last_action='HOLD',
+                          last_event='MANAGEMENT_CANDLE_CLOSE',last_confidence=1.0,
+                          level_state='BREAKOUT_CONFIRMED',
+                          nearest_support=99.0,nearest_resistance=102.0
+                    WHERE signal_id=4"""
+            )
+            conn.execute(
                 "UPDATE manager_positions SET realized_r=1.7 WHERE signal_id=6"
             )
             # The analytical signal monitor may lag a confirmed Binance position.
@@ -82,11 +90,22 @@ class TelegramTradeStateTests(unittest.TestCase):
         self.assertIn("PAIR1USDT", active)
         self.assertIn("текущий R <b>+1.00R</b>", active)
         self.assertIn("Цена проверки", active)
+        self.assertIn("🧠 Manager: <b>HOLD</b> · уверенность 100%", active)
+        self.assertIn("закрепление выше сопротивления — держим пробой", active)
+        self.assertIn("S <code>99</code> · R <code>102</code>", active)
         self.assertIn("Результат Manager: <b>+1.70R</b>", format_trade_view("closed", fetch_live_trades("closed", 12, self.factory)))
         signals = format_trade_view("signals", fetch_live_trades("signals", 12, self.factory))
         self.assertIn("SIGNAL7USDT", signals)
         self.assertIn("аналитически закрыт: TP1", signals)
         self.assertIn("не означает исполненную сделку", signals)
+
+    def test_scheduled_manager_is_pull_only(self):
+        source = Path("apex/app/worker.py").read_text(encoding="utf-8")
+        cycle = source.split("async def _run_trade_manager_once", 1)[1].split(
+            "async def trade_manager_job", 1
+        )[0]
+        self.assertNotIn("_upsert_manager_card(", cycle)
+        self.assertIn("Manager output is pull-only", cycle)
 
     def test_state_failure_does_not_fall_back_to_legacy(self):
         with self.assertRaises(sqlite3.OperationalError):

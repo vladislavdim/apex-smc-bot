@@ -54,9 +54,17 @@ def fetch_live_trades(
                       l.status AS lifecycle_status,l.result,l.created_at,l.updated_at,
                       l.closed_at,l.last_checked_at,l.cancel_reason,
                       e.status AS execution_status,e.mode AS execution_mode,
-                      e.position_id AS execution_position_id
+                      e.position_id AS execution_position_id,
+                      mgr.status AS manager_status,mgr.tracking_mode AS manager_tracking_mode,
+                      mgr.last_action AS manager_last_action,
+                      mgr.last_event AS manager_last_event,
+                      mgr.last_confidence AS manager_last_confidence,
+                      mgr.level_state AS manager_level_state,
+                      mgr.nearest_support AS manager_nearest_support,
+                      mgr.nearest_resistance AS manager_nearest_resistance
                  FROM signal_lifecycle l
                  LEFT JOIN executions e ON e.signal_entity_id=l.signal_entity_id
+                 LEFT JOIN manager_positions mgr ON mgr.signal_entity_id=l.signal_entity_id
                 WHERE l.symbol IS NOT NULL AND l.entry IS NOT NULL
                   AND ({analytical_where[category]})
                   AND NOT EXISTS (
@@ -80,6 +88,12 @@ def fetch_live_trades(
                           m.status AS manager_status,m.close_result,m.created_at,
                           m.updated_at,m.closed_at,m.last_price,m.current_r,
                           m.last_reviewed_candle,m.price_observed_at,m.exit_price,m.realized_pct,m.realized_r,
+                          m.status AS manager_status,m.tracking_mode AS manager_tracking_mode,
+                          m.last_action AS manager_last_action,m.last_event AS manager_last_event,
+                          m.last_confidence AS manager_last_confidence,
+                          m.level_state AS manager_level_state,
+                          m.nearest_support AS manager_nearest_support,
+                          m.nearest_resistance AS manager_nearest_resistance,
                           l.status AS lifecycle_status,l.result AS lifecycle_result,
                           e.status AS execution_status,{real_result} AS resolved_result
                      FROM manager_positions m
@@ -235,6 +249,33 @@ def _manager_return(row: dict[str, Any]) -> str:
     return "\n   Результат Manager: <b>" + " · ".join(values) + "</b>"
 
 
+def _active_manager_context(row: dict[str, Any]) -> str:
+    """Render the latest durable Manager view inside the active-trades screen."""
+    if str(row.get("manager_status") or "").upper() != "ACTIVE":
+        return ""
+    action = html.escape(str(row.get("manager_last_action") or "HOLD").upper())
+    event = html.escape(str(row.get("manager_last_event") or "ожидается закрытая свеча"))
+    confidence = _finite_number(row.get("manager_last_confidence"))
+    confidence_text = f" · уверенность {confidence * 100:.0f}%" if confidence is not None else ""
+    level = str(row.get("manager_level_state") or "").upper()
+    labels = {
+        "BREAKOUT_CONFIRMED": "закрепление выше сопротивления — держим пробой",
+        "BREAKDOWN_CONFIRMED": "закрепление ниже поддержки — держим пробой",
+        "STRUCTURE_INVALIDATED": "структура сигнала нарушена",
+        "BETWEEN_LEVELS": "цена между подтверждёнными уровнями",
+    }
+    support = _fmt_price(row.get("manager_nearest_support"))
+    resistance = _fmt_price(row.get("manager_nearest_resistance"))
+    level_text = (
+        f"\n   Уровни: {labels.get(level, level)} · S <code>{support}</code> · R <code>{resistance}</code>"
+        if level else "\n   Уровни: ожидается первая закрытая свеча менеджера"
+    )
+    return (
+        f"\n   🧠 Manager: <b>{action}</b>{confidence_text} · событие {event}"
+        f"{level_text}"
+    )
+
+
 def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
     category = str(category).lower()
     headers = {
@@ -298,6 +339,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
                 f"   Вход <code>{_fmt_price(row.get('entry'))}</code> · SL <code>{_fmt_price(row.get('sl'))}</code> "
                 f"· TP1 <code>{_fmt_price(row.get('tp1'))}</code> · {date_text}"
                 f"{_analytical_live_return(row) if category == 'active' and lifecycle == 'active' else ''}"
+                f"{_active_manager_context(row) if category == 'active' and lifecycle == 'active' else ''}"
                 f"{_analytical_return(row)}"
             )
         elif category == "active":
@@ -322,6 +364,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
                 f"\n{direction_icon} <b>#{int(row['id'])} {symbol}</b> {direction} · {strategy}/{timeframe}\n"
                 f"   {live_label}{html.escape(status)} · вход <code>{_fmt_price(row.get('entry'))}</code>\n"
                 f"   SL <code>{_fmt_price(current_sl)}</code> · {target_text}{plan_text}{progress}{execution_text}"
+                f"{_active_manager_context(row)}"
             )
         else:
             live_label = "Binance · " if row.get("_view_kind") == "live" else ""
