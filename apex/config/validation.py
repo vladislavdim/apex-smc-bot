@@ -84,6 +84,8 @@ def validate_config(config: ApexConfig, *, raise_on_error: bool = False) -> Vali
         errors.append("FAST_CONCURRENCY_INVALID")
     if not 7 <= config.operational.state_telemetry_retention_days <= 365:
         errors.append("STATE_RETENTION_INVALID")
+    if not 1 <= config.operational.job_run_raw_retention_days <= 30:
+        errors.append("JOB_RUN_RETENTION_INVALID")
     if not 30 <= config.operational.memory_context_retention_days <= 3650:
         errors.append("MEMORY_RETENTION_INVALID")
     if not 30 <= config.operational.resolved_incident_retention_days <= 3650:

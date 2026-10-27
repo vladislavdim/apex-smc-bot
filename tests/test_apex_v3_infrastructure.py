@@ -157,11 +157,13 @@ class ApexV3InfrastructureTests(unittest.TestCase):
     def test_invalid_retention_config_fails_closed(self):
         config = ApexConfig.from_env({
             "APEX_STATE_TELEMETRY_RETENTION_DAYS": "1",
+            "APEX_JOB_RUN_RAW_RETENTION_DAYS": "0",
             "APEX_MEMORY_CONTEXT_RETENTION_DAYS": "2",
             "APEX_RESOLVED_INCIDENT_RETENTION_DAYS": "3",
         })
         errors = validate_config(config).errors
         self.assertIn("STATE_RETENTION_INVALID", errors)
+        self.assertIn("JOB_RUN_RETENTION_INVALID", errors)
         self.assertIn("MEMORY_RETENTION_INVALID", errors)
         self.assertIn("INCIDENT_RETENTION_INVALID", errors)
 
@@ -249,7 +251,7 @@ class ApexV3InfrastructureTests(unittest.TestCase):
     def test_state_and_memory_migrations_are_idempotent(self):
         state = sqlite3.connect(":memory:")
         memory = sqlite3.connect(":memory:")
-        self.assertEqual(migrate_state(state), tuple(range(1, 29)))
+        self.assertEqual(migrate_state(state), tuple(range(1, 30)))
         self.assertEqual(migrate_state(state), ())
         self.assertEqual(migrate_memory(memory), (1, 2, 3, 4))
         self.assertEqual(migrate_memory(memory), ())
@@ -683,6 +685,9 @@ class ApexV3InfrastructureTests(unittest.TestCase):
             self.assertEqual(state_report["deleted"]["setup_audit_events"], 1)
             self.assertEqual(state_report["deleted"]["strategy_decisions"], 1)
             self.assertEqual(state.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0], 1)
+            self.assertEqual(
+                state.execute("SELECT SUM(runs) FROM job_run_daily").fetchone()[0], 1
+            )
             self.assertEqual(state.execute("SELECT COUNT(*) FROM delivery_claims").fetchone()[0], 1)
             self.assertEqual(
                 {row[0] for row in state.execute("SELECT event_key FROM setup_audit_events")},

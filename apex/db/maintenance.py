@@ -6,6 +6,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from apex.db.job_run_retention import rollup_and_prune_job_runs
+
 
 def _cutoff(now: datetime, days: int) -> str:
     return (now.astimezone(timezone.utc) - timedelta(days=int(days))).isoformat(timespec="seconds")
@@ -39,6 +41,7 @@ def maintain_state(
     path: str,
     *,
     telemetry_days: int = 30,
+    job_run_raw_days: int = 7,
     resolved_incident_days: int = 365,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -51,10 +54,9 @@ def maintain_state(
              WHERE status='RUNNING' AND started_at<?""",
         (current.isoformat(timespec="seconds"), stale_running),
     ).rowcount
-    job_runs = conn.execute(
-        "DELETE FROM job_runs WHERE finished_at IS NOT NULL AND finished_at<?",
-        (telemetry_cutoff,),
-    ).rowcount
+    job_run_retention = rollup_and_prune_job_runs(
+        conn, raw_days=job_run_raw_days, now=current
+    )
     notifications = conn.execute(
         "DELETE FROM incident_notifications WHERE delivered_at IS NOT NULL AND delivered_at<?",
         (telemetry_cutoff,),
@@ -79,13 +81,14 @@ def maintain_state(
     checkpoint = _checkpoint(conn)
     return {
         "deleted": {
-            "job_runs": int(job_runs), "incident_notifications": int(notifications),
+            "job_runs": job_run_retention["deleted"], "incident_notifications": int(notifications),
             "delivery_claims": int(delivery_claims),
             "setup_audit_events": int(setup_audit),
             "strategy_decisions": int(strategy_decisions),
             "resolved_incidents": int(incidents),
         },
         "abandoned_job_runs": int(abandoned),
+        "job_run_retention": job_run_retention,
         "checkpoint": checkpoint,
         "health": database_health(conn, path),
     }

@@ -122,6 +122,62 @@ def _finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def enrich_active_analytical_progress(
+    rows: list[dict[str, Any]],
+    prices: dict[str, Any],
+    *,
+    observed_at: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Attach a fresh Gate mark to active analytical signals without mutating State."""
+    stamp = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    enriched: list[dict[str, Any]] = []
+    for original in rows:
+        row = dict(original)
+        is_analytical_active = (
+            row.get("_view_kind") == "analytical"
+            and str(row.get("lifecycle_status") or "").lower() == "active"
+        )
+        quote = prices.get(str(row.get("symbol") or "").upper()) if is_analytical_active else None
+        quote = quote if isinstance(quote, dict) else {}
+        price = _finite_number(quote.get("price"))
+        entry = _finite_number(row.get("entry"))
+        stop = _finite_number(row.get("sl"))
+        direction = str(row.get("direction") or "").upper()
+        sign = {"BULLISH": 1.0, "BEARISH": -1.0}.get(direction)
+        if (
+            price is not None and price > 0 and entry is not None and entry > 0
+            and stop is not None and stop > 0 and sign is not None
+            and sign * (entry - stop) > 0
+        ):
+            move = sign * (price - entry)
+            row["display_price"] = price
+            row["display_r"] = move / abs(entry - stop)
+            row["display_pct"] = move / entry * 100
+            row["display_price_observed_at"] = stamp.isoformat(timespec="seconds")
+            row["display_price_source"] = "Gate"
+        enriched.append(row)
+    return enriched
+
+
+def fetch_trade_view_rows(
+    category: str,
+    limit: int,
+    connection_factory: Callable[[], sqlite3.Connection],
+    price_provider: Callable[[], dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch State rows, then enrich active analytical signals with one fresh market read."""
+    rows = fetch_live_trades(category, limit, connection_factory)
+    if str(category).lower() != "active" or price_provider is None:
+        return rows
+    try:
+        prices = price_provider()
+    except Exception:
+        return rows
+    if not isinstance(prices, dict) or not prices:
+        return rows
+    return enrich_active_analytical_progress(rows, prices)
+
+
 def _analytical_return(row: dict[str, Any]) -> str:
     """Nominal barrier distance; never imply a fill, trailing exit or account PnL."""
     if str(row.get("lifecycle_status") or "").lower() != "closed":
@@ -144,6 +200,25 @@ def _analytical_return(row: dict[str, Any]) -> str:
         return "\n   Расчёт результата: недостаточно данных"
     return (
         f"\n   Расчёт до уровня {outcome.upper()}: <b>{pct:+.2f}% · {r:+.2f}R</b>"
+    )
+
+
+def _analytical_live_return(row: dict[str, Any]) -> str:
+    """Render an on-refresh analytical mark without claiming a Binance fill or cash PnL."""
+    price, pct, r = (
+        _finite_number(row.get(key))
+        for key in ("display_price", "display_pct", "display_r")
+    )
+    if price is None or pct is None or r is None:
+        return "\n   Текущий результат: цена временно недоступна"
+    source = html.escape(str(row.get("display_price_source") or "Gate"))
+    checked = html.escape(
+        str(row.get("display_price_observed_at") or "")[:19].replace("T", " ")
+    )
+    return (
+        f"\n   📈 Цена {source} <code>{_fmt_price(price)}</code> · "
+        f"текущий результат <b>{r:+.2f}R · {pct:+.2f}%</b>"
+        + (f" · обновлено {checked} UTC" if checked else "")
     )
 
 
@@ -222,6 +297,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
                 f"   {html.escape(state)} · {status}\n"
                 f"   Вход <code>{_fmt_price(row.get('entry'))}</code> · SL <code>{_fmt_price(row.get('sl'))}</code> "
                 f"· TP1 <code>{_fmt_price(row.get('tp1'))}</code> · {date_text}"
+                f"{_analytical_live_return(row) if category == 'active' and lifecycle == 'active' else ''}"
                 f"{_analytical_return(row)}"
             )
         elif category == "active":
@@ -260,7 +336,7 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
             lines.pop()
             break
     if analytical_shown:
-        lines.append("\n<i>Это история сигналов. Аналитический результат не означает исполненную сделку на Binance. Расчёт до уровня — без плеча, комиссий, funding и проскальзывания; при трейлинге это не цена выхода и не итоговый PnL. Денежный PnL счёта не рассчитан.</i>")
+        lines.append("\n<i>Это история сигналов. Аналитический результат не означает исполненную сделку на Binance. Текущий результат обновляется по цене Gate при нажатии «Обновить»; расчёты — без плеча, комиссий, funding и проскальзывания; при трейлинге это не цена выхода и не итоговый PnL. Денежный PnL счёта не рассчитан.</i>")
     elif category in {"closed", "take", "stop"}:
         lines.append("\n<i>Результат Manager не подтверждает чистый PnL счёта с комиссиями, funding и частичными выходами.</i>")
     elif category == "active":
@@ -272,4 +348,4 @@ def format_trade_view(category: str, rows: list[dict[str, Any]]) -> str:
 def trade_line(symbol,direction,status):
     return f"{symbol} · {direction} · {status}"
 
-__all__=["fetch_live_trades","format_trade_view","trade_line"]
+__all__=["enrich_active_analytical_progress","fetch_live_trades","fetch_trade_view_rows","format_trade_view","trade_line"]
