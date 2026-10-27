@@ -555,8 +555,16 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
             if int(position["signal_id"]) in live_execution_ids
             and str(lifecycles.get(int(position["signal_id"]), {}).get("result") or "pending") != "pending"
         ]
+        analytical_rows = [
+            {**position, **lifecycles.get(int(position["signal_id"]), {})}
+            for position in positions
+            if str(position.get("tracking_mode") or "LIVE").upper() == "ANALYTICAL"
+            and str(lifecycles.get(int(position["signal_id"]), {}).get("result") or "pending") != "pending"
+        ]
         not_opened_rows = []
         for position in positions:
+            if str(position.get("tracking_mode") or "LIVE").upper() == "ANALYTICAL":
+                continue
             signal_id = int(position["signal_id"])
             execution = executions.get(signal_id)
             if execution is None or str(execution.get("mode") or "") != "live":
@@ -576,6 +584,7 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
                     "signal_id": signal_id, "execution_status": status,
                 })
     else:
+        analytical_rows = []
         ensure_trade_manager_schema(db_path)
         conn = _connect(db_path)
         try:
@@ -612,6 +621,22 @@ def reconcile_manager_states_from_signals(db_path: str = DB_PATH) -> int:
         finally:
             conn.close()
     reconciled = 0
+    for row in analytical_rows:
+        result = str(row.get("result") or "closed").lower()
+        if result == "sl" or "stop" in result:
+            exit_price = row.get("initial_sl") or row.get("sl")
+        elif "tp3" in result:
+            exit_price = row.get("initial_tp3") or row.get("tp3") or row.get("initial_tp1")
+        elif "tp2" in result:
+            exit_price = row.get("initial_tp2") or row.get("tp2") or row.get("initial_tp1")
+        elif "tp" in result:
+            exit_price = row.get("initial_tp1") or row.get("tp1")
+        else:
+            exit_price = row.get("last_price") or row.get("initial_entry") or row.get("entry")
+        if _manager_state_repository().close_analytical(
+            int(row["signal_id"]), result=result, exit_price=float(exit_price)
+        ):
+            reconciled += 1
     for row in rows:
         signal_id = int(row["signal_id"])
         if signal_id in live_execution_ids:
@@ -766,6 +791,14 @@ def build_structure_facts(
     event_type = str(event.get("type") or "").upper()
     against_trade = bool(event_type == "CHOCH" and event_direction and event_direction != direction)
     with_trade = bool(event_type in {"BOS", "CHOCH"} and event_direction == direction)
+    if with_trade:
+        level_state = "BREAKOUT_CONFIRMED" if direction == "BULLISH" else "BREAKDOWN_CONFIRMED"
+    elif against_trade:
+        level_state = "STRUCTURE_INVALIDATED"
+    else:
+        level_state = "BETWEEN_LEVELS"
+    nearest_support = protection if direction == "BULLISH" else structural_target
+    nearest_resistance = structural_target if direction == "BULLISH" else protection
     return {
         "closed_candle": True,
         "new_management_candle": new_candle,
@@ -777,6 +810,9 @@ def build_structure_facts(
         "structure_against_trade": against_trade,
         "confirmed_protection_level": protection,
         "structural_target": structural_target,
+        "level_state": level_state,
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
         "latest_closed_open": float(closed[-1]["open"]),
         "latest_closed_volume": float(closed[-1].get("volume") or 0.0),
         "latest_close": float(closed[-1]["close"]),
@@ -1082,6 +1118,7 @@ def register_active_trade(
             "initial_rr": float(signal.get("rr") or 0),
             "manager_version": MANAGER_VERSION,
             "thesis": frozen_thesis,
+            "tracking_mode": str(signal.get("tracking_mode") or "LIVE").upper(),
         })
         return
     ensure_trade_manager_schema(db_path)
@@ -1177,23 +1214,15 @@ def register_pending_signals(db_path: str = DB_PATH) -> int:
     try:
         if _MANAGER_STATE_FACTORY is not None:
             rows = conn.execute(
-                """SELECT id,symbol,direction,entry,sl,tp1,tp2,tp3,
-                          timeframe,grade,signal_type
+                """SELECT id,symbol,direction,entry,sl,tp1,tp2,tp3,timeframe,grade,signal_type
                    FROM signals WHERE result='pending'"""
             ).fetchall()
             signal_ids = [int(row["id"]) for row in rows]
             lifecycles = SignalLifecycleRepository(_MANAGER_STATE_FACTORY).get_many(signal_ids)
+            rows = [{**dict(row), "lifecycle_status": str(
+                lifecycles.get(int(row["id"]), {}).get("status") or "waiting_entry")}
+                for row in rows]
             executions = ExecutionRepository(_MANAGER_STATE_FACTORY).get_many(signal_ids)
-            rows = [
-                {
-                    **dict(row),
-                    # Missing State lifecycle is not proof of an activated entry.
-                    "lifecycle_status": str(
-                        lifecycles.get(int(row["id"]), {}).get("status") or "waiting_entry"
-                    ),
-                }
-                for row in rows
-            ]
             confirmed_live_ids = {
                 signal_id for signal_id, execution in executions.items()
                 if str(execution.get("mode") or "") == "live"
@@ -1204,7 +1233,7 @@ def register_pending_signals(db_path: str = DB_PATH) -> int:
                     or str(execution.get("pending_stop_order_id") or "")
                 )
             }
-            non_open_live_ids = set(signal_ids) - confirmed_live_ids
+            non_open_live_ids = set()
         else:
             rows = conn.execute(
                 """SELECT s.id,s.symbol,s.direction,s.entry,s.sl,s.tp1,s.tp2,s.tp3,
@@ -1232,9 +1261,9 @@ def register_pending_signals(db_path: str = DB_PATH) -> int:
     registered = 0
     for row in rows:
         data = dict(row)
-        if int(data["id"]) in non_open_live_ids:
-            continue
-        if confirmed_live_ids is not None and int(data["id"]) not in confirmed_live_ids:
+        if confirmed_live_ids is not None:
+            data["tracking_mode"] = "LIVE" if int(data["id"]) in confirmed_live_ids else "ANALYTICAL"
+        elif int(data["id"]) in non_open_live_ids:
             continue
         if str(data.pop("lifecycle_status", "active")).lower() != "active":
             continue
@@ -1369,6 +1398,9 @@ def persist_review(
                 "proposed_protect_level": proposed_protect_level,
                 "last_event": ",".join(events), "last_action": review.get("action"),
                 "last_confidence": review.get("confidence"),
+                "level_state": facts.get("level_state"),
+                "nearest_support": facts.get("nearest_support"),
+                "nearest_resistance": facts.get("nearest_resistance"),
                 "last_reviewed_candle": str(candle_id) if candle_id is not None else None,
                 "no_progress_bars": no_progress, "progress_anchor_r": anchor,
                 "last_progress_candle": (
@@ -1782,6 +1814,7 @@ def manager_cycle(
             "signal_id": state["signal_id"],
             "symbol": symbol,
             "strategy": strategy,
+            "tracking_mode": str(state.get("tracking_mode") or "LIVE").upper(),
             "manager_state": str(state.get("manager_state") or "PROTECTED"),
             "events": events,
             "review": review,
