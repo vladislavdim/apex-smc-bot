@@ -312,6 +312,7 @@ from apex.strategies.mtf import MtfStrategy as _V3_MTF_STRATEGY
 from apex.strategies.registry import StrategyRegistry as _V3_STRATEGY_REGISTRY_CLASS
 from apex.strategies.swing import SwingStrategy as _V3_SWING_STRATEGY
 from apex.strategies.wyckoff import WyckoffStrategy as _V3_WYCKOFF_STRATEGY
+from apex.strategies.wyckoff_sequence import strict_sequence_policy as _v3_wyckoff_sequence_policy
 from apex.strategies.zone import ZoneStrategy as _V3_ZONE_STRATEGY
 from apex.market.gate_client import GateMarketClient as _V3_GATE_MARKET_CLIENT, normalize_gate_candles as _v3_normalize_gate_candles
 from apex.market.provider import GateSnapshotProvider as _V3_GATE_SNAPSHOT_PROVIDER
@@ -2327,7 +2328,7 @@ def _get_v3_live_strategy_registry():
                 _v3_native_strategies.detect_wyckoff_spring,
                 _v3_native_strategies.detect_wyckoff_distribution,
                 _v3_native_strategies.detect_wyckoff_reaccumulation,
-            )),
+            ), sequence_policy=_v3_wyckoff_sequence_policy),
         })
     return _v3_live_strategy_registry
 
@@ -3209,10 +3210,24 @@ async def _auto_ltf_watch_scan_impl():
                     _touch_ltf_watch, strategy, symbol, "entry drift; keep observing", False, DB_PATH
                 )
                 continue
+            # The watch is the durable producer record.  Keep it WAITING until
+            # the canonical sender has completed its State/outbox checkpoint,
+            # Telegram receipt and signal lifecycle persistence.  Resolving it
+            # first loses the candidate on WAIT, failure, cancellation or a
+            # container replacement between these two operations.
+            delivered = await _send_signal(candidate)
             await asyncio.to_thread(
-                _touch_ltf_watch, strategy, symbol, "required LTF confirmation completed", True, DB_PATH
+                _touch_ltf_watch,
+                strategy,
+                symbol,
+                (
+                    "required LTF confirmation delivered"
+                    if delivered
+                    else "delivery deferred; durable watch retained"
+                ),
+                bool(delivered),
+                DB_PATH,
             )
-            await _send_signal(candidate)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
