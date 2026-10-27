@@ -2,7 +2,9 @@
 import unittest
 from unittest.mock import Mock
 
-from apex.ui.telegram.manager import fetch_state_manager_trade, fetch_state_manager_trades
+from apex.ui.telegram.manager import (
+    fetch_state_manager_trade, fetch_state_manager_trades, format_manager_dashboard,
+)
 
 
 class ManagerStateViewTests(unittest.TestCase):
@@ -22,6 +24,17 @@ class ManagerStateViewTests(unittest.TestCase):
         self.assertEqual(detail["events"][0]["reason"], "HOLD")
         repository.recent.assert_called_once_with(limit=2)
         repository.events.assert_called_once_with(21, limit=3)
+
+    def test_dashboard_distinguishes_analytical_tracking_and_levels(self):
+        text = format_manager_dashboard([{
+            "signal_id": 480, "symbol": "SOLUSDT", "strategy": "ZONE",
+            "direction": "BULLISH", "status": "ACTIVE", "tracking_mode": "ANALYTICAL",
+            "initial_entry": 100, "last_price": 103, "current_r": 1.2,
+            "level_state": "BREAKOUT_CONFIRMED", "nearest_support": 101,
+            "nearest_resistance": 105,
+        }])
+        self.assertIn("Аналитический сигнал", text)
+        self.assertIn("закрепление выше сопротивления", text)
 
     def test_read_error_does_not_fall_back_to_legacy(self):
         repository = Mock()
