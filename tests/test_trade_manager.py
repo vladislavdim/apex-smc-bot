@@ -95,6 +95,8 @@ def test_structure_uses_closed_candles_only():
     facts = build_structure_facts(candles, "BULLISH")
     assert facts["latest_close"] != 9999
     assert facts["latest_closed_high"] != 9999
+    assert facts["level_state"] == "BETWEEN_LEVELS"
+    assert "nearest_support" in facts and "nearest_resistance" in facts
 
 
 def test_closed_candle_high_low_detects_missed_long_barriers_conservatively():

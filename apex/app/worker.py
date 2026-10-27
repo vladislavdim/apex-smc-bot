@@ -2226,7 +2226,8 @@ async def _run_trade_manager_once():
                 update.get("review", {}).get("action"), update.get("notify"),
             )
             durable_events = durable_events or bool(update.get("events"))
-            if _TRADE_EXECUTION_OK and not update.get("degraded"):
+            if (_TRADE_EXECUTION_OK and not update.get("degraded")
+                    and str(update.get("tracking_mode") or "LIVE").upper() == "LIVE"):
                 execution = await asyncio.to_thread(
                     _execute_manager_review, update, db_path=DB_PATH,
                 )
@@ -2250,7 +2251,8 @@ async def _run_trade_manager_once():
                     "events": update.get("events") or [],
                     "review": update.get("review") or {},
                     "facts": update.get("facts") or {},
-                    "execution": execution if _TRADE_EXECUTION_OK and not update.get("degraded") else {},
+                    "execution": execution if (_TRADE_EXECUTION_OK and not update.get("degraded")
+                        and str(update.get("tracking_mode") or "LIVE").upper() == "LIVE") else {},
                     "manager_version": 2,
                 }
                 event_seed = json.dumps(event_payload, sort_keys=True, default=str)

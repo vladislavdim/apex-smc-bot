@@ -102,6 +102,7 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
     active_count = sum(1 for item in items if str(item.get("status") or "ACTIVE").upper() == "ACTIVE")
     lines.append(f"Активно: <b>{active_count}</b> · показано сделок: <b>{len(items)}</b>\n")
     for item in items:
+        source = "⚙️ Binance-позиция" if str(item.get("tracking_mode") or "LIVE").upper() == "LIVE" else "📨 Аналитический сигнал"
         action = html.escape(str(item.get("last_action") or "HOLD"))
         event = html.escape(str(item.get("last_event") or "—"))
         confidence = item.get("last_confidence")
@@ -118,6 +119,7 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
         lines += [
             f"<b>#{item['signal_id']} {html.escape(str(item.get('symbol') or ''))}</b> · "
             f"{html.escape(str(item.get('strategy') or 'MTF'))} · {_direction_label(item.get('direction'))}{status_text}",
+            source,
             f"V{int(item.get('manager_version') or 2)} · state <b>{html.escape(str(item.get('manager_state') or 'PROTECTED'))}</b>",
             f"Entry <code>{_fmt_price(item.get('initial_entry'))}</code> · "
             f"Цена <code>{_fmt_price(item.get('last_price'))}</code> · "
@@ -126,10 +128,25 @@ def format_manager_dashboard(items: list[dict[str, Any]]) -> str:
             f"Решение: <b>{action}</b> · уверенность {confidence_text}",
             f"Цель менеджера: <code>{_fmt_price(item.get('manager_target'))}</code> · "
             f"защита: <code>{_fmt_price(item.get('manager_protect_level'))}</code>",
+            _format_level_line(item),
             "",
         ]
     lines.append("<i>Решения менеджера — рекомендации; сами по себе они не означают исполненный ордер.</i>")
     return "\n".join(lines)[:4000]
+
+
+def _format_level_line(item: dict[str, Any]) -> str:
+    state = str(item.get("level_state") or "").upper()
+    labels = {
+        "BREAKOUT_CONFIRMED": "закрепление выше сопротивления — пробой подтверждён",
+        "BREAKDOWN_CONFIRMED": "закрепление ниже поддержки — пробой подтверждён",
+        "STRUCTURE_INVALIDATED": "структура сделки нарушена",
+        "BETWEEN_LEVELS": "цена между подтверждёнными уровнями",
+    }
+    if not state:
+        return "🧠 Уровни: ожидается первая закрытая свеча менеджера"
+    return (f"🧠 {labels.get(state, state)} · S <code>{_fmt_price(item.get('nearest_support'))}</code>"
+            f" · R <code>{_fmt_price(item.get('nearest_resistance'))}</code>")
 
 
 def manager_trade_buttons(items: list[dict[str, Any]]) -> list[tuple[str, str]]:

@@ -68,11 +68,18 @@ class ManagerRepository:
         value = str(supplied or "")
         if value and not is_id(value, "signal"):
             raise ManagerStateError("manager_position_invalid:signal_entity_id")
-        execution = conn.execute(
-            "SELECT signal_entity_id FROM executions WHERE signal_id=?",
+        existing = conn.execute(
+            "SELECT signal_entity_id FROM manager_positions WHERE signal_id=?", (int(signal_id),)
+        ).fetchone()
+        lifecycle = conn.execute(
+            "SELECT signal_entity_id FROM signal_lifecycle WHERE signal_id=?",
             (int(signal_id),),
         ).fetchone()
-        canonical = str(execution[0] or "") if execution else ""
+        execution = conn.execute(
+            "SELECT signal_entity_id FROM executions WHERE signal_id=?", (int(signal_id),)
+        ).fetchone()
+        canonical = str((existing[0] if existing else None) or (lifecycle[0] if lifecycle else None)
+                        or (execution[0] if execution else None) or "")
         if canonical and value and canonical != value:
             raise ManagerStateError("manager_position_signal_identity_conflict")
         value = canonical or value or derived_id(
@@ -127,20 +134,25 @@ class ManagerRepository:
                     raise ManagerStateError("manager_position_geometry_conflict")
                 if str(existing[1] or "") != signal_entity_id:
                     raise ManagerStateError("manager_position_signal_identity_conflict")
+                if str(position.get("tracking_mode") or "LIVE").upper() == "LIVE":
+                    conn.execute(
+                        "UPDATE manager_positions SET tracking_mode='LIVE',updated_at=CURRENT_TIMESTAMP WHERE signal_entity_id=?",
+                        (signal_entity_id,),
+                    )
                 conn.commit()
                 return False
             conn.execute(
                 """INSERT INTO manager_positions(
                     signal_id,signal_entity_id,symbol,strategy,direction,management_tf,
                     initial_entry,initial_sl,initial_tp1,initial_tp2,initial_tp3,
-                    initial_rr,manager_version,thesis_json,snapshot_json,snapshot_hash
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    initial_rr,manager_version,thesis_json,snapshot_json,snapshot_hash,tracking_mode
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     signal_id, signal_entity_id, snapshot["symbol"], snapshot["strategy"], snapshot["direction"],
                     snapshot["management_tf"], snapshot["initial_entry"], snapshot["initial_sl"],
                     snapshot["initial_tp1"], snapshot["initial_tp2"], snapshot["initial_tp3"],
                     snapshot["initial_rr"], snapshot["manager_version"], thesis_json,
-                    snapshot_json, snapshot_hash,
+                    snapshot_json, snapshot_hash, str(position.get("tracking_mode") or "LIVE").upper(),
                 ),
             )
             conn.commit()
@@ -311,6 +323,34 @@ class ManagerRepository:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def close_analytical(self, signal_id: int, *, result: str, exit_price: float) -> bool:
+        """Close an analytical track from canonical lifecycle geometry only."""
+        conn = self._conn_factory()
+        try:
+            signal_entity_id = self._signal_entity(conn, int(signal_id))
+            row = conn.execute(
+                "SELECT direction,initial_entry,initial_sl FROM manager_positions WHERE signal_entity_id=?",
+                (signal_entity_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            entry, sl, price = float(row[1]), float(row[2]), float(exit_price)
+            risk = abs(entry - sl)
+            realized_r = ((price-entry) if str(row[0]).upper() in {'BULLISH','LONG'} else (entry-price)) / risk if risk else 0.0
+            realized_pct = ((price-entry) if str(row[0]).upper() in {'BULLISH','LONG'} else (entry-price)) / entry * 100 if entry else 0.0
+            cursor = conn.execute(
+                """UPDATE manager_positions SET status='CLOSED',manager_state='CLOSED',close_result=?,
+                    exit_price=?,realized_pct=?,realized_r=?,last_price=?,current_r=?,
+                    last_event='ANALYTICAL_LIFECYCLE_CLOSED',last_action='CLOSE',position_fraction=0,
+                    closed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                    WHERE signal_entity_id=? AND tracking_mode='ANALYTICAL' AND status!='CLOSED'""",
+                (str(result),price,realized_pct,realized_r,price,realized_r,signal_entity_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
         finally:
             conn.close()
 
@@ -504,7 +544,8 @@ class ManagerRepository:
                       THEN 'TP1_REACHED' ELSE manager_state END,
                     last_price=?,best_price=?,current_r=?,tp1_seen=?,tp2_seen=?,tp3_seen=?,
                     manager_target=?,proposed_protect_level=?,last_event=?,last_action=?,
-                    last_confidence=?,last_reviewed_candle=?,no_progress_bars=?,
+                    last_confidence=?,level_state=?,nearest_support=?,nearest_resistance=?,
+                    last_reviewed_candle=?,no_progress_bars=?,
                     progress_anchor_r=?,last_progress_candle=?,updated_at=CURRENT_TIMESTAMP
                    WHERE signal_entity_id=?""",
                 (
@@ -515,6 +556,8 @@ class ManagerRepository:
                     int(bool(observation.get("tp3_seen"))), observation.get("manager_target"),
                     observation.get("proposed_protect_level"), observation.get("last_event"),
                     observation.get("last_action"), observation.get("last_confidence"),
+                    observation.get("level_state"), observation.get("nearest_support"),
+                    observation.get("nearest_resistance"),
                     observation.get("last_reviewed_candle"),
                     int(observation.get("no_progress_bars") or 0),
                     float(observation.get("progress_anchor_r") or 0),
