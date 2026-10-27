@@ -822,6 +822,76 @@ def _migration_029(conn: sqlite3.Connection) -> None:
     )""")
 
 
+def _migration_030(conn: sqlite3.Connection) -> None:
+    """Allow Manager to track analytical signals without an execution owner."""
+    conn.execute("ALTER TABLE manager_events RENAME TO manager_events__legacy_030")
+    conn.execute("ALTER TABLE manager_positions RENAME TO manager_positions__legacy_030")
+    conn.execute("DROP INDEX IF EXISTS idx_manager_positions_active")
+    conn.execute("DROP INDEX IF EXISTS idx_manager_events_signal")
+    conn.execute("""CREATE TABLE manager_positions (
+        signal_entity_id TEXT PRIMARY KEY NOT NULL, signal_id INTEGER NOT NULL UNIQUE,
+        symbol TEXT NOT NULL, strategy TEXT NOT NULL, direction TEXT NOT NULL,
+        management_tf TEXT NOT NULL, initial_entry REAL NOT NULL, initial_sl REAL NOT NULL,
+        initial_tp1 REAL NOT NULL, initial_tp2 REAL, initial_tp3 REAL, initial_rr REAL,
+        manager_version INTEGER NOT NULL, thesis_json TEXT NOT NULL DEFAULT '{}',
+        snapshot_json TEXT NOT NULL, snapshot_hash TEXT NOT NULL,
+        tracking_mode TEXT NOT NULL DEFAULT 'LIVE' CHECK(tracking_mode IN ('LIVE','ANALYTICAL')),
+        status TEXT NOT NULL DEFAULT 'ACTIVE', manager_state TEXT NOT NULL DEFAULT 'PROTECTED',
+        position_fraction REAL NOT NULL DEFAULT 1.0, partial_exit_done INTEGER NOT NULL DEFAULT 0,
+        last_price REAL, best_price REAL, current_r REAL NOT NULL DEFAULT 0,
+        tp1_seen INTEGER NOT NULL DEFAULT 0, tp2_seen INTEGER NOT NULL DEFAULT 0,
+        tp3_seen INTEGER NOT NULL DEFAULT 0, manager_target REAL,
+        confirmed_protect_level REAL, proposed_protect_level REAL,
+        level_state TEXT, nearest_support REAL, nearest_resistance REAL,
+        last_event TEXT, last_action TEXT, last_confidence REAL, last_reviewed_candle TEXT,
+        no_progress_bars INTEGER NOT NULL DEFAULT 0, progress_anchor_r REAL NOT NULL DEFAULT 0,
+        last_progress_candle TEXT, reconciliation_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, closed_at TEXT, close_result TEXT,
+        exit_price REAL, realized_pct REAL, realized_r REAL,
+        data_failure_count INTEGER NOT NULL DEFAULT 0,
+        data_failure_notified INTEGER NOT NULL DEFAULT 0,
+        last_data_error TEXT, pre_degraded_state TEXT, price_observed_at TEXT,
+        FOREIGN KEY(signal_entity_id) REFERENCES signal_lifecycle(signal_entity_id)
+    )""")
+    conn.execute("""INSERT INTO manager_positions(
+        signal_entity_id,signal_id,symbol,strategy,direction,management_tf,initial_entry,initial_sl,
+        initial_tp1,initial_tp2,initial_tp3,initial_rr,manager_version,thesis_json,snapshot_json,
+        snapshot_hash,status,manager_state,position_fraction,partial_exit_done,last_price,best_price,
+        current_r,tp1_seen,tp2_seen,tp3_seen,manager_target,confirmed_protect_level,
+        proposed_protect_level,last_event,last_action,last_confidence,last_reviewed_candle,
+        no_progress_bars,progress_anchor_r,last_progress_candle,reconciliation_reason,created_at,
+        updated_at,closed_at,close_result,exit_price,realized_pct,realized_r,data_failure_count,
+        data_failure_notified,last_data_error,pre_degraded_state,price_observed_at)
+        SELECT COALESCE(l.signal_entity_id,m.signal_entity_id),m.signal_id,m.symbol,m.strategy,m.direction,m.management_tf,m.initial_entry,m.initial_sl,
+        m.initial_tp1,m.initial_tp2,m.initial_tp3,m.initial_rr,m.manager_version,m.thesis_json,m.snapshot_json,
+        m.snapshot_hash,m.status,m.manager_state,m.position_fraction,m.partial_exit_done,m.last_price,m.best_price,
+        m.current_r,m.tp1_seen,m.tp2_seen,m.tp3_seen,m.manager_target,m.confirmed_protect_level,
+        m.proposed_protect_level,m.last_event,m.last_action,m.last_confidence,m.last_reviewed_candle,
+        m.no_progress_bars,m.progress_anchor_r,m.last_progress_candle,m.reconciliation_reason,m.created_at,
+        m.updated_at,m.closed_at,m.close_result,m.exit_price,m.realized_pct,m.realized_r,m.data_failure_count,
+        m.data_failure_notified,m.last_data_error,m.pre_degraded_state,m.price_observed_at
+        FROM manager_positions__legacy_030 m
+        LEFT JOIN signal_lifecycle l ON l.signal_id=m.signal_id""")
+    conn.execute("CREATE INDEX idx_manager_positions_active ON manager_positions(status,updated_at DESC)")
+    conn.execute("""CREATE TABLE manager_events (
+        manager_event_id TEXT PRIMARY KEY, signal_entity_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL, action TEXT, confidence REAL, price REAL, r_multiple REAL,
+        manager_target REAL, confirmed_protect_level REAL, facts_json TEXT NOT NULL DEFAULT '{}',
+        reason_codes_json TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '',
+        execution_status TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(signal_entity_id) REFERENCES manager_positions(signal_entity_id))""")
+    conn.execute("""INSERT INTO manager_events
+        SELECT e.manager_event_id,m.signal_entity_id,e.signal_id,e.event_type,e.action,e.confidence,
+               e.price,e.r_multiple,e.manager_target,e.confirmed_protect_level,e.facts_json,
+               e.reason_codes_json,e.summary,e.execution_status,e.created_at
+          FROM manager_events__legacy_030 e
+          JOIN manager_positions m ON m.signal_id=e.signal_id""")
+    conn.execute("CREATE INDEX idx_manager_events_signal ON manager_events(signal_entity_id,created_at DESC)")
+    conn.execute("DROP TABLE manager_events__legacy_030")
+    conn.execute("DROP TABLE manager_positions__legacy_030")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -852,6 +922,7 @@ STATE_MIGRATIONS = (
     Migration(27, "durable_scanner_candidates", _migration_027),
     Migration(28, "canonical_delivery_signal_identity", _migration_028),
     Migration(29, "job_run_daily_rollups", _migration_029),
+    Migration(30, "analytical_manager_tracking", _migration_030),
 )
 
 
