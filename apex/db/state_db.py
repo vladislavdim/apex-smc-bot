@@ -811,6 +811,17 @@ def _migration_028(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE signal_delivery_outbox ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 0")
 
 
+def _migration_029(conn: sqlite3.Connection) -> None:
+    """Keep long-horizon scheduler evidence without retaining every heartbeat row."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS job_run_daily (
+        day TEXT NOT NULL, job_id TEXT NOT NULL, status TEXT NOT NULL,
+        error_code TEXT NOT NULL, runs INTEGER NOT NULL,
+        duration_ms REAL NOT NULL, items_processed INTEGER NOT NULL,
+        max_rss_after INTEGER NOT NULL, max_cpu_after REAL NOT NULL,
+        PRIMARY KEY(day,job_id,status,error_code)
+    )""")
+
+
 STATE_MIGRATIONS = (
     Migration(1, "production_core", _migration_001),
     Migration(2, "job_telemetry", _migration_002),
@@ -840,6 +851,7 @@ STATE_MIGRATIONS = (
     Migration(26, "durable_delivery_outbox", _migration_026),
     Migration(27, "durable_scanner_candidates", _migration_027),
     Migration(28, "canonical_delivery_signal_identity", _migration_028),
+    Migration(29, "job_run_daily_rollups", _migration_029),
 )
 
 

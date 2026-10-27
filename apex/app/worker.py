@@ -124,7 +124,7 @@ from apex.strategies.common import fast_session
 from apex.strategies.pending_thesis import has_pending_thesis as _v3_has_pending_thesis
 from apex.strategies.state_signal_monitor import StateSignalMonitor as _V3StateSignalMonitor
 from apex.compatibility.legacy_market_runtime import _emit_trade_stats_event as _v3_emit_trade_stats_event
-from apex.ui.telegram.trades import fetch_live_trades as _fetch_trade_view_rows
+from apex.ui.telegram.trades import fetch_trade_view_rows as _fetch_trade_view_rows
 from apex.ui.telegram.trades import format_trade_view as _format_trade_view
 from apex.ui.telegram.manager import (
     fetch_state_manager_trades as _fetch_manager_trades,
@@ -834,7 +834,8 @@ _v3_state_callback_handlers = _V3StateCallbackHandlers(
         format_manager_trade_detail=_format_manager_trade_detail,
         manager_trade_buttons=_manager_trade_buttons,
         fetch_trade_rows=lambda category, limit: _fetch_trade_view_rows(
-            category, limit, lambda: _v3_connect_state(_V3_CONFIG, read_only=True)
+            category, limit, lambda: _v3_connect_state(_V3_CONFIG, read_only=True),
+            get_live_prices,
         ),
         format_trade_view=_format_trade_view,
         fetch_watchlist=lambda limit: _fetch_watchlist(DB_PATH, limit),
@@ -4047,6 +4048,7 @@ async def _v3_maintenance_and_backup(reason="safety_30m", *, store="all"):
                 return _v3_maintain_state(
                     state, _V3_CONFIG.database.state_db_path,
                     telemetry_days=_V3_CONFIG.operational.state_telemetry_retention_days,
+                    job_run_raw_days=_V3_CONFIG.operational.job_run_raw_retention_days,
                     resolved_incident_days=_V3_CONFIG.operational.resolved_incident_retention_days,
                 )
         if store == "memory":

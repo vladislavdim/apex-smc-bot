@@ -120,6 +120,7 @@ class OperationalSettings:
     runtime_lease_ttl_seconds: int
     fast_concurrency: int
     state_telemetry_retention_days: int
+    job_run_raw_retention_days: int
     memory_context_retention_days: int
     resolved_incident_retention_days: int
     active_pair_limit: int
@@ -326,6 +327,7 @@ class ApexConfig:
                     180 if source.get("APEX_RUNTIME_LEASE_BACKEND", "http").strip().lower() == "github" else 60),
                 fast_concurrency=_int(source, "APEX_FAST_CONCURRENCY", 6),
                 state_telemetry_retention_days=_int(source, "APEX_STATE_TELEMETRY_RETENTION_DAYS", 30),
+                job_run_raw_retention_days=_int(source, "APEX_JOB_RUN_RAW_RETENTION_DAYS", 7),
                 memory_context_retention_days=_int(source, "APEX_MEMORY_CONTEXT_RETENTION_DAYS", 365),
                 resolved_incident_retention_days=_int(source, "APEX_RESOLVED_INCIDENT_RETENTION_DAYS", 365),
                 active_pair_limit=max(20, min(120, _int(source, "APEX_ACTIVE_PAIR_LIMIT", 80))),

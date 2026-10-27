@@ -152,6 +152,9 @@ def test_reaccumulation_is_explicitly_outside_the_policy():
 def test_frozen_33_registry_outputs_are_unchanged():
     environment = os.environ.copy()
     environment["TELEGRAM_TOKEN"] = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk"
+    environment["PYTHONPATH"] = str(ROOT) + (
+        os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
+    )
     completed = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("r0028_frozen_compare.py"))],
         cwd=ROOT,

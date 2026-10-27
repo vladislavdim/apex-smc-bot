@@ -25,6 +25,7 @@ STATE_TABLES = frozenset({
     "incident_notifications",
     "incidents",
     "job_runs",
+    "job_run_daily",
     "manager_events",
     "manager_positions",
     "release_manifests",
